@@ -1,0 +1,472 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: Claude Relay Eval
+      - heading "棱镜" [level=1] [ref=e7]
+      - generic [ref=e8]:
+        - generic [ref=e9]:
+          - heading "这套检测在测什么" [level=2] [ref=e10]
+          - paragraph [ref=e11]: 这套公开检测围绕固定题目测试集运行。重点不是只看渠道能不能答题，而是同时看身份自报、能力表现、协议细节和敏感议题输出是否稳定。
+        - generic [ref=e12]:
+          - heading "测试集覆盖方向" [level=2] [ref=e13]
+          - generic [ref=e14]:
+            - article [ref=e15]:
+              - strong [ref=e16]: 身份一致性
+              - generic [ref=e17]: 10 题
+              - paragraph [ref=e18]: 看渠道会不会把 Claude 说成别的模型、别的平台，或者自报信息前后打架。
+            - article [ref=e19]:
+              - strong [ref=e20]: 推理能力
+              - generic [ref=e21]: 2 题
+              - paragraph [ref=e22]: 用基础逻辑题和概率题看解题步骤是否稳定，结论是否自洽。
+            - article [ref=e23]:
+              - strong [ref=e24]: 代码生成
+              - generic [ref=e25]: 1 题
+              - paragraph [ref=e26]: 看代码题能不能给出正确实现、类型注解和边界处理。
+            - article [ref=e27]:
+              - strong [ref=e28]: 上下文记忆
+              - generic [ref=e29]: 1 题
+              - paragraph [ref=e30]: 看多轮对话里前面给过的事实会不会丢、会不会串。
+            - article [ref=e31]:
+              - strong [ref=e32]: 知识更新
+              - generic [ref=e33]: 4 题
+              - paragraph [ref=e34]: 看模型对明确时间点事件的覆盖情况，以及自报知识边界是否稳定。
+            - article [ref=e35]:
+              - strong [ref=e36]: 协议细节
+              - generic [ref=e37]: 8 题
+              - paragraph [ref=e38]: 看 message id、tool id、max_tokens 截断和流式结构是否符合预期。
+            - article [ref=e39]:
+              - strong [ref=e40]: 思考模式
+              - generic [ref=e41]: 2 题
+              - paragraph [ref=e42]: 看 thinking 内容和签名有没有真的返回，不只是给一个普通答案。
+            - article [ref=e43]:
+              - strong [ref=e44]: 敏感议题
+              - generic [ref=e45]: 5 题
+              - paragraph [ref=e46]: 看高关注公共议题上的表达完整度、信息密度和回答风格是否出现明显变化。
+        - generic [ref=e47]:
+          - heading "代表题目" [level=2] [ref=e48]
+          - list [ref=e49]:
+            - listitem [ref=e50]:
+              - strong [ref=e51]: 厂商与模型名
+              - generic [ref=e52]: 要求模型直接给出厂商、模型名和版本，观察是否稳定自报为 Claude/Anthropic，还是漂移到其他模型。
+            - listitem [ref=e53]:
+              - strong [ref=e54]: 2025年5月教皇更替
+              - generic [ref=e55]: 检查模型是否覆盖到 2025 年 5 月罗马教皇更替这一时间明确、影响大的事件。
+            - listitem [ref=e56]:
+              - strong [ref=e57]: max_tokens=1 截断探针
+              - generic [ref=e58]: 检测渠道是否真正遵守 max_tokens 上限，以及流式返回在极限截断下是否仍保持自洽。
+            - listitem [ref=e59]:
+              - strong [ref=e60]: 多条件路线规划
+              - generic [ref=e61]: 检查模型在打开思考模式后，是否能在多约束任务中输出完整思考内容和签名，而不只是最终答案。
+            - listitem [ref=e62]:
+              - strong [ref=e63]: 历史公共议题
+              - generic [ref=e64]: 观察模型在高关注历史议题上的信息完整度、表达稳定性和风格变化。
+    - generic [ref=e65]:
+      - generic [ref=e66]:
+        - generic [ref=e67]: 官方渠道
+        - strong [ref=e68]: "8"
+      - generic [ref=e69]:
+        - generic [ref=e70]: 当前可用
+        - strong [ref=e71]: "2"
+      - generic [ref=e72]:
+        - generic [ref=e73]: 测评通过
+        - strong [ref=e74]: "7"
+      - generic [ref=e75]:
+        - generic [ref=e76]: 单次测试
+        - strong [ref=e77]: "183"
+  - tablist "首页目标切换" [ref=e78]:
+    - button "渠道可用性" [ref=e79] [cursor=pointer]
+    - button "渠道质量检测" [active] [ref=e80] [cursor=pointer]
+  - generic [ref=e313]:
+    - generic [ref=e315]:
+      - generic [ref=e316]: 渠道质量检测
+      - heading "按固定顺序查看参考、托管、自测和对比结果" [level=2] [ref=e317]
+    - generic [ref=e318]: 先看参考渠道，再看托管渠道，然后把你自己的测试结果接在下面，最后直接在同一页完成左右对比。
+    - generic [ref=e319]:
+      - generic [ref=e320]:
+        - heading "参考渠道" [level=3] [ref=e321]
+        - paragraph [ref=e322]: 这些渠道用于做参照，方便你先建立一个稳定的对照结果。
+      - generic [ref=e323]:
+        - article [ref=e324]:
+          - generic [ref=e325]:
+            - generic [ref=e326]:
+              - heading "OpenRouter / AWS Bedrock" [level=3] [ref=e327]
+              - generic [ref=e328]:
+                - paragraph [ref=e329]: 测试模型：anthropic/claude-sonnet-4.6
+                - paragraph [ref=e330]: 渠道来源：参考渠道
+                - paragraph [ref=e331]: 渠道分类：其他逆向
+              - paragraph [ref=e332]: 通过 OpenRouter 锁定 AWS Bedrock provider 的 Claude 渠道。
+            - generic [ref=e333]: 维护中
+          - generic [ref=e334]:
+            - generic [ref=e335]:
+              - generic [ref=e336]:
+                - generic [ref=e337]: 最近质量
+                - strong [ref=e338]: 97.50 分
+              - generic [ref=e339]: 可用
+            - img "最近质量分数变化" [ref=e341]:
+              - generic "04/09 16:34 · 需要复查 · 75.94 分" [ref=e344]
+              - generic "04/10 00:50 · 需要复查 · 83.63 分" [ref=e345]
+              - generic "04/10 08:58 · 可用 · 93.50 分" [ref=e346]
+              - generic "04/10 17:30 · 可用 · 92.81 分" [ref=e347]
+              - generic "04/11 01:58 · 可用 · 95.50 分" [ref=e348]
+              - generic "04/11 10:28 · 可用 · 97.50 分" [ref=e349]
+              - generic "04/11 18:57 · 可用 · 97.50 分" [ref=e350]
+              - generic "04/12 03:17 · 可用 · 97.50 分" [ref=e351]
+              - generic "04/12 11:47 · 可用 · 97.50 分" [ref=e352]
+              - generic "04/12 20:18 · 可用 · 91.16 分" [ref=e353]
+              - generic "04/13 04:47 · 可用 · 97.50 分" [ref=e354]
+              - generic "04/19 18:36 · 可用 · 97.50 分" [ref=e355]
+          - generic [ref=e356]:
+            - generic [ref=e357]:
+              - generic [ref=e358]: 最近得分
+              - strong [ref=e359]: 97.50 分
+            - generic [ref=e360]:
+              - generic [ref=e361]: 状态
+              - strong [ref=e362]: 可用
+            - generic [ref=e363]:
+              - generic [ref=e364]: 成功题数
+              - strong [ref=e365]: 33/33
+            - generic [ref=e366]:
+              - generic [ref=e367]: 已完成检测
+              - strong [ref=e368]: "28"
+          - generic [ref=e370]: 最近完整检测：04/19 18:36
+          - generic [ref=e371]:
+            - link "查看历史" [ref=e372] [cursor=pointer]:
+              - /url: /channels/90ec6bba-8f39-4f83-b519-34957fcb734d
+            - button "加入对比" [ref=e373] [cursor=pointer]
+        - article [ref=e374]:
+          - generic [ref=e375]:
+            - generic [ref=e376]:
+              - heading "OpenRouter / Anthropic 官方" [level=3] [ref=e377]
+              - generic [ref=e378]:
+                - paragraph [ref=e379]: 测试模型：anthropic/claude-sonnet-4.6
+                - paragraph [ref=e380]: 渠道来源：参考渠道
+                - paragraph [ref=e381]: 渠道分类：其他逆向
+              - paragraph [ref=e382]: 通过 OpenRouter 锁定 Anthropic 官方 provider 的 Claude 渠道。
+            - generic [ref=e383]: 维护中
+          - generic [ref=e384]:
+            - generic [ref=e385]:
+              - generic [ref=e386]:
+                - generic [ref=e387]: 最近质量
+                - strong [ref=e388]: 91.50 分
+              - generic [ref=e389]: 可用
+            - img "最近质量分数变化" [ref=e391]:
+              - generic "04/09 07:56 · 可用 · 97.50 分" [ref=e394]
+              - generic "04/09 16:07 · 可用 · 97.66 分" [ref=e395]
+              - generic "04/10 00:18 · 可用 · 97.50 分" [ref=e396]
+              - generic "04/10 08:28 · 可用 · 95.16 分" [ref=e397]
+              - generic "04/10 16:48 · 可用 · 93.16 分" [ref=e398]
+              - generic "04/11 00:58 · 可用 · 95.16 分" [ref=e399]
+              - generic "04/11 09:28 · 可用 · 93.16 分" [ref=e400]
+              - generic "04/11 17:57 · 可用 · 93.16 分" [ref=e401]
+              - generic "04/12 02:17 · 可用 · 97.50 分" [ref=e402]
+              - generic "04/12 10:48 · 可用 · 95.50 分" [ref=e403]
+              - generic "04/12 19:18 · 可用 · 95.50 分" [ref=e404]
+              - generic "04/13 03:47 · 可用 · 91.50 分" [ref=e405]
+          - generic [ref=e406]:
+            - generic [ref=e407]:
+              - generic [ref=e408]: 最近得分
+              - strong [ref=e409]: 91.50 分
+            - generic [ref=e410]:
+              - generic [ref=e411]: 状态
+              - strong [ref=e412]: 可用
+            - generic [ref=e413]:
+              - generic [ref=e414]: 成功题数
+              - strong [ref=e415]: 32/32
+            - generic [ref=e416]:
+              - generic [ref=e417]: 已完成检测
+              - strong [ref=e418]: "27"
+          - generic [ref=e420]: 最近完整检测：04/13 03:47
+          - generic [ref=e421]:
+            - link "查看历史" [ref=e422] [cursor=pointer]:
+              - /url: /channels/f2eb67ff-c761-423b-9eb8-5a8c450bee75
+            - button "加入对比" [ref=e423] [cursor=pointer]
+  - generic [ref=e424]:
+    - generic [ref=e426]:
+      - generic [ref=e427]: 托管渠道
+      - heading "查看棱镜托管渠道的完整检测结果" [level=2] [ref=e428]
+    - generic [ref=e429]: 棱镜托管的渠道将每 30 分钟进行一次定时全量检测，可和参考渠道比对确保模型质量。
+    - tablist "托管渠道分类筛选" [ref=e430]:
+      - button "全部" [ref=e431] [cursor=pointer]
+      - button "Max" [ref=e432] [cursor=pointer]
+      - button "Aws Bedrock" [ref=e433] [cursor=pointer]
+      - button "Vertex" [ref=e434] [cursor=pointer]
+      - button "Kiro" [ref=e435] [cursor=pointer]
+      - button "反重力" [ref=e436] [cursor=pointer]
+      - button "其他逆向" [ref=e437] [cursor=pointer]
+    - generic [ref=e438]:
+      - article [ref=e439]:
+        - generic [ref=e440]:
+          - generic [ref=e441]:
+            - heading "OpenRouter / Claude Opus 4.7" [level=3] [ref=e442]
+            - generic [ref=e443]:
+              - paragraph [ref=e444]: 测试模型：anthropic/claude-opus-4.7
+              - paragraph [ref=e445]: 渠道来源：托管渠道
+              - paragraph [ref=e446]: 渠道分类：其他逆向
+            - paragraph [ref=e447]: 通过 OpenRouter 默认路由调用 Claude Opus 4.7 的托管渠道。
+          - generic [ref=e448]: 维护中
+        - generic [ref=e449]:
+          - generic [ref=e450]:
+            - generic [ref=e451]:
+              - generic [ref=e452]: 最近质量
+              - strong [ref=e453]: 97.50 分
+            - generic [ref=e454]: 可用
+          - img "最近质量分数变化" [ref=e456]:
+            - generic "04/30 23:39 · 可用 · 100.00 分" [ref=e459]
+            - generic "04/30 23:54 · 可用 · 97.50 分" [ref=e460]
+            - generic "05/01 07:58 · 可用 · 97.50 分" [ref=e461]
+            - generic "05/01 16:00 · 可用 · 97.50 分" [ref=e462]
+        - generic [ref=e463]:
+          - generic [ref=e464]:
+            - generic [ref=e465]: 最近得分
+            - strong [ref=e466]: 97.50 分
+          - generic [ref=e467]:
+            - generic [ref=e468]: 状态
+            - strong [ref=e469]: 可用
+          - generic [ref=e470]:
+            - generic [ref=e471]: 成功题数
+            - strong [ref=e472]: 33/33
+          - generic [ref=e473]:
+            - generic [ref=e474]: 已完成检测
+            - strong [ref=e475]: "4"
+        - generic [ref=e476]:
+          - generic [ref=e477]: 最近完整检测：05/01 16:00
+          - generic [ref=e478]: 最近可用性：未运行
+        - generic [ref=e479]:
+          - link "查看历史" [ref=e480] [cursor=pointer]:
+            - /url: /channels/eb24246f-6b96-40b3-ad3f-bdf2fb748167
+          - button "加入对比" [ref=e481] [cursor=pointer]
+      - article [ref=e482]:
+        - generic [ref=e483]:
+          - generic [ref=e484]:
+            - heading "3002-aws-bedrock" [level=3] [ref=e485]
+            - generic [ref=e486]:
+              - paragraph [ref=e487]: 测试模型：claude-sonnet-4-6
+              - paragraph [ref=e488]: 渠道来源：托管渠道
+              - paragraph [ref=e489]: 渠道分类：Aws Bedrock
+          - generic [ref=e490]: 维护中
+        - generic [ref=e491]:
+          - generic [ref=e492]:
+            - generic [ref=e493]:
+              - generic [ref=e494]: 最近质量
+              - strong [ref=e495]: 2.27 分
+            - generic [ref=e496]: 待判断
+          - img "最近质量分数变化" [ref=e498]:
+            - generic "04/23 13:48 · 待判断 · 2.27 分" [ref=e500]
+        - generic [ref=e501]:
+          - generic [ref=e502]:
+            - generic [ref=e503]: 最近得分
+            - strong [ref=e504]: 2.27 分
+          - generic [ref=e505]:
+            - generic [ref=e506]: 状态
+            - strong [ref=e507]: 待判断
+          - generic [ref=e508]:
+            - generic [ref=e509]: 成功题数
+            - strong [ref=e510]: 1/33
+          - generic [ref=e511]:
+            - generic [ref=e512]: 已完成检测
+            - strong [ref=e513]: "1"
+        - generic [ref=e514]:
+          - generic [ref=e515]: 最近完整检测：04/23 13:48
+          - generic [ref=e516]: 最近可用性：未运行
+        - generic [ref=e517]:
+          - link "查看历史" [ref=e518] [cursor=pointer]:
+            - /url: /channels/28f45e64-00a5-4d6d-af9c-593ebfe4b7ab
+          - button "加入对比" [ref=e519] [cursor=pointer]
+      - article [ref=e520]:
+        - generic [ref=e521]:
+          - generic [ref=e522]:
+            - heading "3001-aws-bedrock 渠道跟踪" [level=3] [ref=e523]
+            - generic [ref=e524]:
+              - paragraph [ref=e525]: 测试模型：claude-sonnet-4-6
+              - paragraph [ref=e526]: 渠道来源：托管渠道
+              - paragraph [ref=e527]: 渠道分类：Aws Bedrock
+          - generic [ref=e528]: 维护中
+        - generic [ref=e529]:
+          - generic [ref=e530]:
+            - generic [ref=e531]:
+              - generic [ref=e532]: 最近质量
+              - strong [ref=e533]: 97.50 分
+            - generic [ref=e534]: 可用
+          - img "最近质量分数变化" [ref=e536]:
+            - generic "04/22 11:41 · 可用 · 97.50 分" [ref=e538]
+            - generic "04/22 13:48 · 可用 · 97.50 分" [ref=e539]
+        - generic [ref=e540]:
+          - generic [ref=e541]:
+            - generic [ref=e542]: 最近得分
+            - strong [ref=e543]: 97.50 分
+          - generic [ref=e544]:
+            - generic [ref=e545]: 状态
+            - strong [ref=e546]: 可用
+          - generic [ref=e547]:
+            - generic [ref=e548]: 成功题数
+            - strong [ref=e549]: 33/33
+          - generic [ref=e550]:
+            - generic [ref=e551]: 已完成检测
+            - strong [ref=e552]: "2"
+        - generic [ref=e553]:
+          - generic [ref=e554]: 最近完整检测：04/22 13:48
+          - generic [ref=e555]: 最近可用性：未运行
+        - generic [ref=e556]:
+          - link "查看历史" [ref=e557] [cursor=pointer]:
+            - /url: /channels/3c1d0caf-2a3c-4fe2-9ee8-c2ca2af48257
+          - button "加入对比" [ref=e558] [cursor=pointer]
+      - article [ref=e559]:
+        - generic [ref=e560]:
+          - generic [ref=e561]:
+            - heading "3001-逆向跟踪" [level=3] [ref=e562]
+            - generic [ref=e563]:
+              - paragraph [ref=e564]: 测试模型：claude-sonnet-4-6
+              - paragraph [ref=e565]: 渠道来源：托管渠道
+              - paragraph [ref=e566]: 渠道分类：其他逆向
+          - generic [ref=e567]: 维护中
+        - generic [ref=e568]:
+          - generic [ref=e569]:
+            - generic [ref=e570]:
+              - generic [ref=e571]: 最近质量
+              - strong [ref=e572]: 95.00 分
+            - generic [ref=e573]: 可用
+          - img "最近质量分数变化" [ref=e575]:
+            - generic "04/22 10:48 · 可用 · 97.50 分" [ref=e578]
+            - generic "04/22 11:41 · 可用 · 95.00 分" [ref=e579]
+        - generic [ref=e580]:
+          - generic [ref=e581]:
+            - generic [ref=e582]: 最近得分
+            - strong [ref=e583]: 95.00 分
+          - generic [ref=e584]:
+            - generic [ref=e585]: 状态
+            - strong [ref=e586]: 可用
+          - generic [ref=e587]:
+            - generic [ref=e588]: 成功题数
+            - strong [ref=e589]: 33/33
+          - generic [ref=e590]:
+            - generic [ref=e591]: 已完成检测
+            - strong [ref=e592]: "2"
+        - generic [ref=e593]:
+          - generic [ref=e594]: 最近完整检测：04/22 11:41
+          - generic [ref=e595]: 最近可用性：未运行
+        - generic [ref=e596]:
+          - link "查看历史" [ref=e597] [cursor=pointer]:
+            - /url: /channels/d087b836-86b4-40c3-bf5c-62f709b79d38
+          - button "加入对比" [ref=e598] [cursor=pointer]
+      - article [ref=e599]:
+        - generic [ref=e600]:
+          - generic [ref=e601]:
+            - heading "3001-Vertex 渠道跟踪" [level=3] [ref=e602]
+            - generic [ref=e603]:
+              - paragraph [ref=e604]: 测试模型：claude-sonnet-4-6
+              - paragraph [ref=e605]: 渠道来源：托管渠道
+              - paragraph [ref=e606]: 渠道分类：Vertex
+          - generic [ref=e607]: 维护中
+        - generic [ref=e608]:
+          - generic [ref=e609]:
+            - generic [ref=e610]:
+              - generic [ref=e611]: 最近质量
+              - strong [ref=e612]: 95.50 分
+            - generic [ref=e613]: 可用
+          - img "最近质量分数变化" [ref=e615]:
+            - generic "04/22 10:49 · 可用 · 97.50 分" [ref=e618]
+            - generic "04/22 11:40 · 可用 · 95.50 分" [ref=e619]
+            - generic "04/22 13:55 · 可用 · 95.50 分" [ref=e620]
+        - generic [ref=e621]:
+          - generic [ref=e622]:
+            - generic [ref=e623]: 最近得分
+            - strong [ref=e624]: 95.50 分
+          - generic [ref=e625]:
+            - generic [ref=e626]: 状态
+            - strong [ref=e627]: 可用
+          - generic [ref=e628]:
+            - generic [ref=e629]: 成功题数
+            - strong [ref=e630]: 33/33
+          - generic [ref=e631]:
+            - generic [ref=e632]: 已完成检测
+            - strong [ref=e633]: "3"
+        - generic [ref=e634]:
+          - generic [ref=e635]: 最近完整检测：04/22 13:55
+          - generic [ref=e636]: 最近可用性：未运行
+        - generic [ref=e637]:
+          - link "查看历史" [ref=e638] [cursor=pointer]:
+            - /url: /channels/7d9fad31-9479-4b3c-ab7f-c689b5d21b9d
+          - button "加入对比" [ref=e639] [cursor=pointer]
+      - article [ref=e640]:
+        - generic [ref=e641]:
+          - generic [ref=e642]:
+            - heading "3001-Max-逆向跟踪" [level=3] [ref=e643]
+            - generic [ref=e644]:
+              - paragraph [ref=e645]: 测试模型：claude-sonnet-4-6
+              - paragraph [ref=e646]: 渠道来源：托管渠道
+              - paragraph [ref=e647]: 渠道分类：Max
+          - generic [ref=e648]: 维护中
+        - generic [ref=e649]:
+          - generic [ref=e650]:
+            - generic [ref=e651]:
+              - generic [ref=e652]: 最近质量
+              - strong [ref=e653]: 97.50 分
+            - generic [ref=e654]: 可用
+          - img "最近质量分数变化" [ref=e656]:
+            - generic "04/22 13:55 · 可用 · 97.50 分" [ref=e658]
+        - generic [ref=e659]:
+          - generic [ref=e660]:
+            - generic [ref=e661]: 最近得分
+            - strong [ref=e662]: 97.50 分
+          - generic [ref=e663]:
+            - generic [ref=e664]: 状态
+            - strong [ref=e665]: 可用
+          - generic [ref=e666]:
+            - generic [ref=e667]: 成功题数
+            - strong [ref=e668]: 33/33
+          - generic [ref=e669]:
+            - generic [ref=e670]: 已完成检测
+            - strong [ref=e671]: "1"
+        - generic [ref=e672]:
+          - generic [ref=e673]: 最近完整检测：04/22 13:55
+          - generic [ref=e674]: 最近可用性：未运行
+        - generic [ref=e675]:
+          - link "查看历史" [ref=e676] [cursor=pointer]:
+            - /url: /channels/e4600db3-ec06-4083-924a-6d2794ead68c
+          - button "加入对比" [ref=e677] [cursor=pointer]
+  - generic [ref=e678]:
+    - generic [ref=e680]:
+      - generic [ref=e681]: 自测渠道
+      - heading "提交你自己的渠道做完整检测" [level=2] [ref=e682]
+    - generic [ref=e683]: 这里会直接跑一整套完整测试。跑完以后，这条自测渠道也可以和上面的参考渠道、托管渠道一起加入同一个对比槽。
+    - generic [ref=e684]:
+      - generic [ref=e685]:
+        - text: 名称
+        - textbox "名称" [ref=e686]:
+          - /placeholder: 可留空，系统会自动生成
+      - generic [ref=e687]:
+        - text: 接口地址（Base URL）
+        - textbox "接口地址（Base URL）" [ref=e688]:
+          - /placeholder: https://example.com
+      - generic [ref=e689]:
+        - text: 密钥（API Key）
+        - textbox "密钥（API Key）" [ref=e690]:
+          - /placeholder: sk-...
+      - generic [ref=e691]:
+        - text: 模型
+        - textbox "模型" [ref=e692]:
+          - /placeholder: claude-sonnet-4-6
+          - text: claude-sonnet-4-6
+      - generic [ref=e693]:
+        - text: 描述
+        - textbox "描述" [ref=e694]:
+          - /placeholder: 这条临时渠道用于什么场景
+      - generic [ref=e696]:
+        - generic [ref=e697]:
+          - generic [ref=e698]: 随机输入 Token
+          - generic [ref=e699]: 开启后，每道题会自动追加随机词表尾巴，避免连续相同输入触发上游禁用。
+        - checkbox "随机输入 Token 开启后，每道题会自动追加随机词表尾巴，避免连续相同输入触发上游禁用。" [ref=e701] [cursor=pointer]
+      - button "开始完整检测" [ref=e704] [cursor=pointer]
+  - generic [ref=e705]:
+    - generic [ref=e707]:
+      - generic [ref=e708]: 渠道对比
+      - heading "把参考渠道、托管渠道和自测渠道放在一起比较" [level=2] [ref=e709]
+    - generic [ref=e710]: 先从上面的参考渠道、托管渠道或自测结果里选两条完整测评，再打开对比页。对比页会把相同题目左右并排放好，方便直接看差异。
+    - generic [ref=e711]:
+      - generic [ref=e712]:
+        - generic [ref=e713]: 左侧
+        - strong [ref=e714]: 尚未选择
+      - generic [ref=e715]:
+        - generic [ref=e716]: 右侧
+        - strong [ref=e717]: 尚未选择
+      - generic [ref=e718]: 先选两条完整测评结果

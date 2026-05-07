@@ -1,0 +1,122 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CheckCircle2, Plus, RefreshCw } from "lucide-react";
+import { FormEvent, useState } from "react";
+import { api } from "../api";
+import { Badge } from "../components/Badge";
+import { Section } from "../components/Section";
+import type { ChannelRole } from "../types";
+
+const roleTone = {
+  gold: "blue",
+  official_cloud: "green",
+  candidate: "purple",
+  negative: "red"
+} as const;
+
+export function ChannelsPage() {
+  const queryClient = useQueryClient();
+  const channels = useQuery({ queryKey: ["channels"], queryFn: api.channels });
+  const [health, setHealth] = useState<Record<string, string>>({});
+  const emptyForm = { name: "", provider_type: "openai_compatible", role: "candidate" as ChannelRole, base_url: "", model_name: "" };
+  const [form, setForm] = useState(emptyForm);
+  const create = useMutation({
+    mutationFn: api.createChannel,
+    onSuccess: () => {
+      setForm(emptyForm);
+      queryClient.invalidateQueries({ queryKey: ["channels"] });
+    }
+  });
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    create.mutate({ ...form, enabled: true });
+  }
+
+  async function check(id: string) {
+    setHealth((current) => ({ ...current, [id]: "checking" }));
+    const result = await api.healthCheck(id);
+    setHealth((current) => ({ ...current, [id]: result.ok ? "ok" : "fail" }));
+  }
+
+  return (
+    <div className="page">
+      <header className="page-header">
+        <div>
+          <p>Channels</p>
+          <h1>渠道管理</h1>
+        </div>
+      </header>
+      <Section title="新增渠道">
+        <form className="form-grid" onSubmit={submit}>
+          <label>
+            渠道名
+            <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
+          </label>
+          <label>
+            Provider
+            <select value={form.provider_type} onChange={(event) => setForm({ ...form, provider_type: event.target.value })}>
+              <option value="anthropic">anthropic</option>
+              <option value="aws_bedrock">aws_bedrock</option>
+              <option value="azure_foundry">azure_foundry</option>
+              <option value="openai_compatible">openai_compatible</option>
+              <option value="custom">custom</option>
+            </select>
+          </label>
+          <label>
+            角色
+            <select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value as ChannelRole })}>
+              <option value="gold">gold</option>
+              <option value="official_cloud">official_cloud</option>
+              <option value="candidate">candidate</option>
+              <option value="negative">negative</option>
+            </select>
+          </label>
+          <label>
+            Endpoint
+            <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
+          </label>
+          <label>
+            模型名
+            <input value={form.model_name} onChange={(event) => setForm({ ...form, model_name: event.target.value })} />
+          </label>
+          <button className="primary-button" type="submit" disabled={create.isPending}>
+            <Plus size={16} />新增
+          </button>
+        </form>
+      </Section>
+
+      <Section title="渠道列表">
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>渠道</th>
+                <th>类型</th>
+                <th>角色</th>
+                <th>模型</th>
+                <th>Endpoint</th>
+                <th>健康检查</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(channels.data ?? []).map((channel) => (
+                <tr key={channel.id}>
+                  <td><strong>{channel.name}</strong></td>
+                  <td>{channel.provider_type}</td>
+                  <td><Badge tone={roleTone[channel.role]}>{channel.role}</Badge></td>
+                  <td>{channel.model_name}</td>
+                  <td className="truncate">{channel.base_url}</td>
+                  <td>
+                    <button className="icon-button" type="button" aria-label="健康检查" onClick={() => check(channel.id)}>
+                      {health[channel.id] === "ok" ? <CheckCircle2 size={16} /> : <RefreshCw size={16} />}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Section>
+    </div>
+  );
+}

@@ -1,0 +1,79 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: Claude Relay Eval
+      - heading "棱镜" [level=1] [ref=e7]
+      - generic [ref=e8]:
+        - generic [ref=e9]:
+          - heading "这套检测在测什么" [level=2] [ref=e10]
+          - paragraph [ref=e11]: 这套公开检测围绕固定题目测试集运行。重点不是只看渠道能不能答题，而是同时看身份自报、能力表现、协议细节和敏感议题输出是否稳定。
+        - generic [ref=e12]:
+          - heading "测试集覆盖方向" [level=2] [ref=e13]
+          - generic [ref=e14]:
+            - article [ref=e15]:
+              - strong [ref=e16]: 身份一致性
+              - generic [ref=e17]: 10 题
+              - paragraph [ref=e18]: 看渠道会不会把 Claude 说成别的模型、别的平台，或者自报信息前后打架。
+            - article [ref=e19]:
+              - strong [ref=e20]: 推理能力
+              - generic [ref=e21]: 2 题
+              - paragraph [ref=e22]: 用基础逻辑题和概率题看解题步骤是否稳定，结论是否自洽。
+            - article [ref=e23]:
+              - strong [ref=e24]: 代码生成
+              - generic [ref=e25]: 1 题
+              - paragraph [ref=e26]: 看代码题能不能给出正确实现、类型注解和边界处理。
+            - article [ref=e27]:
+              - strong [ref=e28]: 上下文记忆
+              - generic [ref=e29]: 1 题
+              - paragraph [ref=e30]: 看多轮对话里前面给过的事实会不会丢、会不会串。
+            - article [ref=e31]:
+              - strong [ref=e32]: 知识更新
+              - generic [ref=e33]: 4 题
+              - paragraph [ref=e34]: 看模型对明确时间点事件的覆盖情况，以及自报知识边界是否稳定。
+            - article [ref=e35]:
+              - strong [ref=e36]: 协议细节
+              - generic [ref=e37]: 8 题
+              - paragraph [ref=e38]: 看 message id、tool id、max_tokens 截断和流式结构是否符合预期。
+            - article [ref=e39]:
+              - strong [ref=e40]: 思考模式
+              - generic [ref=e41]: 2 题
+              - paragraph [ref=e42]: 看 thinking 内容和签名有没有真的返回，不只是给一个普通答案。
+            - article [ref=e43]:
+              - strong [ref=e44]: 敏感议题
+              - generic [ref=e45]: 5 题
+              - paragraph [ref=e46]: 看高关注公共议题上的表达完整度、信息密度和回答风格是否出现明显变化。
+        - generic [ref=e47]:
+          - heading "代表题目" [level=2] [ref=e48]
+          - list [ref=e49]:
+            - listitem [ref=e50]:
+              - strong [ref=e51]: 厂商与模型名
+              - generic [ref=e52]: 要求模型直接给出厂商、模型名和版本，观察是否稳定自报为 Claude/Anthropic，还是漂移到其他模型。
+            - listitem [ref=e53]:
+              - strong [ref=e54]: 2025年5月教皇更替
+              - generic [ref=e55]: 检查模型是否覆盖到 2025 年 5 月罗马教皇更替这一时间明确、影响大的事件。
+            - listitem [ref=e56]:
+              - strong [ref=e57]: max_tokens=1 截断探针
+              - generic [ref=e58]: 检测渠道是否真正遵守 max_tokens 上限，以及流式返回在极限截断下是否仍保持自洽。
+            - listitem [ref=e59]:
+              - strong [ref=e60]: 多条件路线规划
+              - generic [ref=e61]: 检查模型在打开思考模式后，是否能在多约束任务中输出完整思考内容和签名，而不只是最终答案。
+            - listitem [ref=e62]:
+              - strong [ref=e63]: 历史公共议题
+              - generic [ref=e64]: 观察模型在高关注历史议题上的信息完整度、表达稳定性和风格变化。
+    - generic [ref=e65]:
+      - generic [ref=e66]:
+        - generic [ref=e67]: 官方渠道
+        - strong [ref=e68]: "0"
+      - generic [ref=e69]:
+        - generic [ref=e70]: 当前可用
+        - strong [ref=e71]: "0"
+      - generic [ref=e72]:
+        - generic [ref=e73]: 测评通过
+        - strong [ref=e74]: "0"
+      - generic [ref=e75]:
+        - generic [ref=e76]: 单次测试
+        - strong [ref=e77]: "0"
+  - tablist "首页目标切换" [ref=e78]:
+    - button "渠道可用性" [ref=e79] [cursor=pointer]
+    - button "渠道质量检测" [ref=e80] [cursor=pointer]
+  - generic [ref=e82]: 正在加载渠道列表…

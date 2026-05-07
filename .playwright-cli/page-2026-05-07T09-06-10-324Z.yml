@@ -1,0 +1,111 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]: CE
+        - generic [ref=e8]:
+          - text: Claude Channel
+          - heading "Eval Platform" [level=4] [ref=e9]
+      - menu [ref=e10]:
+        - menuitem "总览" [ref=e11] [cursor=pointer]:
+          - img [ref=e12]
+          - link "总览" [ref=e15]:
+            - /url: /
+        - menuitem "渠道管理" [ref=e16] [cursor=pointer]:
+          - img [ref=e17]
+          - link "渠道管理" [ref=e23]:
+            - /url: /channels
+        - menuitem "创建检测" [ref=e24] [cursor=pointer]:
+          - img [ref=e25]
+          - link "创建检测" [ref=e29]:
+            - /url: /new-run
+        - menuitem "任务列表" [ref=e30] [cursor=pointer]:
+          - img [ref=e31]
+          - link "任务列表" [ref=e37]:
+            - /url: /runs
+  - generic [ref=e38]:
+    - banner [ref=e39]:
+      - generic [ref=e40]:
+        - text: 内网无登录版本
+        - heading "Claude 多渠道真实性检测" [level=3] [ref=e41]
+      - link "API" [ref=e42] [cursor=pointer]:
+        - /url: /api/eval-runs
+        - img [ref=e43]
+        - text: API
+    - main [ref=e46]:
+      - generic [ref=e47]:
+        - generic [ref=e50]:
+          - text: Channel Authenticity Eval
+          - heading "官方金标 + 云参考 + 第三方待测的四路对比" [level=1] [ref=e51]
+          - generic [ref=e52]: 平台把 Anthropic 纯官方作为金标，AWS Bedrock 与 Azure AI Foundry 作为官方云参考，对第三方 Claude 渠道进行同题、同参数、同轮次检测。
+        - generic [ref=e54]:
+          - generic [ref=e58]:
+            - generic [ref=e59]: 渠道数
+            - generic [ref=e61]: "0"
+          - generic [ref=e65]:
+            - generic [ref=e66]: 题库数
+            - generic [ref=e68]: "0"
+          - generic [ref=e72]:
+            - generic [ref=e73]: 已完成任务
+            - generic [ref=e75]: "0"
+          - generic [ref=e79]:
+            - generic [ref=e80]: 运行中
+            - generic [ref=e82]: "0"
+        - generic [ref=e84]:
+          - generic [ref=e87]: 测试集覆盖方向
+          - generic [ref=e89]:
+            - generic [ref=e91]:
+              - generic [ref=e92]:
+                - strong [ref=e93]: 身份一致性
+                - generic [ref=e94]: 10 题
+              - paragraph [ref=e95]: 模型/厂商自述、混淆纠正、知识边界自报
+            - generic [ref=e97]:
+              - generic [ref=e98]:
+                - strong [ref=e99]: 协议细节
+                - generic [ref=e100]: 8 题
+              - paragraph [ref=e101]: message_id、tool_id、截断、stop、stream
+            - generic [ref=e103]:
+              - generic [ref=e104]:
+                - strong [ref=e105]: 推理能力
+                - generic [ref=e106]: 2 题
+              - paragraph [ref=e107]: 逻辑推理与数学计算
+            - generic [ref=e109]:
+              - generic [ref=e110]:
+                - strong [ref=e111]: 代码能力
+                - generic [ref=e112]: 2 题
+              - paragraph [ref=e113]: 代码生成与边界推理
+            - generic [ref=e115]:
+              - generic [ref=e116]:
+                - strong [ref=e117]: 知识边界
+                - generic [ref=e118]: 4 题
+              - paragraph [ref=e119]: 明确时间点事件与不确定性
+            - generic [ref=e121]:
+              - generic [ref=e122]:
+                - strong [ref=e123]: 上下文记忆
+                - generic [ref=e124]: 1 题
+              - paragraph [ref=e125]: 多轮事实整合
+            - generic [ref=e127]:
+              - generic [ref=e128]:
+                - strong [ref=e129]: 安全敏感
+                - generic [ref=e130]: 5 题
+              - paragraph [ref=e131]: 危险、隐私、医疗、金融、付费墙
+            - generic [ref=e133]:
+              - generic [ref=e134]:
+                - strong [ref=e135]: 格式边界
+                - generic [ref=e136]: 3 题
+              - paragraph [ref=e137]: JSON、表格、特殊字符
+        - generic [ref=e139]:
+          - generic [ref=e142]: 最近任务
+          - table [ref=e150]:
+            - rowgroup [ref=e151]:
+              - row "任务 状态 进度 创建时间" [ref=e152]:
+                - columnheader "任务" [ref=e153]
+                - columnheader "状态" [ref=e154]
+                - columnheader "进度" [ref=e155]
+                - columnheader "创建时间" [ref=e156]
+            - rowgroup [ref=e157]:
+              - row "暂无数据 暂无数据" [ref=e158]:
+                - cell "暂无数据 暂无数据" [ref=e159]:
+                  - generic [ref=e160]:
+                    - img "暂无数据" [ref=e162]
+                    - generic [ref=e168]: 暂无数据

@@ -1,0 +1,14 @@
+- main [ref=e719]:
+  - generic [ref=e721]:
+    - generic [ref=e722]:
+      - generic [ref=e723]:
+        - link "首页" [ref=e724] [cursor=pointer]:
+          - /url: /
+        - generic [ref=e725]: /
+        - generic [ref=e726]: 渠道历史
+      - link "返回首页" [ref=e728] [cursor=pointer]:
+        - /url: /
+    - generic [ref=e729]: 渠道历史
+    - heading "渠道历史" [level=1] [ref=e730]
+    - paragraph [ref=e731]: 这里按时间拆开看可用性检测和完整质量检测。
+  - generic [ref=e733]: Failed to fetch
