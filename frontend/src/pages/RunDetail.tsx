@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Button, Card, Descriptions, Empty, Progress, Select, Space, Spin, Table, Tag, Typography } from 'antd';
+import { useQuery } from '@tanstack/react-query';
+import { Alert, Button, Card, Descriptions, Empty, Progress, Select, Space, Spin, Table, Tag, Typography } from 'antd';
 import { CheckCircle2, Clock3, GitCompare, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { useParams } from 'react-router-dom';
-import { api } from '../api';
+import { api, getErrorMessage } from '../api';
 import type { Channel, ChannelRole, Comparison, Result, RunResults, TestCase } from '../types';
 
 type CasePanelRow = {
@@ -107,35 +108,28 @@ function comparisonCell(comparison?: Comparison) {
 
 export default function RunDetail() {
   const { runId = '' } = useParams();
-  const [data, setData] = useState<RunResults | null>(null);
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const [cases, setCases] = useState<TestCase[]>([]);
   const [selectedOfficialId, setSelectedOfficialId] = useState('');
   const [selectedCandidateId, setSelectedCandidateId] = useState('');
-  const [loading, setLoading] = useState(true);
 
-  async function load() {
-    const runResults = await api.runResults(runId);
-    const [channelData, caseData] = await Promise.all([api.channels(), api.cases(runResults.run.suite_id)]);
-    setData(runResults);
-    setChannels(channelData);
-    setCases(caseData);
-    setLoading(false);
-  }
+  const runResults = useQuery<RunResults>({
+    queryKey: ['runResults', runId],
+    queryFn: () => api.runResults(runId),
+    enabled: Boolean(runId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.run.status;
+      return status === 'pending' || status === 'running' ? 1800 : false;
+    },
+  });
+  const channelsQuery = useQuery({ queryKey: ['channels'], queryFn: api.channels });
+  const casesQuery = useQuery({
+    queryKey: ['cases', runResults.data?.run.suite_id],
+    queryFn: () => api.cases(runResults.data?.run.suite_id),
+    enabled: Boolean(runResults.data?.run.suite_id),
+  });
 
-  useEffect(() => {
-    let active = true;
-    async function safeLoad() {
-      if (!active) return;
-      await load();
-    }
-    safeLoad();
-    const id = window.setInterval(safeLoad, 1800);
-    return () => {
-      active = false;
-      window.clearInterval(id);
-    };
-  }, [runId]);
+  const data = runResults.data ?? null;
+  const channels = channelsQuery.data ?? [];
+  const cases = casesQuery.data ?? [];
 
   const channelById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels]);
   const runChannelIds = useMemo(() => new Set((data?.run_channels ?? []).map((item) => item.channel_id)), [data?.run_channels]);
@@ -228,7 +222,22 @@ export default function RunDetail() {
     ? rows.reduce((sum, row) => sum + (row.comparison?.final_score ?? 0), 0) / Math.max(1, comparedRows)
     : 0;
 
-  if (loading || !data) {
+  if (runResults.isError || channelsQuery.isError || casesQuery.isError) {
+    const error = runResults.error ?? channelsQuery.error ?? casesQuery.error;
+    return (
+      <Card bordered={false}>
+        <Alert
+          type="error"
+          showIcon
+          message="任务详情加载失败"
+          description={getErrorMessage(error)}
+          action={<Button onClick={() => Promise.all([runResults.refetch(), channelsQuery.refetch(), casesQuery.refetch()])}>重试</Button>}
+        />
+      </Card>
+    );
+  }
+
+  if (runResults.isLoading || channelsQuery.isLoading || casesQuery.isLoading || !data) {
     return <Card loading />;
   }
 

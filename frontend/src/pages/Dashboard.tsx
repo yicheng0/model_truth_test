@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { Button, Card, Col, Row, Space, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Col, Row, Space, Tag, Typography } from 'antd';
 import { Link } from 'react-router-dom';
 import { Activity, CheckCircle2, Clock3, FileText, ShieldCheck } from 'lucide-react';
-import { api } from '../api';
+import { api, getErrorMessage } from '../api';
 
 const modules = [
   ['身份一致性', 10, '看渠道会不会把 Claude 说成别的模型、别的平台，或者自报信息前后打架。'],
@@ -25,9 +25,17 @@ const sampleCases = [
 
 export default function Dashboard() {
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
-  const runs = useQuery({ queryKey: ['runs'], queryFn: api.runs, refetchInterval: 3000 });
+  const runs = useQuery({
+    queryKey: ['runs'],
+    queryFn: api.runs,
+    refetchInterval: (query) => (query.state.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 3000 : false),
+  });
   const suites = useQuery({ queryKey: ['suites'], queryFn: api.suites });
-  const reports = useQuery({ queryKey: ['reports'], queryFn: api.reports, refetchInterval: 3000 });
+  const reports = useQuery({
+    queryKey: ['reports'],
+    queryFn: api.reports,
+    refetchInterval: () => (runs.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 3000 : false),
+  });
 
   const completed = runs.data?.filter((run) => run.status === 'completed').length ?? 0;
   const running = runs.data?.filter((run) => run.status === 'running').length ?? 0;
@@ -38,6 +46,14 @@ export default function Dashboard() {
 
   return (
     <Space direction="vertical" size={28} className="page-stack">
+      {channels.isError || runs.isError || suites.isError || reports.isError ? (
+        <Alert
+          type="error"
+          showIcon
+          message="仪表盘数据加载失败"
+          description={getErrorMessage(channels.error ?? runs.error ?? suites.error ?? reports.error)}
+        />
+      ) : null}
       <section className="reference-hero">
         <Typography.Text className="section-kicker">APIPRO RELAY EVAL</Typography.Text>
         <Typography.Title>渠道真实性测评</Typography.Title>

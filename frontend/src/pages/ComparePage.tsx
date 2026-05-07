@@ -8,10 +8,15 @@ import type { Channel, Result } from "../types";
 
 export function ComparePage() {
   const { runId = "", testCaseId } = useParams();
+  const run = useQuery({ queryKey: ["run", runId], queryFn: () => api.run(runId), enabled: Boolean(runId), refetchInterval: (query) => {
+    const status = query.state.data?.status;
+    return status === "pending" || status === "running" ? 2000 : false;
+  } });
   const channels = useQuery({ queryKey: ["channels"], queryFn: api.channels });
   const cases = useQuery({ queryKey: ["cases"], queryFn: () => api.cases() });
-  const results = useQuery({ queryKey: ["results", runId], queryFn: () => api.results(runId), enabled: Boolean(runId), refetchInterval: 2000 });
-  const comparisons = useQuery({ queryKey: ["comparisons", runId], queryFn: () => api.comparisons(runId), enabled: Boolean(runId), refetchInterval: 2000 });
+  const isLive = run.data?.status === "pending" || run.data?.status === "running";
+  const results = useQuery({ queryKey: ["results", runId], queryFn: () => api.results(runId), enabled: Boolean(runId), refetchInterval: () => (isLive ? 2000 : false) });
+  const comparisons = useQuery({ queryKey: ["comparisons", runId], queryFn: () => api.comparisons(runId), enabled: Boolean(runId), refetchInterval: () => (isLive ? 2000 : false) });
   const selectedCase = testCaseId || cases.data?.[0]?.id;
   const caseInfo = cases.data?.find((item) => item.id === selectedCase);
   const byChannel = new Map<string, Result>();
@@ -77,4 +82,3 @@ function orderChannels(channels: Channel[]) {
   const rank = { gold: 0, official_cloud: 1, candidate: 2, negative: 3 };
   return [...channels].sort((a, b) => rank[a.role] - rank[b.role]);
 }
-

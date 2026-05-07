@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, select
@@ -29,22 +32,31 @@ from .schemas import (
 from .services import build_comparisons, build_reports, create_case, create_channel, create_run, create_suite, execute_run, seed_demo_data
 
 
-app = FastAPI(title="Claude Channel Authenticity Eval", version="0.1.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.on_event("startup")
-def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     init_db()
     with SessionLocal() as db:
         seed_demo_data(db)
+    yield
+
+
+app = FastAPI(title="Claude Channel Authenticity Eval", version="0.1.0", lifespan=lifespan)
+
+
+def cors_origins() -> list[str]:
+    raw = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
+allowed_origins = cors_origins()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials="*" not in allowed_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/api/health")
@@ -252,8 +264,13 @@ def get_run_results(run_id: str, db: Session = Depends(get_db)) -> RunResultsRea
     return RunResultsRead(run=run, run_channels=list(run_channels), results=list(results), comparisons=list(comparisons), reports=list(reports))
 
 
-@app.get("/api/runs/{run_id}/results", response_model=list[ResultRead])
-def get_run_results_alias(run_id: str, db: Session = Depends(get_db)) -> list[Result]:
+@app.get("/api/runs/{run_id}/results", response_model=RunResultsRead)
+def get_run_results_alias(run_id: str, db: Session = Depends(get_db)) -> RunResultsRead:
+    return get_run_results(run_id, db)
+
+
+@app.get("/api/runs/{run_id}/raw-results", response_model=list[ResultRead])
+def get_run_raw_results_alias(run_id: str, db: Session = Depends(get_db)) -> list[Result]:
     get_run(run_id, db)
     return list(db.scalars(select(Result).where(Result.run_id == run_id).order_by(Result.test_case_id, Result.channel_id)).all())
 
@@ -326,6 +343,11 @@ def finalize_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/api/runs/{run_id}/finalize")
+def finalize_run_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    return finalize_run(run_id, db)
+
+
 @app.get("/api/eval-runs/{run_id}/report.md")
 def download_report(run_id: str, db: Session = Depends(get_db)) -> Response:
     reports = db.scalars(select(Report).where(Report.run_id == run_id).order_by(Report.final_score.asc())).all()
@@ -333,6 +355,11 @@ def download_report(run_id: str, db: Session = Depends(get_db)) -> Response:
         raise HTTPException(status_code=404, detail="Report not found")
     markdown = "\n\n---\n\n".join(report.markdown or "" for report in reports)
     return Response(markdown, media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{run_id}.md"'})
+
+
+@app.get("/api/runs/{run_id}/report.md")
+def download_report_alias(run_id: str, db: Session = Depends(get_db)) -> Response:
+    return download_report(run_id, db)
 
 
 @app.get("/api/reports", response_model=list[ReportRead])

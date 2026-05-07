@@ -24,12 +24,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           colorPrimary: '#a35f45',
           colorInfo: '#a35f45',
           colorSuccess: '#2f8f66',
-          borderRadius: 18,
-          fontFamily: '"Plus Jakarta Sans", "Inter", "Noto Sans SC", system-ui, sans-serif',
+          borderRadius: 8,
+          fontFamily: '"Inter", "Noto Sans SC", system-ui, sans-serif',
         },
         components: {
-          Card: { borderRadiusLG: 22 },
-          Button: { borderRadius: 999 },
+          Card: { borderRadiusLG: 8 },
+          Button: { borderRadius: 8 },
           Table: { headerBg: '#f7f1ed', rowHoverBg: '#fbf6f2' },
         },
       }}

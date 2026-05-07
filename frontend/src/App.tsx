@@ -47,7 +47,7 @@ function Shell() {
         </nav>
 
         <div className="sidebar-tools">
-          <Button className="side-tool-button" href="/api/eval-runs" target="_blank" icon={<FileText size={16} />}>
+          <Button className="side-tool-button" href="/api/runs" target="_blank" icon={<FileText size={16} />}>
             API
           </Button>
           <Popover

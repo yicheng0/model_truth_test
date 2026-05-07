@@ -1,6 +1,21 @@
 import type { Channel, Comparison, Report, Result, Run, RunResults, TestCase, TestSuite } from './types';
 
-const API_BASE = '';
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
+
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+export function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  return '请求失败，请稍后重试';
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -9,8 +24,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || response.statusText);
+    let message = text || response.statusText;
+    try {
+      const payload = JSON.parse(text) as { detail?: unknown; message?: unknown };
+      const detail = payload.detail ?? payload.message;
+      message = typeof detail === 'string' ? detail : JSON.stringify(detail);
+    } catch {
+      // Keep the raw response text when the API does not return JSON.
+    }
+    throw new ApiError(message || response.statusText, response.status);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -28,17 +52,17 @@ export const api = {
   createCase: (payload: Partial<TestCase>) => request<TestCase>('/api/test-cases', { method: 'POST', body: JSON.stringify(payload) }),
   updateCase: (id: string, payload: Partial<TestCase>) => request<TestCase>(`/api/test-cases/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCase: (id: string) => request<{ deleted: boolean }>(`/api/test-cases/${id}`, { method: 'DELETE' }),
-  runs: () => request<Run[]>('/api/eval-runs'),
-  run: (runId: string) => request<Run>(`/api/eval-runs/${runId}`),
-  runResults: (runId: string) => request<RunResults>(`/api/eval-runs/${runId}/results`),
-  startRun: (payload: unknown) => request<Run>('/api/eval-runs', { method: 'POST', body: JSON.stringify(payload) }),
+  runs: () => request<Run[]>('/api/runs'),
+  run: (runId: string) => request<Run>(`/api/runs/${runId}`),
+  runResults: (runId: string) => request<RunResults>(`/api/runs/${runId}/results`),
+  startRun: (payload: unknown) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
   createRun: (payload: { name: string; suite_id: string; channel_ids?: Record<string, string[]>; repeat_count: number; concurrency: number }) =>
     request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
   deleteRun: (id: string) => request<{ deleted: boolean }>(`/api/runs/${id}`, { method: 'DELETE' }),
   runProgress: (id: string) => request<{ percent: number; status: string; completed_jobs: number; total_jobs: number }>(`/api/runs/${id}/progress`),
-  results: (runId: string) => request<Result[]>(`/api/runs/${runId}/results`),
+  results: (runId: string) => request<Result[]>(`/api/runs/${runId}/raw-results`),
   comparisons: (runId: string) => request<Comparison[]>(`/api/runs/${runId}/comparisons`),
   reports: () => request<Report[]>('/api/reports'),
-  finalize: (runId: string) => request<{ status: string }>(`/api/eval-runs/${runId}/finalize`, { method: 'POST' }),
-  reportUrl: (runId: string) => `${API_BASE}/api/eval-runs/${runId}/report.md`,
+  finalize: (runId: string) => request<{ status: string }>(`/api/runs/${runId}/finalize`, { method: 'POST' }),
+  reportUrl: (runId: string) => `${API_BASE}/api/runs/${runId}/report.md`,
 };

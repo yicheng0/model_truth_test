@@ -183,31 +183,49 @@ async def execute_run(
             run.completed_jobs = 0
             db.commit()
 
-            for case in cases:
-                ordered_channels = _sort_channels_for_run(channels)
-                for channel in ordered_channels:
-                    for attempt in range(1, run.repeat_count + 1):
-                        normalized = await invoke_channel(channel, case, attempt, runtime_credentials.get(channel.id, {}), use_mock)
-                        score, labels = score_result(channel, case, normalized)
-                        db.add(
-                            Result(
-                                id=new_id("res"),
-                                run_id=run.id,
-                                test_case_id=case.id,
-                                channel_id=channel.id,
-                                attempt_index=attempt,
-                                normalized_response=normalized,
-                                raw_request=normalized.get("raw_request"),
-                                raw_response=normalized.get("raw_response"),
-                                metrics={"latency_ms": normalized.get("latency_ms"), "first_token_ms": normalized.get("first_token_ms")},
-                                score=score,
-                                labels=labels,
-                            )
-                        )
-                        run.completed_jobs += 1
-                        db.commit()
-                        if channel.role in {"candidate", "negative"}:
-                            build_comparisons(db, run.id)
+            semaphore = asyncio.Semaphore(max(1, run.concurrency))
+            jobs = [
+                (case, channel, attempt)
+                for case in cases
+                for channel in _sort_channels_for_run(channels)
+                for attempt in range(1, run.repeat_count + 1)
+            ]
+
+            async def invoke_job(case: TestCase, channel: Channel, attempt: int) -> tuple[TestCase, Channel, int, dict[str, Any]]:
+                async with semaphore:
+                    normalized = await invoke_channel(channel, case, attempt, runtime_credentials.get(channel.id, {}), use_mock)
+                    return case, channel, attempt, normalized
+
+            pending = [asyncio.create_task(invoke_job(case, channel, attempt)) for case, channel, attempt in jobs]
+            for task in asyncio.as_completed(pending):
+                db.refresh(run)
+                if run.status == "canceled":
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    run.finished_at = datetime.now(timezone.utc)
+                    db.commit()
+                    return
+
+                case, channel, attempt, normalized = await task
+                score, labels = score_result(channel, case, normalized)
+                db.add(
+                    Result(
+                        id=new_id("res"),
+                        run_id=run.id,
+                        test_case_id=case.id,
+                        channel_id=channel.id,
+                        attempt_index=attempt,
+                        normalized_response=normalized,
+                        raw_request=normalized.get("raw_request"),
+                        raw_response=normalized.get("raw_response"),
+                        metrics={"latency_ms": normalized.get("latency_ms"), "first_token_ms": normalized.get("first_token_ms")},
+                        score=score,
+                        labels=labels,
+                    )
+                )
+                run.completed_jobs += 1
+                db.commit()
 
             build_comparisons(db, run.id)
             build_reports(db, run.id)

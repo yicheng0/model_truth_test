@@ -8,7 +8,11 @@ import { StatCard } from "../components/StatCard";
 
 export function DashboardPage() {
   const channels = useQuery({ queryKey: ["channels"], queryFn: api.channels });
-  const runs = useQuery({ queryKey: ["runs"], queryFn: api.runs, refetchInterval: 2500 });
+  const runs = useQuery({
+    queryKey: ["runs"],
+    queryFn: api.runs,
+    refetchInterval: (query) => (query.state.data?.some((run) => run.status === "pending" || run.status === "running") ? 2500 : false)
+  });
   const reports = useQuery({ queryKey: ["reports"], queryFn: api.reports });
 
   const riskData = ["A", "B", "C", "D", "E"].map((grade) => ({
@@ -101,4 +105,3 @@ export function DashboardPage() {
     </div>
   );
 }
-

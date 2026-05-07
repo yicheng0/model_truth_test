@@ -1,35 +1,34 @@
-import { useEffect, useState } from 'react';
-import { Button, Card, Popconfirm, Progress, Space, Table, Tag, message } from 'antd';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Alert, Button, Card, Popconfirm, Progress, Space, Table, Tag, message } from 'antd';
 import { Link } from 'react-router-dom';
 import { Trash2 } from 'lucide-react';
-import { api } from '../api';
+import { api, getErrorMessage } from '../api';
 import type { Run } from '../types';
 
 export default function Runs() {
-  const [runs, setRuns] = useState<Run[]>([]);
+  const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const runs = useQuery({
+    queryKey: ['runs'],
+    queryFn: api.runs,
+    refetchInterval: (query) => (query.state.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
+  });
 
-  async function load() {
-    setRuns(await api.runs());
-  }
-
-  useEffect(() => {
-    load();
-    const id = window.setInterval(load, 2500);
-    return () => window.clearInterval(id);
-  }, []);
+  const remove = useMutation({
+    mutationFn: api.deleteRun,
+    onSuccess: async () => {
+      message.success('任务已删除');
+      await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: () => setDeletingId(null),
+  });
 
   async function deleteRun(run: Run) {
     setDeletingId(run.id);
-    try {
-      await api.deleteRun(run.id);
-      message.success('任务已删除');
-      await load();
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '删除失败');
-    } finally {
-      setDeletingId(null);
-    }
+    remove.mutate(run.id);
   }
 
   return (
@@ -39,10 +38,22 @@ export default function Runs() {
         extra={<Link to="/new-run"><Button type="primary" size="large" style={{ height: '40px', fontWeight: 600 }}>创建检测</Button></Link>}
         bordered={false}
       >
+        {runs.isError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="任务列表加载失败"
+            description={getErrorMessage(runs.error)}
+            action={<Button onClick={() => runs.refetch()}>重试</Button>}
+            style={{ marginBottom: 16 }}
+          />
+        ) : null}
         <Table
           rowKey="id"
-          dataSource={runs}
+          loading={runs.isLoading}
+          dataSource={runs.data ?? []}
           pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
+          scroll={{ x: 760 }}
           columns={[
             { title: '任务', dataIndex: 'name', width: '25%' },
             {
