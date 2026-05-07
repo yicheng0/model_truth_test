@@ -69,12 +69,6 @@ function Shell() {
       </Sider>
 
       <Layout className="workspace">
-        <header className="workspace-header">
-          <div>
-            <Typography.Text className="brand-kicker">Claude Channel Authenticity</Typography.Text>
-            <Typography.Title level={3}>渠道真实性测评平台</Typography.Title>
-          </div>
-        </header>
         <Content className="content">
           <Routes>
             <Route path="/" element={<Dashboard />} />

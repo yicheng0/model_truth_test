@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
-import { Edit3, Plus, Power, Trash2 } from 'lucide-react';
+import { CheckCircle2, Edit3, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import { api } from '../api';
+import { fixedReferenceChannelIds, fixedReferenceChannels } from '../channelPresets';
 import type { Channel, ChannelRole } from '../types';
 
 type ChannelFormValues = {
@@ -76,6 +77,19 @@ export default function Channels() {
     },
   });
 
+  const createFixedReferences = useMutation({
+    mutationFn: async () => {
+      const existingIds = new Set((channels.data ?? []).map((channel) => channel.id));
+      const missing = fixedReferenceChannels.filter((channel) => !existingIds.has(channel.id));
+      await Promise.all(missing.map((channel) => api.createChannel({ ...channel, enabled: true })));
+      return missing.length;
+    },
+    onSuccess: async (createdCount) => {
+      message.success(createdCount ? `已创建 ${createdCount} 个固定对照渠道` : '固定对照渠道已完整');
+      await invalidate();
+    },
+  });
+
   const roleCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const channel of channels.data ?? []) {
@@ -83,6 +97,9 @@ export default function Channels() {
     }
     return counts;
   }, [channels.data]);
+
+  const existingChannelIds = useMemo(() => new Set((channels.data ?? []).map((channel) => channel.id)), [channels.data]);
+  const missingFixedReferenceCount = fixedReferenceChannels.filter((channel) => !existingChannelIds.has(channel.id)).length;
 
   function openEdit(channel: Channel) {
     setEditing(channel);
@@ -164,6 +181,45 @@ export default function Channels() {
         </Form>
       </Card>
 
+      <Card
+        title="固定对照渠道"
+        bordered={false}
+        extra={
+          <Button
+            type="primary"
+            icon={<ShieldCheck size={16} />}
+            loading={createFixedReferences.isPending}
+            disabled={missingFixedReferenceCount === 0}
+            onClick={() => createFixedReferences.mutate()}
+          >
+            {missingFixedReferenceCount ? '一键补齐' : '已完整'}
+          </Button>
+        }
+      >
+        <Typography.Paragraph type="secondary">
+          这些渠道会在创建检测任务时默认作为对照渠道，可直接勾选使用；你仍然可以停用或编辑它们的模型名、Base URL。
+        </Typography.Paragraph>
+        <div className="fixed-channel-grid">
+          {fixedReferenceChannels.map((preset) => {
+            const exists = existingChannelIds.has(preset.id);
+            return (
+              <div className="fixed-channel-card" key={preset.id}>
+                <div>
+                  <strong>{preset.name}</strong>
+                  <Typography.Text type="secondary">{preset.model_name}</Typography.Text>
+                </div>
+                <Space wrap>
+                  <Tag color={roleColor[preset.role]}>{preset.role}</Tag>
+                  <Tag color={exists ? 'green' : 'default'} icon={exists ? <CheckCircle2 size={12} /> : undefined}>
+                    {exists ? '已创建' : '待创建'}
+                  </Tag>
+                </Space>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
       <Card title="渠道列表" bordered={false}>
         <Table
           rowKey="id"
@@ -177,7 +233,10 @@ export default function Channels() {
               width: 220,
               render: (name: string, channel) => (
                 <Space direction="vertical" size={2}>
-                  <strong>{name}</strong>
+                  <Space size={6} wrap>
+                    <strong>{name}</strong>
+                    {fixedReferenceChannelIds.has(channel.id) ? <Tag color="green">固定对照</Tag> : null}
+                  </Space>
                   <Typography.Text type="secondary">{channel.id}</Typography.Text>
                 </Space>
               ),
