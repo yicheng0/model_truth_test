@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import { CheckCircle2, Edit3, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { fixedReferenceChannelIds, fixedReferenceChannels } from '../channelPresets';
-import { defaultProviderTypeLabels, defaultRoleLabels, providerOptions, providerTypeKeys, providerTypeLabel, roleColor, roleKeys, roleLabel, roleOptions } from '../channelTaxonomy';
+import { providerOptions, providerTypeLabel, roleColor, roleLabel, roleOptions } from '../channelTaxonomy';
 import type { Channel, ChannelRole } from '../types';
 
 type ChannelFormValues = {
@@ -16,11 +16,6 @@ type ChannelFormValues = {
   enabled?: boolean;
 };
 
-type TaxonomyFormValues = {
-  role_labels: Record<ChannelRole, string>;
-  provider_type_labels: Record<string, string>;
-};
-
 export default function Channels() {
   const queryClient = useQueryClient();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
@@ -28,17 +23,8 @@ export default function Channels() {
   const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
   const [createForm] = Form.useForm<ChannelFormValues>();
   const [editForm] = Form.useForm<ChannelFormValues>();
-  const [taxonomyForm] = Form.useForm<TaxonomyFormValues>();
   const [editing, setEditing] = useState<Channel | null>(null);
   const taxonomyData = taxonomy.data;
-
-  useEffect(() => {
-    if (!taxonomyData) return;
-    taxonomyForm.setFieldsValue({
-      role_labels: taxonomyData.role_labels,
-      provider_type_labels: taxonomyData.provider_type_labels,
-    });
-  }, [taxonomyData, taxonomyForm]);
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['channels'] });
@@ -62,14 +48,6 @@ export default function Channels() {
       await invalidate();
     },
   });
-  const updateTaxonomy = useMutation({
-    mutationFn: api.updateChannelTaxonomy,
-    onSuccess: async () => {
-      message.success('显示名称已更新');
-      await queryClient.invalidateQueries({ queryKey: ['channelTaxonomy'] });
-    },
-  });
-
   const remove = useMutation({
     mutationFn: api.deleteChannel,
     onSuccess: async () => {
@@ -144,19 +122,6 @@ export default function Channels() {
 
   function toggleEnabled(channel: Channel, enabled: boolean) {
     update.mutate({ id: channel.id, values: { enabled } });
-  }
-
-  function submitTaxonomy(values: TaxonomyFormValues) {
-    updateTaxonomy.mutate(values);
-  }
-
-  function resetTaxonomyDefaults() {
-    const values = {
-      role_labels: defaultRoleLabels,
-      provider_type_labels: defaultProviderTypeLabels,
-    };
-    taxonomyForm.setFieldsValue(values);
-    updateTaxonomy.mutate(values);
   }
 
   const channelRoleOptions = roleOptions(taxonomyData);
@@ -242,39 +207,6 @@ export default function Channels() {
             );
           })}
         </div>
-      </Card>
-
-      <Card
-        title="角色 / 类型显示名"
-        bordered={false}
-        extra={
-          <Space>
-            <Button onClick={resetTaxonomyDefaults} disabled={updateTaxonomy.isPending}>
-              恢复默认
-            </Button>
-            <Button type="primary" loading={updateTaxonomy.isPending} onClick={() => taxonomyForm.submit()}>
-              保存显示名
-            </Button>
-          </Space>
-        }
-      >
-        <Form form={taxonomyForm} layout="vertical" onFinish={submitTaxonomy}>
-          <Typography.Paragraph type="secondary">
-            这里只修改页面显示名称，不改变底层角色和 Provider Type key，检测、基线和巡检逻辑仍按原 key 执行。
-          </Typography.Paragraph>
-          <div className="form-grid">
-            {roleKeys.map((role) => (
-              <Form.Item key={role} name={['role_labels', role]} label={`角色：${role}`}>
-                <Input placeholder={defaultRoleLabels[role]} />
-              </Form.Item>
-            ))}
-            {providerTypeKeys.map((providerType) => (
-              <Form.Item key={providerType} name={['provider_type_labels', providerType]} label={`类型：${providerType}`}>
-                <Input placeholder={defaultProviderTypeLabels[providerType]} />
-              </Form.Item>
-            ))}
-          </div>
-        </Form>
       </Card>
 
       <Card title="渠道列表" bordered={false}>
