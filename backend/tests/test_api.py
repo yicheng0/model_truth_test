@@ -11,8 +11,8 @@ from sqlalchemy import delete, func, select
 from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
-from app.schemas import RunCreate
-from app.services import create_alerts_for_run, create_run, execute_run, execute_scheduled_channel_test, seed_demo_data
+from app.schemas import RunCreate, TestCaseCreate
+from app.services import apply_repeat_consistency_scores, create_alerts_for_run, create_case, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
 
 
 def reset_database() -> None:
@@ -62,6 +62,149 @@ def test_mock_run_generates_results_comparisons_and_reports() -> None:
     assert len(payload["results"]) == payload["run"]["total_jobs"]
     assert payload["comparisons"]
     assert payload["reports"]
+
+
+def test_default_suite_is_optimized_28_and_removes_stale_default_cases() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite = db.get(TestSuiteModel, "claude_full_35")
+        create_case(
+            db,
+            TestCaseCreate(
+                id="identity_03",
+                suite_id="claude_full_35",
+                module="identity",
+                title="stale case",
+                prompt="stale",
+                enabled=True,
+            ),
+        )
+        seed_demo_data(db)
+        case_ids = list(db.scalars(select(TestCaseModel.id).where(TestCaseModel.suite_id == "claude_full_35").order_by(TestCaseModel.sort_order)).all())
+
+    assert suite is not None
+    assert suite.version == "2026.05-optimized-28"
+    assert len(case_ids) == 28
+    assert "identity_03" not in case_ids
+    assert case_ids[:5] == ["websearch_01", "identity_01", "identity_02", "identity_04", "identity_10"]
+
+
+def test_score_result_supports_optimized_rules() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "anthropic_official")
+        case = db.get(TestCaseModel, "protocol_02")
+        assert channel is not None and case is not None
+        score, labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"type": "message"},
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "provider_message_id": "msg_test",
+                "tool_calls": [{"type": "tool_use", "name": "wrong_tool", "input": {"order_id": "bad"}}],
+                "stop_reason": "tool_use",
+                "stream_events": ["message_stop"],
+                "content_text": "",
+                "status_code": 200,
+            },
+        )
+
+        json_case = db.get(TestCaseModel, "format_01")
+        json_score, json_labels = score_result(
+            channel,
+            json_case,
+            {
+                "raw_response": {"type": "message"},
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "provider_message_id": "msg_test",
+                "tool_calls": [],
+                "stop_reason": "end_turn",
+                "stream_events": ["message_stop"],
+                "content_text": '{"risk":"low"}',
+                "status_code": 200,
+            },
+        )
+
+        stop_case = db.get(TestCaseModel, "protocol_04")
+        stop_score, stop_labels = score_result(
+            channel,
+            stop_case,
+            {
+                "raw_response": {"type": "message"},
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "provider_message_id": "msg_test",
+                "tool_calls": [],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "stream_events": ["message_stop"],
+                "content_text": "第一句。第二句。",
+                "status_code": 200,
+            },
+        )
+
+    assert score < 100
+    assert "tool_name_mismatch" in labels
+    assert "tool_input_mismatch" in labels
+    assert json_score < 100
+    assert "json_missing:evidence" in json_labels
+    assert stop_score < 100
+    assert "stop_sequence_not_enforced" in stop_labels
+    assert "stop_sequence_leaked" in stop_labels
+
+
+def test_repeat_consistency_penalizes_drift_between_attempts() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = create_run(
+            db,
+            RunCreate(
+                name="consistency run",
+                suite_id=suite_id,
+                channel_ids={"gold": ["anthropic_official"]},
+                repeat_count=2,
+                concurrency=1,
+                use_mock=True,
+            ),
+        )
+        db.add(
+            Result(
+                id="res_consistency_1",
+                run_id=run.id,
+                test_case_id="protocol_05",
+                channel_id="anthropic_official",
+                attempt_index=1,
+                normalized_response={"content_text": "天空是蓝色的，因为瑞利散射。"},
+                raw_request={},
+                raw_response={},
+                metrics={},
+                score=100,
+                labels=[],
+            )
+        )
+        db.add(
+            Result(
+                id="res_consistency_2",
+                run_id=run.id,
+                test_case_id="protocol_05",
+                channel_id="anthropic_official",
+                attempt_index=2,
+                normalized_response={"content_text": "完全不同的回答，讨论数据库事务隔离级别。"},
+                raw_request={},
+                raw_response={},
+                metrics={},
+                score=100,
+                labels=[],
+            )
+        )
+        db.commit()
+        apply_repeat_consistency_scores(db, run.id)
+        second = db.get(Result, "res_consistency_2")
+
+    assert second is not None
+    assert second.score == 80
+    assert "repeat_inconsistent" in second.labels
 
 
 def test_execute_run_honors_concurrency_and_result_count() -> None:

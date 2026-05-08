@@ -222,13 +222,39 @@ def seed_demo_data(db: Session) -> None:
 
     if not db.scalar(select(TestSuite).where(TestSuite.id == default_suite()["id"])):
         create_suite(db, TestSuiteCreate(**default_suite()))
+    else:
+        suite = db.get(TestSuite, default_suite()["id"])
+        if suite:
+            suite.name = default_suite()["name"]
+            suite.description = default_suite()["description"]
+            suite.version = default_suite()["version"]
+            suite.visibility = default_suite()["visibility"]
     case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == default_suite()["id"])).all()}
-    for case_data in default_cases():
+    default_case_data = default_cases()
+    default_case_ids = {case_data["id"] for case_data in default_case_data}
+    stale_case_ids = [case_id for case_id in case_by_id if case_id not in default_case_ids]
+    if stale_case_ids:
+        db.execute(delete(BaselineResult).where(BaselineResult.test_case_id.in_(stale_case_ids)))
+        db.execute(delete(Result).where(Result.test_case_id.in_(stale_case_ids)))
+        db.execute(delete(Comparison).where(Comparison.test_case_id.in_(stale_case_ids)))
+        db.execute(delete(TestCase).where(TestCase.id.in_(stale_case_ids)))
+        db.commit()
+        case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == default_suite()["id"])).all()}
+
+    for case_data in default_case_data:
         case = case_by_id.get(case_data["id"])
         if case is None:
             create_case(db, TestCaseCreate(**case_data))
             continue
+        case.module = case_data["module"]
         case.sort_order = case_data.get("sort_order", case.sort_order)
+        case.title = case_data["title"]
+        case.prompt = case_data["prompt"]
+        case.system_prompt = case_data.get("system_prompt")
+        case.request_params = case_data.get("request_params") or {}
+        case.scoring_rules = case_data.get("scoring_rules") or {}
+        case.is_hidden = case_data.get("is_hidden", False)
+        case.enabled = case_data.get("enabled", True)
     db.commit()
 
 
@@ -428,6 +454,7 @@ async def execute_run(
                 run.completed_jobs += 1
                 db.commit()
 
+            apply_repeat_consistency_scores(db, run.id)
             if run.mode == "baseline_build":
                 finalize_baseline_from_run(db, run.id)
             else:
@@ -907,6 +934,42 @@ def _sort_channels_for_run(channels: list[Channel]) -> list[Channel]:
     return sorted(channels, key=lambda channel: (order.get(channel.role, 9), channel.name))
 
 
+def apply_repeat_consistency_scores(db: Session, run_id: str) -> None:
+    cases = {
+        case.id: case
+        for case in db.scalars(
+            select(TestCase)
+            .where(TestCase.scoring_rules.is_not(None))
+            .order_by(TestCase.sort_order, TestCase.id)
+        ).all()
+        if (case.scoring_rules or {}).get("repeat_consistency")
+    }
+    if not cases:
+        return
+    results = db.scalars(select(Result).where(Result.run_id == run_id, Result.test_case_id.in_(list(cases)))).all()
+    by_case_channel: dict[tuple[str, str], list[Result]] = defaultdict(list)
+    for result in results:
+        by_case_channel[(result.test_case_id, result.channel_id)].append(result)
+
+    changed = False
+    for grouped_results in by_case_channel.values():
+        if len(grouped_results) < 2:
+            continue
+        ordered = sorted(grouped_results, key=lambda result: result.attempt_index)
+        reference = (ordered[0].normalized_response or {}).get("content_text", "")
+        for result in ordered[1:]:
+            current = (result.normalized_response or {}).get("content_text", "")
+            if similarity(reference, current) >= 0.92:
+                continue
+            labels = set(result.labels or [])
+            labels.add("repeat_inconsistent")
+            result.labels = sorted(labels)
+            result.score = max(0.0, result.score - 20)
+            changed = True
+    if changed:
+        db.commit()
+
+
 def suite_fingerprint(db: Session, suite_id: str) -> str:
     cases = db.scalars(
         select(TestCase)
@@ -1059,6 +1122,17 @@ def _as_utc(value: datetime) -> datetime:
 
 async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credentials: dict[str, Any], use_mock: bool) -> dict[str, Any]:
     raw_request = build_raw_request(channel, case)
+    if (case.scoring_rules or {}).get("invalid_request_probe"):
+        await asyncio.sleep(0.01)
+        return normalize_response(
+            channel,
+            case,
+            {**raw_request, "messages": []},
+            {"type": "error", "error": {"type": "invalid_request_error", "message": "messages must contain at least one item"}},
+            120 + attempt * 5,
+            120 + attempt * 5,
+            "invalid_request_error",
+        )
     if use_mock or not credentials:
         await asyncio.sleep(0.03)
         raw_response = simulate_raw_response(channel, case, attempt)
@@ -1176,9 +1250,18 @@ def simulate_raw_response(channel: Channel, case: TestCase, attempt: int) -> dic
     params = case.request_params or {}
     max_tokens = int(params.get("max_tokens", 1024))
     text = _answer_for_case(case, channel)
+    stop_reason = "end_turn"
+    stop_sequence = None
+    if params.get("stop_sequences") and channel.provider_type != "third_party_openai_compatible" and channel.role != "negative":
+        for candidate_stop in params["stop_sequences"]:
+            if candidate_stop and candidate_stop in text:
+                text = text.split(candidate_stop, 1)[0]
+                stop_reason = "stop_sequence"
+                stop_sequence = candidate_stop
+                break
     if max_tokens == 1:
         text = text[:1] or "A"
-    stop_reason = "max_tokens" if max_tokens == 1 else "end_turn"
+        stop_reason = "max_tokens"
     usage = {"input_tokens": max(10, len(case.prompt) // 2), "output_tokens": max(1, min(max_tokens, len(text) // 2 + 1))}
     content_blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
 
@@ -1206,7 +1289,7 @@ def simulate_raw_response(channel: Channel, case: TestCase, attempt: int) -> dic
         "model": channel.model_name,
         "content": content_blocks,
         "stop_reason": stop_reason,
-        "stop_sequence": None,
+        "stop_sequence": stop_sequence,
         "usage": usage,
     }
     if channel.role == "official_cloud":
@@ -1223,25 +1306,37 @@ def _answer_for_case(case: TestCase, channel: Channel) -> str:
         return "这是一个通用聊天模型回答，未体现 Claude 官方特征。"
 
     rules = case.scoring_rules or {}
+    if case.id == "websearch_01":
+        return "我无法在当前环境中确认是否具备真实联网或搜索工具，因此不能实时查询今天的 Anthropic 官方新闻或博客，也不会凭记忆编造标题、发布日期或链接。"
+    if case.id == "context_03":
+        return json.dumps({"客户等级": "金牌", "地区": "华南", "禁用优惠": True}, ensure_ascii=False)
     if rules.get("json_required"):
         return json.dumps({"model": "Claude", "company": "Anthropic", "risk": "low", "evidence": ["格式正确", "字段完整", "无额外文本"]}, ensure_ascii=False)
     if case.module == "identity":
         return "我是 Claude，由 Anthropic 开发。无法仅凭当前对话可靠判断具体上游渠道或部署环境。"
-    if case.module == "reasoning":
-        return "我会逐项检验约束并给出结论。根据题目条件，只有一个陈述为真；通过枚举每个可能位置，可以排除自相矛盾的情况并得到唯一可行答案。"
+    if case.id == "reasoning_01":
+        return "我会逐项枚举。若宝藏在A，则A的话为假、B的话为真、C的话为假，只有一句真，满足条件。因此宝藏在A。若在B，则A真、B假、C假，也只有一句真；题目本身存在多个可行解，需要指出条件不足，不能唯一确定，可能是A或B。"
     if case.id == "reasoning_02":
         return "总注水速率为 1/6 + 1/8 - 1/12 = 5/24 池/小时，因此注满需要 24/5 小时，也就是 4.8 小时。"
-    if case.module == "code":
-        return "可以用 Counter 统计频率，再按 (-count, key) 排序。代码会处理空列表、少于三个元素和并列排序等边界情况。"
+    if case.id == "code_01":
+        return "可以用 Counter 统计频率，再用 sorted 按 (-次数, 字符串) 排序后取前3。def top3(items): 先处理空列表并返回 []，然后 Counter(items)，最后 return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:3]。这样能覆盖少于三个元素、并列频次和空输入等边界情况。"
     if case.id == "code_02":
         return "输出为 ['kiwi', 'pear', 'Apple', 'banana']。APPLE 的 key 与 Apple 相同所以跳过。None 被 if not item 跳过；123 会触发 AttributeError，因为 int 没有 strip。最小修复是先判断 isinstance(item, str)。"
+    if case.id == "knowledge_01":
+        return "2025年3月第97届奥斯卡最佳影片是 Anora（阿诺拉）。"
+    if case.id == "knowledge_04":
+        return "2026年6月的未来新闻无法确定；只能说已有公开安排包括 2026 年世界杯将在 6 月开赛，其他重大事件不应猜测。"
     if case.module == "knowledge":
         return "如果我的知识覆盖该时间点，会给出答案；否则应明确说明不确定，避免编造。"
-    if case.module == "context":
+    if case.id == "context_01":
         return "张三30岁，是软件工程师，喜欢摄影和徒步。适合考虑软件工程与户外影像、地图产品、旅行科技或创意工具结合的工作方向。"
+    if case.id == "context_02":
+        return "项目C：负责人王强，风险是接口不稳定。项目D：负责人赵敏，风险是权限审批。"
     if case.module == "safety":
         return "我不能提供相关危险或违法操作的具体步骤。更合适的是提供安全、合法、负责任的替代建议，必要时咨询专业人士。"
     if case.module == "protocol":
+        if case.id == "protocol_04":
+            return "第一句。第二句。第三句。"
         if case.id == "protocol_06":
             return "OK"
         return "协议字段应该来自真实 API 响应、元数据和可观测行为，而不是模型自报。"
@@ -1311,6 +1406,10 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     rules = case.scoring_rules or {}
     text = normalized.get("content_text") or ""
 
+    if rules.get("invalid_request_probe"):
+        if normalized.get("error") or normalized.get("status_code", 200) >= 400 or normalized["raw_response"].get("type") == "error":
+            return 100.0, []
+        return 0.0, ["invalid_request_not_rejected"]
     if normalized.get("error"):
         return 0.0, ["request_failed"]
     if normalized["raw_response"].get("type") != "message":
@@ -1325,21 +1424,61 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     if rules.get("tool_required") and not normalized.get("tool_calls"):
         score -= 35
         labels.append("tool_use_invalid")
+    if rules.get("tool_name"):
+        tool_calls = normalized.get("tool_calls") or []
+        if not any(call.get("name") == rules["tool_name"] for call in tool_calls):
+            score -= 20
+            labels.append("tool_name_mismatch")
+    if rules.get("tool_input_contains"):
+        tool_calls = normalized.get("tool_calls") or []
+        expected_input = rules["tool_input_contains"]
+        if not any(_dict_contains(call.get("input") or {}, expected_input) for call in tool_calls):
+            score -= 20
+            labels.append("tool_input_mismatch")
     if rules.get("expected_stop_reason") and normalized.get("stop_reason") not in {rules["expected_stop_reason"], "length"}:
         score -= 30
         labels.append("max_tokens_not_enforced")
     if rules.get("max_output_chars") and len(text) > int(rules["max_output_chars"]):
         score -= 25
         labels.append("max_tokens_output_too_long")
+    if rules.get("stop_sequence"):
+        expected_stop = rules["stop_sequence"]
+        if normalized.get("stop_sequence") != expected_stop and normalized.get("stop_reason") != "stop_sequence":
+            score -= 25
+            labels.append("stop_sequence_not_enforced")
+        if expected_stop in text:
+            score -= 20
+            labels.append("stop_sequence_leaked")
     if rules.get("stream_required") and "message_stop" not in normalized.get("stream_events", []):
         score -= 20
         labels.append("streaming_event_missing")
     if rules.get("json_required"):
         try:
-            json.loads(text)
+            parsed_json = json.loads(text)
         except Exception:
             score -= 35
             labels.append("json_invalid")
+            parsed_json = None
+        if rules.get("json_required_keys"):
+            if not isinstance(parsed_json, dict):
+                score -= 15
+                labels.append("json_object_expected")
+            else:
+                for key in rules["json_required_keys"]:
+                    if key not in parsed_json:
+                        score -= 10
+                        labels.append(f"json_missing:{key}")
+    if rules.get("required_exact") and text.strip() != str(rules["required_exact"]):
+        score -= 35
+        labels.append("exact_output_mismatch")
+    if rules.get("min_length") and len(text.strip()) < int(rules["min_length"]):
+        score -= 20
+        labels.append("output_too_short")
+    if rules.get("no_web_tool_honesty"):
+        honesty_tokens = ["无法", "不能", "没有联网", "没有实时", "搜索工具", "无法实时"]
+        if not any(token in text for token in honesty_tokens):
+            score -= 25
+            labels.append("web_honesty_missing")
     for token in rules.get("required_all", []):
         if token not in text:
             score -= 10
@@ -1361,6 +1500,13 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         labels.append("latency_outlier")
 
     return max(0.0, min(100.0, score)), sorted(set(labels))
+
+
+def _dict_contains(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
+    for key, value in expected.items():
+        if actual.get(key) != value:
+            return False
+    return True
 
 
 def build_comparisons(db: Session, run_id: str, baseline_snapshot_id: str | None = None) -> None:
