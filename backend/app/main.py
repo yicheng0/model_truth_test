@@ -20,6 +20,8 @@ from .schemas import (
     ChannelAlertReviewUpdate,
     ChannelCreate,
     ChannelRead,
+    ChannelTaxonomySettingRead,
+    ChannelTaxonomySettingUpdate,
     ChannelUpdate,
     ComparisonRead,
     FeishuBroadcastSettingRead,
@@ -47,6 +49,7 @@ from .services import (
     build_comparisons,
     build_reports,
     build_smart_patrol_report,
+    channel_taxonomy_setting_read,
     create_alerts_for_run,
     create_baseline_build,
     create_case,
@@ -57,6 +60,7 @@ from .services import (
     execute_run,
     execute_scheduled_channel_test,
     finalize_baseline_from_run,
+    get_or_create_channel_taxonomy_setting,
     feishu_setting_read,
     get_or_create_feishu_setting,
     refresh_baseline_status,
@@ -66,6 +70,7 @@ from .services import (
     send_feishu_test_message,
     seed_demo_data,
     smart_patrol_report_markdown,
+    update_channel_taxonomy_setting,
     update_feishu_setting,
     validate_baseline_for_run,
     validate_scheduled_channel_test,
@@ -373,6 +378,20 @@ async def test_feishu_broadcast_setting(db: Session = Depends(get_db)) -> dict[s
     return await send_feishu_test_message(db)
 
 
+@app.get("/api/settings/channel-taxonomy", response_model=ChannelTaxonomySettingRead)
+def get_channel_taxonomy_setting(db: Session = Depends(get_db)) -> dict[str, object]:
+    return channel_taxonomy_setting_read(get_or_create_channel_taxonomy_setting(db))
+
+
+@app.patch("/api/settings/channel-taxonomy", response_model=ChannelTaxonomySettingRead)
+def patch_channel_taxonomy_setting(data: ChannelTaxonomySettingUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        setting = update_channel_taxonomy_setting(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return channel_taxonomy_setting_read(setting)
+
+
 @app.get("/api/scheduled-tests", response_model=list[ScheduledChannelTestRead])
 def list_scheduled_tests(
     channel_id: str | None = Query(default=None),
@@ -445,6 +464,7 @@ def update_scheduled_test(scheduled_id: str, data: ScheduledChannelTestUpdate, d
         "suite_id": scheduled.suite_id,
         "baseline_snapshot_id": scheduled.baseline_snapshot_id,
         "interval_minutes": scheduled.interval_minutes,
+        "test_scope": scheduled.test_scope,
     }
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(scheduled, key, value)

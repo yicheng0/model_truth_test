@@ -1,4 +1,5 @@
-import type { Channel, ChannelRole } from './types';
+import type { Channel } from './types';
+export { isCandidateChannel, isReferenceChannel, referenceRoles } from './channelTaxonomy';
 
 export type ChannelPreset = Pick<Channel, 'id' | 'name' | 'provider_type' | 'role' | 'base_url' | 'model_name'>;
 
@@ -30,13 +31,3 @@ export const fixedReferenceChannels: ChannelPreset[] = [
 ];
 
 export const fixedReferenceChannelIds = new Set(fixedReferenceChannels.map((channel) => channel.id));
-
-export const referenceRoles = new Set<ChannelRole>(['gold', 'official_cloud']);
-
-export function isReferenceChannel(channel: Channel) {
-  return referenceRoles.has(channel.role);
-}
-
-export function isCandidateChannel(channel: Channel) {
-  return channel.role === 'candidate' || channel.role === 'negative';
-}

@@ -267,5 +267,44 @@ def default_cases() -> list[dict[str, Any]]:
 
     for index, case in enumerate(cases, start=1):
         case["sort_order"] = index
+        rules = case["scoring_rules"] or {}
+        rules.setdefault("weight", _default_weight(case["module"], case["id"]))
+        rules.setdefault("risk_dimension", _default_dimension(case["module"], case["id"]))
+        rules["quick"] = case["id"] in QUICK_CASE_IDS
+        case["scoring_rules"] = rules
 
     return cases
+
+
+QUICK_CASE_IDS = {
+    "identity_02",
+    "code_02",
+    "context_02",
+    "protocol_02",
+    "protocol_03",
+    "protocol_04",
+    "protocol_07",
+    "format_01",
+}
+
+
+def _default_weight(module: str, case_id: str) -> float:
+    if module == "protocol":
+        return 3.0
+    if case_id in {"code_02", "context_02", "context_03"}:
+        return 2.0
+    if module in {"reasoning", "code", "context", "safety"}:
+        return 1.5
+    if module == "identity":
+        return 0.8
+    return 1.0
+
+
+def _default_dimension(module: str, case_id: str) -> str:
+    if case_id == "protocol_05":
+        return "stability"
+    if module == "protocol":
+        return "authenticity"
+    if module in {"identity", "websearch"}:
+        return "authenticity"
+    return "quality"

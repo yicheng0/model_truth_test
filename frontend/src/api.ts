@@ -3,6 +3,8 @@ import type {
   BaselineSnapshot,
   Channel,
   ChannelAlert,
+  ChannelTaxonomySetting,
+  ChannelTaxonomyUpdate,
   Comparison,
   FeishuBroadcastSetting,
   FeishuBroadcastUpdate,
@@ -14,6 +16,7 @@ import type {
   ScheduledChannelTest,
   SmartPatrolReport,
   TestCase,
+  TestScope,
   TestSuite,
 } from './types';
 
@@ -26,6 +29,7 @@ type RunCreatePayload = {
   repeat_count: number;
   concurrency: number;
   mode?: RunMode;
+  test_scope?: TestScope;
   baseline_snapshot_id?: string;
   use_mock?: boolean;
   runtime_credentials?: Record<string, Record<string, unknown>>;
@@ -104,6 +108,9 @@ export const api = {
   updateFeishuBroadcastSetting: (payload: FeishuBroadcastUpdate) =>
     request<FeishuBroadcastSetting>('/api/settings/feishu-broadcast', { method: 'PATCH', body: JSON.stringify(payload) }),
   testFeishuBroadcast: () => request<{ ok: boolean; status: string; message: string }>('/api/settings/feishu-broadcast/test', { method: 'POST' }),
+  channelTaxonomy: () => request<ChannelTaxonomySetting>('/api/settings/channel-taxonomy'),
+  updateChannelTaxonomy: (payload: ChannelTaxonomyUpdate) =>
+    request<ChannelTaxonomySetting>('/api/settings/channel-taxonomy', { method: 'PATCH', body: JSON.stringify(payload) }),
   smartPatrolReport: (from?: string, to?: string) => {
     const params = new URLSearchParams();
     if (from) params.set('from', from);

@@ -11,7 +11,7 @@ from sqlalchemy import delete, func, select
 
 from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
-from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
+from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import RunCreate, TestCaseCreate
 from app.services import apply_repeat_consistency_scores, create_alerts_for_run, create_case, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
 
@@ -19,7 +19,7 @@ from app.services import apply_repeat_consistency_scores, create_alerts_for_run,
 def reset_database() -> None:
     init_db()
     with SessionLocal() as db:
-        for model in [FeishuBroadcastSetting, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
+        for model in [ChannelTaxonomySetting, FeishuBroadcastSetting, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
             db.execute(delete(model))
         db.commit()
         seed_demo_data(db)
@@ -88,6 +88,38 @@ def test_default_suite_is_optimized_28_and_removes_stale_default_cases() -> None
     assert len(case_ids) == 28
     assert "identity_03" not in case_ids
     assert case_ids[:5] == ["websearch_01", "identity_01", "identity_02", "identity_04", "identity_10"]
+    with SessionLocal() as db:
+        quick_count = sum(
+            1
+            for case in db.scalars(select(TestCaseModel).where(TestCaseModel.suite_id == "claude_full_35")).all()
+            if (case.scoring_rules or {}).get("quick") is True
+        )
+    assert quick_count == 8
+
+
+def test_quick_run_uses_only_quick_cases() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        response = client.post(
+            "/api/runs",
+            json={
+                "name": "pytest quick run",
+                "suite_id": suite_id,
+                "test_scope": "quick",
+                "channel_ids": {"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
+                "repeat_count": 1,
+                "concurrency": 4,
+                "use_mock": True,
+            },
+        )
+        assert response.status_code == 200
+        run = response.json()
+        payload = client.get(f"/api/runs/{run['id']}/results").json()
+
+    assert payload["run"]["test_scope"] == "quick"
+    assert payload["run"]["total_jobs"] == 16
+    assert len(payload["results"]) == 16
 
 
 def test_score_result_supports_optimized_rules() -> None:
@@ -284,6 +316,10 @@ def test_baseline_build_then_candidate_eval_reuses_snapshot() -> None:
     assert payload["baseline_results"]
     assert payload["comparisons"]
     assert payload["reports"][0]["evidence"]["baseline_snapshot_id"] == snapshot["id"]
+    evidence = payload["reports"][0]["evidence"]
+    assert evidence["dimension_scores"]["authenticity"] is not None
+    assert evidence["confidence"] in {"medium", "high"}
+    assert isinstance(evidence["label_explanations"], list)
 
 
 def test_candidate_eval_requires_valid_baseline() -> None:
@@ -472,6 +508,54 @@ def test_feishu_broadcast_setting_masks_secret_and_preserves_existing_secret() -
     assert payload["enabled"] is False
     assert payload["secret_configured"] is True
     assert payload["app_base_url"] == "http://localhost:5174"
+
+
+def test_channel_taxonomy_setting_returns_defaults_and_allows_label_updates() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        defaults = client.get("/api/settings/channel-taxonomy")
+        updated = client.patch(
+            "/api/settings/channel-taxonomy",
+            json={
+                "role_labels": {"candidate": "客户待测渠道"},
+                "provider_type_labels": {"third_party_anthropic": "Claude 中转协议"},
+            },
+        )
+        reset_candidate = client.patch("/api/settings/channel-taxonomy", json={"role_labels": {"candidate": ""}})
+
+    assert defaults.status_code == 200
+    default_payload = defaults.json()
+    assert default_payload["role_labels"]["candidate"] == "待测第三方"
+    assert default_payload["provider_type_labels"]["third_party_anthropic"] == "Third-party Anthropic compatible"
+    assert updated.status_code == 200
+    assert updated.json()["role_labels"]["candidate"] == "客户待测渠道"
+    assert updated.json()["provider_type_labels"]["third_party_anthropic"] == "Claude 中转协议"
+    assert reset_candidate.status_code == 200
+    assert reset_candidate.json()["role_labels"]["candidate"] == "待测第三方"
+
+
+def test_channel_taxonomy_rejects_unknown_keys_and_does_not_change_run_semantics() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        bad = client.patch("/api/settings/channel-taxonomy", json={"role_labels": {"custom_role": "自定义角色"}})
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        client.patch("/api/settings/channel-taxonomy", json={"role_labels": {"candidate": "客户待测渠道"}})
+        response = client.post(
+            "/api/runs",
+            json={
+                "name": "taxonomy labels do not affect role keys",
+                "suite_id": suite_id,
+                "channel_ids": {"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
+                "use_mock": True,
+            },
+        )
+        payload = client.get(f"/api/runs/{response.json()['id']}/results").json()
+
+    assert bad.status_code == 400
+    assert response.status_code == 200
+    assert payload["run_channels"]
+    assert {item["role_in_run"] for item in payload["run_channels"]} == {"gold", "candidate"}
+    assert payload["reports"]
 
 
 def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None:

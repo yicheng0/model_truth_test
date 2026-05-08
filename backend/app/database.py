@@ -44,6 +44,15 @@ def _ensure_run_baseline_columns() -> None:
             connection.execute(text("ALTER TABLE runs ADD COLUMN baseline_snapshot_id VARCHAR"))
         if "scheduled_test_id" not in columns:
             connection.execute(text("ALTER TABLE runs ADD COLUMN scheduled_test_id VARCHAR"))
+        if "test_scope" not in columns:
+            connection.execute(text("ALTER TABLE runs ADD COLUMN test_scope VARCHAR(30) NOT NULL DEFAULT 'full'"))
+
+    if "scheduled_channel_tests" not in tables:
+        return
+    scheduled_columns = {column["name"] for column in inspector.get_columns("scheduled_channel_tests")}
+    with engine.begin() as connection:
+        if "test_scope" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN test_scope VARCHAR(30) NOT NULL DEFAULT 'quick'"))
 
 
 def get_db() -> Generator[Session, None, None]:

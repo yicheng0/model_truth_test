@@ -4,7 +4,8 @@ import { Alert, Button, Card, Descriptions, Empty, Progress, Select, Space, Spin
 import { CheckCircle2, Clock3, GitCompare, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
-import type { BaselineResult, Channel, ChannelRole, Comparison, Result, RunResults, TestCase } from '../types';
+import { roleColor, roleLabel } from '../channelTaxonomy';
+import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunResults, TestCase } from '../types';
 
 type DisplayResult = Result | BaselineResult;
 
@@ -16,20 +17,6 @@ type CasePanelRow = {
   candidate?: DisplayResult;
   candidateAttempts: number;
   comparison?: Comparison;
-};
-
-const roleLabel: Record<string, string> = {
-  gold: '官方基准',
-  official_cloud: '官方云参考',
-  candidate: '第三方待测',
-  negative: '负样本',
-};
-
-const roleColor: Record<ChannelRole, string> = {
-  gold: 'gold',
-  official_cloud: 'blue',
-  candidate: 'purple',
-  negative: 'red',
 };
 
 function latestResult(results?: DisplayResult[]) {
@@ -73,12 +60,12 @@ function rowStatus(row: CasePanelRow) {
   return { color: 'default', text: '排队中' };
 }
 
-function resultCell(channel: Channel | undefined, result: DisplayResult | undefined, attempts: number, baseline = false) {
+function resultCell(channel: Channel | undefined, result: DisplayResult | undefined, attempts: number, baseline = false, taxonomy?: ChannelTaxonomySetting) {
   return (
     <div className="result-cell">
       <div className="result-cell-title">
         <strong>{channel?.name ?? '未选择渠道'}</strong>
-        {channel ? <Tag color={roleColor[channel.role]}>{baseline ? '官方基线' : roleLabel[channel.role]}</Tag> : null}
+        {channel ? <Tag color={roleColor[channel.role]}>{baseline ? '官方基线' : roleLabel(channel.role, taxonomy)}</Tag> : null}
       </div>
       <div className="result-cell-meta">
         <Tag>score {metricValue(result?.score)}</Tag>
@@ -108,6 +95,19 @@ function comparisonCell(comparison?: Comparison) {
   );
 }
 
+function formatDimension(value: unknown) {
+  return typeof value === 'number' ? value.toFixed(1) : '-';
+}
+
+function labelDescription(label: string, report?: RunResults['reports'][number]) {
+  const explanations = report?.evidence?.label_explanations;
+  if (Array.isArray(explanations)) {
+    const item = explanations.find((entry) => entry?.label === label);
+    if (item?.description) return item.description;
+  }
+  return label;
+}
+
 export default function RunDetail() {
   const { runId = '' } = useParams();
   const [selectedOfficialId, setSelectedOfficialId] = useState('');
@@ -123,6 +123,7 @@ export default function RunDetail() {
     },
   });
   const channelsQuery = useQuery({ queryKey: ['channels'], queryFn: api.channels });
+  const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
   const casesQuery = useQuery({
     queryKey: ['cases', runResults.data?.run.suite_id],
     queryFn: () => api.cases(runResults.data?.run.suite_id),
@@ -234,6 +235,9 @@ export default function RunDetail() {
   const averageScore = rows.length
     ? rows.reduce((sum, row) => sum + (row.comparison?.final_score ?? 0), 0) / Math.max(1, comparedRows)
     : 0;
+  const selectedReport = data?.reports.find((report) => report.channel_id === selectedCandidateId);
+  const dimensionScores = selectedReport?.evidence?.dimension_scores ?? {};
+  const confidence = selectedReport?.evidence?.confidence ?? '-';
 
   if (runResults.isError || channelsQuery.isError || casesQuery.isError) {
     const error = runResults.error ?? channelsQuery.error ?? casesQuery.error;
@@ -279,12 +283,36 @@ export default function RunDetail() {
           </Descriptions.Item>
           <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
           <Descriptions.Item label="运行模式">{data.run.mode}</Descriptions.Item>
+          <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '快速检测' : '完整检测'}</Descriptions.Item>
           <Descriptions.Item label="官方基线">{data.baseline_snapshot?.name ?? '本次同步对比'}</Descriptions.Item>
           <Descriptions.Item label="已返回题目">{returnedRows} / {rows.length}</Descriptions.Item>
           <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
         </Descriptions>
         <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
       </Card>
+
+      {selectedReport ? (
+        <Card bordered={false}>
+          <div className="channel-pair-grid">
+            <div className="monitor-stat-card">
+              <span>真实性风险分</span>
+              <strong>{formatDimension(dimensionScores.authenticity)}</strong>
+            </div>
+            <div className="monitor-stat-card">
+              <span>质量风险分</span>
+              <strong>{formatDimension(dimensionScores.quality)}</strong>
+            </div>
+            <div className="monitor-stat-card">
+              <span>稳定性风险分</span>
+              <strong>{formatDimension(dimensionScores.stability)}</strong>
+            </div>
+            <div className="monitor-stat-card">
+              <span>报告置信度</span>
+              <strong>{confidence}</strong>
+            </div>
+          </div>
+        </Card>
+      ) : null}
 
       <Card bordered={false} className="live-monitor-card">
         <div className="live-monitor-header">
@@ -307,7 +335,7 @@ export default function RunDetail() {
               value={selectedOfficialId || undefined}
               placeholder="选择官方渠道"
               onChange={setSelectedOfficialId}
-              options={officialChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel[channel.role]})` }))}
+              options={officialChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
             />
           </div>
           <div className="channel-pair-card candidate">
@@ -316,7 +344,7 @@ export default function RunDetail() {
               value={selectedCandidateId || undefined}
               placeholder="选择第三方渠道"
               onChange={setSelectedCandidateId}
-              options={candidateChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel[channel.role]})` }))}
+              options={candidateChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
             />
           </div>
           <div className="monitor-stat-card">
@@ -388,7 +416,7 @@ export default function RunDetail() {
                         </div>
                         <Space wrap>
                           {row.comparison?.labels?.length ? (
-                            row.comparison.labels.map((label) => <Tag color="volcano" key={label}>{label}</Tag>)
+                            row.comparison.labels.map((label) => <Tag color="volcano" key={label}>{labelDescription(label, selectedReport)}</Tag>)
                           ) : row.candidate ? (
                             <Tag color="green" icon={<CheckCircle2 size={13} />}>暂无异常标签</Tag>
                           ) : (
@@ -420,12 +448,12 @@ export default function RunDetail() {
               {
                 title: '官方渠道数据',
                 width: 330,
-                render: (_, row) => resultCell(selectedOfficial, row.official, row.officialAttempts, Boolean(data.baseline_snapshot)),
+                  render: (_, row) => resultCell(selectedOfficial, row.official, row.officialAttempts, Boolean(data.baseline_snapshot), taxonomy.data),
               },
               {
                 title: '第三方渠道数据',
                 width: 330,
-                render: (_, row) => resultCell(selectedCandidate, row.candidate, row.candidateAttempts),
+                  render: (_, row) => resultCell(selectedCandidate, row.candidate, row.candidateAttempts, false, taxonomy.data),
               },
               {
                 title: '实时对比结果',

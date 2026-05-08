@@ -3,6 +3,7 @@ import { Alert, Button, Card, Col, Row, Space, Tag, Typography } from 'antd';
 import { Link } from 'react-router-dom';
 import { Activity, CheckCircle2, Clock3, FileText, ShieldCheck } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { providerTypeLabel, roleLabel } from '../channelTaxonomy';
 
 const modules = [
   ['身份一致性', 10, '看渠道会不会把 Claude 说成别的模型、别的平台，或者自报信息前后打架。'],
@@ -31,6 +32,7 @@ export default function Dashboard() {
     refetchInterval: (query) => (query.state.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 3000 : false),
   });
   const suites = useQuery({ queryKey: ['suites'], queryFn: api.suites });
+  const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
   const reports = useQuery({
     queryKey: ['reports'],
     queryFn: api.reports,
@@ -139,8 +141,8 @@ export default function Dashboard() {
                     <Tag color={channel.enabled ? 'green' : 'red'}>{channel.enabled ? '维护中' : '停用'}</Tag>
                   </div>
                   <p>测试模型：{channel.model_name || '未配置'}</p>
-                  <p>渠道来源：{channel.role === 'candidate' ? '待测渠道' : channel.role === 'negative' ? '负样本' : '官方参考'}</p>
-                  <p>渠道分类：{channel.provider_type}</p>
+                  <p>渠道来源：{roleLabel(channel.role, taxonomy.data)}</p>
+                  <p>渠道分类：{providerTypeLabel(channel.provider_type, taxonomy.data)}</p>
                   <p className="relay-desc">
                     通过统一题集和同参数执行，比较协议结构、截断行为、工具调用、内容相似度和稳定性。
                   </p>

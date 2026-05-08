@@ -305,6 +305,20 @@ export default function TestCases() {
               render: (module: string) => <Tag color={moduleColor[module] ?? 'default'}>{module}</Tag>,
             },
             {
+              title: '检测策略',
+              width: 190,
+              render: (_, record) => {
+                const rules = record.scoring_rules ?? {};
+                return (
+                  <Space wrap size={4}>
+                    {rules.quick ? <Tag color="blue">快速</Tag> : <Tag>完整</Tag>}
+                    <Tag color="purple">权重 {String(rules.weight ?? 1)}</Tag>
+                    <Tag color="gold">{String(rules.risk_dimension ?? 'quality')}</Tag>
+                  </Space>
+                );
+              },
+            },
+            {
               title: '状态',
               dataIndex: 'enabled',
               width: 130,

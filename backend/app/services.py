@@ -18,8 +18,8 @@ import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
-from .schemas import BaselineBuildCreate, ChannelCreate, FeishuBroadcastSettingUpdate, RunCreate, ScheduledChannelTestCreate, TestCaseCreate, TestSuiteCreate
+from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .schemas import BaselineBuildCreate, ChannelCreate, ChannelTaxonomySettingUpdate, FeishuBroadcastSettingUpdate, RunCreate, ScheduledChannelTestCreate, TestCaseCreate, TestSuiteCreate
 from .suite_seed import default_cases, default_suite
 
 
@@ -52,12 +52,96 @@ ALERT_RED_FLAGS = {
     "identity_mismatch",
     "unsafe_response",
     "tool_use_invalid",
+    "tool_name_mismatch",
+    "tool_input_mismatch",
     "max_tokens_not_enforced",
+    "stop_sequence_not_enforced",
+    "streaming_event_missing",
+    "invalid_request_not_rejected",
     "request_failed",
     "protocol_mismatch",
 }
 
 FEISHU_SETTING_ID = "global"
+CHANNEL_TAXONOMY_SETTING_ID = "global"
+DEFAULT_ROLE_LABELS = {
+    "gold": "金标 Anthropic",
+    "official_cloud": "官方云参考",
+    "candidate": "待测第三方",
+    "negative": "负样本",
+}
+DEFAULT_PROVIDER_TYPE_LABELS = {
+    "anthropic": "Anthropic",
+    "aws_bedrock": "AWS Bedrock",
+    "azure_foundry": "Azure AI Foundry",
+    "third_party_anthropic": "Third-party Anthropic compatible",
+    "third_party_openai_compatible": "Third-party OpenAI compatible",
+    "openai_compatible": "OpenAI compatible",
+    "custom": "Custom",
+}
+
+
+def get_or_create_channel_taxonomy_setting(db: Session) -> ChannelTaxonomySetting:
+    setting = db.get(ChannelTaxonomySetting, CHANNEL_TAXONOMY_SETTING_ID)
+    if setting:
+        return setting
+    setting = ChannelTaxonomySetting(
+        id=CHANNEL_TAXONOMY_SETTING_ID,
+        role_labels=DEFAULT_ROLE_LABELS.copy(),
+        provider_type_labels=DEFAULT_PROVIDER_TYPE_LABELS.copy(),
+    )
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    return setting
+
+
+def channel_taxonomy_setting_read(setting: ChannelTaxonomySetting) -> dict[str, Any]:
+    return {
+        "id": setting.id,
+        "role_labels": _taxonomy_labels(DEFAULT_ROLE_LABELS, setting.role_labels),
+        "provider_type_labels": _taxonomy_labels(DEFAULT_PROVIDER_TYPE_LABELS, setting.provider_type_labels),
+        "default_role_labels": DEFAULT_ROLE_LABELS,
+        "default_provider_type_labels": DEFAULT_PROVIDER_TYPE_LABELS,
+        "created_at": setting.created_at,
+        "updated_at": setting.updated_at,
+    }
+
+
+def update_channel_taxonomy_setting(db: Session, data: ChannelTaxonomySettingUpdate) -> ChannelTaxonomySetting:
+    setting = get_or_create_channel_taxonomy_setting(db)
+    if data.role_labels is not None:
+        setting.role_labels = _apply_taxonomy_update(DEFAULT_ROLE_LABELS, setting.role_labels, data.role_labels, "role")
+    if data.provider_type_labels is not None:
+        setting.provider_type_labels = _apply_taxonomy_update(
+            DEFAULT_PROVIDER_TYPE_LABELS,
+            setting.provider_type_labels,
+            data.provider_type_labels,
+            "provider_type",
+        )
+    db.commit()
+    db.refresh(setting)
+    return setting
+
+
+def _taxonomy_labels(defaults: dict[str, str], stored: dict | None) -> dict[str, str]:
+    labels = defaults.copy()
+    if not isinstance(stored, dict):
+        return labels
+    for key, value in stored.items():
+        if key in defaults and isinstance(value, str) and value.strip():
+            labels[key] = value.strip()
+    return labels
+
+
+def _apply_taxonomy_update(defaults: dict[str, str], current: dict | None, updates: dict[str, str | None], label_type: str) -> dict[str, str]:
+    labels = _taxonomy_labels(defaults, current)
+    for key, value in updates.items():
+        if key not in defaults:
+            raise ValueError(f"Unsupported {label_type} key: {key}")
+        text = (value or "").strip()
+        labels[key] = text or defaults[key]
+    return labels
 
 
 def get_or_create_feishu_setting(db: Session) -> FeishuBroadcastSetting:
@@ -434,11 +518,7 @@ async def execute_run(
             run_channels = db.scalars(select(RunChannel).where(RunChannel.run_id == run_id)).all()
             channel_by_id = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
             channels = [channel_by_id[rc.channel_id] for rc in run_channels if rc.channel_id in channel_by_id]
-            cases = db.scalars(
-                select(TestCase)
-                .where(TestCase.suite_id == run.suite_id, TestCase.enabled.is_(True))
-                .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
-            ).all()
+            cases = cases_for_scope(db, run.suite_id, run.test_scope)
             run.total_jobs = len(channels) * len(cases) * run.repeat_count
             run.completed_jobs = 0
             db.commit()
@@ -575,6 +655,7 @@ async def execute_scheduled_channel_test(
                     concurrency=scheduled.concurrency,
                     use_mock=scheduled.use_mock,
                     mode="candidate_eval",
+                    test_scope=scheduled.test_scope,
                     baseline_snapshot_id=scheduled.baseline_snapshot_id,
                 ),
             )
@@ -1623,9 +1704,9 @@ def build_comparisons(db: Session, run_id: str, baseline_snapshot_id: str | None
             final_score = protocol_score * 0.65 + capability_score * 0.35
             labels = sorted({label for result in candidate_results for label in (result.labels or [])})
             if baseline_snapshot_id:
-                if not any(gold_texts):
+                if not baseline_by_case_role.get((case_id, "gold")):
                     labels.append("baseline_gold_missing")
-                if not any(cloud_texts):
+                if not baseline_by_case_role.get((case_id, "official_cloud")):
                     labels.append("baseline_cloud_missing")
             db.add(
                 Comparison(
@@ -1664,6 +1745,7 @@ def build_reports(db: Session, run_id: str) -> None:
     run = db.get(Run, run_id)
     snapshot = db.get(BaselineSnapshot, run.baseline_snapshot_id) if run and run.baseline_snapshot_id else None
     comparisons = db.scalars(select(Comparison).where(Comparison.run_id == run_id)).all()
+    cases = {case.id: case for case in db.scalars(select(TestCase)).all()}
     by_channel: dict[str, list[Comparison]] = defaultdict(list)
     for comparison in comparisons:
         by_channel[comparison.candidate_channel_id].append(comparison)
@@ -1672,15 +1754,23 @@ def build_reports(db: Session, run_id: str) -> None:
         channel = db.get(Channel, channel_id)
         if not channel:
             continue
-        final_score = sum(item.final_score for item in items) / len(items)
+        final_score = weighted_comparison_score(items, cases)
         labels = sorted({label for item in items for label in (item.labels or [])})
-        grade = grade_from_score(final_score, labels)
+        grade = capped_grade_from_score(final_score, labels)
         summary = _summary_for(grade)
+        dimension_scores = dimension_scores_for(items, cases)
+        confidence = confidence_for(run, snapshot, items, labels)
         evidence = {
             "avg_gold_similarity": round(sum(item.gold_similarity for item in items) / len(items), 2),
             "avg_official_cloud_similarity": round(sum(item.official_cloud_similarity for item in items) / len(items), 2),
             "labels": labels,
+            "label_explanations": label_explanations(labels),
+            "dimension_scores": dimension_scores,
+            "confidence": confidence,
+            "red_flags": sorted(set(labels).intersection(ALERT_RED_FLAGS)),
+            "top_evidence": top_evidence_for(items, cases),
             "comparison_count": len(items),
+            "test_scope": run.test_scope if run else "full",
             "baseline_snapshot_id": snapshot.id if snapshot else None,
             "baseline_name": snapshot.name if snapshot else None,
             "baseline_ready_at": snapshot.ready_at.isoformat() if snapshot and snapshot.ready_at else None,
@@ -1701,6 +1791,134 @@ def build_reports(db: Session, run_id: str) -> None:
     db.commit()
 
 
+def weighted_comparison_score(items: list[Comparison], cases: dict[str, TestCase]) -> float:
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    for item in items:
+        weight = case_weight(cases.get(item.test_case_id))
+        weighted_sum += item.final_score * weight
+        weight_sum += weight
+    return weighted_sum / weight_sum if weight_sum else 0.0
+
+
+def case_weight(case: TestCase | None) -> float:
+    if not case:
+        return 1.0
+    try:
+        return max(0.1, float((case.scoring_rules or {}).get("weight", 1.0)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def case_dimension(case: TestCase | None) -> str:
+    if not case:
+        return "quality"
+    dimension = (case.scoring_rules or {}).get("risk_dimension")
+    if dimension in {"authenticity", "quality", "stability"}:
+        return dimension
+    if case.module in {"protocol", "identity", "websearch"}:
+        return "authenticity"
+    return "quality"
+
+
+def dimension_scores_for(items: list[Comparison], cases: dict[str, TestCase]) -> dict[str, float | None]:
+    grouped: dict[str, list[Comparison]] = defaultdict(list)
+    for item in items:
+        grouped[case_dimension(cases.get(item.test_case_id))].append(item)
+    scores: dict[str, float | None] = {}
+    for dimension in ["authenticity", "quality", "stability"]:
+        dimension_items = grouped.get(dimension, [])
+        scores[dimension] = round(weighted_comparison_score(dimension_items, cases), 2) if dimension_items else None
+    return scores
+
+
+GRADE_ORDER = ["A", "B", "C", "D", "E"]
+
+
+def capped_grade_from_score(score: float, labels: list[str] | None = None) -> str:
+    grade = grade_from_score(score, labels)
+    red_flags = set(labels or []).intersection(ALERT_RED_FLAGS)
+    if "max_tokens_not_enforced" in red_flags or "tool_use_invalid" in red_flags or "protocol_mismatch" in red_flags:
+        return worse_grade(grade, "D")
+    if len(red_flags) >= 2:
+        return worse_grade(grade, "C")
+    if len(red_flags) == 1:
+        return worse_grade(grade, "B")
+    return grade
+
+
+def worse_grade(current: str, cap: str) -> str:
+    return GRADE_ORDER[max(GRADE_ORDER.index(current), GRADE_ORDER.index(cap))]
+
+
+LABEL_EXPLANATIONS = {
+    "protocol_mismatch": "响应结构不是 Anthropic 原生 message 形态，可能存在中转格式转换或模型替换。",
+    "usage_missing": "响应缺少 usage/token 统计，说明渠道没有完整保留原生计量字段。",
+    "message_id_mismatch": "message id 前缀不符合 Claude 原生响应特征。",
+    "tool_use_invalid": "要求工具调用时未返回 tool_use 结构。",
+    "tool_name_mismatch": "工具调用名称与预期 schema 不一致。",
+    "tool_input_mismatch": "工具调用参数与预期输入不一致。",
+    "max_tokens_not_enforced": "极小 max_tokens 限制未被严格执行。",
+    "max_tokens_output_too_long": "输出长度超过本题允许的截断范围。",
+    "stop_sequence_not_enforced": "stop sequence 没有按预期触发。",
+    "stop_sequence_leaked": "输出中泄露了应触发截断的 stop sequence。",
+    "streaming_event_missing": "流式响应缺少关键结束事件。",
+    "json_invalid": "要求严格 JSON 时返回了非法 JSON。",
+    "json_object_expected": "要求 JSON 对象时返回的不是对象。",
+    "exact_output_mismatch": "要求精确输出时包含了额外内容或内容不一致。",
+    "output_too_short": "输出明显短于题目要求，可能是截断或模型能力不足。",
+    "web_honesty_missing": "无联网工具场景下没有诚实说明无法实时查询。",
+    "required_keypoint_missing": "缺少题目要求的关键答案点。",
+    "identity_mismatch": "身份或安全边界出现明显异常表述。",
+    "unsafe_response": "安全题中给出了不应提供的危险或违法内容。",
+    "suspected_model_swap": "负样本或候选渠道表现出疑似模型替换特征。",
+    "latency_outlier": "延迟明显偏高，可能存在中转链路或路由异常。",
+    "repeat_inconsistent": "同一题多次运行输出差异过大，存在稳定性或混路由风险。",
+    "baseline_gold_missing": "当前题缺少 Anthropic 官方金标基线。",
+    "baseline_cloud_missing": "当前题缺少官方云参考基线。",
+    "invalid_request_not_rejected": "无效请求没有被正确拒绝。",
+    "request_failed": "请求失败，未获得可评分响应。",
+}
+
+
+def label_explanations(labels: list[str]) -> list[dict[str, str]]:
+    explanations = []
+    for label in labels:
+        base_label = label.split(":", 1)[0] if ":" in label else label
+        explanations.append({"label": label, "description": LABEL_EXPLANATIONS.get(label) or LABEL_EXPLANATIONS.get(base_label) or "检测项返回异常，需要结合原始响应复核。"})
+    return explanations
+
+
+def top_evidence_for(items: list[Comparison], cases: dict[str, TestCase], limit: int = 5) -> list[dict[str, Any]]:
+    ranked = sorted(items, key=lambda item: (item.final_score, -case_weight(cases.get(item.test_case_id))))
+    evidence: list[dict[str, Any]] = []
+    for item in ranked[:limit]:
+        case = cases.get(item.test_case_id)
+        evidence.append(
+            {
+                "test_case_id": item.test_case_id,
+                "title": case.title if case else item.test_case_id,
+                "module": case.module if case else "unknown",
+                "score": item.final_score,
+                "labels": item.labels or [],
+                "impact": case_dimension(case),
+            }
+        )
+    return evidence
+
+
+def confidence_for(run: Run | None, snapshot: BaselineSnapshot | None, items: list[Comparison], labels: list[str]) -> str:
+    if not run:
+        return "low"
+    if any(label in labels for label in ["baseline_gold_missing", "baseline_cloud_missing", "request_failed"]):
+        return "low"
+    if run.test_scope == "quick" or run.repeat_count < 2:
+        return "medium"
+    if snapshot and snapshot.expires_at and (_as_utc(snapshot.expires_at) - datetime.now(timezone.utc)).days < 3:
+        return "medium"
+    return "high" if len(items) >= 20 else "medium"
+
+
 def _summary_for(grade: str) -> str:
     return {
         "A": "高度可信，接近纯官方与官方云参考。",
@@ -1713,6 +1931,15 @@ def _summary_for(grade: str) -> str:
 
 def report_markdown(channel: Channel, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
     labels = ", ".join(evidence["labels"]) or "未发现显著异常"
+    dimensions = evidence.get("dimension_scores") or {}
+    label_lines = "\n".join(
+        f"- {item['label']}：{item['description']}"
+        for item in evidence.get("label_explanations", [])[:8]
+    ) or "- 未发现显著异常标签"
+    top_lines = "\n".join(
+        f"{index + 1}. {item['title']}（{item['impact']}）：{item['score']:.1f}，标签 {', '.join(item['labels']) or '无'}"
+        for index, item in enumerate(evidence.get("top_evidence", [])[:5])
+    ) or "暂无异常证据"
     baseline_line = (
         f"- 复用官方基线：{evidence.get('baseline_name')} ({evidence.get('baseline_snapshot_id')})\n"
         f"- 基线生成时间：{evidence.get('baseline_ready_at') or '未记录'}\n"
@@ -1734,6 +1961,10 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
 
 - 评级：{grade}
 - 总分：{score:.1f} / 100
+- 真实性分：{_fmt_optional_score(dimensions.get("authenticity"))}
+- 质量分：{_fmt_optional_score(dimensions.get("quality"))}
+- 稳定性分：{_fmt_optional_score(dimensions.get("stability"))}
+- 置信度：{evidence.get("confidence", "medium")}
 - 结论：{summary}
 
 ## 主要证据
@@ -1743,7 +1974,19 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
 3. 异常标签：{labels}
 4. 参与对比题目数：{evidence["comparison_count"]}
 
+## 关键异常题
+
+{top_lines}
+
+## 异常解释
+
+{label_lines}
+
 ## 风险说明
 
 本报告不写“100% 真/假”，只基于协议、能力、工具调用、截断、多轮上下文、安全边界和稳定性证据给出风险评级。若本次复用了历史官方基线，只代表与该基线快照的差异，不证明渠道永久可信。
 """
+
+
+def _fmt_optional_score(value: Any) -> str:
+    return "-" if value is None else f"{float(value):.1f} / 100"

@@ -4,32 +4,20 @@ import { Alert, Button, Card, Checkbox, Form, Input, InputNumber, Radio, Select,
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { fixedReferenceChannelIds, isCandidateChannel, isReferenceChannel } from '../channelPresets';
-import type { BaselineSnapshot, Channel, ChannelRole, RunMode, TestSuite } from '../types';
+import { roleColor, roleLabel } from '../channelTaxonomy';
+import type { BaselineSnapshot, Channel, RunMode, TestScope, TestSuite } from '../types';
 
 type CreateRunValues = {
   name: string;
   suite_id: string;
   mode: RunMode;
+  test_scope: TestScope;
   baseline_snapshot_id?: string;
   reference_channel_ids?: string[];
   candidate_channel_ids?: string[];
   repeat_count: number;
   concurrency: number;
   use_mock?: boolean;
-};
-
-const roleLabel: Record<ChannelRole, string> = {
-  gold: '金标',
-  official_cloud: '官方云参考',
-  candidate: '待测',
-  negative: '负样本',
-};
-
-const roleColor: Record<ChannelRole, string> = {
-  gold: 'gold',
-  official_cloud: 'blue',
-  candidate: 'purple',
-  negative: 'red',
 };
 
 function getErrorMessage(error: unknown) {
@@ -45,6 +33,7 @@ export default function CreateRun() {
   const selectedMode = Form.useWatch('mode', form) ?? 'candidate_eval';
   const suites = useQuery<TestSuite[]>({ queryKey: ['suites'], queryFn: api.suites });
   const channels = useQuery<Channel[]>({ queryKey: ['channels'], queryFn: api.channels });
+  const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
   const baselines = useQuery<BaselineSnapshot[]>({
     queryKey: ['baselines', selectedSuiteId],
     queryFn: () => api.baselines(selectedSuiteId),
@@ -93,6 +82,7 @@ export default function CreateRun() {
         channel_ids: grouped,
         repeat_count: values.repeat_count,
         concurrency: values.concurrency,
+        test_scope: values.test_scope,
         use_mock: values.use_mock ?? true,
       };
       const run =
@@ -125,7 +115,7 @@ export default function CreateRun() {
             style={{ marginBottom: 16 }}
           />
         ) : null}
-        <Form form={form} layout="vertical" onFinish={submit} initialValues={{ mode: 'candidate_eval', repeat_count: 1, concurrency: 4, use_mock: true }}>
+        <Form form={form} layout="vertical" onFinish={submit} initialValues={{ mode: 'candidate_eval', test_scope: 'quick', repeat_count: 1, concurrency: 4, use_mock: true }}>
           <Form.Item label="任务名" name="name" rules={[{ required: true }]}>
             <Input size="large" placeholder="Sonnet 4.5 渠道真实性测试" />
           </Form.Item>
@@ -143,6 +133,12 @@ export default function CreateRun() {
               placeholder="选择测试集"
               options={(suites.data ?? []).map((suite) => ({ value: suite.id, label: `${suite.name} (${suite.version ?? '未标版'})` }))}
             />
+          </Form.Item>
+          <Form.Item label="检测范围" name="test_scope" rules={[{ required: true }]}>
+            <Radio.Group size="large">
+              <Radio.Button value="quick">快速检测</Radio.Button>
+              <Radio.Button value="full">完整检测</Radio.Button>
+            </Radio.Group>
           </Form.Item>
           {selectedMode === 'candidate_eval' ? (
             <Form.Item
@@ -189,7 +185,7 @@ export default function CreateRun() {
                       </span>
                       <Space wrap>
                         {fixedReferenceChannelIds.has(channel.id) ? <Tag color="green">固定对照</Tag> : null}
-                        <Tag color={roleColor[channel.role]}>{roleLabel[channel.role]}</Tag>
+                      <Tag color={roleColor[channel.role]}>{roleLabel(channel.role, taxonomy.data)}</Tag>
                       </Space>
                     </label>
                   ))}
@@ -212,7 +208,7 @@ export default function CreateRun() {
                       <strong>{channel.name}</strong>
                       <small>{channel.model_name || '未配置模型'}</small>
                     </span>
-                    <Tag color={roleColor[channel.role]}>{roleLabel[channel.role]}</Tag>
+                  <Tag color={roleColor[channel.role]}>{roleLabel(channel.role, taxonomy.data)}</Tag>
                   </label>
                 ))}
                 {candidateChannels.length === 0 ? (
@@ -236,7 +232,7 @@ export default function CreateRun() {
             </Form.Item>
           </Space>
           <Typography.Paragraph type="secondary" style={{ marginBottom: '24px', fontSize: '14px' }}>
-            复用官方基线模式只调用第三方渠道，并用已保存的官方快照完成评分；生成官方基线模式只调用金标和官方云参考渠道。
+            快速检测只运行高区分度题，适合日常巡检；完整检测运行全部启用题，适合新渠道验收和正式报告。
           </Typography.Paragraph>
           <Button type="primary" size="large" htmlType="submit" loading={loading} style={{ height: '44px', fontWeight: 600 }}>
             启动检测

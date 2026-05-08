@@ -234,6 +234,21 @@ class FeishuTestMessageRead(BaseModel):
     message: str
 
 
+class ChannelTaxonomySettingRead(BaseModel):
+    id: str
+    role_labels: dict[str, str]
+    provider_type_labels: dict[str, str]
+    default_role_labels: dict[str, str]
+    default_provider_type_labels: dict[str, str]
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ChannelTaxonomySettingUpdate(BaseModel):
+    role_labels: dict[str, str | None] | None = None
+    provider_type_labels: dict[str, str | None] | None = None
+
+
 class SmartPatrolChannelSummary(BaseModel):
     channel_id: str
     channel_name: str

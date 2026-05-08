@@ -10,6 +10,21 @@ export type Channel = {
 
 export type ChannelRole = 'gold' | 'official_cloud' | 'candidate' | 'negative';
 
+export type ChannelTaxonomySetting = {
+  id: string;
+  role_labels: Record<ChannelRole, string>;
+  provider_type_labels: Record<string, string>;
+  default_role_labels: Record<ChannelRole, string>;
+  default_provider_type_labels: Record<string, string>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ChannelTaxonomyUpdate = {
+  role_labels?: Partial<Record<ChannelRole, string | null>>;
+  provider_type_labels?: Record<string, string | null>;
+};
+
 export type TestSuite = {
   id: string;
   name: string;
@@ -37,6 +52,7 @@ export type Run = {
   suite_id: string;
   name: string;
   mode: RunMode;
+  test_scope: TestScope;
   baseline_snapshot_id?: string | null;
   scheduled_test_id?: string | null;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'interrupted' | 'canceled';
@@ -50,6 +66,7 @@ export type Run = {
 };
 
 export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval';
+export type TestScope = 'quick' | 'full';
 
 export type RunChannel = {
   id: string;
@@ -147,6 +164,7 @@ export type ScheduledChannelTest = {
   baseline_snapshot_id: string;
   enabled: boolean;
   interval_minutes: number;
+  test_scope: TestScope;
   repeat_count: number;
   concurrency: number;
   use_mock: boolean;
