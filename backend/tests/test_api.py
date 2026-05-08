@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_claude_eval.db")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
@@ -522,6 +523,126 @@ def test_running_run_must_be_canceled_before_delete() -> None:
     assert blocked.status_code == 409
     assert canceled.status_code == 200
     assert canceled.json()["status"] == "canceled"
+
+
+def test_cancel_run_is_idempotent_and_does_not_reopen_terminal_runs() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        pending = create_run(db, RunCreate(name="pending run", suite_id=suite_id, use_mock=True))
+        completed = create_run(db, RunCreate(name="completed run", suite_id=suite_id, use_mock=True))
+        completed.status = "completed"
+        db.commit()
+        pending_id = pending.id
+        completed_id = completed.id
+
+    with TestClient(app) as client:
+        first_cancel = client.post(f"/api/runs/{pending_id}/cancel")
+        second_cancel = client.post(f"/api/runs/{pending_id}/cancel")
+        completed_cancel = client.post(f"/api/runs/{completed_id}/cancel")
+
+    assert first_cancel.status_code == 200
+    assert first_cancel.json()["status"] == "canceled"
+    assert second_cancel.status_code == 200
+    assert second_cancel.json()["status"] == "canceled"
+    assert completed_cancel.status_code == 200
+    assert completed_cancel.json()["status"] == "completed"
+
+    with SessionLocal() as db:
+        pending = db.get(Run, pending_id)
+        completed = db.get(Run, completed_id)
+
+    assert pending is not None
+    assert pending.status == "canceled"
+    assert pending.finished_at is not None
+    assert completed is not None
+    assert completed.status == "completed"
+
+
+def test_execute_run_stops_remaining_jobs_when_canceled(monkeypatch) -> None:
+    reset_database()
+
+    async def scenario() -> str:
+        started = asyncio.Event()
+        started_count = 0
+
+        async def slow_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
+            nonlocal started_count
+            started_count += 1
+            started.set()
+            await asyncio.sleep(30)
+            return {"content_text": "late response", "raw_request": {}, "raw_response": {}, "latency_ms": 1, "first_token_ms": 1}
+
+        monkeypatch.setattr("app.services.invoke_channel", slow_invoke)
+
+        with SessionLocal() as db:
+            suite_id = db.scalar(select(TestSuiteModel.id))
+            run = create_run(
+                db,
+                RunCreate(
+                    name="cancelable run",
+                    suite_id=suite_id,
+                    channel_ids={"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
+                    repeat_count=2,
+                    concurrency=2,
+                    use_mock=True,
+                ),
+            )
+            run_id = run.id
+
+        task = asyncio.create_task(execute_run(SessionLocal, run_id, use_mock=True))
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        with SessionLocal() as db:
+            run = db.get(Run, run_id)
+            assert run is not None
+            assert run.status == "running"
+            run.status = "canceled"
+            db.commit()
+
+        await asyncio.wait_for(task, timeout=3)
+
+        with SessionLocal() as db:
+            run = db.get(Run, run_id)
+            result_count = db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id))
+            report_count = db.scalar(select(func.count()).select_from(Report).where(Report.run_id == run_id))
+
+        assert started_count <= 2
+        assert run is not None
+        assert run.status == "canceled"
+        assert run.finished_at is not None
+        assert run.completed_jobs < run.total_jobs
+        assert result_count == 0
+        assert report_count == 0
+        return run_id
+
+    asyncio.run(scenario())
+
+
+def test_run_create_rejects_out_of_range_repeat_count_and_concurrency() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        low_repeat = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "repeat_count": 0, "use_mock": True})
+        high_repeat = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "repeat_count": 6, "use_mock": True})
+        low_concurrency = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "concurrency": 0, "use_mock": True})
+        high_concurrency = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "concurrency": 17, "use_mock": True})
+
+    assert low_repeat.status_code == 422
+    assert high_repeat.status_code == 422
+    assert low_concurrency.status_code == 422
+    assert high_concurrency.status_code == 422
+
+
+def test_baseline_build_rejects_out_of_range_repeat_count_and_concurrency() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        low_repeat = client.post("/api/baselines/build", json={"name": "bad", "suite_id": suite_id, "repeat_count": 0, "use_mock": True})
+        high_concurrency = client.post("/api/baselines/build", json={"name": "bad", "suite_id": suite_id, "concurrency": 17, "use_mock": True})
+
+    assert low_repeat.status_code == 422
+    assert high_concurrency.status_code == 422
 
 
 def test_cors_origins_are_read_from_environment() -> None:

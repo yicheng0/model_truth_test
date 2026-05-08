@@ -2,13 +2,25 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Popconfirm, Progress, Space, Table, Tag, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { Trash2 } from 'lucide-react';
+import { CircleStop, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import type { Run } from '../types';
+
+function statusColor(status: Run['status']) {
+  if (status === 'completed') return 'green';
+  if (status === 'failed') return 'red';
+  if (status === 'canceled') return 'default';
+  return 'gold';
+}
+
+function canCancel(status: Run['status']) {
+  return status === 'pending' || status === 'running';
+}
 
 export default function Runs() {
   const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [cancelingId, setCancelingId] = useState<string | null>(null);
   const runs = useQuery({
     queryKey: ['runs'],
     queryFn: api.runs,
@@ -25,10 +37,24 @@ export default function Runs() {
     onError: (error) => message.error(getErrorMessage(error)),
     onSettled: () => setDeletingId(null),
   });
+  const cancel = useMutation({
+    mutationFn: api.cancelRun,
+    onSuccess: async () => {
+      message.success('任务已取消');
+      await queryClient.invalidateQueries({ queryKey: ['runs'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: () => setCancelingId(null),
+  });
 
   async function deleteRun(run: Run) {
     setDeletingId(run.id);
     remove.mutate(run.id);
+  }
+
+  async function cancelRun(run: Run) {
+    setCancelingId(run.id);
+    cancel.mutate(run.id);
   }
 
   return (
@@ -60,9 +86,9 @@ export default function Runs() {
               title: '状态',
               dataIndex: 'status',
               width: '12%',
-              render: (status: string) => (
+              render: (status: Run['status']) => (
                 <Tag
-                  color={status === 'completed' ? 'green' : status === 'failed' ? 'red' : 'gold'}
+                  color={statusColor(status)}
                   style={{ borderRadius: '6px', padding: '4px 12px', fontWeight: 500 }}
                 >
                   {status}
@@ -89,10 +115,26 @@ export default function Runs() {
             { title: '并发', dataIndex: 'concurrency', width: '10%' },
             {
               title: '操作',
-              width: 210,
+              width: 290,
               render: (_, run) => (
                 <Space>
                   <Link to={`/runs/${run.id}`} style={{ fontWeight: 600 }}>查看详情</Link>
+                  {canCancel(run.status) ? (
+                    <Popconfirm
+                      title="取消检测任务"
+                      description="会停止剩余检测，已产生结果会保留。确定取消吗？"
+                      okText="取消任务"
+                      cancelText="返回"
+                      onConfirm={() => cancelRun(run)}
+                    >
+                      <Button
+                        icon={<CircleStop size={15} />}
+                        loading={cancelingId === run.id}
+                      >
+                        取消
+                      </Button>
+                    </Popconfirm>
+                  ) : null}
                   <Popconfirm
                     title="删除检测任务"
                     description="会同时删除该任务的结果、对比和报告。确定删除吗？"

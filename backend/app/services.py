@@ -260,6 +260,9 @@ def seed_demo_data(db: Session) -> None:
 
 def create_run(db: Session, data: RunCreate) -> Run:
     mode = data.mode or "full_comparison"
+    test_scope = data.test_scope or "full"
+    if test_scope not in {"quick", "full"}:
+        raise ValueError(f"Unsupported test scope: {test_scope}")
     if mode not in {"full_comparison", "baseline_build", "candidate_eval"}:
         raise ValueError(f"Unsupported run mode: {mode}")
     if mode == "candidate_eval":
@@ -269,16 +272,13 @@ def create_run(db: Session, data: RunCreate) -> Run:
     channel_ids_by_role = data.channel_ids or _default_channel_ids_by_role(db, mode)
     channel_ids_by_role = _filter_channel_ids_for_mode(channel_ids_by_role, mode)
     selected_ids = [(channel_id, role) for role, ids in channel_ids_by_role.items() for channel_id in ids]
-    cases = db.scalars(
-        select(TestCase)
-        .where(TestCase.suite_id == data.suite_id, TestCase.enabled.is_(True))
-        .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
-    ).all()
+    cases = cases_for_scope(db, data.suite_id, test_scope)
     run = Run(
         id=new_id("run"),
         suite_id=data.suite_id,
         name=data.name,
         mode=mode,
+        test_scope=test_scope,
         baseline_snapshot_id=data.baseline_snapshot_id,
         status="pending",
         repeat_count=max(1, data.repeat_count),
@@ -305,6 +305,7 @@ def create_baseline_build(db: Session, data: BaselineBuildCreate) -> tuple[Run, 
             concurrency=data.concurrency,
             use_mock=data.use_mock,
             mode="baseline_build",
+            test_scope=data.test_scope,
             runtime_credentials=data.runtime_credentials,
         ),
     )
@@ -345,6 +346,7 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
         baseline_snapshot_id=data.baseline_snapshot_id,
         enabled=data.enabled,
         interval_minutes=max(5, data.interval_minutes),
+        test_scope=data.test_scope if data.test_scope in {"quick", "full"} else "quick",
         repeat_count=max(1, data.repeat_count),
         concurrency=max(1, data.concurrency),
         use_mock=data.use_mock,
@@ -355,6 +357,19 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
     db.commit()
     db.refresh(scheduled)
     return scheduled
+
+
+def cases_for_scope(db: Session, suite_id: str, test_scope: str) -> list[TestCase]:
+    cases = list(
+        db.scalars(
+            select(TestCase)
+            .where(TestCase.suite_id == suite_id, TestCase.enabled.is_(True))
+            .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
+        ).all()
+    )
+    if test_scope != "quick":
+        return cases
+    return [case for case in cases if (case.scoring_rules or {}).get("quick") is True]
 
 
 def validate_scheduled_channel_test(db: Session, scheduled: ScheduledChannelTest) -> None:
@@ -389,11 +404,29 @@ async def execute_run(
     use_mock: bool = True,
 ) -> None:
     runtime_credentials = runtime_credentials or {}
+    active_tasks: set[asyncio.Task[tuple[TestCase, Channel, int, dict[str, Any]]]] = set()
     with session_factory() as db:
         run = db.get(Run, run_id)
         if not run:
             return
+
+        async def cancel_active_tasks(tasks: set[asyncio.Task[tuple[TestCase, Channel, int, dict[str, Any]]]]) -> None:
+            for pending_task in tasks:
+                pending_task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        def finish_canceled_run() -> None:
+            run.status = "canceled"
+            run.finished_at = datetime.now(timezone.utc)
+            db.commit()
+
         try:
+            db.refresh(run)
+            if run.status == "canceled":
+                run.finished_at = run.finished_at or datetime.now(timezone.utc)
+                db.commit()
+                return
             run.status = "running"
             run.started_at = datetime.now(timezone.utc)
             db.commit()
@@ -410,50 +443,75 @@ async def execute_run(
             run.completed_jobs = 0
             db.commit()
 
-            semaphore = asyncio.Semaphore(max(1, run.concurrency))
             jobs = [
                 (case, channel, attempt)
                 for case in cases
                 for channel in _sort_channels_for_run(channels)
                 for attempt in range(1, run.repeat_count + 1)
             ]
+            job_index = 0
+            concurrency = max(1, min(run.concurrency, len(jobs) or 1))
 
             async def invoke_job(case: TestCase, channel: Channel, attempt: int) -> tuple[TestCase, Channel, int, dict[str, Any]]:
-                async with semaphore:
-                    normalized = await invoke_channel(channel, case, attempt, runtime_credentials.get(channel.id, {}), use_mock)
-                    return case, channel, attempt, normalized
+                normalized = await invoke_channel(channel, case, attempt, runtime_credentials.get(channel.id, {}), use_mock)
+                return case, channel, attempt, normalized
 
-            pending = [asyncio.create_task(invoke_job(case, channel, attempt)) for case, channel, attempt in jobs]
-            for task in asyncio.as_completed(pending):
+            while job_index < len(jobs) or active_tasks:
                 db.refresh(run)
                 if run.status == "canceled":
-                    for pending_task in pending:
-                        pending_task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
-                    run.finished_at = datetime.now(timezone.utc)
-                    db.commit()
+                    await cancel_active_tasks(active_tasks)
+                    finish_canceled_run()
                     return
 
-                case, channel, attempt, normalized = await task
-                score, labels = score_result(channel, case, normalized)
-                db.add(
-                    Result(
-                        id=new_id("res"),
-                        run_id=run.id,
-                        test_case_id=case.id,
-                        channel_id=channel.id,
-                        attempt_index=attempt,
-                        normalized_response=normalized,
-                        raw_request=normalized.get("raw_request"),
-                        raw_response=normalized.get("raw_response"),
-                        metrics={"latency_ms": normalized.get("latency_ms"), "first_token_ms": normalized.get("first_token_ms")},
-                        score=score,
-                        labels=labels,
-                    )
-                )
-                run.completed_jobs += 1
-                db.commit()
+                while job_index < len(jobs) and len(active_tasks) < concurrency:
+                    case, channel, attempt = jobs[job_index]
+                    job_index += 1
+                    active_tasks.add(asyncio.create_task(invoke_job(case, channel, attempt)))
 
+                if not active_tasks:
+                    break
+
+                done, active_tasks = await asyncio.wait(active_tasks, timeout=0.25, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    continue
+
+                db.refresh(run)
+                if run.status == "canceled":
+                    await asyncio.gather(*done, return_exceptions=True)
+                    await cancel_active_tasks(active_tasks)
+                    finish_canceled_run()
+                    return
+
+                for task in done:
+                    case, channel, attempt, normalized = await task
+                    db.refresh(run)
+                    if run.status == "canceled":
+                        await cancel_active_tasks(active_tasks)
+                        finish_canceled_run()
+                        return
+                    score, labels = score_result(channel, case, normalized)
+                    db.add(
+                        Result(
+                            id=new_id("res"),
+                            run_id=run.id,
+                            test_case_id=case.id,
+                            channel_id=channel.id,
+                            attempt_index=attempt,
+                            normalized_response=normalized,
+                            raw_request=normalized.get("raw_request"),
+                            raw_response=normalized.get("raw_response"),
+                            metrics={"latency_ms": normalized.get("latency_ms"), "first_token_ms": normalized.get("first_token_ms")},
+                            score=score,
+                            labels=labels,
+                        )
+                    )
+                    run.completed_jobs += 1
+                    db.commit()
+
+            db.refresh(run)
+            if run.status == "canceled":
+                finish_canceled_run()
+                return
             apply_repeat_consistency_scores(db, run.id)
             if run.mode == "baseline_build":
                 finalize_baseline_from_run(db, run.id)
@@ -464,6 +522,11 @@ async def execute_run(
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
         except Exception as exc:  # keep failed runs inspectable
+            await cancel_active_tasks(active_tasks)
+            db.refresh(run)
+            if run.status == "canceled":
+                finish_canceled_run()
+                return
             run.status = "failed"
             run.finished_at = datetime.now(timezone.utc)
             if run.mode == "baseline_build" and run.baseline_snapshot_id:
@@ -1163,7 +1226,7 @@ def build_raw_request(channel: Channel, case: TestCase) -> dict[str, Any]:
 async def _live_call(channel: Channel, case: TestCase, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
     provider = channel.provider_type
     if provider == "aws_bedrock":
-        return _aws_bedrock_call(channel, case, credentials)
+        return await asyncio.to_thread(_aws_bedrock_call, channel, case, credentials)
     if provider in {"anthropic", "azure_foundry", "third_party_anthropic"}:
         return await _anthropic_compatible_call(channel, raw_request, credentials)
     if provider == "third_party_openai_compatible":
@@ -1194,7 +1257,8 @@ async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, An
         body["tools"] = params["tools"]
     if params.get("stop_sequences"):
         body["stop_sequences"] = params["stop_sequences"]
-    async with httpx.AsyncClient(timeout=90) as client:
+    timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=body)
         response.raise_for_status()
         return response.json()
@@ -1211,7 +1275,8 @@ async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any],
         "max_tokens": params.get("max_tokens", 1024),
         "temperature": params.get("temperature", 0),
     }
-    async with httpx.AsyncClient(timeout=90) as client:
+    timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=body)
         response.raise_for_status()
         return response.json()
@@ -1219,6 +1284,7 @@ async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any],
 
 def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, Any]) -> dict[str, Any]:
     import boto3
+    from botocore.config import Config
 
     region = credentials.get("region") or "us-east-1"
     client = boto3.client(
@@ -1227,6 +1293,7 @@ def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, A
         aws_access_key_id=credentials.get("aws_access_key_id"),
         aws_secret_access_key=credentials.get("aws_secret_access_key"),
         aws_session_token=credentials.get("aws_session_token"),
+        config=Config(connect_timeout=10, read_timeout=90, retries={"max_attempts": 1}),
     )
     params = case.request_params or {}
     response = client.converse(

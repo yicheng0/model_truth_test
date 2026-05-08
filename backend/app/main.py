@@ -613,8 +613,9 @@ def get_run_case_comparisons_alias(run_id: str, test_case_id: str, db: Session =
 @app.post("/api/runs/{run_id}/cancel")
 def cancel_run_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     run = get_run(run_id, db)
-    if run.status not in {"completed", "failed"}:
+    if run.status in {"pending", "running"}:
         run.status = "canceled"
+        run.finished_at = datetime.now(timezone.utc)
         db.commit()
     return {"status": run.status}
 

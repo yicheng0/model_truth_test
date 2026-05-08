@@ -258,7 +258,17 @@ export default function RunDetail() {
     <Space direction="vertical" size={20} style={{ width: '100%' }} className="page-stack">
       <Card
         title={<span style={{ fontSize: '20px', fontWeight: 700 }}>{data.run.name}</span>}
-        extra={<Button size="large" href={api.reportUrl(data.run.id)} target="_blank" style={{ fontWeight: 600 }}>导出 Markdown</Button>}
+        extra={
+          <Button
+            size="large"
+            href={data.reports.length ? api.reportUrl(data.run.id) : undefined}
+            target="_blank"
+            disabled={!data.reports.length}
+            style={{ fontWeight: 600 }}
+          >
+            导出 Markdown
+          </Button>
+        }
         bordered={false}
       >
         <Descriptions column={{ xs: 1, sm: 2, md: 4 }} style={{ marginBottom: '18px' }}>

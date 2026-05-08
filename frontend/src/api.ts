@@ -9,6 +9,7 @@ import type {
   Report,
   Result,
   Run,
+  RunMode,
   RunResults,
   ScheduledChannelTest,
   SmartPatrolReport,
@@ -17,6 +18,18 @@ import type {
 } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
+
+type RunCreatePayload = {
+  name: string;
+  suite_id: string;
+  channel_ids?: Record<string, string[]>;
+  repeat_count: number;
+  concurrency: number;
+  mode?: RunMode;
+  baseline_snapshot_id?: string;
+  use_mock?: boolean;
+  runtime_credentials?: Record<string, Record<string, unknown>>;
+};
 
 export class ApiError extends Error {
   status: number;
@@ -106,8 +119,9 @@ export const api = {
     const query = params.toString();
     return `${API_BASE}/api/scheduled-tests/report.md${query ? `?${query}` : ''}`;
   },
-  createRun: (payload: { name: string; suite_id: string; channel_ids?: Record<string, string[]>; repeat_count: number; concurrency: number }) =>
+  createRun: (payload: RunCreatePayload) =>
     request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
+  cancelRun: (id: string) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
   deleteRun: (id: string) => request<{ deleted: boolean }>(`/api/runs/${id}`, { method: 'DELETE' }),
   runProgress: (id: string) => request<{ percent: number; status: string; completed_jobs: number; total_jobs: number }>(`/api/runs/${id}/progress`),
   results: (runId: string) => request<Result[]>(`/api/runs/${runId}/raw-results`),

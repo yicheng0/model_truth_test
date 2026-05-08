@@ -100,10 +100,11 @@ class RunCreate(BaseModel):
     name: str
     suite_id: str
     channel_ids: dict[str, list[str]] = Field(default_factory=dict)
-    repeat_count: int = 1
-    concurrency: int = 1
+    repeat_count: int = Field(default=1, ge=1, le=5)
+    concurrency: int = Field(default=1, ge=1, le=16)
     use_mock: bool = True
     mode: str = "full_comparison"
+    test_scope: str = "full"
     baseline_snapshot_id: str | None = None
     runtime_credentials: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
@@ -114,6 +115,7 @@ class RunRead(BaseModel):
     suite_id: str
     name: str
     mode: str = "full_comparison"
+    test_scope: str = "full"
     baseline_snapshot_id: str | None = None
     scheduled_test_id: str | None = None
     status: str
@@ -133,6 +135,7 @@ class ScheduledChannelTestBase(BaseModel):
     baseline_snapshot_id: str
     enabled: bool = True
     interval_minutes: int = Field(default=1440, ge=5)
+    test_scope: str = "quick"
     repeat_count: int = Field(default=1, ge=1, le=5)
     concurrency: int = Field(default=4, ge=1, le=16)
     use_mock: bool = False
@@ -150,6 +153,7 @@ class ScheduledChannelTestUpdate(BaseModel):
     baseline_snapshot_id: str | None = None
     enabled: bool | None = None
     interval_minutes: int | None = Field(default=None, ge=5)
+    test_scope: str | None = None
     repeat_count: int | None = Field(default=None, ge=1, le=5)
     concurrency: int | None = Field(default=None, ge=1, le=16)
     use_mock: bool | None = None
@@ -328,9 +332,10 @@ class BaselineBuildCreate(BaseModel):
     name: str
     suite_id: str
     channel_ids: dict[str, list[str]] = Field(default_factory=dict)
-    repeat_count: int = 1
-    concurrency: int = 1
+    repeat_count: int = Field(default=1, ge=1, le=5)
+    concurrency: int = Field(default=1, ge=1, le=16)
     use_mock: bool = True
+    test_scope: str = "full"
     expires_in_days: int = 30
     runtime_credentials: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
