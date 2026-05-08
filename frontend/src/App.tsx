@@ -1,12 +1,14 @@
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Popover, Typography } from 'antd';
-import { Activity, ClipboardList, FileText, GitCompare, Headphones, ListChecks, Network } from 'lucide-react';
+import { Activity, CalendarClock, ClipboardList, Database, GitCompare, Headphones, ListChecks, Network } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Channels from './pages/Channels';
+import Baselines from './pages/Baselines';
 import CreateRun from './pages/CreateRun';
 import Runs from './pages/Runs';
 import RunDetail from './pages/RunDetail';
 import TestCases from './pages/TestCases';
+import ScheduledTests from './pages/ScheduledTests';
 
 const { Content, Sider } = Layout;
 
@@ -14,6 +16,8 @@ const navItems = [
   { key: '/', icon: Activity, label: '总览', to: '/' },
   { key: '/channels', icon: Network, label: '渠道管理', to: '/channels' },
   { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },
+  { key: '/baselines', icon: Database, label: '基线管理', to: '/baselines' },
+  { key: '/scheduled-tests', icon: CalendarClock, label: '自动巡检', to: '/scheduled-tests' },
   { key: '/new-run', icon: ListChecks, label: '创建检测', to: '/new-run' },
   { key: '/runs', icon: GitCompare, label: '任务列表', to: '/runs' },
 ];
@@ -47,9 +51,6 @@ function Shell() {
         </nav>
 
         <div className="sidebar-tools">
-          <Button className="side-tool-button" href="/api/runs" target="_blank" icon={<FileText size={16} />}>
-            API
-          </Button>
           <Popover
             trigger="click"
             placement="rightBottom"
@@ -74,6 +75,8 @@ function Shell() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/channels" element={<Channels />} />
             <Route path="/test-cases" element={<TestCases />} />
+            <Route path="/baselines" element={<Baselines />} />
+            <Route path="/scheduled-tests" element={<ScheduledTests />} />
             <Route path="/new-run" element={<CreateRun />} />
             <Route path="/runs" element={<Runs />} />
             <Route path="/runs/:runId" element={<RunDetail />} />

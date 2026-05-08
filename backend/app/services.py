@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
+import os
 import time
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Channel, Comparison, Report, Result, Run, RunChannel, TestCase, TestSuite
-from .schemas import ChannelCreate, RunCreate, TestCaseCreate, TestSuiteCreate
+from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .schemas import BaselineBuildCreate, ChannelCreate, FeishuBroadcastSettingUpdate, RunCreate, ScheduledChannelTestCreate, TestCaseCreate, TestSuiteCreate
 from .suite_seed import default_cases, default_suite
 
 
@@ -41,6 +46,111 @@ def grade_from_score(score: float, labels: list[str] | None = None) -> str:
     if score >= 60:
         return "D"
     return "E"
+
+
+ALERT_RED_FLAGS = {
+    "identity_mismatch",
+    "unsafe_response",
+    "tool_use_invalid",
+    "max_tokens_not_enforced",
+    "request_failed",
+    "protocol_mismatch",
+}
+
+FEISHU_SETTING_ID = "global"
+
+
+def get_or_create_feishu_setting(db: Session) -> FeishuBroadcastSetting:
+    setting = db.get(FeishuBroadcastSetting, FEISHU_SETTING_ID)
+    if setting:
+        return setting
+    env_webhook = os.getenv("FEISHU_WEBHOOK_URL", "").strip() or None
+    setting = FeishuBroadcastSetting(
+        id=FEISHU_SETTING_ID,
+        enabled=bool(env_webhook),
+        webhook_url=env_webhook,
+        webhook_secret=os.getenv("FEISHU_WEBHOOK_SECRET", "").strip() or None,
+        app_base_url=os.getenv("APP_BASE_URL", "").strip().rstrip("/") or None,
+        alert_broadcast_enabled=True,
+        daily_report_enabled=True,
+        daily_report_time="09:00",
+        timezone="Asia/Shanghai",
+    )
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    return setting
+
+
+def feishu_setting_read(setting: FeishuBroadcastSetting) -> dict[str, Any]:
+    return {
+        "id": setting.id,
+        "enabled": setting.enabled,
+        "webhook_configured": bool(setting.webhook_url),
+        "webhook_preview": _mask_webhook(setting.webhook_url),
+        "secret_configured": bool(setting.webhook_secret),
+        "app_base_url": setting.app_base_url,
+        "alert_broadcast_enabled": setting.alert_broadcast_enabled,
+        "daily_report_enabled": setting.daily_report_enabled,
+        "daily_report_time": setting.daily_report_time,
+        "timezone": setting.timezone,
+        "last_daily_report_at": setting.last_daily_report_at,
+        "created_at": setting.created_at,
+        "updated_at": setting.updated_at,
+    }
+
+
+def update_feishu_setting(db: Session, data: FeishuBroadcastSettingUpdate) -> FeishuBroadcastSetting:
+    setting = get_or_create_feishu_setting(db)
+    values = data.model_dump(exclude_unset=True)
+    for key in ["enabled", "alert_broadcast_enabled", "daily_report_enabled"]:
+        if key in values:
+            setattr(setting, key, values[key])
+    if "webhook_url" in values:
+        setting.webhook_url = (values["webhook_url"] or "").strip() or None
+    if data.clear_webhook_secret:
+        setting.webhook_secret = None
+    elif "webhook_secret" in values:
+        secret = (values["webhook_secret"] or "").strip()
+        if secret:
+            setting.webhook_secret = secret
+    if "app_base_url" in values:
+        setting.app_base_url = (values["app_base_url"] or "").strip().rstrip("/") or None
+    if "daily_report_time" in values and values["daily_report_time"] is not None:
+        _validate_daily_report_time(values["daily_report_time"])
+        setting.daily_report_time = values["daily_report_time"]
+    if "timezone" in values and values["timezone"]:
+        _zoneinfo(values["timezone"])
+        setting.timezone = values["timezone"]
+    db.commit()
+    db.refresh(setting)
+    return setting
+
+
+def _mask_webhook(webhook_url: str | None) -> str | None:
+    if not webhook_url:
+        return None
+    if len(webhook_url) <= 18:
+        return "***"
+    return f"{webhook_url[:12]}...{webhook_url[-6:]}"
+
+
+def _validate_daily_report_time(value: str) -> None:
+    try:
+        hour_raw, minute_raw = value.split(":", 1)
+        hour = int(hour_raw)
+        minute = int(minute_raw)
+    except Exception as exc:
+        raise ValueError("daily_report_time must use HH:MM format") from exc
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("daily_report_time must be between 00:00 and 23:59")
+
+
+def _zoneinfo(timezone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"Unsupported timezone: {timezone_name}") from exc
 
 
 def create_channel(db: Session, data: ChannelCreate) -> Channel:
@@ -123,7 +233,15 @@ def seed_demo_data(db: Session) -> None:
 
 
 def create_run(db: Session, data: RunCreate) -> Run:
-    channel_ids_by_role = data.channel_ids or _default_channel_ids_by_role(db)
+    mode = data.mode or "full_comparison"
+    if mode not in {"full_comparison", "baseline_build", "candidate_eval"}:
+        raise ValueError(f"Unsupported run mode: {mode}")
+    if mode == "candidate_eval":
+        if not data.baseline_snapshot_id:
+            raise ValueError("candidate_eval requires baseline_snapshot_id")
+        validate_baseline_for_run(db, data.baseline_snapshot_id, data.suite_id)
+    channel_ids_by_role = data.channel_ids or _default_channel_ids_by_role(db, mode)
+    channel_ids_by_role = _filter_channel_ids_for_mode(channel_ids_by_role, mode)
     selected_ids = [(channel_id, role) for role, ids in channel_ids_by_role.items() for channel_id in ids]
     cases = db.scalars(
         select(TestCase)
@@ -134,6 +252,8 @@ def create_run(db: Session, data: RunCreate) -> Run:
         id=new_id("run"),
         suite_id=data.suite_id,
         name=data.name,
+        mode=mode,
+        baseline_snapshot_id=data.baseline_snapshot_id,
         status="pending",
         repeat_count=max(1, data.repeat_count),
         concurrency=max(1, data.concurrency),
@@ -148,11 +268,92 @@ def create_run(db: Session, data: RunCreate) -> Run:
     return run
 
 
-def _default_channel_ids_by_role(db: Session) -> dict[str, list[str]]:
+def create_baseline_build(db: Session, data: BaselineBuildCreate) -> tuple[Run, BaselineSnapshot]:
+    run = create_run(
+        db,
+        RunCreate(
+            name=data.name,
+            suite_id=data.suite_id,
+            channel_ids=data.channel_ids,
+            repeat_count=data.repeat_count,
+            concurrency=data.concurrency,
+            use_mock=data.use_mock,
+            mode="baseline_build",
+            runtime_credentials=data.runtime_credentials,
+        ),
+    )
+    channel_ids = [item.channel_id for item in db.scalars(select(RunChannel).where(RunChannel.run_id == run.id)).all()]
+    snapshot = BaselineSnapshot(
+        id=new_id("base"),
+        name=data.name,
+        suite_id=data.suite_id,
+        source_run_id=run.id,
+        status="building",
+        suite_fingerprint=suite_fingerprint(db, data.suite_id),
+        request_fingerprint=request_fingerprint(db, data.suite_id),
+        channel_fingerprint=channel_fingerprint(db, channel_ids),
+        channel_ids=channel_ids,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=max(1, data.expires_in_days)),
+    )
+    db.add(snapshot)
+    run.baseline_snapshot_id = snapshot.id
+    db.commit()
+    db.refresh(run)
+    db.refresh(snapshot)
+    return run, snapshot
+
+
+def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate) -> ScheduledChannelTest:
+    channel = db.get(Channel, data.channel_id)
+    if not channel:
+        raise ValueError("Channel not found")
+    if channel.role not in {"candidate", "negative"}:
+        raise ValueError("Scheduled channel tests require a candidate or negative channel")
+    validate_baseline_for_run(db, data.baseline_snapshot_id, data.suite_id)
+    next_run_at = data.next_run_at or datetime.now(timezone.utc) + timedelta(minutes=max(5, data.interval_minutes))
+    scheduled = ScheduledChannelTest(
+        id=data.id or new_id("sched"),
+        name=data.name,
+        channel_id=data.channel_id,
+        suite_id=data.suite_id,
+        baseline_snapshot_id=data.baseline_snapshot_id,
+        enabled=data.enabled,
+        interval_minutes=max(5, data.interval_minutes),
+        repeat_count=max(1, data.repeat_count),
+        concurrency=max(1, data.concurrency),
+        use_mock=data.use_mock,
+        next_run_at=next_run_at,
+        last_status="idle",
+    )
+    db.add(scheduled)
+    db.commit()
+    db.refresh(scheduled)
+    return scheduled
+
+
+def validate_scheduled_channel_test(db: Session, scheduled: ScheduledChannelTest) -> None:
+    channel = db.get(Channel, scheduled.channel_id)
+    if not channel:
+        raise ValueError("Channel not found")
+    if channel.role not in {"candidate", "negative"}:
+        raise ValueError("Scheduled channel tests require a candidate or negative channel")
+    validate_baseline_for_run(db, scheduled.baseline_snapshot_id, scheduled.suite_id)
+
+
+def _default_channel_ids_by_role(db: Session, mode: str = "full_comparison") -> dict[str, list[str]]:
     result: dict[str, list[str]] = defaultdict(list)
     for channel in db.scalars(select(Channel).where(Channel.enabled.is_(True))).all():
         result[channel.role].append(channel.id)
-    return dict(result)
+    return _filter_channel_ids_for_mode(dict(result), mode)
+
+
+def _filter_channel_ids_for_mode(channel_ids_by_role: dict[str, list[str]], mode: str) -> dict[str, list[str]]:
+    allowed = {
+        "baseline_build": {"gold", "official_cloud"},
+        "candidate_eval": {"candidate", "negative"},
+        "full_comparison": {"gold", "official_cloud", "candidate", "negative"},
+    }[mode]
+    return {role: ids for role, ids in channel_ids_by_role.items() if role in allowed and ids}
 
 
 async def execute_run(
@@ -227,14 +428,21 @@ async def execute_run(
                 run.completed_jobs += 1
                 db.commit()
 
-            build_comparisons(db, run.id)
-            build_reports(db, run.id)
+            if run.mode == "baseline_build":
+                finalize_baseline_from_run(db, run.id)
+            else:
+                build_comparisons(db, run.id, run.baseline_snapshot_id)
+                build_reports(db, run.id)
             run.status = "completed"
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
         except Exception as exc:  # keep failed runs inspectable
             run.status = "failed"
             run.finished_at = datetime.now(timezone.utc)
+            if run.mode == "baseline_build" and run.baseline_snapshot_id:
+                snapshot = db.get(BaselineSnapshot, run.baseline_snapshot_id)
+                if snapshot:
+                    snapshot.status = "failed"
             fallback_channel_id = db.scalar(select(RunChannel.channel_id).where(RunChannel.run_id == run.id)) or "anthropic_official"
             db.add(
                 Report(
@@ -251,9 +459,602 @@ async def execute_run(
             db.commit()
 
 
+async def execute_scheduled_channel_test(
+    session_factory: sessionmaker[Session],
+    scheduled_id: str,
+    *,
+    advance_next_run: bool = True,
+) -> Run | None:
+    run_id: str | None = None
+    try:
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            if not scheduled:
+                return None
+            validate_scheduled_channel_test(db, scheduled)
+            channel = db.get(Channel, scheduled.channel_id)
+            if not channel:
+                raise ValueError("Channel not found")
+            run = create_run(
+                db,
+                RunCreate(
+                    name=f"自动巡检 - {scheduled.name}",
+                    suite_id=scheduled.suite_id,
+                    channel_ids={channel.role: [channel.id]},
+                    repeat_count=scheduled.repeat_count,
+                    concurrency=scheduled.concurrency,
+                    use_mock=scheduled.use_mock,
+                    mode="candidate_eval",
+                    baseline_snapshot_id=scheduled.baseline_snapshot_id,
+                ),
+            )
+            run_id = run.id
+            run.scheduled_test_id = scheduled.id
+            scheduled.last_run_id = run.id
+            scheduled.last_status = "running"
+            scheduled.last_error = None
+            if advance_next_run:
+                scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+            db.commit()
+
+        await execute_run(session_factory, run_id, use_mock=scheduled.use_mock)
+
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            run = db.get(Run, run_id)
+            if not scheduled or not run:
+                return run
+            scheduled.last_status = run.status
+            scheduled.last_error = None if run.status == "completed" else f"Run finished with status {run.status}"
+            db.commit()
+            if run.status in {"completed", "failed"}:
+                await create_alerts_for_run(session_factory, run.id, scheduled.id)
+            db.refresh(run)
+            return run
+    except Exception as exc:
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            if scheduled:
+                scheduled.last_status = "failed"
+                scheduled.last_error = str(exc)
+                if advance_next_run:
+                    scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+                db.commit()
+        return None
+
+
+async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: str, scheduled_id: str | None = None) -> list[ChannelAlert]:
+    alerts: list[ChannelAlert] = []
+    with session_factory() as db:
+        reports = db.scalars(select(Report).where(Report.run_id == run_id)).all()
+        for report in reports:
+            labels = report_labels(report)
+            if not report_needs_alert(report, labels):
+                continue
+            existing = db.scalar(select(ChannelAlert).where(ChannelAlert.report_id == report.id))
+            if existing:
+                alerts.append(existing)
+                continue
+            channel = db.get(Channel, report.channel_id)
+            severity = "critical" if report.grade == "E" or ALERT_RED_FLAGS.intersection(labels) else "high"
+            message = f"{channel.name if channel else report.channel_id} 自动巡检异常：评级 {report.grade}，得分 {report.final_score:.1f}"
+            alert = ChannelAlert(
+                id=new_id("alert"),
+                scheduled_test_id=scheduled_id,
+                run_id=run_id,
+                report_id=report.id,
+                channel_id=report.channel_id,
+                status="pending_review",
+                severity=severity,
+                grade=report.grade,
+                final_score=report.final_score,
+                trigger_labels=sorted(set(labels)),
+                message=message,
+                notification_status="pending",
+            )
+            db.add(alert)
+            db.commit()
+            db.refresh(alert)
+            alerts.append(alert)
+
+    for alert in alerts:
+        await send_alert_notification(session_factory, alert.id)
+    return alerts
+
+
+def report_labels(report: Report) -> list[str]:
+    evidence = report.evidence or {}
+    labels = evidence.get("labels")
+    if not isinstance(labels, list):
+        return []
+    return sorted({str(label) for label in labels})
+
+
+def report_needs_alert(report: Report, labels: list[str] | None = None) -> bool:
+    labels = labels if labels is not None else report_labels(report)
+    return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels))
+
+
+async def send_alert_notification(session_factory: sessionmaker[Session], alert_id: str) -> ChannelAlert | None:
+    with session_factory() as db:
+        alert = db.get(ChannelAlert, alert_id)
+        if not alert:
+            return None
+        setting = get_or_create_feishu_setting(db)
+        if not setting.enabled or not setting.alert_broadcast_enabled:
+            alert.notification_status = "skipped"
+            alert.notification_error = "Feishu alert broadcast is disabled"
+            db.commit()
+            db.refresh(alert)
+            return alert
+        if not setting.webhook_url:
+            alert.notification_status = "skipped"
+            alert.notification_error = "Feishu webhook is not configured"
+            db.commit()
+            db.refresh(alert)
+            return alert
+        payload = feishu_text_payload(alert, db, setting)
+        webhook_url = setting.webhook_url
+
+    try:
+        await post_feishu_payload(webhook_url, payload)
+        with session_factory() as db:
+            alert = db.get(ChannelAlert, alert_id)
+            if alert:
+                alert.notification_status = "sent"
+                alert.notification_error = None
+                alert.notified_at = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(alert)
+            return alert
+    except Exception as exc:
+        with session_factory() as db:
+            alert = db.get(ChannelAlert, alert_id)
+            if alert:
+                alert.notification_status = "failed"
+                alert.notification_error = str(exc)
+                db.commit()
+                db.refresh(alert)
+            return alert
+
+
+async def post_feishu_payload(webhook_url: str, payload: dict[str, Any]) -> None:
+    async with httpx.AsyncClient(timeout=8) as client:
+        response = await client.post(webhook_url, json=payload)
+        response.raise_for_status()
+
+
+async def send_feishu_test_message(db: Session) -> dict[str, Any]:
+    setting = get_or_create_feishu_setting(db)
+    if not setting.enabled:
+        return {"ok": False, "status": "skipped", "message": "飞书播报未启用"}
+    if not setting.webhook_url:
+        return {"ok": False, "status": "skipped", "message": "飞书 Webhook 未配置"}
+    payload = feishu_signed_payload(
+        "Claude 渠道自动巡检测试消息\n"
+        "如果你收到这条消息，说明飞书机器人配置可用。",
+        setting.webhook_secret,
+    )
+    try:
+        await post_feishu_payload(setting.webhook_url, payload)
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "message": str(exc)}
+    return {"ok": True, "status": "sent", "message": "测试消息已发送"}
+
+
+def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadcastSetting) -> dict[str, Any]:
+    channel = db.get(Channel, alert.channel_id)
+    run = db.get(Run, alert.run_id)
+    app_base_url = (setting.app_base_url or "").strip().rstrip("/")
+    run_link = f"{app_base_url}/runs/{alert.run_id}" if app_base_url else f"/runs/{alert.run_id}"
+    review_link = f"{app_base_url}/scheduled-tests?alert={alert.id}" if app_base_url else f"/scheduled-tests?alert={alert.id}"
+    labels = ", ".join(alert.trigger_labels or []) or "无"
+    text = (
+        "Claude 渠道自动巡检发现异常\n"
+        f"渠道：{channel.name if channel else alert.channel_id}\n"
+        f"任务：{run.name if run else alert.run_id}\n"
+        f"评级：{alert.grade}\n"
+        f"得分：{alert.final_score:.1f}\n"
+        f"异常标签：{labels}\n"
+        f"报告：{run_link}\n"
+        f"复审：{review_link}"
+    )
+    return feishu_signed_payload(text, setting.webhook_secret)
+
+
+def feishu_signed_payload(text: str, secret: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"msg_type": "text", "content": {"text": text}}
+    secret = (secret or "").strip()
+    if secret:
+        timestamp = str(int(time.time()))
+        string_to_sign = f"{timestamp}\n{secret}".encode("utf-8")
+        sign = base64.b64encode(hmac.new(string_to_sign, b"", digestmod=hashlib.sha256).digest()).decode("utf-8")
+        payload["timestamp"] = timestamp
+        payload["sign"] = sign
+    return payload
+
+
+def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -> dict[str, Any]:
+    from_at = _as_utc(from_at)
+    to_at = _as_utc(to_at)
+    schedules = db.scalars(select(ScheduledChannelTest).order_by(ScheduledChannelTest.name)).all()
+    runs = db.scalars(
+        select(Run)
+        .where(Run.scheduled_test_id.is_not(None), Run.created_at >= from_at, Run.created_at <= to_at)
+        .order_by(Run.created_at.desc())
+    ).all()
+    run_ids = [run.id for run in runs]
+    reports = db.scalars(select(Report).where(Report.run_id.in_(run_ids)).order_by(Report.created_at.desc())).all() if run_ids else []
+    alerts = db.scalars(
+        select(ChannelAlert)
+        .where(ChannelAlert.created_at >= from_at, ChannelAlert.created_at <= to_at)
+        .order_by(ChannelAlert.created_at.desc())
+    ).all()
+    channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
+    run_by_id = {run.id: run for run in runs}
+    reports_by_channel: dict[str, list[Report]] = defaultdict(list)
+    for report in reports:
+        reports_by_channel[report.channel_id].append(report)
+    alerts_by_channel: dict[str, list[ChannelAlert]] = defaultdict(list)
+    for alert in alerts:
+        alerts_by_channel[alert.channel_id].append(alert)
+
+    channel_ids = sorted({schedule.channel_id for schedule in schedules} | set(reports_by_channel) | set(alerts_by_channel))
+    channel_summaries = []
+    for channel_id in channel_ids:
+        channel = channels.get(channel_id)
+        channel_reports = reports_by_channel.get(channel_id, [])
+        latest_report = channel_reports[0] if channel_reports else None
+        channel_runs = [run for run in runs if run_by_id.get(run.id) and any(report.run_id == run.id and report.channel_id == channel_id for report in reports)]
+        scores = [report.final_score for report in channel_reports]
+        channel_alerts = alerts_by_channel.get(channel_id, [])
+        last_run_at = max([run.created_at for run in channel_runs if run.created_at], default=None)
+        channel_summaries.append(
+            {
+                "channel_id": channel_id,
+                "channel_name": channel.name if channel else channel_id,
+                "run_count": len(channel_runs),
+                "alert_count": len(channel_alerts),
+                "pending_review_count": sum(1 for alert in channel_alerts if alert.status == "pending_review"),
+                "latest_grade": latest_report.grade if latest_report else None,
+                "latest_score": latest_report.final_score if latest_report else None,
+                "avg_score": round(sum(scores) / len(scores), 2) if scores else None,
+                "last_run_at": last_run_at,
+            }
+        )
+    channel_summaries.sort(key=lambda item: (item["alert_count"], -(item["avg_score"] or 0), item["channel_name"]), reverse=True)
+
+    grade_distribution = {grade: 0 for grade in ["A", "B", "C", "D", "E"]}
+    for report in reports:
+        grade_distribution[report.grade] = grade_distribution.get(report.grade, 0) + 1
+    trend = _smart_patrol_trend(runs, reports, alerts)
+    scores = [report.final_score for report in reports]
+    return {
+        "from_at": from_at,
+        "to_at": to_at,
+        "schedule_count": len(schedules),
+        "enabled_schedule_count": sum(1 for schedule in schedules if schedule.enabled),
+        "run_count": len(runs),
+        "completed_run_count": sum(1 for run in runs if run.status == "completed"),
+        "failed_run_count": sum(1 for run in runs if run.status == "failed"),
+        "alert_count": len(alerts),
+        "pending_review_count": sum(1 for alert in alerts if alert.status == "pending_review"),
+        "avg_score": round(sum(scores) / len(scores), 2) if scores else None,
+        "grade_distribution": grade_distribution,
+        "channel_summaries": channel_summaries,
+        "recent_alerts": alerts[:10],
+        "trend": trend,
+    }
+
+
+def _smart_patrol_trend(runs: list[Run], reports: list[Report], alerts: list[ChannelAlert]) -> list[dict[str, Any]]:
+    run_count_by_date: dict[str, int] = defaultdict(int)
+    alert_count_by_date: dict[str, int] = defaultdict(int)
+    scores_by_date: dict[str, list[float]] = defaultdict(list)
+    for run in runs:
+        if run.created_at:
+            run_count_by_date[_date_key(run.created_at)] += 1
+    for alert in alerts:
+        if alert.created_at:
+            alert_count_by_date[_date_key(alert.created_at)] += 1
+    for report in reports:
+        if report.created_at:
+            scores_by_date[_date_key(report.created_at)].append(report.final_score)
+    dates = sorted(set(run_count_by_date) | set(alert_count_by_date) | set(scores_by_date))
+    return [
+        {
+            "date": date,
+            "run_count": run_count_by_date.get(date, 0),
+            "alert_count": alert_count_by_date.get(date, 0),
+            "avg_score": round(sum(scores_by_date[date]) / len(scores_by_date[date]), 2) if scores_by_date.get(date) else None,
+        }
+        for date in dates
+    ]
+
+
+def _date_key(value: datetime) -> str:
+    return _as_utc(value).date().isoformat()
+
+
+def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
+    avg_score = "-" if report["avg_score"] is None else f"{report['avg_score']:.1f}"
+    grade_line = "、".join(f"{grade}:{count}" for grade, count in report["grade_distribution"].items())
+    channel_lines = "\n".join(
+        f"- {item['channel_name']}：巡检 {item['run_count']} 次，异常 {item['alert_count']} 次，待复审 {item['pending_review_count']}，均分 {item['avg_score'] if item['avg_score'] is not None else '-'}"
+        for item in report["channel_summaries"][:8]
+    ) or "- 暂无渠道巡检数据"
+    alert_lines = "\n".join(
+        f"- {alert.message or alert.channel_id}（{alert.grade}/{alert.final_score:.1f}，{alert.status}）"
+        for alert in report["recent_alerts"][:8]
+    ) or "- 暂无异常告警"
+    return f"""# 智能巡检汇总报告
+
+## 时间范围
+
+- 开始：{report['from_at'].isoformat()}
+- 结束：{report['to_at'].isoformat()}
+
+## 总览
+
+- 巡检计划：{report['enabled_schedule_count']} / {report['schedule_count']} 启用
+- 自动巡检任务：{report['run_count']} 次
+- 完成 / 失败：{report['completed_run_count']} / {report['failed_run_count']}
+- 异常告警：{report['alert_count']}
+- 待复审：{report['pending_review_count']}
+- 平均分：{avg_score}
+- 评级分布：{grade_line}
+
+## 渠道风险排行
+
+{channel_lines}
+
+## 最近异常
+
+{alert_lines}
+"""
+
+
+async def send_daily_patrol_report(session_factory: sessionmaker[Session], *, force: bool = False) -> dict[str, Any]:
+    with session_factory() as db:
+        setting = get_or_create_feishu_setting(db)
+        due = force or daily_report_due(setting, datetime.now(timezone.utc))
+        if not due:
+            return {"ok": False, "status": "skipped", "message": "日报未到发送时间"}
+        if not setting.enabled or not setting.daily_report_enabled:
+            return {"ok": False, "status": "skipped", "message": "飞书日报未启用"}
+        if not setting.webhook_url:
+            return {"ok": False, "status": "skipped", "message": "飞书 Webhook 未配置"}
+        to_at = datetime.now(timezone.utc)
+        from_at = to_at - timedelta(hours=24)
+        report = build_smart_patrol_report(db, from_at, to_at)
+        text = smart_patrol_daily_text(report, setting)
+        payload = feishu_signed_payload(text, setting.webhook_secret)
+        webhook_url = setting.webhook_url
+
+    try:
+        await post_feishu_payload(webhook_url, payload)
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "message": str(exc)}
+
+    with session_factory() as db:
+        setting = get_or_create_feishu_setting(db)
+        setting.last_daily_report_at = datetime.now(timezone.utc)
+        db.commit()
+    return {"ok": True, "status": "sent", "message": "智能巡检日报已发送"}
+
+
+def daily_report_due(setting: FeishuBroadcastSetting, now_utc: datetime) -> bool:
+    if not setting.enabled or not setting.daily_report_enabled:
+        return False
+    _validate_daily_report_time(setting.daily_report_time)
+    zone = _zoneinfo(setting.timezone)
+    now_local = _as_utc(now_utc).astimezone(zone)
+    hour, minute = [int(part) for part in setting.daily_report_time.split(":", 1)]
+    scheduled_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now_local < scheduled_local:
+        return False
+    if not setting.last_daily_report_at:
+        return True
+    return _as_utc(setting.last_daily_report_at).astimezone(zone).date() < now_local.date()
+
+
+def smart_patrol_daily_text(report: dict[str, Any], setting: FeishuBroadcastSetting) -> str:
+    app_base_url = (setting.app_base_url or "").strip().rstrip("/")
+    report_link = f"{app_base_url}/scheduled-tests?tab=report" if app_base_url else "/scheduled-tests?tab=report"
+    top_channels = report["channel_summaries"][:5]
+    channel_lines = "\n".join(
+        f"{index + 1}. {item['channel_name']}：异常 {item['alert_count']}，待复审 {item['pending_review_count']}，均分 {item['avg_score'] if item['avg_score'] is not None else '-'}"
+        for index, item in enumerate(top_channels)
+    ) or "暂无渠道巡检数据"
+    avg_score = "-" if report["avg_score"] is None else f"{report['avg_score']:.1f}"
+    return (
+        "Claude 渠道智能巡检日报\n"
+        f"时间范围：{report['from_at'].isoformat()} ~ {report['to_at'].isoformat()}\n"
+        f"巡检任务：{report['run_count']} 次，完成 {report['completed_run_count']}，失败 {report['failed_run_count']}\n"
+        f"异常告警：{report['alert_count']}，待复审 {report['pending_review_count']}\n"
+        f"平均分：{avg_score}\n"
+        "渠道风险排行：\n"
+        f"{channel_lines}\n"
+        f"报告：{report_link}"
+    )
+
+
+async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_seconds: int = 60) -> None:
+    while True:
+        await send_daily_patrol_report(session_factory)
+        now = datetime.now(timezone.utc)
+        due_ids: list[str] = []
+        with session_factory() as db:
+            schedules = db.scalars(
+                select(ScheduledChannelTest)
+                .where(ScheduledChannelTest.enabled.is_(True), ScheduledChannelTest.next_run_at <= now)
+                .order_by(ScheduledChannelTest.next_run_at)
+            ).all()
+            for scheduled in schedules:
+                if scheduled.last_status in {"queued", "running"}:
+                    continue
+                scheduled.last_status = "queued"
+                scheduled.next_run_at = now + timedelta(minutes=max(5, scheduled.interval_minutes))
+                due_ids.append(scheduled.id)
+            db.commit()
+        for scheduled_id in due_ids:
+            asyncio.create_task(execute_scheduled_channel_test(session_factory, scheduled_id, advance_next_run=False))
+        await asyncio.sleep(max(5, poll_seconds))
+
+
 def _sort_channels_for_run(channels: list[Channel]) -> list[Channel]:
     order = {"gold": 0, "official_cloud": 1, "candidate": 2, "negative": 3}
     return sorted(channels, key=lambda channel: (order.get(channel.role, 9), channel.name))
+
+
+def suite_fingerprint(db: Session, suite_id: str) -> str:
+    cases = db.scalars(
+        select(TestCase)
+        .where(TestCase.suite_id == suite_id, TestCase.enabled.is_(True))
+        .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
+    ).all()
+    payload = [
+        {
+            "id": case.id,
+            "module": case.module,
+            "sort_order": case.sort_order,
+            "title": case.title,
+            "prompt": case.prompt,
+            "system_prompt": case.system_prompt,
+            "request_params": case.request_params or {},
+            "scoring_rules": case.scoring_rules or {},
+        }
+        for case in cases
+    ]
+    return _hash_payload(payload)
+
+
+def request_fingerprint(db: Session, suite_id: str) -> str:
+    cases = db.scalars(
+        select(TestCase)
+        .where(TestCase.suite_id == suite_id, TestCase.enabled.is_(True))
+        .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
+    ).all()
+    payload = [
+        {
+            "id": case.id,
+            "system_prompt": case.system_prompt,
+            "request_params": case.request_params or {},
+        }
+        for case in cases
+    ]
+    return _hash_payload(payload)
+
+
+def channel_fingerprint(db: Session, channel_ids: list[str]) -> str:
+    channels = db.scalars(select(Channel).where(Channel.id.in_(channel_ids)).order_by(Channel.role, Channel.id)).all()
+    payload = [
+        {
+            "id": channel.id,
+            "provider_type": channel.provider_type,
+            "role": channel.role,
+            "base_url": channel.base_url,
+            "model_name": channel.model_name,
+        }
+        for channel in channels
+    ]
+    return _hash_payload(payload)
+
+
+def _hash_payload(payload: Any) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_baseline_for_run(db: Session, baseline_snapshot_id: str, suite_id: str) -> BaselineSnapshot:
+    snapshot = db.get(BaselineSnapshot, baseline_snapshot_id)
+    if not snapshot:
+        raise ValueError("Baseline snapshot not found")
+    refresh_baseline_status(db, snapshot)
+    if snapshot.status != "ready":
+        raise ValueError(f"Baseline snapshot is not ready: {snapshot.status}")
+    if snapshot.suite_id != suite_id:
+        raise ValueError("Baseline suite does not match run suite")
+    if snapshot.suite_fingerprint != suite_fingerprint(db, suite_id):
+        snapshot.status = "invalid"
+        db.commit()
+        raise ValueError("Baseline suite fingerprint is no longer valid")
+    if snapshot.request_fingerprint != request_fingerprint(db, suite_id):
+        snapshot.status = "invalid"
+        db.commit()
+        raise ValueError("Baseline request fingerprint is no longer valid")
+    if snapshot.channel_fingerprint != channel_fingerprint(db, snapshot.channel_ids or []):
+        snapshot.status = "invalid"
+        db.commit()
+        raise ValueError("Baseline channel fingerprint is no longer valid")
+    return snapshot
+
+
+def refresh_baseline_status(db: Session, snapshot: BaselineSnapshot) -> BaselineSnapshot:
+    if snapshot.status == "ready" and snapshot.expires_at and _as_utc(snapshot.expires_at) < datetime.now(timezone.utc):
+        snapshot.status = "expired"
+        db.commit()
+        db.refresh(snapshot)
+    return snapshot
+
+
+def finalize_baseline_from_run(db: Session, run_id: str) -> BaselineSnapshot | None:
+    run = db.get(Run, run_id)
+    if not run:
+        return None
+    snapshot = db.get(BaselineSnapshot, run.baseline_snapshot_id) if run.baseline_snapshot_id else None
+    if not snapshot:
+        snapshot = BaselineSnapshot(
+            id=new_id("base"),
+            name=run.name,
+            suite_id=run.suite_id,
+            source_run_id=run.id,
+            status="building",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+        db.add(snapshot)
+        run.baseline_snapshot_id = snapshot.id
+        db.commit()
+        db.refresh(snapshot)
+
+    db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
+    channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
+    results = db.scalars(select(Result).where(Result.run_id == run.id).order_by(Result.test_case_id, Result.channel_id, Result.attempt_index)).all()
+    official_results = [result for result in results if channels.get(result.channel_id) and channels[result.channel_id].role in {"gold", "official_cloud"}]
+    for result in official_results:
+        channel = channels[result.channel_id]
+        db.add(
+            BaselineResult(
+                id=new_id("bres"),
+                baseline_snapshot_id=snapshot.id,
+                test_case_id=result.test_case_id,
+                channel_id=result.channel_id,
+                role_in_baseline=channel.role,
+                attempt_index=result.attempt_index,
+                normalized_response=result.normalized_response,
+                raw_request=result.raw_request,
+                raw_response=result.raw_response,
+                metrics=result.metrics,
+                score=result.score,
+                labels=result.labels,
+            )
+        )
+    channel_ids = sorted({result.channel_id for result in official_results})
+    snapshot.channel_ids = channel_ids
+    snapshot.suite_fingerprint = suite_fingerprint(db, run.suite_id)
+    snapshot.request_fingerprint = request_fingerprint(db, run.suite_id)
+    snapshot.channel_fingerprint = channel_fingerprint(db, channel_ids)
+    snapshot.ready_at = datetime.now(timezone.utc)
+    snapshot.status = "ready" if official_results else "failed"
+    db.commit()
+    db.refresh(snapshot)
+    return snapshot
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credentials: dict[str, Any], use_mock: bool) -> dict[str, Any]:
@@ -562,8 +1363,10 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     return max(0.0, min(100.0, score)), sorted(set(labels))
 
 
-def build_comparisons(db: Session, run_id: str) -> None:
+def build_comparisons(db: Session, run_id: str, baseline_snapshot_id: str | None = None) -> None:
     db.execute(delete(Comparison).where(Comparison.run_id == run_id))
+    run = db.get(Run, run_id)
+    baseline_snapshot_id = baseline_snapshot_id or (run.baseline_snapshot_id if run else None)
     results = db.scalars(select(Result).where(Result.run_id == run_id)).all()
     channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
     by_case_channel: dict[tuple[str, str], list[Result]] = defaultdict(list)
@@ -571,13 +1374,30 @@ def build_comparisons(db: Session, run_id: str) -> None:
         by_case_channel[(result.test_case_id, result.channel_id)].append(result)
 
     case_ids = sorted({result.test_case_id for result in results})
-    candidate_ids = [cid for cid, channel in channels.items() if channel.role in {"candidate", "negative"}]
-    gold_ids = [cid for cid, channel in channels.items() if channel.role == "gold"]
-    cloud_ids = [cid for cid, channel in channels.items() if channel.role == "official_cloud"]
+    run_channel_ids = {item.channel_id for item in db.scalars(select(RunChannel).where(RunChannel.run_id == run_id)).all()}
+    candidate_ids = [cid for cid, channel in channels.items() if cid in run_channel_ids and channel.role in {"candidate", "negative"}]
+
+    baseline_by_case_role: dict[tuple[str, str], list[BaselineResult]] = defaultdict(list)
+    if baseline_snapshot_id:
+        baseline_results = db.scalars(
+            select(BaselineResult)
+            .where(BaselineResult.baseline_snapshot_id == baseline_snapshot_id)
+            .order_by(BaselineResult.test_case_id, BaselineResult.channel_id, BaselineResult.attempt_index)
+        ).all()
+        for result in baseline_results:
+            baseline_by_case_role[(result.test_case_id, result.role_in_baseline)].append(result)
+        case_ids = sorted(set(case_ids) | {result.test_case_id for result in baseline_results})
+    else:
+        gold_ids = [cid for cid, channel in channels.items() if cid in run_channel_ids and channel.role == "gold"]
+        cloud_ids = [cid for cid, channel in channels.items() if cid in run_channel_ids and channel.role == "official_cloud"]
 
     for case_id in case_ids:
-        gold_texts = [_joined_text(by_case_channel.get((case_id, cid), [])) for cid in gold_ids]
-        cloud_texts = [_joined_text(by_case_channel.get((case_id, cid), [])) for cid in cloud_ids]
+        if baseline_snapshot_id:
+            gold_texts = [_joined_baseline_text(baseline_by_case_role.get((case_id, "gold"), []))]
+            cloud_texts = [_joined_baseline_text(baseline_by_case_role.get((case_id, "official_cloud"), []))]
+        else:
+            gold_texts = [_joined_text(by_case_channel.get((case_id, cid), [])) for cid in gold_ids]
+            cloud_texts = [_joined_text(by_case_channel.get((case_id, cid), [])) for cid in cloud_ids]
         for candidate_id in candidate_ids:
             candidate_results = by_case_channel.get((case_id, candidate_id), [])
             if not candidate_results:
@@ -589,6 +1409,11 @@ def build_comparisons(db: Session, run_id: str) -> None:
             capability_score = max(gold_sim, cloud_sim) * 100
             final_score = protocol_score * 0.65 + capability_score * 0.35
             labels = sorted({label for result in candidate_results for label in (result.labels or [])})
+            if baseline_snapshot_id:
+                if not any(gold_texts):
+                    labels.append("baseline_gold_missing")
+                if not any(cloud_texts):
+                    labels.append("baseline_cloud_missing")
             db.add(
                 Comparison(
                     id=new_id("cmp"),
@@ -600,13 +1425,17 @@ def build_comparisons(db: Session, run_id: str) -> None:
                     protocol_score=round(protocol_score, 2),
                     capability_score=round(capability_score, 2),
                     final_score=round(final_score, 2),
-                    labels=labels,
+                    labels=sorted(set(labels)),
                 )
             )
     db.commit()
 
 
 def _joined_text(results: list[Result]) -> str:
+    return "\n".join((result.normalized_response or {}).get("content_text", "") for result in results)
+
+
+def _joined_baseline_text(results: list[BaselineResult]) -> str:
     return "\n".join((result.normalized_response or {}).get("content_text", "") for result in results)
 
 
@@ -619,6 +1448,8 @@ def _avg_sim(text: str, references: list[str]) -> float:
 
 def build_reports(db: Session, run_id: str) -> None:
     db.execute(delete(Report).where(Report.run_id == run_id))
+    run = db.get(Run, run_id)
+    snapshot = db.get(BaselineSnapshot, run.baseline_snapshot_id) if run and run.baseline_snapshot_id else None
     comparisons = db.scalars(select(Comparison).where(Comparison.run_id == run_id)).all()
     by_channel: dict[str, list[Comparison]] = defaultdict(list)
     for comparison in comparisons:
@@ -637,6 +1468,10 @@ def build_reports(db: Session, run_id: str) -> None:
             "avg_official_cloud_similarity": round(sum(item.official_cloud_similarity for item in items) / len(items), 2),
             "labels": labels,
             "comparison_count": len(items),
+            "baseline_snapshot_id": snapshot.id if snapshot else None,
+            "baseline_name": snapshot.name if snapshot else None,
+            "baseline_ready_at": snapshot.ready_at.isoformat() if snapshot and snapshot.ready_at else None,
+            "baseline_expires_at": snapshot.expires_at.isoformat() if snapshot and snapshot.expires_at else None,
         }
         db.add(
             Report(
@@ -665,6 +1500,13 @@ def _summary_for(grade: str) -> str:
 
 def report_markdown(channel: Channel, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
     labels = ", ".join(evidence["labels"]) or "未发现显著异常"
+    baseline_line = (
+        f"- 复用官方基线：{evidence.get('baseline_name')} ({evidence.get('baseline_snapshot_id')})\n"
+        f"- 基线生成时间：{evidence.get('baseline_ready_at') or '未记录'}\n"
+        f"- 基线过期时间：{evidence.get('baseline_expires_at') or '未记录'}\n"
+        if evidence.get("baseline_snapshot_id")
+        else "- 基线模式：本次任务内同步对比\n"
+    )
     return f"""# Claude 渠道真实性测评报告
 
 ## 基本信息
@@ -673,6 +1515,7 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
 - 声称模型：{channel.model_name or "未配置"}
 - 测试时间：{datetime.now(timezone.utc).isoformat()}
 - 基线渠道：Anthropic Official、AWS Bedrock Claude、Azure AI Foundry Claude
+{baseline_line}
 
 ## 综合结论
 
@@ -689,5 +1532,5 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
 
 ## 风险说明
 
-本报告不写“100% 真/假”，只基于协议、能力、工具调用、截断、多轮上下文、安全边界和稳定性证据给出风险评级。
+本报告不写“100% 真/假”，只基于协议、能力、工具调用、截断、多轮上下文、安全边界和稳定性证据给出风险评级。若本次复用了历史官方基线，只代表与该基线快照的差异，不证明渠道永久可信。
 """

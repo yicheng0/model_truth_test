@@ -42,6 +42,7 @@ const roleColor: Record<ChannelRole, string> = {
 export default function Channels() {
   const queryClient = useQueryClient();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
+  const pendingAlerts = useQuery({ queryKey: ['alerts', 'pending_review'], queryFn: () => api.alerts('pending_review') });
   const [createForm] = Form.useForm<ChannelFormValues>();
   const [editForm] = Form.useForm<ChannelFormValues>();
   const [editing, setEditing] = useState<Channel | null>(null);
@@ -100,6 +101,13 @@ export default function Channels() {
 
   const existingChannelIds = useMemo(() => new Set((channels.data ?? []).map((channel) => channel.id)), [channels.data]);
   const missingFixedReferenceCount = fixedReferenceChannels.filter((channel) => !existingChannelIds.has(channel.id)).length;
+  const pendingAlertCountByChannel = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const alert of pendingAlerts.data ?? []) {
+      counts.set(alert.channel_id, (counts.get(alert.channel_id) ?? 0) + 1);
+    }
+    return counts;
+  }, [pendingAlerts.data]);
 
   function openEdit(channel: Channel) {
     setEditing(channel);
@@ -260,6 +268,14 @@ export default function Channels() {
               dataIndex: 'role',
               width: 150,
               render: (role: ChannelRole) => <Tag color={roleColor[role] ?? 'default'}>{role}</Tag>,
+            },
+            {
+              title: '复审',
+              width: 120,
+              render: (_, channel) => {
+                const count = pendingAlertCountByChannel.get(channel.id) ?? 0;
+                return count ? <Tag color="red">待复审 {count}</Tag> : <Tag color="green">正常</Tag>;
+              },
             },
             { title: '类型', dataIndex: 'provider_type', width: 220 },
             { title: '模型', dataIndex: 'model_name', width: 220 },

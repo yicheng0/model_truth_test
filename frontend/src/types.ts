@@ -36,6 +36,9 @@ export type Run = {
   id: string;
   suite_id: string;
   name: string;
+  mode: RunMode;
+  baseline_snapshot_id?: string | null;
+  scheduled_test_id?: string | null;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'interrupted' | 'canceled';
   repeat_count: number;
   concurrency: number;
@@ -45,6 +48,8 @@ export type Run = {
   finished_at?: string | null;
   created_at?: string | null;
 };
+
+export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval';
 
 export type RunChannel = {
   id: string;
@@ -58,6 +63,38 @@ export type Result = {
   run_id: string;
   test_case_id: string;
   channel_id: string;
+  attempt_index: number;
+  normalized_response?: Record<string, any> | null;
+  raw_request?: Record<string, any> | null;
+  raw_response?: Record<string, any> | null;
+  metrics?: Record<string, any> | null;
+  score: number;
+  labels?: string[] | null;
+  created_at?: string | null;
+};
+
+export type BaselineSnapshot = {
+  id: string;
+  name: string;
+  suite_id: string;
+  source_run_id?: string | null;
+  status: 'building' | 'ready' | 'expired' | 'invalid' | 'failed';
+  suite_fingerprint?: string | null;
+  request_fingerprint?: string | null;
+  channel_fingerprint?: string | null;
+  channel_ids?: string[] | null;
+  expires_at?: string | null;
+  ready_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type BaselineResult = {
+  id: string;
+  baseline_snapshot_id: string;
+  test_case_id: string;
+  channel_id: string;
+  role_in_baseline: ChannelRole;
   attempt_index: number;
   normalized_response?: Record<string, any> | null;
   raw_request?: Record<string, any> | null;
@@ -98,4 +135,113 @@ export type RunResults = {
   results: Result[];
   comparisons: Comparison[];
   reports: Report[];
+  baseline_snapshot?: BaselineSnapshot | null;
+  baseline_results: BaselineResult[];
+};
+
+export type ScheduledChannelTest = {
+  id: string;
+  name: string;
+  channel_id: string;
+  suite_id: string;
+  baseline_snapshot_id: string;
+  enabled: boolean;
+  interval_minutes: number;
+  repeat_count: number;
+  concurrency: number;
+  use_mock: boolean;
+  next_run_at?: string | null;
+  last_run_id?: string | null;
+  last_status?: string | null;
+  last_error?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ChannelAlertStatus = 'pending_review' | 'confirmed_issue' | 'false_positive' | 'resolved';
+
+export type ChannelAlert = {
+  id: string;
+  scheduled_test_id?: string | null;
+  run_id: string;
+  report_id: string;
+  channel_id: string;
+  status: ChannelAlertStatus;
+  severity: 'high' | 'critical' | string;
+  grade: Report['grade'];
+  final_score: number;
+  trigger_labels?: string[] | null;
+  message?: string | null;
+  notification_status: 'pending' | 'sent' | 'failed' | 'skipped' | string;
+  notification_error?: string | null;
+  notified_at?: string | null;
+  reviewer_name?: string | null;
+  review_note?: string | null;
+  reviewed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type FeishuBroadcastSetting = {
+  id: string;
+  enabled: boolean;
+  webhook_configured: boolean;
+  webhook_preview?: string | null;
+  secret_configured: boolean;
+  app_base_url?: string | null;
+  alert_broadcast_enabled: boolean;
+  daily_report_enabled: boolean;
+  daily_report_time: string;
+  timezone: string;
+  last_daily_report_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type FeishuBroadcastUpdate = {
+  enabled?: boolean;
+  webhook_url?: string | null;
+  webhook_secret?: string | null;
+  clear_webhook_secret?: boolean;
+  app_base_url?: string | null;
+  alert_broadcast_enabled?: boolean;
+  daily_report_enabled?: boolean;
+  daily_report_time?: string;
+  timezone?: string;
+};
+
+export type SmartPatrolChannelSummary = {
+  channel_id: string;
+  channel_name: string;
+  run_count: number;
+  alert_count: number;
+  pending_review_count: number;
+  latest_grade?: Report['grade'] | null;
+  latest_score?: number | null;
+  avg_score?: number | null;
+  last_run_at?: string | null;
+};
+
+export type SmartPatrolTrendPoint = {
+  date: string;
+  run_count: number;
+  alert_count: number;
+  avg_score?: number | null;
+};
+
+export type SmartPatrolReport = {
+  from_at: string;
+  to_at: string;
+  schedule_count: number;
+  enabled_schedule_count: number;
+  run_count: number;
+  completed_run_count: number;
+  failed_run_count: number;
+  alert_count: number;
+  pending_review_count: number;
+  avg_score?: number | null;
+  grade_distribution: Record<string, number>;
+  channel_summaries: SmartPatrolChannelSummary[];
+  recent_alerts: ChannelAlert[];
+  trend: SmartPatrolTrendPoint[];
 };

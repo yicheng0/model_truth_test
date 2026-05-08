@@ -318,6 +318,50 @@ textarea:focus-visible,
   width: 100%;
 }
 
+.card-title-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.highlight-table-row > td {
+  background: #fff7ed !important;
+}
+
+.smart-report-actions {
+  justify-content: flex-end;
+}
+
+.smart-report-section-title.ant-typography {
+  margin: 20px 0 12px;
+  color: #211d1b;
+  font-weight: 800;
+}
+
+.smart-report-empty {
+  min-height: 188px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  color: #64748b;
+  background: #ffffff;
+}
+
+@media (max-width: 760px) {
+  .smart-report-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .smart-report-actions .ant-select,
+  .smart-report-actions .ant-btn {
+    width: 100%;
+  }
+}
+
 .reference-hero,
 .section-card,
 .ant-card {
