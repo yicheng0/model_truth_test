@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Form, Input, InputNumber, Radio, Select, Space, Tag, Typography, message } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import { fixedReferenceChannelIds, isCandidateChannel, isReferenceChannel } from '../channelPresets';
+import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
 import { roleColor, roleLabel } from '../channelTaxonomy';
 import type { BaselineSnapshot, Channel, RunMode, TestScope, TestSuite } from '../types';
 
@@ -47,10 +47,9 @@ export default function CreateRun() {
   useEffect(() => {
     if (!channels.data) return;
     const enabledChannels = channels.data.filter((channel) => channel.enabled);
-    const fixedReferences = enabledChannels.filter((channel) => fixedReferenceChannelIds.has(channel.id));
     const fallbackReferences = enabledChannels.filter(isReferenceChannel);
     form.setFieldsValue({
-      reference_channel_ids: (fixedReferences.length ? fixedReferences : fallbackReferences).map((channel) => channel.id),
+      reference_channel_ids: fallbackReferences.map((channel) => channel.id),
       candidate_channel_ids: enabledChannels.filter(isCandidateChannel).map((channel) => channel.id),
     });
   }, [channels.data, form]);
@@ -66,16 +65,10 @@ export default function CreateRun() {
   async function submit(values: CreateRunValues) {
     setLoading(true);
     try {
-      const grouped: Record<string, string[]> = {};
-      const selectedIds = new Set([
-        ...(values.mode === 'candidate_eval' ? [] : values.reference_channel_ids ?? []),
-        ...(values.mode === 'baseline_build' ? [] : values.candidate_channel_ids ?? []),
-      ]);
-      for (const channel of channels.data ?? []) {
-        if (selectedIds.has(channel.id)) {
-          grouped[channel.role] = [...(grouped[channel.role] ?? []), channel.id];
-        }
-      }
+      const grouped: Record<string, string[]> = {
+        reference: values.mode === 'candidate_eval' ? [] : values.reference_channel_ids ?? [],
+        candidate: values.mode === 'baseline_build' ? [] : values.candidate_channel_ids ?? [],
+      };
       const payload = {
         name: values.name,
         suite_id: values.suite_id,
@@ -163,7 +156,7 @@ export default function CreateRun() {
               type="warning"
               showIcon
               message="还没有可用对照渠道"
-              description="请先到渠道管理中补齐 Anthropic Official、AWS Bedrock、Azure AI Foundry 等固定对照渠道。"
+              description="请先到渠道管理中新增渠道，并打开该渠道的“对照渠道”开关。"
               action={<Button onClick={() => navigate('/channels')}>去渠道管理</Button>}
               style={{ marginBottom: 16 }}
             />
@@ -184,8 +177,8 @@ export default function CreateRun() {
                         <small>{channel.model_name || '未配置模型'}</small>
                       </span>
                       <Space wrap>
-                        {fixedReferenceChannelIds.has(channel.id) ? <Tag color="green">固定对照</Tag> : null}
-                      <Tag color={roleColor[channel.role]}>{roleLabel(channel.role, taxonomy.data)}</Tag>
+                        <Tag color="blue">对照</Tag>
+                        <Tag color={roleColor[channel.role]}>{roleLabel(channel.role, taxonomy.data)}</Tag>
                       </Space>
                     </label>
                   ))}

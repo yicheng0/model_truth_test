@@ -144,7 +144,7 @@ export default function RunDetail() {
       channels.filter((channel) => {
         if (!runChannelIds.has(channel.id) && !baselineChannelIds.has(channel.id)) return false;
         const role = runRoleByChannel.get(channel.id) ?? channel.role;
-        return role === 'gold' || role === 'official_cloud';
+        return role === 'reference' || role === 'gold' || role === 'official_cloud' || channel.is_reference;
       }),
     [baselineChannelIds, channels, runChannelIds, runRoleByChannel],
   );
@@ -154,7 +154,7 @@ export default function RunDetail() {
       channels.filter((channel) => {
         if (!runChannelIds.has(channel.id)) return false;
         const role = runRoleByChannel.get(channel.id) ?? channel.role;
-        return role === 'candidate' || role === 'negative';
+        return role === 'candidate' || role === 'negative' || !channel.is_reference;
       }),
     [channels, runChannelIds, runRoleByChannel],
   );

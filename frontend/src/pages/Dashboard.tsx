@@ -42,7 +42,7 @@ export default function Dashboard() {
   const completed = runs.data?.filter((run) => run.status === 'completed').length ?? 0;
   const running = runs.data?.filter((run) => run.status === 'running').length ?? 0;
   const totalJobs = runs.data?.reduce((sum, run) => sum + run.completed_jobs, 0) ?? 0;
-  const officialChannels = channels.data?.filter((channel) => channel.role === 'gold' || channel.role === 'official_cloud').length ?? 0;
+  const officialChannels = channels.data?.filter((channel) => channel.is_reference).length ?? 0;
   const latestReports = reports.data?.slice(0, 4) ?? [];
   const recentChannels = channels.data?.slice(0, 6) ?? [];
 

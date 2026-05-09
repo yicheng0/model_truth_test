@@ -53,7 +53,7 @@ export function ComparePage() {
             <article key={channel.id} className="compare-column">
               <div className="compare-head">
                 <strong>{channel.name}</strong>
-                <Badge tone={channel.role === "gold" ? "blue" : channel.role === "official_cloud" ? "green" : channel.role === "candidate" ? "purple" : "red"}>{channel.role}</Badge>
+                <Badge tone={channel.is_reference ? "blue" : channel.role === "negative" ? "red" : "purple"}>{channel.is_reference ? "对照" : channel.role}</Badge>
               </div>
               <dl className="meta-grid">
                 <div><dt>模型</dt><dd>{result?.normalized_response?.provider_model ?? channel.model_name}</dd></div>
@@ -79,6 +79,5 @@ export function ComparePage() {
 }
 
 function orderChannels(channels: Channel[]) {
-  const rank = { gold: 0, official_cloud: 1, candidate: 2, negative: 3 };
-  return [...channels].sort((a, b) => rank[a.role] - rank[b.role]);
+  return [...channels].sort((a, b) => Number(a.is_reference) === Number(b.is_reference) ? a.name.localeCompare(b.name) : Number(b.is_reference) - Number(a.is_reference));
 }
