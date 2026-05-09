@@ -2,9 +2,27 @@
   --color-bg-subtle: #f8fafc;
   --color-border-light: #e2e8f0;
   --color-text-secondary: #64748b;
+  --surface-page: #f6f7f4;
+  --surface-page-soft: #f8fafc;
+  --surface-card: #ffffff;
+  --surface-panel: #f2f5f7;
+  --surface-panel-warm: #f7eee9;
+  --text-primary: #172033;
+  --text-secondary: #667085;
+  --text-muted: #7a8494;
+  --brand-primary: #9a563f;
+  --brand-primary-strong: #7f432f;
+  --brand-primary-soft: #f4e6df;
+  --accent-blue: #2563eb;
+  --accent-blue-soft: #e8f0ff;
+  --border-subtle: rgba(23, 32, 51, 0.08);
+  --border-medium: rgba(23, 32, 51, 0.13);
+  --shadow-card: 0 16px 38px rgba(23, 32, 51, 0.07);
+  --shadow-card-hover: 0 18px 46px rgba(23, 32, 51, 0.1);
+  --shadow-sidebar: 10px 0 28px rgba(23, 32, 51, 0.045);
   --radius-md: 8px;
-  color: #1e293b;
-  background: #f6f8fb;
+  color: var(--text-primary);
+  background: var(--surface-page);
   font-family: "Inter", "Noto Sans SC", system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -18,7 +36,39 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: #f6f8fb;
+  background: var(--surface-page);
+}
+
+body::before,
+body::after {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+}
+
+body::before {
+  z-index: 0;
+  background:
+    radial-gradient(circle at 78% -12%, rgba(37, 99, 235, 0.16), transparent 34%),
+    radial-gradient(circle at 28% -16%, rgba(154, 86, 63, 0.12), transparent 30%);
+}
+
+body::after {
+  z-index: 0;
+  opacity: 0.72;
+  background-image:
+    linear-gradient(rgba(23, 32, 51, 0.034) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(23, 32, 51, 0.034) 1px, transparent 1px);
+  background-size: 32px 32px;
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.85), transparent 76%);
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.85), transparent 76%);
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
 }
 
 button,
@@ -40,6 +90,7 @@ textarea:focus-visible,
 }
 
 .app-shell {
+  position: relative;
   min-height: 100vh;
   background: transparent;
 }
@@ -50,7 +101,7 @@ textarea:focus-visible,
   height: 100vh;
   overflow: hidden;
   border-right: 1px solid #e2e8f0;
-  background: #ffffff !important;
+  background: #faf8f3 !important;
   box-shadow: 10px 0 28px rgba(15, 23, 42, 0.04);
 }
 
@@ -180,13 +231,14 @@ textarea:focus-visible,
   color: #475569;
   text-decoration: none;
   font-weight: 800;
-  transition: background 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+  transition: background 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
 
 .side-nav-item:hover {
   border-color: #dbe3ec;
   color: #8d4f39;
   background: #f8fafc;
+  transform: scale(1.02);
 }
 
 .side-nav-item.active {
@@ -210,14 +262,16 @@ textarea:focus-visible,
   justify-content: flex-start;
   border-color: #dbe3ec;
   color: #8d4f39;
-  background: #fff;
+  background: #faf8f3;
   font-weight: 800;
+  transition: border-color 180ms ease, color 180ms ease, background 180ms ease, transform 180ms ease;
 }
 
 .side-tool-button:hover {
   border-color: #d7b7a9 !important;
   color: #8d4f39 !important;
-  background: #fff !important;
+  background: #faf8f3 !important;
+  transform: scale(1.02);
 }
 
 .nav-pills,
@@ -248,10 +302,10 @@ textarea:focus-visible,
   border-radius: 8px;
   padding: 0 16px;
   color: #66554d;
-  background: #ffffff;
+  background: #faf8f3;
   text-decoration: none;
   font-weight: 700;
-  transition: background 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+  transition: background 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
 
 .nav-pill:hover,
@@ -262,7 +316,8 @@ textarea:focus-visible,
 .support-button:hover {
   border-color: #d7b7a9;
   color: #8d4f39 !important;
-  background: #fff;
+  background: #faf8f3;
+  transform: scale(1.02);
 }
 
 .nav-pill.active,
@@ -297,7 +352,7 @@ textarea:focus-visible,
   height: 160px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: #faf8f3;
 }
 
 .support-popover strong {
@@ -347,7 +402,7 @@ textarea:focus-visible,
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   color: #64748b;
-  background: #ffffff;
+  background: #faf8f3;
 }
 
 @media (max-width: 760px) {
@@ -367,7 +422,7 @@ textarea:focus-visible,
 .ant-card {
   border: 1px solid #e2e8f0 !important;
   border-radius: 8px !important;
-  background: #ffffff !important;
+  background: #faf8f3 !important;
   box-shadow: 0 14px 32px rgba(15, 23, 42, 0.06) !important;
 }
 
@@ -424,7 +479,7 @@ textarea:focus-visible,
   padding: 18px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #ffffff;
+  background: #faf8f3;
 }
 
 .coverage-card strong {
@@ -535,7 +590,7 @@ textarea:focus-visible,
   padding: 24px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: #faf8f3;
 }
 
 .relay-title-row {
@@ -572,7 +627,7 @@ textarea:focus-visible,
   padding: 18px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: #faf8f3;
 }
 
 .availability-box div:first-child {
@@ -745,7 +800,7 @@ textarea:focus-visible,
   padding: 14px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: #faf8f3;
   color: #4f4540;
   font-family: "Fira Code", "Consolas", monospace;
   font-size: 12px;
@@ -784,7 +839,7 @@ textarea:focus-visible,
   min-width: 0;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: #faf8f3;
 }
 
 .fixed-channel-card {
@@ -821,7 +876,7 @@ textarea:focus-visible,
 
 .run-channel-option:hover {
   border-color: #d7b7a9;
-  background: #fff;
+  background: #faf8f3;
   box-shadow: inset 0 0 0 1px rgba(163, 95, 69, 0.06);
 }
 
@@ -917,7 +972,7 @@ textarea:focus-visible,
   padding: 16px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: #faf8f3;
 }
 
 .channel-pair-card.official {
@@ -1076,7 +1131,7 @@ textarea:focus-visible,
   min-width: 0;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: #faf8f3;
 }
 
 .response-panel {
@@ -1146,7 +1201,7 @@ textarea:focus-visible,
   align-content: start;
   gap: 14px;
   padding: 16px;
-  background: #fff;
+  background: #faf8f3;
 }
 
 .diff-status {
@@ -1186,6 +1241,275 @@ textarea:focus-visible,
   font-weight: 800;
 }
 
+/* Premium enterprise light refresh */
+.enterprise-sidebar.ant-layout-sider,
+.workspace,
+.content {
+  position: relative;
+  z-index: 1;
+}
+
+.enterprise-sidebar.ant-layout-sider {
+  border-right-color: var(--border-subtle);
+  background: rgba(255, 255, 255, 0.88) !important;
+  box-shadow: var(--shadow-sidebar);
+  backdrop-filter: blur(16px);
+}
+
+.enterprise-sidebar .ant-layout-sider-children {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.48)),
+    transparent;
+}
+
+.workspace-header h3.ant-typography,
+.topbar h4.ant-typography,
+.brand-lockup,
+.brand-lockup h4.ant-typography,
+.soft-panel h4.ant-typography,
+.coverage-panel h4.ant-typography,
+.section-heading h2.ant-typography,
+.relay-card h3,
+.coverage-card strong,
+.availability-box strong,
+.relay-metrics strong,
+.page-heading h2.ant-typography,
+.page-stack h2.ant-typography,
+.ant-card-head-title,
+.fixed-channel-card strong,
+.run-channel-option strong,
+.live-case-header h2.ant-typography,
+.live-monitor-header h2.ant-typography,
+.channel-pair-card > span,
+.monitor-stat-card strong,
+.case-summary-line strong,
+.result-cell-title strong,
+.prompt-panel strong,
+.response-panel-head > span,
+.diff-metrics strong {
+  color: var(--text-primary) !important;
+}
+
+.brand-kicker,
+.section-kicker,
+.muted,
+.coverage-card span {
+  color: var(--brand-primary) !important;
+}
+
+.soft-panel .ant-typography,
+.section-heading .ant-typography,
+.coverage-card p,
+.sample-list li,
+.relay-card p,
+.availability-box span,
+.relay-metrics span,
+.availability-box small,
+.page-heading .ant-typography,
+.page-stack > div .ant-typography,
+.ant-card-body,
+.fixed-channel-card .ant-typography,
+.run-channel-option small,
+.live-case-header .ant-typography,
+.live-monitor-header .ant-typography,
+.monitor-stat-card span,
+.result-cell-snippet,
+.prompt-panel pre,
+.response-meta span,
+.diff-metrics span {
+  color: var(--text-secondary) !important;
+}
+
+.side-nav-item {
+  color: var(--text-secondary);
+}
+
+.side-nav-item:hover {
+  border-color: var(--border-medium);
+  color: var(--brand-primary-strong);
+  background: var(--surface-panel);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.62);
+}
+
+.side-nav-item.active {
+  border-color: rgba(154, 86, 63, 0.28);
+  color: var(--brand-primary-strong);
+  background: var(--brand-primary-soft);
+  box-shadow: inset 0 0 0 1px rgba(154, 86, 63, 0.1);
+}
+
+.side-tool-button,
+.nav-pill,
+.tab-pill,
+.filter-chip,
+.history-link,
+.api-button,
+.support-button {
+  border-color: var(--border-subtle);
+  color: var(--brand-primary-strong);
+  background: var(--surface-card);
+  box-shadow: 0 1px 0 rgba(23, 32, 51, 0.03);
+}
+
+.side-tool-button:hover,
+.nav-pill:hover,
+.tab-pill:hover,
+.filter-chip:hover,
+.history-link:hover,
+.api-button:hover,
+.support-button:hover {
+  border-color: var(--border-medium) !important;
+  color: var(--brand-primary-strong) !important;
+  background: var(--surface-panel) !important;
+}
+
+.nav-pill.active,
+.tab-pill.active,
+.filter-chip.active {
+  border-color: rgba(154, 86, 63, 0.28);
+  color: var(--brand-primary-strong);
+  background: var(--brand-primary-soft);
+  box-shadow: inset 0 0 0 1px rgba(154, 86, 63, 0.1);
+}
+
+.reference-hero,
+.section-card,
+.ant-card,
+.relay-card,
+.coverage-card,
+.availability-box,
+.fixed-channel-card,
+.run-channel-option,
+.response-panel,
+.diff-panel,
+.channel-pair-card,
+.monitor-stat-card {
+  border-color: var(--border-subtle) !important;
+  background: var(--surface-card) !important;
+  box-shadow: var(--shadow-card) !important;
+}
+
+.soft-panel,
+.coverage-panel,
+.metric-strip div,
+.relay-metrics div,
+.credential-row,
+.run-channel-empty,
+.prompt-panel,
+.diff-metrics div,
+.smart-report-empty {
+  border-color: var(--border-subtle);
+  background: var(--surface-panel);
+}
+
+.reference-hero {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.9)),
+    radial-gradient(circle at 86% 10%, rgba(37, 99, 235, 0.08), transparent 36%) !important;
+}
+
+.channel-pair-card.official,
+.response-panel.official {
+  border-color: #cfe8d8 !important;
+  background: #f7fcf8 !important;
+}
+
+.channel-pair-card.candidate,
+.response-panel.candidate {
+  border-color: #cfe0ff !important;
+  background: #f6faff !important;
+}
+
+.highlight-table-row > td {
+  background: #fff4e8 !important;
+}
+
+.availability-bar {
+  border-color: var(--border-subtle);
+  background: #e9eef3;
+}
+
+.availability-bar span {
+  background: linear-gradient(90deg, #d9a08a, var(--brand-primary));
+}
+
+.support-popover img,
+.prompt-preview {
+  border-color: var(--border-subtle);
+  background: var(--surface-card);
+}
+
+.ant-card-head {
+  border-color: var(--border-subtle) !important;
+  background: var(--surface-page-soft) !important;
+}
+
+.ant-table-wrapper .ant-table,
+.ant-table-wrapper .ant-table-container {
+  background: var(--surface-card) !important;
+}
+
+.ant-table-thead > tr > th {
+  border-color: var(--border-subtle) !important;
+  color: var(--text-secondary) !important;
+  background: #f5f7fa !important;
+}
+
+.ant-table-tbody > tr > td {
+  border-color: var(--border-subtle) !important;
+  color: var(--text-primary);
+}
+
+.ant-table-tbody > tr:hover > td {
+  background: var(--surface-page-soft) !important;
+}
+
+.ant-input,
+.ant-input-number,
+.ant-select-selector,
+.ant-checkbox-inner {
+  border-color: rgba(154, 86, 63, 0.22) !important;
+}
+
+.ant-btn-primary {
+  background: var(--brand-primary);
+  border-color: var(--brand-primary);
+  box-shadow: 0 12px 24px rgba(154, 86, 63, 0.2);
+}
+
+.ant-btn-primary:hover,
+.ant-btn-primary:focus-visible {
+  background: var(--brand-primary-strong) !important;
+  border-color: var(--brand-primary-strong) !important;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+.ant-select-focused {
+  outline-color: rgba(154, 86, 63, 0.26);
+}
+
+.response-snippet,
+.json-block,
+.response-panel pre {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #111827;
+  color: #e5edf7;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.response-meta span {
+  border-color: var(--border-subtle);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.diff-status,
+.history-link {
+  color: var(--brand-primary);
+}
+
 @media (max-width: 1040px) {
   .app-shell.ant-layout {
     display: block;
@@ -1205,7 +1529,8 @@ textarea:focus-visible,
     min-width: 0 !important;
     height: auto;
     border-right: 0;
-    border-bottom: 1px solid #e2e8f0;
+    border-bottom: 1px solid var(--border-subtle);
+    background: rgba(255, 255, 255, 0.94) !important;
   }
 
   .enterprise-sidebar .ant-layout-sider-children {
@@ -1270,6 +1595,17 @@ textarea:focus-visible,
 }
 
 @media (max-width: 720px) {
+  body::before {
+    background:
+      radial-gradient(circle at 78% -12%, rgba(37, 99, 235, 0.09), transparent 36%),
+      radial-gradient(circle at 28% -16%, rgba(154, 86, 63, 0.07), transparent 32%);
+  }
+
+  body::after {
+    opacity: 0.42;
+    background-size: 28px 28px;
+  }
+
   .site-frame {
     width: min(100% - 20px, 1160px);
     padding-top: 12px;

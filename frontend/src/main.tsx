@@ -21,8 +21,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       locale={zhCN}
       theme={{
         token: {
-          colorPrimary: '#a35f45',
-          colorInfo: '#a35f45',
+          colorPrimary: '#9a563f',
+          colorInfo: '#2563eb',
           colorSuccess: '#2f8f66',
           borderRadius: 8,
           fontFamily: '"Inter", "Noto Sans SC", system-ui, sans-serif',
@@ -30,7 +30,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         components: {
           Card: { borderRadiusLG: 8 },
           Button: { borderRadius: 8 },
-          Table: { headerBg: '#f7f1ed', rowHoverBg: '#fbf6f2' },
+          Table: { headerBg: '#f5f7fa', rowHoverBg: '#f8fafc' },
         },
       }}
     >
