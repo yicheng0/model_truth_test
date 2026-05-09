@@ -65,7 +65,7 @@ export default function Runs() {
     <div className="page-stack">
       <Card
         title={<span style={{ fontSize: '18px', fontWeight: 600 }}>检测任务列表</span>}
-        extra={<Link to="/new-run"><Button type="primary" size="large" style={{ height: '40px', fontWeight: 600 }}>创建检测</Button></Link>}
+        extra={<Link to="/new-run?mode=compare"><Button type="primary" size="large" style={{ height: '40px', fontWeight: 600 }}>对比测试</Button></Link>}
         bordered={false}
       >
         {runs.isError ? (

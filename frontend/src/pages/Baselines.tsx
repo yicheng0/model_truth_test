@@ -39,7 +39,7 @@ export default function Baselines() {
     <div className="page-stack">
       <Card
         title={<span style={{ fontSize: '18px', fontWeight: 600 }}>官方基线管理</span>}
-        extra={<Link to="/new-run"><Button type="primary" size="large">生成官方基线</Button></Link>}
+        extra={<Link to="/new-run?mode=baseline"><Button type="primary" size="large">创建对照样本</Button></Link>}
         bordered={false}
       >
         {baselines.isError || suites.isError || channels.isError ? (
