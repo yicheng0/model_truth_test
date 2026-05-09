@@ -35,6 +35,8 @@ type RunCreatePayload = {
   runtime_credentials?: Record<string, Record<string, unknown>>;
 };
 
+type ChannelWritePayload = Partial<Omit<Channel, 'auth_config'>> & { auth_config?: Record<string, unknown> | null };
+
 export class ApiError extends Error {
   status: number;
 
@@ -74,8 +76,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<{ status: string }>('/api/health'),
   channels: () => request<Channel[]>('/api/channels'),
-  createChannel: (payload: Partial<Channel> & { auth_config?: Record<string, unknown> }) => request<Channel>('/api/channels', { method: 'POST', body: JSON.stringify(payload) }),
-  updateChannel: (id: string, payload: Partial<Channel> & { auth_config?: Record<string, unknown> }) =>
+  createChannel: (payload: ChannelWritePayload) => request<Channel>('/api/channels', { method: 'POST', body: JSON.stringify(payload) }),
+  updateChannel: (id: string, payload: ChannelWritePayload) =>
     request<Channel>(`/api/channels/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteChannel: (id: string) => request<{ deleted: boolean }>(`/api/channels/${id}`, { method: 'DELETE' }),
   healthCheck: (id: string) => request<Record<string, unknown>>(`/api/channels/${id}/health-check`, { method: 'POST' }),

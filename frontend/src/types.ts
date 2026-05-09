@@ -5,6 +5,7 @@ export type Channel = {
   role: ChannelRole;
   base_url?: string | null;
   model_name?: string | null;
+  auth_config?: Record<string, unknown>;
   is_reference: boolean;
   enabled: boolean;
 };

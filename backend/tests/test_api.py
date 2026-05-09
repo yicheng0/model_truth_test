@@ -14,7 +14,7 @@ from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_messages_url, _live_call, apply_repeat_consistency_scores, build_raw_request, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
+from app.services import _anthropic_messages_url, _live_call, _merged_channel_credentials, apply_repeat_consistency_scores, build_raw_request, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
 
 
 def reset_database() -> None:
@@ -613,6 +613,46 @@ def test_channel_create_accepts_custom_provider_type_and_defaults_role() -> None
     assert "protocol_type" not in created.json()
     assert reference.status_code == 200
     assert reference.json()["role"] == "gold"
+
+
+def test_channel_api_key_is_readable_and_updatable() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/channels",
+            json={
+                "name": "Editable Key Channel",
+                "provider_type": "customer_gateway",
+                "model_name": "claude-via-gateway",
+                "auth_config": {"api_key": "first-key"},
+                "enabled": True,
+            },
+        )
+        channel_id = created.json()["id"]
+        updated = client.patch(f"/api/channels/{channel_id}", json={"auth_config": {"api_key": "second-key"}})
+        cleared = client.patch(f"/api/channels/{channel_id}", json={"auth_config": {}})
+
+    assert created.status_code == 200
+    assert created.json()["auth_config"]["api_key"] == "first-key"
+    assert updated.status_code == 200
+    assert updated.json()["auth_config"]["api_key"] == "second-key"
+    assert cleared.status_code == 200
+    assert cleared.json()["auth_config"] == {}
+
+
+def test_runtime_credentials_merge_channel_api_key_and_per_run_override() -> None:
+    channel = Channel(
+        id="with_key",
+        name="With Key",
+        provider_type="customer_gateway",
+        role="candidate",
+        model_name="custom-model",
+        auth_config_encrypted={"api_key": "stored-key", "region": "us-east-1"},
+        enabled=True,
+    )
+
+    assert _merged_channel_credentials(channel, {}) == {"api_key": "stored-key", "region": "us-east-1"}
+    assert _merged_channel_credentials(channel, {"api_key": "runtime-key"}) == {"api_key": "runtime-key", "region": "us-east-1"}
 
 
 def test_live_call_uses_anthropic_messages_for_custom_provider_key(monkeypatch) -> None:

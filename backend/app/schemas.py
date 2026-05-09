@@ -12,6 +12,7 @@ class ChannelBase(BaseModel):
     role: str | None = None
     base_url: str | None = None
     model_name: str | None = None
+    auth_config: dict[str, Any] = Field(default_factory=dict)
     is_reference: bool = False
     enabled: bool = True
 
@@ -26,6 +27,7 @@ class ChannelUpdate(BaseModel):
     role: str | None = None
     base_url: str | None = None
     model_name: str | None = None
+    auth_config: dict[str, Any] | None = None
     is_reference: bool | None = None
     enabled: bool | None = None
 

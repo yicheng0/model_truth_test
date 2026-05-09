@@ -272,7 +272,7 @@ def create_channel(db: Session, data: ChannelCreate) -> Channel:
         role=role,
         base_url=data.base_url,
         model_name=data.model_name,
-        auth_config_encrypted=None,
+        auth_config_encrypted=_clean_auth_config(data.auth_config),
         is_reference=data.is_reference,
         enabled=data.enabled,
     )
@@ -280,6 +280,19 @@ def create_channel(db: Session, data: ChannelCreate) -> Channel:
     db.commit()
     db.refresh(channel)
     return channel
+
+
+def _clean_auth_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    cleaned: dict[str, Any] = {}
+    for key, value in (config or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        cleaned[str(key)] = value
+    return cleaned or None
 
 
 def create_suite(db: Session, data: TestSuiteCreate) -> TestSuite:
@@ -520,6 +533,15 @@ def _is_candidate_role(role: str | None) -> bool:
     return role in CANDIDATE_RUN_ROLES
 
 
+def _merged_channel_credentials(channel: Channel, runtime: dict[str, Any] | None) -> dict[str, Any]:
+    credentials: dict[str, Any] = {}
+    if isinstance(channel.auth_config_encrypted, dict):
+        credentials.update(channel.auth_config_encrypted)
+    if runtime:
+        credentials.update(runtime)
+    return credentials
+
+
 async def execute_run(
     session_factory: sessionmaker[Session],
     run_id: str,
@@ -572,7 +594,8 @@ async def execute_run(
             concurrency = max(1, min(run.concurrency, len(jobs) or 1))
 
             async def invoke_job(case: TestCase, channel: Channel, attempt: int) -> tuple[TestCase, Channel, int, dict[str, Any]]:
-                normalized = await invoke_channel(channel, case, attempt, runtime_credentials.get(channel.id, {}), use_mock)
+                credentials = _merged_channel_credentials(channel, runtime_credentials.get(channel.id, {}))
+                normalized = await invoke_channel(channel, case, attempt, credentials, use_mock)
                 return case, channel, attempt, normalized
 
             while job_index < len(jobs) or active_tasks:

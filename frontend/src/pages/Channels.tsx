@@ -11,6 +11,7 @@ type ChannelFormValues = {
   provider_type: string;
   model_name?: string | string[];
   base_url?: string;
+  api_key?: string;
   is_reference?: boolean;
   enabled?: boolean;
 };
@@ -18,6 +19,11 @@ type ChannelFormValues = {
 function firstSelectValue(value?: string | string[]) {
   if (Array.isArray(value)) return value[0] ?? '';
   return value ?? '';
+}
+
+function channelApiKey(channel: Channel) {
+  const value = channel.auth_config?.api_key;
+  return typeof value === 'string' ? value : '';
 }
 
 export default function Channels() {
@@ -94,6 +100,7 @@ export default function Channels() {
       provider_type: channel.provider_type,
       model_name: channel.model_name ? [channel.model_name] : [],
       base_url: channel.base_url ?? '',
+      api_key: channelApiKey(channel),
       is_reference: channel.is_reference,
       enabled: channel.enabled,
     });
@@ -108,6 +115,7 @@ export default function Channels() {
       enabled: values.enabled,
       model_name: modelName || null,
       base_url: values.base_url?.trim() || null,
+      auth_config: values.api_key?.trim() ? { api_key: values.api_key.trim() } : {},
     };
   }
 
@@ -159,6 +167,9 @@ export default function Channels() {
             </Form.Item>
             <Form.Item name="base_url" label="Base URL" help="Anthropic Messages 协议可只填根地址，系统会自动补 /v1/messages；也兼容已填 /v1 或完整 /v1/messages。">
               <Input size="large" placeholder="https://api.anthropic.com 或 https://relay.example/v1" />
+            </Form.Item>
+            <Form.Item name="api_key" label="API Key">
+              <Input size="large" autoComplete="off" placeholder="sk-ant-..." />
             </Form.Item>
             <Form.Item name="is_reference" label="对照渠道" valuePropName="checked" initialValue={false}>
               <Switch checkedChildren="对照" unCheckedChildren="待测" />
@@ -223,6 +234,12 @@ export default function Channels() {
             { title: '模型', dataIndex: 'model_name', width: 220 },
             { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
             {
+              title: 'API Key',
+              dataIndex: 'auth_config',
+              width: 120,
+              render: (_: unknown, channel) => (channelApiKey(channel) ? <Tag color="green">已配置</Tag> : <Tag>未配置</Tag>),
+            },
+            {
               title: '复审',
               width: 120,
               render: (_, channel) => {
@@ -281,6 +298,9 @@ export default function Channels() {
           </Form.Item>
           <Form.Item name="base_url" label="Base URL" help="Anthropic Messages 协议可只填根地址，系统会自动补 /v1/messages；也兼容已填 /v1 或完整 /v1/messages。">
             <Input placeholder="https://api.anthropic.com 或 https://relay.example/v1" />
+          </Form.Item>
+          <Form.Item name="api_key" label="API Key">
+            <Input autoComplete="off" placeholder="sk-ant-..." />
           </Form.Item>
           <Form.Item name="enabled" label="状态" valuePropName="checked">
             <Switch checkedChildren="启用" unCheckedChildren="停用" />

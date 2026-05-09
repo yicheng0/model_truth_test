@@ -32,6 +32,8 @@ def _ensure_channel_columns() -> None:
         return
     columns = {column["name"] for column in inspector.get_columns("channels")}
     with engine.begin() as connection:
+        if "auth_config_encrypted" not in columns:
+            connection.execute(text("ALTER TABLE channels ADD COLUMN auth_config_encrypted JSON"))
         if "is_reference" not in columns:
             connection.execute(text("ALTER TABLE channels ADD COLUMN is_reference BOOLEAN NOT NULL DEFAULT 0"))
             connection.execute(text("UPDATE channels SET is_reference = 1 WHERE role IN ('gold', 'official_cloud')"))

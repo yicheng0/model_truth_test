@@ -25,6 +25,14 @@ class Channel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    @property
+    def auth_config(self) -> dict:
+        return self.auth_config_encrypted or {}
+
+    @auth_config.setter
+    def auth_config(self, value: dict | None) -> None:
+        self.auth_config_encrypted = value or None
+
 
 class TestSuite(Base):
     __tablename__ = "test_suites"

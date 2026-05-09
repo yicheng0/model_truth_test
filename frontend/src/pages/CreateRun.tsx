@@ -5,7 +5,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
 import { roleColor, roleLabel } from '../channelTaxonomy';
-import type { BaselineSnapshot, Channel, TestSuite } from '../types';
+import type { BaselineSnapshot, Channel, TestScope, TestSuite } from '../types';
 
 type CreateMode = 'baseline_build' | 'candidate_eval';
 const DEFAULT_SUITE_ID = 'claude_full_35';
@@ -14,14 +14,30 @@ type CreateRunValues = {
   name: string;
   suite_id: string;
   mode: CreateMode;
+  test_scope: TestScope;
   baseline_snapshot_id?: string;
   reference_channel_ids?: string[];
   candidate_channel_ids?: string[];
+  runtime_credentials?: Record<string, RuntimeCredentialValues>;
+};
+
+type RuntimeCredentialValues = {
+  api_key?: string;
 };
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   return '请求失败，请稍后重试';
+}
+
+function trimmedValue(value?: string) {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+function hasStoredApiKey(channel: Channel) {
+  const value = channel.auth_config?.api_key;
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 export default function CreateRun() {
@@ -32,6 +48,8 @@ export default function CreateRun() {
   const initialMode: CreateMode = searchParams.get('mode') === 'baseline' ? 'baseline_build' : 'candidate_eval';
   const selectedMode = Form.useWatch('mode', form) ?? initialMode;
   const watchedSuiteId = Form.useWatch('suite_id', form);
+  const watchedReferenceChannelIds = Form.useWatch('reference_channel_ids', form) ?? [];
+  const watchedCandidateChannelIds = Form.useWatch('candidate_channel_ids', form) ?? [];
   const suites = useQuery<TestSuite[]>({ queryKey: ['suites'], queryFn: api.suites });
   const channels = useQuery<Channel[]>({ queryKey: ['channels'], queryFn: api.channels });
   const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
@@ -49,6 +67,11 @@ export default function CreateRun() {
   const referenceChannels = useMemo(() => (channels.data ?? []).filter(isReferenceChannel), [channels.data]);
   const candidateChannels = useMemo(() => (channels.data ?? []).filter(isCandidateChannel), [channels.data]);
   const readyBaselines = useMemo(() => (baselines.data ?? []).filter((baseline) => baseline.status === 'ready'), [baselines.data]);
+  const credentialChannels = useMemo(() => {
+    const selectedIds = selectedMode === 'baseline_build' ? watchedReferenceChannelIds : watchedCandidateChannelIds;
+    const channelById = new Map((channels.data ?? []).map((channel) => [channel.id, channel]));
+    return selectedIds.map((id) => channelById.get(id)).filter((channel): channel is Channel => Boolean(channel));
+  }, [channels.data, selectedMode, watchedCandidateChannelIds, watchedReferenceChannelIds]);
 
   useEffect(() => {
     form.setFieldValue('mode', initialMode);
@@ -87,6 +110,7 @@ export default function CreateRun() {
     setLoading(true);
     try {
       const suiteId = values.suite_id ?? selectedSuiteId;
+      const testScope = values.test_scope ?? 'full';
       if (!suiteId) {
         message.error('内置题库加载失败，请刷新后重试');
         return;
@@ -96,14 +120,22 @@ export default function CreateRun() {
         reference: mode === 'baseline_build' ? values.reference_channel_ids ?? [] : [],
         candidate: mode === 'candidate_eval' ? values.candidate_channel_ids ?? [] : [],
       };
+      const runtimeCredentials: Record<string, Record<string, string>> = {};
+      for (const channel of credentialChannels) {
+        const credentials = values.runtime_credentials?.[channel.id] ?? {};
+        const apiKey = trimmedValue(credentials.api_key);
+        if (!apiKey) continue;
+        runtimeCredentials[channel.id] = { api_key: apiKey };
+      }
       const payload = {
         name: values.name,
         suite_id: suiteId,
         channel_ids: grouped,
         repeat_count: 1,
         concurrency: 1,
-        test_scope: 'quick',
+        test_scope: testScope,
         use_mock: false,
+        runtime_credentials: runtimeCredentials,
       };
       const run =
         mode === 'baseline_build'
@@ -135,7 +167,7 @@ export default function CreateRun() {
             style={{ marginBottom: 16 }}
           />
         ) : null}
-        <Form form={form} layout="vertical" onFinish={submit} initialValues={{ mode: initialMode }}>
+        <Form form={form} layout="vertical" onFinish={submit} initialValues={{ mode: initialMode, test_scope: 'full' }}>
           <Form.Item label="任务名" name="name" rules={[{ required: true }]}>
             <Input size="large" placeholder={selectedMode === 'baseline_build' ? 'Sonnet 4.5 对照样本采样' : 'Sonnet 4.5 渠道对比测试'} />
           </Form.Item>
@@ -143,6 +175,12 @@ export default function CreateRun() {
             <Radio.Group size="large">
               <Radio.Button value="baseline_build">创建对照样本</Radio.Button>
               <Radio.Button value="candidate_eval">对比测试</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+          <Form.Item label="任务范围" name="test_scope" rules={[{ required: true }]}>
+            <Radio.Group size="large">
+              <Radio.Button value="full">完整任务</Radio.Button>
+              <Radio.Button value="quick">快速任务</Radio.Button>
             </Radio.Group>
           </Form.Item>
           {!suites.isLoading && !builtInSuite ? (
@@ -233,6 +271,36 @@ export default function CreateRun() {
               </div>
             </Checkbox.Group>
             </Form.Item>
+          ) : null}
+          {credentialChannels.length ? (
+            <div className="runtime-credentials">
+              <div className="credential-heading">
+                <Typography.Text strong>运行时凭据</Typography.Text>
+                <Typography.Text type="secondary">密钥仅随本次任务提交，系统不会写入渠道配置或报告。</Typography.Text>
+              </div>
+              {credentialChannels.map((channel) => (
+                <div className="credential-row" key={channel.id}>
+                  <div className="credential-channel">
+                    <strong>{channel.name}</strong>
+                    <small>{channel.model_name || '未配置模型'}</small>
+                  </div>
+                  <Form.Item
+                    label="API Key"
+                    name={['runtime_credentials', channel.id, 'api_key']}
+                    rules={[
+                      {
+                        validator: (_, value: string | undefined) =>
+                          trimmedValue(value) || hasStoredApiKey(channel)
+                            ? Promise.resolve()
+                            : Promise.reject(new Error('请输入该渠道的 API Key')),
+                      },
+                    ]}
+                  >
+                    <Input autoComplete="off" placeholder={hasStoredApiKey(channel) ? '使用渠道管理中的 API Key' : 'sk-ant-...'} />
+                  </Form.Item>
+                </div>
+              ))}
+            </div>
           ) : null}
           <Button type="primary" size="large" htmlType="submit" loading={loading} style={{ height: '44px', fontWeight: 600 }}>
             {selectedMode === 'baseline_build' ? '创建对照样本' : '启动对比测试'}

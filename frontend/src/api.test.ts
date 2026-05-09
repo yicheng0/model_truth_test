@@ -88,6 +88,34 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('updates channel API keys through auth_config', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: 'ch_custom',
+          name: 'Custom Gateway',
+          role: 'candidate',
+          provider_type: 'customer_gateway',
+          auth_config: { api_key: 'second-key' },
+          is_reference: false,
+          enabled: true,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.updateChannel('ch_custom', { auth_config: { api_key: 'second-key' } });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/ch_custom',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ auth_config: { api_key: 'second-key' } }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('saves custom model names as channel taxonomy options', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
