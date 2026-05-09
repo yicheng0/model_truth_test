@@ -17,7 +17,7 @@ export function ChannelsPage() {
   const queryClient = useQueryClient();
   const channels = useQuery({ queryKey: ["channels"], queryFn: api.channels });
   const [health, setHealth] = useState<Record<string, string>>({});
-  const emptyForm = { name: "", provider_type: "openai_compatible", role: "candidate" as ChannelRole, base_url: "", model_name: "" };
+  const emptyForm = { name: "", provider_type: "", role: "candidate" as ChannelRole, base_url: "", model_name: "" };
   const [form, setForm] = useState(emptyForm);
   const create = useMutation({
     mutationFn: api.createChannel,
@@ -54,13 +54,7 @@ export function ChannelsPage() {
           </label>
           <label>
             Provider
-            <select value={form.provider_type} onChange={(event) => setForm({ ...form, provider_type: event.target.value })}>
-              <option value="anthropic">anthropic</option>
-              <option value="aws_bedrock">aws_bedrock</option>
-              <option value="azure_foundry">azure_foundry</option>
-              <option value="openai_compatible">openai_compatible</option>
-              <option value="custom">custom</option>
-            </select>
+            <input value={form.provider_type} onChange={(event) => setForm({ ...form, provider_type: event.target.value })} required />
           </label>
           <label>
             角色
@@ -73,7 +67,11 @@ export function ChannelsPage() {
           </label>
           <label>
             Endpoint
-            <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
+            <input
+              value={form.base_url}
+              onChange={(event) => setForm({ ...form, base_url: event.target.value })}
+              placeholder="可只填根地址，系统自动补 /v1/messages"
+            />
           </label>
           <label>
             模型名
@@ -103,7 +101,7 @@ export function ChannelsPage() {
                 <tr key={channel.id}>
                   <td><strong>{channel.name}</strong></td>
                   <td>{channel.provider_type}</td>
-                  <td><Badge tone={roleTone[channel.role]}>{channel.role}</Badge></td>
+                  <td><Badge tone={roleTone[channel.role as keyof typeof roleTone] ?? "purple"}>{channel.role}</Badge></td>
                   <td>{channel.model_name}</td>
                   <td className="truncate">{channel.base_url}</td>
                   <td>

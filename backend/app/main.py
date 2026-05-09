@@ -139,7 +139,10 @@ def list_channels(db: Session = Depends(get_db)) -> list[Channel]:
 
 @app.post("/api/channels", response_model=ChannelRead)
 def add_channel(data: ChannelCreate, db: Session = Depends(get_db)) -> Channel:
-    return create_channel(db, data)
+    try:
+        return create_channel(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/channels/{channel_id}", response_model=ChannelRead)
@@ -157,6 +160,8 @@ def update_channel(channel_id: str, data: ChannelUpdate, db: Session = Depends(g
         raise HTTPException(status_code=404, detail="Channel not found")
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(channel, key, value)
+    if data.is_reference is not None and data.role is None:
+        channel.role = "gold" if channel.is_reference else "candidate"
     db.commit()
     db.refresh(channel)
     return channel

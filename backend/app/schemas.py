@@ -9,9 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field
 class ChannelBase(BaseModel):
     name: str
     provider_type: str
-    role: str
+    role: str | None = None
     base_url: str | None = None
     model_name: str | None = None
+    is_reference: bool = False
     enabled: bool = True
 
 
@@ -25,6 +26,7 @@ class ChannelUpdate(BaseModel):
     role: str | None = None
     base_url: str | None = None
     model_name: str | None = None
+    is_reference: bool | None = None
     enabled: bool | None = None
 
 
@@ -238,8 +240,10 @@ class ChannelTaxonomySettingRead(BaseModel):
     id: str
     role_labels: dict[str, str]
     provider_type_labels: dict[str, str]
+    model_options: list[str]
     default_role_labels: dict[str, str]
     default_provider_type_labels: dict[str, str]
+    default_model_options: list[str]
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -247,6 +251,7 @@ class ChannelTaxonomySettingRead(BaseModel):
 class ChannelTaxonomySettingUpdate(BaseModel):
     role_labels: dict[str, str | None] | None = None
     provider_type_labels: dict[str, str | None] | None = None
+    model_options: list[str | None] | None = None
 
 
 class SmartPatrolChannelSummary(BaseModel):

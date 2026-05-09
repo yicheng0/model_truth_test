@@ -70,15 +70,17 @@ DEFAULT_ROLE_LABELS = {
     "candidate": "待测第三方",
     "negative": "负样本",
 }
-DEFAULT_PROVIDER_TYPE_LABELS = {
-    "anthropic": "Anthropic",
-    "aws_bedrock": "AWS Bedrock",
-    "azure_foundry": "Azure AI Foundry",
-    "third_party_anthropic": "Third-party Anthropic compatible",
-    "third_party_openai_compatible": "Third-party OpenAI compatible",
-    "openai_compatible": "OpenAI compatible",
-    "custom": "Custom",
+DEFAULT_PROVIDER_TYPE_LABELS: dict[str, str] = {}
+DEFAULT_MODEL_OPTIONS: list[str] = []
+REMOVED_BUILT_IN_MODEL_OPTIONS = {
+    "claude-sonnet-4-5",
+    "anthropic.claude-sonnet-4-5-v1:0",
+    "claude-opus-4-1",
+    "claude-haiku-4-5",
+    "gpt-like-model",
 }
+REFERENCE_RUN_ROLES = {"reference", "gold", "official_cloud"}
+CANDIDATE_RUN_ROLES = {"candidate", "negative"}
 
 
 def get_or_create_channel_taxonomy_setting(db: Session) -> ChannelTaxonomySetting:
@@ -89,6 +91,7 @@ def get_or_create_channel_taxonomy_setting(db: Session) -> ChannelTaxonomySettin
         id=CHANNEL_TAXONOMY_SETTING_ID,
         role_labels=DEFAULT_ROLE_LABELS.copy(),
         provider_type_labels=DEFAULT_PROVIDER_TYPE_LABELS.copy(),
+        model_options=DEFAULT_MODEL_OPTIONS.copy(),
     )
     db.add(setting)
     db.commit()
@@ -101,8 +104,10 @@ def channel_taxonomy_setting_read(setting: ChannelTaxonomySetting) -> dict[str, 
         "id": setting.id,
         "role_labels": _taxonomy_labels(DEFAULT_ROLE_LABELS, setting.role_labels),
         "provider_type_labels": _taxonomy_labels(DEFAULT_PROVIDER_TYPE_LABELS, setting.provider_type_labels),
+        "model_options": _taxonomy_options(DEFAULT_MODEL_OPTIONS, setting.model_options),
         "default_role_labels": DEFAULT_ROLE_LABELS,
         "default_provider_type_labels": DEFAULT_PROVIDER_TYPE_LABELS,
+        "default_model_options": DEFAULT_MODEL_OPTIONS,
         "created_at": setting.created_at,
         "updated_at": setting.updated_at,
     }
@@ -119,6 +124,8 @@ def update_channel_taxonomy_setting(db: Session, data: ChannelTaxonomySettingUpd
             data.provider_type_labels,
             "provider_type",
         )
+    if data.model_options is not None:
+        setting.model_options = _taxonomy_options(DEFAULT_MODEL_OPTIONS, data.model_options)
     db.commit()
     db.refresh(setting)
     return setting
@@ -129,7 +136,7 @@ def _taxonomy_labels(defaults: dict[str, str], stored: dict | None) -> dict[str,
     if not isinstance(stored, dict):
         return labels
     for key, value in stored.items():
-        if key in defaults and isinstance(value, str) and value.strip():
+        if isinstance(value, str) and value.strip():
             labels[key] = value.strip()
     return labels
 
@@ -137,11 +144,30 @@ def _taxonomy_labels(defaults: dict[str, str], stored: dict | None) -> dict[str,
 def _apply_taxonomy_update(defaults: dict[str, str], current: dict | None, updates: dict[str, str | None], label_type: str) -> dict[str, str]:
     labels = _taxonomy_labels(defaults, current)
     for key, value in updates.items():
-        if key not in defaults:
+        key = str(key).strip()
+        if not key:
             raise ValueError(f"Unsupported {label_type} key: {key}")
         text = (value or "").strip()
-        labels[key] = text or defaults[key]
+        if text:
+            labels[key] = text
+        elif key in defaults:
+            labels[key] = defaults[key]
+        else:
+            labels.pop(key, None)
     return labels
+
+
+def _taxonomy_options(defaults: list[str], stored: list[str | None] | None) -> list[str]:
+    options: list[str] = []
+    for value in [*defaults, *(stored or [])]:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if text in REMOVED_BUILT_IN_MODEL_OPTIONS:
+            continue
+        if text and text not in options:
+            options.append(text)
+    return options
 
 
 def get_or_create_feishu_setting(db: Session) -> FeishuBroadcastSetting:
@@ -238,14 +264,16 @@ def _zoneinfo(timezone_name: str) -> ZoneInfo:
 
 
 def create_channel(db: Session, data: ChannelCreate) -> Channel:
+    role = data.role or ("gold" if data.is_reference else "candidate")
     channel = Channel(
         id=data.id or new_id("ch"),
         name=data.name,
         provider_type=data.provider_type,
-        role=data.role,
+        role=role,
         base_url=data.base_url,
         model_name=data.model_name,
         auth_config_encrypted=None,
+        is_reference=data.is_reference,
         enabled=data.enabled,
     )
     db.add(channel)
@@ -292,18 +320,6 @@ def create_case(db: Session, data: TestCaseCreate) -> TestCase:
 
 
 def seed_demo_data(db: Session) -> None:
-    if not db.scalar(select(Channel).limit(1)):
-        channels = [
-            ChannelCreate(id="anthropic_official", name="Anthropic Official", provider_type="anthropic", role="gold", base_url="https://api.anthropic.com", model_name="claude-sonnet-4-5"),
-            ChannelCreate(id="aws_bedrock", name="AWS Bedrock Claude", provider_type="aws_bedrock", role="official_cloud", base_url="bedrock-runtime", model_name="anthropic.claude-sonnet-4-5-v1:0"),
-            ChannelCreate(id="azure_foundry", name="Azure AI Foundry Claude", provider_type="azure_foundry", role="official_cloud", base_url="https://example.services.ai.azure.com", model_name="claude-sonnet-4-5"),
-            ChannelCreate(id="third_party_demo", name="Third-party Relay Demo", provider_type="third_party_anthropic", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-5"),
-            ChannelCreate(id="openai_compat_demo", name="OpenAI-compatible Relay Demo", provider_type="third_party_openai_compatible", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-5"),
-            ChannelCreate(id="negative_sample", name="Negative Sample", provider_type="third_party_openai_compatible", role="negative", base_url="https://non-claude.example/v1", model_name="gpt-like-model"),
-        ]
-        for channel in channels:
-            create_channel(db, channel)
-
     if not db.scalar(select(TestSuite).where(TestSuite.id == default_suite()["id"])):
         create_suite(db, TestSuiteCreate(**default_suite()))
     else:
@@ -353,8 +369,7 @@ def create_run(db: Session, data: RunCreate) -> Run:
         if not data.baseline_snapshot_id:
             raise ValueError("candidate_eval requires baseline_snapshot_id")
         validate_baseline_for_run(db, data.baseline_snapshot_id, data.suite_id)
-    channel_ids_by_role = data.channel_ids or _default_channel_ids_by_role(db, mode)
-    channel_ids_by_role = _filter_channel_ids_for_mode(channel_ids_by_role, mode)
+    channel_ids_by_role = _normalize_channel_ids_for_mode(db, data.channel_ids or _default_channel_ids_by_role(db, mode), mode)
     selected_ids = [(channel_id, role) for role, ids in channel_ids_by_role.items() for channel_id in ids]
     cases = cases_for_scope(db, data.suite_id, test_scope)
     run = Run(
@@ -418,8 +433,8 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
     channel = db.get(Channel, data.channel_id)
     if not channel:
         raise ValueError("Channel not found")
-    if channel.role not in {"candidate", "negative"}:
-        raise ValueError("Scheduled channel tests require a candidate or negative channel")
+    if channel.is_reference:
+        raise ValueError("Scheduled channel tests require a non-reference candidate channel")
     validate_baseline_for_run(db, data.baseline_snapshot_id, data.suite_id)
     next_run_at = data.next_run_at or datetime.now(timezone.utc) + timedelta(minutes=max(5, data.interval_minutes))
     scheduled = ScheduledChannelTest(
@@ -460,25 +475,49 @@ def validate_scheduled_channel_test(db: Session, scheduled: ScheduledChannelTest
     channel = db.get(Channel, scheduled.channel_id)
     if not channel:
         raise ValueError("Channel not found")
-    if channel.role not in {"candidate", "negative"}:
-        raise ValueError("Scheduled channel tests require a candidate or negative channel")
+    if channel.is_reference:
+        raise ValueError("Scheduled channel tests require a non-reference candidate channel")
     validate_baseline_for_run(db, scheduled.baseline_snapshot_id, scheduled.suite_id)
 
 
 def _default_channel_ids_by_role(db: Session, mode: str = "full_comparison") -> dict[str, list[str]]:
     result: dict[str, list[str]] = defaultdict(list)
     for channel in db.scalars(select(Channel).where(Channel.enabled.is_(True))).all():
-        result[channel.role].append(channel.id)
+        result["reference" if channel.is_reference else "candidate"].append(channel.id)
     return _filter_channel_ids_for_mode(dict(result), mode)
 
 
 def _filter_channel_ids_for_mode(channel_ids_by_role: dict[str, list[str]], mode: str) -> dict[str, list[str]]:
     allowed = {
-        "baseline_build": {"gold", "official_cloud"},
-        "candidate_eval": {"candidate", "negative"},
-        "full_comparison": {"gold", "official_cloud", "candidate", "negative"},
+        "baseline_build": REFERENCE_RUN_ROLES,
+        "candidate_eval": CANDIDATE_RUN_ROLES,
+        "full_comparison": REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
     }[mode]
     return {role: ids for role, ids in channel_ids_by_role.items() if role in allowed and ids}
+
+
+def _normalize_channel_ids_for_mode(db: Session, channel_ids_by_role: dict[str, list[str]], mode: str) -> dict[str, list[str]]:
+    normalized: dict[str, list[str]] = defaultdict(list)
+    for role, ids in channel_ids_by_role.items():
+        for channel_id in ids:
+            channel = db.get(Channel, channel_id)
+            if not channel:
+                continue
+            if role in REFERENCE_RUN_ROLES:
+                normalized["reference"].append(channel_id)
+            elif role in CANDIDATE_RUN_ROLES:
+                normalized["candidate"].append(channel_id)
+            else:
+                normalized["reference" if channel.is_reference else "candidate"].append(channel_id)
+    return _filter_channel_ids_for_mode(dict(normalized), mode)
+
+
+def _is_reference_role(role: str | None) -> bool:
+    return role in REFERENCE_RUN_ROLES
+
+
+def _is_candidate_role(role: str | None) -> bool:
+    return role in CANDIDATE_RUN_ROLES
 
 
 async def execute_run(
@@ -650,7 +689,7 @@ async def execute_scheduled_channel_test(
                 RunCreate(
                     name=f"自动巡检 - {scheduled.name}",
                     suite_id=scheduled.suite_id,
-                    channel_ids={channel.role: [channel.id]},
+                    channel_ids={"candidate": [channel.id]},
                     repeat_count=scheduled.repeat_count,
                     concurrency=scheduled.concurrency,
                     use_mock=scheduled.use_mock,
@@ -1160,6 +1199,7 @@ def channel_fingerprint(db: Session, channel_ids: list[str]) -> str:
             "id": channel.id,
             "provider_type": channel.provider_type,
             "role": channel.role,
+            "is_reference": channel.is_reference,
             "base_url": channel.base_url,
             "model_name": channel.model_name,
         }
@@ -1226,17 +1266,20 @@ def finalize_baseline_from_run(db: Session, run_id: str) -> BaselineSnapshot | N
 
     db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
     channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
+    run_role_by_channel = {
+        item.channel_id: item.role_in_run
+        for item in db.scalars(select(RunChannel).where(RunChannel.run_id == run.id)).all()
+    }
     results = db.scalars(select(Result).where(Result.run_id == run.id).order_by(Result.test_case_id, Result.channel_id, Result.attempt_index)).all()
-    official_results = [result for result in results if channels.get(result.channel_id) and channels[result.channel_id].role in {"gold", "official_cloud"}]
+    official_results = [result for result in results if channels.get(result.channel_id) and _is_reference_role(run_role_by_channel.get(result.channel_id))]
     for result in official_results:
-        channel = channels[result.channel_id]
         db.add(
             BaselineResult(
                 id=new_id("bres"),
                 baseline_snapshot_id=snapshot.id,
                 test_case_id=result.test_case_id,
                 channel_id=result.channel_id,
-                role_in_baseline=channel.role,
+                role_in_baseline="reference",
                 attempt_index=result.attempt_index,
                 normalized_response=result.normalized_response,
                 raw_request=result.raw_request,
@@ -1305,19 +1348,20 @@ def build_raw_request(channel: Channel, case: TestCase) -> dict[str, Any]:
 
 
 async def _live_call(channel: Channel, case: TestCase, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
-    provider = channel.provider_type
-    if provider == "aws_bedrock":
-        return await asyncio.to_thread(_aws_bedrock_call, channel, case, credentials)
-    if provider in {"anthropic", "azure_foundry", "third_party_anthropic"}:
-        return await _anthropic_compatible_call(channel, raw_request, credentials)
-    if provider == "third_party_openai_compatible":
-        return await _openai_compatible_call(channel, raw_request, credentials)
-    raise ValueError(f"Unsupported provider_type: {provider}")
+    return await _anthropic_compatible_call(channel, raw_request, credentials)
+
+
+def _anthropic_messages_url(base_url: str | None) -> str:
+    normalized = (base_url or "https://api.anthropic.com").rstrip("/")
+    if normalized.endswith("/v1/messages") or normalized.endswith("/messages"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/messages"
+    return f"{normalized}/v1/messages"
 
 
 async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
-    base_url = (credentials.get("base_url") or channel.base_url or "https://api.anthropic.com").rstrip("/")
-    url = base_url if base_url.endswith("/messages") else f"{base_url}/v1/messages"
+    url = _anthropic_messages_url(credentials.get("base_url") or channel.base_url)
     headers = {
         "content-type": "application/json",
         "anthropic-version": credentials.get("anthropic_version", "2023-06-01"),
@@ -1400,7 +1444,7 @@ def simulate_raw_response(channel: Channel, case: TestCase, attempt: int) -> dic
     text = _answer_for_case(case, channel)
     stop_reason = "end_turn"
     stop_sequence = None
-    if params.get("stop_sequences") and channel.provider_type != "third_party_openai_compatible" and channel.role != "negative":
+    if params.get("stop_sequences") and channel.role != "negative":
         for candidate_stop in params["stop_sequences"]:
             if candidate_stop and candidate_stop in text:
                 text = text.split(candidate_stop, 1)[0]
@@ -1420,7 +1464,7 @@ def simulate_raw_response(channel: Channel, case: TestCase, attempt: int) -> dic
         else:
             content_blocks = [{"type": "text", "text": "订单 A-2026-0507 正在处理中。"}]
 
-    if channel.provider_type == "third_party_openai_compatible" or channel.role == "negative":
+    if channel.role == "negative":
         finish_reason = "length" if max_tokens == 1 else "stop"
         return {
             "id": f"chatcmpl_{uuid.uuid4().hex[:10]}",
@@ -1668,10 +1712,14 @@ def build_comparisons(db: Session, run_id: str, baseline_snapshot_id: str | None
         by_case_channel[(result.test_case_id, result.channel_id)].append(result)
 
     case_ids = sorted({result.test_case_id for result in results})
-    run_channel_ids = {item.channel_id for item in db.scalars(select(RunChannel).where(RunChannel.run_id == run_id)).all()}
-    candidate_ids = [cid for cid, channel in channels.items() if cid in run_channel_ids and channel.role in {"candidate", "negative"}]
+    run_role_by_channel = {
+        item.channel_id: item.role_in_run
+        for item in db.scalars(select(RunChannel).where(RunChannel.run_id == run_id)).all()
+    }
+    candidate_ids = [cid for cid, role in run_role_by_channel.items() if _is_candidate_role(role)]
 
     baseline_by_case_role: dict[tuple[str, str], list[BaselineResult]] = defaultdict(list)
+    baseline_by_case_reference: dict[str, list[BaselineResult]] = defaultdict(list)
     if baseline_snapshot_id:
         baseline_results = db.scalars(
             select(BaselineResult)
@@ -1680,18 +1728,22 @@ def build_comparisons(db: Session, run_id: str, baseline_snapshot_id: str | None
         ).all()
         for result in baseline_results:
             baseline_by_case_role[(result.test_case_id, result.role_in_baseline)].append(result)
+            if _is_reference_role(result.role_in_baseline):
+                baseline_by_case_reference[result.test_case_id].append(result)
         case_ids = sorted(set(case_ids) | {result.test_case_id for result in baseline_results})
     else:
-        gold_ids = [cid for cid, channel in channels.items() if cid in run_channel_ids and channel.role == "gold"]
-        cloud_ids = [cid for cid, channel in channels.items() if cid in run_channel_ids and channel.role == "official_cloud"]
+        reference_ids = [cid for cid, role in run_role_by_channel.items() if _is_reference_role(role)]
 
     for case_id in case_ids:
         if baseline_snapshot_id:
-            gold_texts = [_joined_baseline_text(baseline_by_case_role.get((case_id, "gold"), []))]
-            cloud_texts = [_joined_baseline_text(baseline_by_case_role.get((case_id, "official_cloud"), []))]
+            all_reference_results = baseline_by_case_reference.get(case_id, [])
+            gold_results = baseline_by_case_role.get((case_id, "gold"), []) or all_reference_results
+            cloud_results = baseline_by_case_role.get((case_id, "official_cloud"), []) or all_reference_results
+            gold_texts = [_joined_baseline_text(gold_results)]
+            cloud_texts = [_joined_baseline_text(cloud_results)]
         else:
-            gold_texts = [_joined_text(by_case_channel.get((case_id, cid), [])) for cid in gold_ids]
-            cloud_texts = [_joined_text(by_case_channel.get((case_id, cid), [])) for cid in cloud_ids]
+            gold_texts = [_joined_text(by_case_channel.get((case_id, cid), [])) for cid in reference_ids]
+            cloud_texts = gold_texts
         for candidate_id in candidate_ids:
             candidate_results = by_case_channel.get((case_id, candidate_id), [])
             if not candidate_results:
@@ -1704,9 +1756,9 @@ def build_comparisons(db: Session, run_id: str, baseline_snapshot_id: str | None
             final_score = protocol_score * 0.65 + capability_score * 0.35
             labels = sorted({label for result in candidate_results for label in (result.labels or [])})
             if baseline_snapshot_id:
-                if not baseline_by_case_role.get((case_id, "gold")):
+                if not gold_texts or not any(gold_texts):
                     labels.append("baseline_gold_missing")
-                if not baseline_by_case_role.get((case_id, "official_cloud")):
+                if not cloud_texts or not any(cloud_texts):
                     labels.append("baseline_cloud_missing")
             db.add(
                 Comparison(

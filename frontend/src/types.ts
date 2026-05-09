@@ -5,17 +5,20 @@ export type Channel = {
   role: ChannelRole;
   base_url?: string | null;
   model_name?: string | null;
+  is_reference: boolean;
   enabled: boolean;
 };
 
-export type ChannelRole = 'gold' | 'official_cloud' | 'candidate' | 'negative';
+export type ChannelRole = string;
 
 export type ChannelTaxonomySetting = {
   id: string;
   role_labels: Record<ChannelRole, string>;
   provider_type_labels: Record<string, string>;
+  model_options: string[];
   default_role_labels: Record<ChannelRole, string>;
   default_provider_type_labels: Record<string, string>;
+  default_model_options: string[];
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -23,6 +26,7 @@ export type ChannelTaxonomySetting = {
 export type ChannelTaxonomyUpdate = {
   role_labels?: Partial<Record<ChannelRole, string | null>>;
   provider_type_labels?: Record<string, string | null>;
+  model_options?: Array<string | null>;
 };
 
 export type TestSuite = {
@@ -72,7 +76,7 @@ export type RunChannel = {
   id: string;
   run_id: string;
   channel_id: string;
-  role_in_run: ChannelRole;
+  role_in_run: string;
 };
 
 export type Result = {
@@ -111,7 +115,7 @@ export type BaselineResult = {
   baseline_snapshot_id: string;
   test_case_id: string;
   channel_id: string;
-  role_in_baseline: ChannelRole;
+  role_in_baseline: string;
   attempt_index: number;
   normalized_response?: Record<string, any> | null;
   raw_request?: Record<string, any> | null;

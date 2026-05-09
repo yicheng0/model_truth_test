@@ -18,8 +18,53 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    _ensure_channel_columns()
+    _ensure_channel_taxonomy_columns()
+    _remove_builtin_demo_channels()
     _ensure_test_case_sort_order_column()
     _ensure_run_baseline_columns()
+
+
+def _ensure_channel_columns() -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "channels" not in tables:
+        return
+    columns = {column["name"] for column in inspector.get_columns("channels")}
+    with engine.begin() as connection:
+        if "is_reference" not in columns:
+            connection.execute(text("ALTER TABLE channels ADD COLUMN is_reference BOOLEAN NOT NULL DEFAULT 0"))
+            connection.execute(text("UPDATE channels SET is_reference = 1 WHERE role IN ('gold', 'official_cloud')"))
+
+
+def _ensure_channel_taxonomy_columns() -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "channel_taxonomy_settings" not in tables:
+        return
+    columns = {column["name"] for column in inspector.get_columns("channel_taxonomy_settings")}
+    with engine.begin() as connection:
+        if "model_options" not in columns:
+            connection.execute(text("ALTER TABLE channel_taxonomy_settings ADD COLUMN model_options JSON"))
+
+
+def _remove_builtin_demo_channels() -> None:
+    if os.getenv("SKIP_BUILTIN_CHANNEL_CLEANUP", "").lower() in {"1", "true", "yes"}:
+        return
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "channels" not in tables:
+        return
+    demo_ids = (
+        "'anthropic_official'",
+        "'aws_bedrock'",
+        "'azure_foundry'",
+        "'third_party_demo'",
+        "'openai_compat_demo'",
+        "'negative_sample'",
+    )
+    with engine.begin() as connection:
+        connection.execute(text(f"DELETE FROM channels WHERE id IN ({','.join(demo_ids)})"))
 
 
 def _ensure_test_case_sort_order_column() -> None:

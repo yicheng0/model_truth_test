@@ -5,6 +5,7 @@ import asyncio
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_claude_eval.db")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
+os.environ.setdefault("SKIP_BUILTIN_CHANNEL_CLEANUP", "1")
 
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
@@ -12,8 +13,8 @@ from sqlalchemy import delete, func, select
 from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
-from app.schemas import RunCreate, TestCaseCreate
-from app.services import apply_repeat_consistency_scores, create_alerts_for_run, create_case, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
+from app.schemas import ChannelCreate, RunCreate, TestCaseCreate
+from app.services import _anthropic_messages_url, _live_call, apply_repeat_consistency_scores, build_raw_request, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
 
 
 def reset_database() -> None:
@@ -23,6 +24,20 @@ def reset_database() -> None:
             db.execute(delete(model))
         db.commit()
         seed_demo_data(db)
+        seed_test_channels(db)
+
+
+def seed_test_channels(db) -> None:  # noqa: ANN001
+    channels = [
+        ChannelCreate(id="anthropic_official", name="Anthropic Official", provider_type="anthropic", role="gold", base_url="https://api.anthropic.com", model_name="claude-sonnet-4-5", is_reference=True),
+        ChannelCreate(id="aws_bedrock", name="AWS Bedrock Claude", provider_type="aws_bedrock", role="official_cloud", base_url="bedrock-runtime", model_name="anthropic.claude-sonnet-4-5-v1:0", is_reference=True),
+        ChannelCreate(id="azure_foundry", name="Azure AI Foundry Claude", provider_type="azure_foundry", role="official_cloud", base_url="https://example.services.ai.azure.com", model_name="claude-sonnet-4-5", is_reference=True),
+        ChannelCreate(id="third_party_demo", name="Third-party Relay Demo", provider_type="third_party_anthropic", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-5"),
+        ChannelCreate(id="openai_compat_demo", name="OpenAI-compatible Relay Demo", provider_type="third_party_openai_compatible", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-5"),
+        ChannelCreate(id="negative_sample", name="Negative Sample", provider_type="third_party_openai_compatible", role="negative", base_url="https://non-claude.example/v1", model_name="gpt-like-model"),
+    ]
+    for channel in channels:
+        create_channel(db, channel)
 
 
 def test_health_check_reports_database_ok() -> None:
@@ -526,7 +541,8 @@ def test_channel_taxonomy_setting_returns_defaults_and_allows_label_updates() ->
     assert defaults.status_code == 200
     default_payload = defaults.json()
     assert default_payload["role_labels"]["candidate"] == "待测第三方"
-    assert default_payload["provider_type_labels"]["third_party_anthropic"] == "Third-party Anthropic compatible"
+    assert default_payload["provider_type_labels"] == {}
+    assert default_payload["model_options"] == []
     assert updated.status_code == 200
     assert updated.json()["role_labels"]["candidate"] == "客户待测渠道"
     assert updated.json()["provider_type_labels"]["third_party_anthropic"] == "Claude 中转协议"
@@ -534,10 +550,17 @@ def test_channel_taxonomy_setting_returns_defaults_and_allows_label_updates() ->
     assert reset_candidate.json()["role_labels"]["candidate"] == "待测第三方"
 
 
-def test_channel_taxonomy_rejects_unknown_keys_and_does_not_change_run_semantics() -> None:
+def test_channel_taxonomy_allows_custom_keys_and_run_uses_reference_semantics() -> None:
     reset_database()
     with TestClient(app) as client:
-        bad = client.patch("/api/settings/channel-taxonomy", json={"role_labels": {"custom_role": "自定义角色"}})
+        custom = client.patch(
+            "/api/settings/channel-taxonomy",
+            json={
+                "role_labels": {"custom_role": "自定义角色"},
+                "provider_type_labels": {"custom_provider": "自定义供应商"},
+                "model_options": ["custom-model"],
+            },
+        )
         suite_id = client.get("/api/suites").json()[0]["id"]
         client.patch("/api/settings/channel-taxonomy", json={"role_labels": {"candidate": "客户待测渠道"}})
         response = client.post(
@@ -551,11 +574,118 @@ def test_channel_taxonomy_rejects_unknown_keys_and_does_not_change_run_semantics
         )
         payload = client.get(f"/api/runs/{response.json()['id']}/results").json()
 
-    assert bad.status_code == 400
+    assert custom.status_code == 200
+    assert custom.json()["role_labels"]["custom_role"] == "自定义角色"
+    assert custom.json()["provider_type_labels"]["custom_provider"] == "自定义供应商"
+    assert custom.json()["model_options"] == ["custom-model"]
     assert response.status_code == 200
     assert payload["run_channels"]
-    assert {item["role_in_run"] for item in payload["run_channels"]} == {"gold", "candidate"}
+    assert {item["role_in_run"] for item in payload["run_channels"]} == {"reference", "candidate"}
     assert payload["reports"]
+
+
+def test_channel_create_accepts_custom_provider_type_and_defaults_role() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/channels",
+            json={
+                "name": "Custom Internal Channel",
+                "provider_type": "customer_gateway",
+                "model_name": "claude-via-gateway",
+                "enabled": True,
+            },
+        )
+        reference = client.post(
+            "/api/channels",
+            json={
+                "name": "Custom Reference Channel",
+                "provider_type": "official-internal",
+                "model_name": "claude-reference",
+                "is_reference": True,
+                "enabled": True,
+            },
+        )
+
+    assert created.status_code == 200
+    assert created.json()["provider_type"] == "customer_gateway"
+    assert created.json()["role"] == "candidate"
+    assert "protocol_type" not in created.json()
+    assert reference.status_code == 200
+    assert reference.json()["role"] == "gold"
+
+
+def test_live_call_uses_anthropic_messages_for_custom_provider_key(monkeypatch) -> None:
+    reset_database()
+    called: dict[str, object] = {}
+
+    async def fake_anthropic_call(channel, raw_request, credentials):  # noqa: ANN001
+        called["provider_type"] = channel.provider_type
+        return {
+            "id": "msg_test",
+            "type": "message",
+            "model": channel.model_name,
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr("app.services._anthropic_compatible_call", fake_anthropic_call)
+
+    with SessionLocal() as db:
+        channel = Channel(
+            id="custom_protocol_channel",
+            name="Custom Protocol Channel",
+            provider_type="customer_gateway",
+            role="candidate",
+            model_name="custom-model",
+            enabled=True,
+        )
+        db.add(channel)
+        db.commit()
+        case = db.get(TestCaseModel, "identity_01")
+        assert case is not None
+        raw_request = build_raw_request(channel, case)
+        response = asyncio.run(_live_call(channel, case, raw_request, {}))
+
+    assert called == {"provider_type": "customer_gateway"}
+    assert response["type"] == "message"
+
+
+def test_anthropic_messages_url_accepts_base_version_or_full_endpoint() -> None:
+    assert _anthropic_messages_url(None) == "https://api.anthropic.com/v1/messages"
+    assert _anthropic_messages_url("https://api.anthropic.com") == "https://api.anthropic.com/v1/messages"
+    assert _anthropic_messages_url("https://api.anthropic.com/v1") == "https://api.anthropic.com/v1/messages"
+    assert _anthropic_messages_url("https://relay.example/v1/messages") == "https://relay.example/v1/messages"
+    assert _anthropic_messages_url("https://relay.example/messages") == "https://relay.example/messages"
+
+
+def test_custom_reference_channel_can_build_baseline() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        created = client.post(
+            "/api/channels",
+            json={
+                "name": "Custom Reference",
+                "provider_type": "custom_provider",
+                "role": "review_control",
+                "model_name": "custom-model",
+                "is_reference": True,
+                "enabled": True,
+            },
+        )
+        run = client.post(
+            "/api/baselines/build",
+            json={"name": "custom reference baseline", "suite_id": suite_id, "channel_ids": {"reference": [created.json()["id"]]}, "use_mock": True},
+        )
+        payload = client.get(f"/api/runs/{run.json()['id']}/results").json()
+
+    assert created.status_code == 200
+    assert created.json()["is_reference"] is True
+    assert run.status_code == 200
+    assert {item["role_in_run"] for item in payload["run_channels"]} == {"reference"}
+    assert payload["baseline_snapshot"]["channel_ids"] == [created.json()["id"]]
 
 
 def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None:
