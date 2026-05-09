@@ -17,6 +17,10 @@ function canCancel(status: Run['status']) {
   return status === 'pending' || status === 'running';
 }
 
+function formatTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString() : '-';
+}
+
 export default function Runs() {
   const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -79,13 +83,13 @@ export default function Runs() {
           loading={runs.isLoading}
           dataSource={runs.data ?? []}
           pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 760 }}
+          scroll={{ x: 1160 }}
           columns={[
-            { title: '任务', dataIndex: 'name', width: '25%' },
+            { title: '任务', dataIndex: 'name', width: 220 },
             {
               title: '状态',
               dataIndex: 'status',
-              width: '12%',
+              width: 120,
               render: (status: Run['status']) => (
                 <Tag
                   color={statusColor(status)}
@@ -97,7 +101,7 @@ export default function Runs() {
             },
             {
               title: '进度',
-              width: '25%',
+              width: 220,
               render: (_, run) => (
                 <Space direction="vertical" size={4} style={{ width: '100%' }}>
                   <Progress
@@ -111,8 +115,10 @@ export default function Runs() {
                 </Space>
               ),
             },
-            { title: '重复', dataIndex: 'repeat_count', width: '10%' },
-            { title: '并发', dataIndex: 'concurrency', width: '10%' },
+            { title: '创建时间', dataIndex: 'created_at', width: 190, render: formatTime },
+            { title: '结束时间', dataIndex: 'finished_at', width: 190, render: formatTime },
+            { title: '重复', dataIndex: 'repeat_count', width: 90 },
+            { title: '并发', dataIndex: 'concurrency', width: 90 },
             {
               title: '操作',
               width: 290,

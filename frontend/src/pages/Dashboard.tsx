@@ -96,7 +96,7 @@ export default function Dashboard() {
       </section>
 
       <section className="metric-strip">
-        <div><span>官方渠道</span><strong>{officialChannels}</strong></div>
+        <div><span>对照渠道</span><strong>{officialChannels}</strong></div>
         <div><span>当前可用</span><strong>{channels.data?.filter((channel) => channel.enabled).length ?? 0}</strong></div>
         <div><span>测评通过</span><strong>{completed}</strong></div>
         <div><span>单次测试</span><strong>{totalJobs || 183}</strong></div>
