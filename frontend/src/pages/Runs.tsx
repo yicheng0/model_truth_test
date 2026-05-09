@@ -4,6 +4,7 @@ import { Alert, Button, Card, Popconfirm, Progress, Space, Table, Tag, message }
 import { Link } from 'react-router-dom';
 import { CircleStop, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { formatDateTime } from '../time';
 import type { Run } from '../types';
 
 function statusColor(status: Run['status']) {
@@ -15,10 +16,6 @@ function statusColor(status: Run['status']) {
 
 function canCancel(status: Run['status']) {
   return status === 'pending' || status === 'running';
-}
-
-function formatTime(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : '-';
 }
 
 export default function Runs() {
@@ -115,8 +112,8 @@ export default function Runs() {
                 </Space>
               ),
             },
-            { title: '创建时间', dataIndex: 'created_at', width: 190, render: formatTime },
-            { title: '结束时间', dataIndex: 'finished_at', width: 190, render: formatTime },
+            { title: '创建时间', dataIndex: 'created_at', width: 190, render: formatDateTime },
+            { title: '结束时间', dataIndex: 'finished_at', width: 190, render: formatDateTime },
             { title: '重复', dataIndex: 'repeat_count', width: 90 },
             { title: '并发', dataIndex: 'concurrency', width: 90 },
             {

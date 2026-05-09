@@ -5,6 +5,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
 import { roleColor, roleLabel } from '../channelTaxonomy';
+import { formatDateTime } from '../time';
 import type { BaselineSnapshot, Channel, TestScope, TestSuite } from '../types';
 
 type CreateMode = 'baseline_build' | 'candidate_eval';
@@ -204,7 +205,7 @@ export default function CreateRun() {
                 placeholder={selectedSuiteId ? '选择可用对照样本' : '请先选择测试集'}
                 options={readyBaselines.map((baseline) => ({
                   value: baseline.id,
-                  label: `${baseline.name} · ${baseline.ready_at ? new Date(baseline.ready_at).toLocaleString() : '未记录生成时间'}`,
+                  label: `${baseline.name} · ${baseline.ready_at ? formatDateTime(baseline.ready_at) : '未记录生成时间'}`,
                 }))}
                 notFoundContent={selectedSuiteId ? '当前测试集暂无可用对照样本' : '请先选择测试集'}
               />

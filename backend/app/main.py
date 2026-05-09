@@ -16,6 +16,7 @@ from .schemas import (
     BaselineBuildCreate,
     BaselineResultRead,
     BaselineSnapshotRead,
+    BaselineSnapshotUpdate,
     ChannelAlertRead,
     ChannelAlertReviewUpdate,
     ChannelCreate,
@@ -124,6 +125,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _baseline_reference_conflict(db: Session, baseline_id: str, source_run_id: str | None = None) -> str | None:
+    run_stmt = select(Run).where(Run.baseline_snapshot_id == baseline_id)
+    if source_run_id:
+        run_stmt = run_stmt.where(Run.id != source_run_id)
+    if db.scalar(run_stmt.limit(1)):
+        return "Baseline snapshot is referenced by existing comparison runs"
+    if db.scalar(select(ScheduledChannelTest).where(ScheduledChannelTest.baseline_snapshot_id == baseline_id).limit(1)):
+        return "Baseline snapshot is referenced by scheduled tests"
+    return None
 
 
 @app.get("/api/health")
@@ -330,6 +342,38 @@ def get_baseline(baseline_id: str, db: Session = Depends(get_db)) -> BaselineSna
     if not snapshot:
         raise HTTPException(status_code=404, detail="Baseline not found")
     return refresh_baseline_status(db, snapshot)
+
+
+@app.patch("/api/baselines/{baseline_id}", response_model=BaselineSnapshotRead)
+def update_baseline(baseline_id: str, data: BaselineSnapshotUpdate, db: Session = Depends(get_db)) -> BaselineSnapshot:
+    snapshot = db.get(BaselineSnapshot, baseline_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Baseline not found")
+    values = data.model_dump(exclude_unset=True)
+    if "name" in values:
+        name = (values["name"] or "").strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Baseline name cannot be empty")
+        snapshot.name = name
+    db.commit()
+    db.refresh(snapshot)
+    return refresh_baseline_status(db, snapshot)
+
+
+@app.delete("/api/baselines/{baseline_id}")
+def delete_baseline(baseline_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+    snapshot = db.get(BaselineSnapshot, baseline_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Baseline not found")
+    conflict = _baseline_reference_conflict(db, baseline_id, snapshot.source_run_id)
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+    for run in db.scalars(select(Run).where(Run.baseline_snapshot_id == baseline_id)).all():
+        run.baseline_snapshot_id = None
+    db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == baseline_id))
+    db.delete(snapshot)
+    db.commit()
+    return {"deleted": True}
 
 
 @app.get("/api/baselines/{baseline_id}/results", response_model=list[BaselineResultRead])
@@ -652,12 +696,18 @@ def delete_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.status == "running":
         raise HTTPException(status_code=409, detail="Running runs must be canceled before deletion")
+    source_snapshots = list(db.scalars(select(BaselineSnapshot).where(BaselineSnapshot.source_run_id == run_id)).all())
+    for snapshot in source_snapshots:
+        conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
     db.execute(delete(RunChannel).where(RunChannel.run_id == run_id))
     db.execute(delete(Result).where(Result.run_id == run_id))
     db.execute(delete(Comparison).where(Comparison.run_id == run_id))
     db.execute(delete(Report).where(Report.run_id == run_id))
-    db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id.in_(select(BaselineSnapshot.id).where(BaselineSnapshot.source_run_id == run_id))))
-    db.execute(delete(BaselineSnapshot).where(BaselineSnapshot.source_run_id == run_id))
+    for snapshot in source_snapshots:
+        db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
+        db.delete(snapshot)
     db.delete(run)
     db.commit()
     return {"deleted": True}

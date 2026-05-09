@@ -40,6 +40,16 @@ def seed_test_channels(db) -> None:  # noqa: ANN001
         create_channel(db, channel)
 
 
+def create_ready_baseline(client: TestClient, name: str = "managed baseline") -> tuple[str, dict, dict]:
+    suite_id = client.get("/api/suites").json()[0]["id"]
+    run = client.post(
+        "/api/baselines/build",
+        json={"name": name, "suite_id": suite_id, "channel_ids": {"gold": ["anthropic_official"]}, "use_mock": True},
+    ).json()
+    snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == run["id"])
+    return suite_id, run, snapshot
+
+
 def test_health_check_reports_database_ok() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -335,6 +345,94 @@ def test_baseline_build_then_candidate_eval_reuses_snapshot() -> None:
     assert evidence["dimension_scores"]["authenticity"] is not None
     assert evidence["confidence"] in {"medium", "high"}
     assert isinstance(evidence["label_explanations"], list)
+
+
+def test_baseline_snapshot_name_can_be_updated() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        _suite_id, _run, snapshot = create_ready_baseline(client, "old baseline name")
+        response = client.patch(f"/api/baselines/{snapshot['id']}", json={"name": " renamed baseline "})
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "renamed baseline"
+
+
+def test_unreferenced_baseline_snapshot_can_be_deleted_with_results() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        _suite_id, _run, snapshot = create_ready_baseline(client, "delete me")
+        delete_response = client.delete(f"/api/baselines/{snapshot['id']}")
+        get_response = client.get(f"/api/baselines/{snapshot['id']}")
+
+    with SessionLocal() as db:
+        result_count = db.scalar(select(func.count()).select_from(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot["id"]))
+
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"deleted": True}
+    assert get_response.status_code == 404
+    assert result_count == 0
+
+
+def test_delete_baseline_snapshot_rejects_candidate_eval_reference() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id, _run, snapshot = create_ready_baseline(client, "referenced baseline")
+        eval_response = client.post(
+            "/api/runs",
+            json={
+                "name": "uses baseline",
+                "suite_id": suite_id,
+                "mode": "candidate_eval",
+                "baseline_snapshot_id": snapshot["id"],
+                "channel_ids": {"candidate": ["third_party_demo"]},
+                "use_mock": True,
+            },
+        )
+        delete_response = client.delete(f"/api/baselines/{snapshot['id']}")
+
+    assert eval_response.status_code == 200
+    assert delete_response.status_code == 409
+
+
+def test_delete_baseline_snapshot_rejects_scheduled_test_reference() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id, _run, snapshot = create_ready_baseline(client, "scheduled referenced baseline")
+        schedule_response = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "uses baseline schedule",
+                "channel_id": "third_party_demo",
+                "suite_id": suite_id,
+                "baseline_snapshot_id": snapshot["id"],
+                "interval_minutes": 60,
+            },
+        )
+        delete_response = client.delete(f"/api/baselines/{snapshot['id']}")
+
+    assert schedule_response.status_code == 200
+    assert delete_response.status_code == 409
+
+
+def test_delete_source_run_rejects_when_generated_baseline_is_referenced() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id, run, snapshot = create_ready_baseline(client, "source protected baseline")
+        eval_response = client.post(
+            "/api/runs",
+            json={
+                "name": "uses generated baseline",
+                "suite_id": suite_id,
+                "mode": "candidate_eval",
+                "baseline_snapshot_id": snapshot["id"],
+                "channel_ids": {"candidate": ["third_party_demo"]},
+                "use_mock": True,
+            },
+        )
+        delete_response = client.delete(f"/api/runs/{run['id']}")
+
+    assert eval_response.status_code == 200
+    assert delete_response.status_code == 409
 
 
 def test_candidate_eval_requires_valid_baseline() -> None:

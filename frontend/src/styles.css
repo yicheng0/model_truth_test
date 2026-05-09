@@ -756,6 +756,24 @@ textarea:focus-visible,
   font-weight: 700;
 }
 
+.baseline-action-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  align-items: center;
+  width: max-content;
+}
+
+.baseline-action-row .ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
 .ant-input,
 .ant-input-number,
 .ant-select-selector,
@@ -817,6 +835,40 @@ textarea:focus-visible,
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #f8fafc;
+}
+
+.runtime-credentials {
+  margin: 4px 0 24px;
+}
+
+.credential-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: baseline;
+  margin-bottom: 12px;
+}
+
+.credential-channel {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding-top: 30px;
+}
+
+.credential-channel strong,
+.credential-channel small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.credential-channel small {
+  color: #64748b;
+}
+
+.credential-row .ant-form-item {
+  margin-bottom: 0;
 }
 
 .full-width {

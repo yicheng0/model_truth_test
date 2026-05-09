@@ -12,6 +12,8 @@ type DisplayResult = Result | BaselineResult;
 type CasePanelRow = {
   key: string;
   caseItem: TestCase;
+  sample?: DisplayResult;
+  sampleAttempts: number;
   official?: DisplayResult;
   officialAttempts: number;
   candidate?: DisplayResult;
@@ -60,12 +62,24 @@ function rowStatus(row: CasePanelRow) {
   return { color: 'default', text: '排队中' };
 }
 
-function resultCell(channel: Channel | undefined, result: DisplayResult | undefined, attempts: number, baseline = false, taxonomy?: ChannelTaxonomySetting) {
+function sampleRowStatus(row: CasePanelRow) {
+  if (row.sample) return { color: 'green', text: '已返回' };
+  return { color: 'default', text: '排队中' };
+}
+
+function resultCell(
+  channel: Channel | undefined,
+  result: DisplayResult | undefined,
+  attempts: number,
+  baseline = false,
+  taxonomy?: ChannelTaxonomySetting,
+  baselineLabel = '官方基线',
+) {
   return (
     <div className="result-cell">
       <div className="result-cell-title">
         <strong>{channel?.name ?? '未选择渠道'}</strong>
-        {channel ? <Tag color={roleColor[channel.role]}>{baseline ? '官方基线' : roleLabel(channel.role, taxonomy)}</Tag> : null}
+        {channel ? <Tag color={roleColor[channel.role]}>{baseline ? baselineLabel : roleLabel(channel.role, taxonomy)}</Tag> : null}
       </div>
       <div className="result-cell-meta">
         <Tag>score {metricValue(result?.score)}</Tag>
@@ -112,6 +126,7 @@ export default function RunDetail() {
   const { runId = '' } = useParams();
   const [selectedOfficialId, setSelectedOfficialId] = useState('');
   const [selectedCandidateId, setSelectedCandidateId] = useState('');
+  const [selectedSampleChannelId, setSelectedSampleChannelId] = useState('');
 
   const runResults = useQuery<RunResults>({
     queryKey: ['runResults', runId],
@@ -133,11 +148,17 @@ export default function RunDetail() {
   const data = runResults.data ?? null;
   const channels = channelsQuery.data ?? [];
   const cases = casesQuery.data ?? [];
+  const isSamplingRun = data?.run.mode === 'baseline_build';
 
   const channelById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels]);
   const runChannelIds = useMemo(() => new Set((data?.run_channels ?? []).map((item) => item.channel_id)), [data?.run_channels]);
   const baselineChannelIds = useMemo(() => new Set((data?.baseline_results ?? []).map((item) => item.channel_id)), [data?.baseline_results]);
   const runRoleByChannel = useMemo(() => new Map((data?.run_channels ?? []).map((item) => [item.channel_id, item.role_in_run])), [data?.run_channels]);
+
+  const sampleChannels = useMemo(
+    () => channels.filter((channel) => runChannelIds.has(channel.id)),
+    [channels, runChannelIds],
+  );
 
   const officialChannels = useMemo(
     () =>
@@ -171,8 +192,15 @@ export default function RunDetail() {
     }
   }, [candidateChannels, selectedCandidateId]);
 
+  useEffect(() => {
+    if (sampleChannels.length && !sampleChannels.some((channel) => channel.id === selectedSampleChannelId)) {
+      setSelectedSampleChannelId(sampleChannels[0].id);
+    }
+  }, [sampleChannels, selectedSampleChannelId]);
+
   const selectedOfficial = channelById.get(selectedOfficialId);
   const selectedCandidate = channelById.get(selectedCandidateId);
+  const selectedSampleChannel = channelById.get(selectedSampleChannelId);
 
   const resultByCaseChannel = useMemo(() => {
     const map = new Map<string, Result[]>();
@@ -212,12 +240,15 @@ export default function RunDetail() {
   const rows: CasePanelRow[] = useMemo(
     () =>
       panelCases.map((caseItem) => {
+          const sampleResults = selectedSampleChannelId ? resultByCaseChannel.get(`${caseItem.id}:${selectedSampleChannelId}`) : undefined;
           const officialResults = selectedOfficialId ? resultByCaseChannel.get(`${caseItem.id}:${selectedOfficialId}`) : undefined;
           const baselineOfficialResults = selectedOfficialId ? baselineResultByCaseChannel.get(`${caseItem.id}:${selectedOfficialId}`) : undefined;
           const candidateResults = selectedCandidateId ? resultByCaseChannel.get(`${caseItem.id}:${selectedCandidateId}`) : undefined;
           return {
             key: caseItem.id,
             caseItem,
+            sample: latestResult(sampleResults),
+            sampleAttempts: sampleResults?.length ?? 0,
             official: latestResult(baselineOfficialResults ?? officialResults),
             officialAttempts: (baselineOfficialResults ?? officialResults)?.length ?? 0,
             candidate: latestResult(candidateResults),
@@ -225,15 +256,20 @@ export default function RunDetail() {
             comparison: selectedCandidateId ? comparisonByCaseCandidate.get(`${caseItem.id}:${selectedCandidateId}`) : undefined,
           };
         }),
-    [baselineResultByCaseChannel, comparisonByCaseCandidate, panelCases, resultByCaseChannel, selectedCandidateId, selectedOfficialId],
+    [baselineResultByCaseChannel, comparisonByCaseCandidate, panelCases, resultByCaseChannel, selectedCandidateId, selectedOfficialId, selectedSampleChannelId],
   );
 
   const percent = data?.run.total_jobs ? Math.round((data.run.completed_jobs / data.run.total_jobs) * 100) : 0;
-  const returnedRows = rows.filter((row) => row.official && row.candidate).length;
+  const sampleReturnedRows = rows.filter((row) => row.sample).length;
+  const returnedRows = isSamplingRun ? sampleReturnedRows : rows.filter((row) => row.official && row.candidate).length;
   const comparedRows = rows.filter((row) => row.comparison).length;
   const riskyRows = rows.filter((row) => (row.comparison?.final_score ?? 100) < 70).length;
   const averageScore = rows.length
     ? rows.reduce((sum, row) => sum + (row.comparison?.final_score ?? 0), 0) / Math.max(1, comparedRows)
+    : 0;
+  const sampleScoreRows = rows.filter((row) => row.sample?.score !== undefined);
+  const averageSampleScore = sampleScoreRows.length
+    ? sampleScoreRows.reduce((sum, row) => sum + (row.sample?.score ?? 0), 0) / sampleScoreRows.length
     : 0;
   const selectedReport = data?.reports.find((report) => report.channel_id === selectedCandidateId);
   const dimensionScores = selectedReport?.evidence?.dimension_scores ?? {};
@@ -284,9 +320,15 @@ export default function RunDetail() {
           <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
           <Descriptions.Item label="运行模式">{data.run.mode}</Descriptions.Item>
           <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '快速检测' : '完整检测'}</Descriptions.Item>
-          <Descriptions.Item label="官方基线">{data.baseline_snapshot?.name ?? '本次同步对比'}</Descriptions.Item>
+          <Descriptions.Item label={isSamplingRun ? '对照样本' : '官方基线'}>
+            {data.baseline_snapshot?.name ?? (isSamplingRun ? '采样生成中' : '本次同步对比')}
+          </Descriptions.Item>
           <Descriptions.Item label="已返回题目">{returnedRows} / {rows.length}</Descriptions.Item>
-          <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
+          {isSamplingRun ? (
+            <Descriptions.Item label="采样渠道">{sampleChannels.length}</Descriptions.Item>
+          ) : (
+            <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
+          )}
         </Descriptions>
         <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
       </Card>
@@ -320,7 +362,9 @@ export default function RunDetail() {
             <Typography.Text className="brand-kicker">REAL-TIME TEST PANEL</Typography.Text>
             <Typography.Title level={2}>实时测试数据面板</Typography.Title>
             <Typography.Paragraph>
-              每道题按执行顺序展示官方基线或官方渠道与第三方渠道的返回、评分、延迟和相似度。运行中每 1.8 秒自动刷新。
+              {isSamplingRun
+                ? '每道题按执行顺序展示采样渠道的返回、评分和延迟。运行中每 1.8 秒自动刷新。'
+                : '每道题按执行顺序展示官方基线或官方渠道与第三方渠道的返回、评分、延迟和相似度。运行中每 1.8 秒自动刷新。'}
             </Typography.Paragraph>
           </div>
           <Tag color={data.run.status === 'running' ? 'processing' : 'default'} icon={data.run.status === 'running' ? <Clock3 size={14} /> : undefined}>
@@ -328,36 +372,60 @@ export default function RunDetail() {
           </Tag>
         </div>
 
-        <div className="channel-pair-grid">
-          <div className="channel-pair-card official">
-            <span><ShieldCheck size={16} />{data.baseline_snapshot ? '官方基线' : '官方渠道'}</span>
-            <Select
-              value={selectedOfficialId || undefined}
-              placeholder="选择官方渠道"
-              onChange={setSelectedOfficialId}
-              options={officialChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
-            />
+        {isSamplingRun ? (
+          <div className="channel-pair-grid">
+            <div className="channel-pair-card official">
+              <span><ShieldCheck size={16} />采样渠道</span>
+              <Select
+                value={selectedSampleChannelId || undefined}
+                placeholder="选择采样渠道"
+                onChange={setSelectedSampleChannelId}
+                options={sampleChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
+              />
+            </div>
+            <div className="monitor-stat-card">
+              <span>已返回题目</span>
+              <strong>{sampleReturnedRows} / {rows.length}</strong>
+            </div>
+            <div className="monitor-stat-card">
+              <span>平均采样分</span>
+              <strong>{sampleScoreRows.length ? metricValue(averageSampleScore) : '-'}</strong>
+            </div>
           </div>
-          <div className="channel-pair-card candidate">
-            <span><GitCompare size={16} />第三方渠道</span>
-            <Select
-              value={selectedCandidateId || undefined}
-              placeholder="选择第三方渠道"
-              onChange={setSelectedCandidateId}
-              options={candidateChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
-            />
+        ) : (
+          <div className="channel-pair-grid">
+            <div className="channel-pair-card official">
+              <span><ShieldCheck size={16} />{data.baseline_snapshot ? '官方基线' : '官方渠道'}</span>
+              <Select
+                value={selectedOfficialId || undefined}
+                placeholder="选择官方渠道"
+                onChange={setSelectedOfficialId}
+                options={officialChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
+              />
+            </div>
+            <div className="channel-pair-card candidate">
+              <span><GitCompare size={16} />第三方渠道</span>
+              <Select
+                value={selectedCandidateId || undefined}
+                placeholder="选择第三方渠道"
+                onChange={setSelectedCandidateId}
+                options={candidateChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
+              />
+            </div>
+            <div className="monitor-stat-card">
+              <span>已形成对比</span>
+              <strong>{comparedRows} / {rows.length}</strong>
+            </div>
+            <div className="monitor-stat-card">
+              <span>平均真实性分</span>
+              <strong>{comparedRows ? metricValue(averageScore) : '-'}</strong>
+            </div>
           </div>
-          <div className="monitor-stat-card">
-            <span>已形成对比</span>
-            <strong>{comparedRows} / {rows.length}</strong>
-          </div>
-          <div className="monitor-stat-card">
-            <span>平均真实性分</span>
-            <strong>{comparedRows ? metricValue(averageScore) : '-'}</strong>
-          </div>
-        </div>
+        )}
 
-        {!selectedOfficial || !selectedCandidate ? (
+        {isSamplingRun && !selectedSampleChannel ? (
+          <Empty description="请先在创建对照样本时选择可用采样渠道" />
+        ) : !isSamplingRun && (!selectedOfficial || !selectedCandidate) ? (
           <Empty description="请先在创建检测时选择可用官方基线或官方渠道，并至少选择一个第三方渠道" />
         ) : (
           <Table
@@ -366,10 +434,34 @@ export default function RunDetail() {
             size="middle"
             dataSource={rows}
             pagination={false}
-            scroll={{ x: 1420, y: 620 }}
+            scroll={{ x: isSamplingRun ? 980 : 1420, y: 620 }}
             expandable={{
               expandedRowRender: (row) => {
                 const tone = riskTone(row.comparison?.final_score);
+                if (isSamplingRun && selectedSampleChannel) {
+                  return (
+                    <div className="expanded-live-row">
+                      <div className="prompt-panel">
+                        <strong>测试题目</strong>
+                        <pre>{row.caseItem.prompt}</pre>
+                      </div>
+                      <div className="ab-compare-grid">
+                        <section className="response-panel official">
+                          <div className="response-panel-head">
+                            <span><ShieldCheck size={16} />采样渠道</span>
+                            <Tag color={roleColor[selectedSampleChannel.role]}>{selectedSampleChannel.name}</Tag>
+                          </div>
+                          <div className="response-meta">
+                            <span>score {metricValue(row.sample?.score)}</span>
+                            <span>{row.sample?.metrics?.latency_ms ?? '-'} ms</span>
+                            <span>{row.sampleAttempts} 次返回</span>
+                          </div>
+                          <pre>{responseText(row.sample)}</pre>
+                        </section>
+                      </div>
+                    </div>
+                  );
+                }
                 return (
                   <div className="expanded-live-row">
                     <div className="prompt-panel">
@@ -380,7 +472,7 @@ export default function RunDetail() {
                       <section className="response-panel official">
                         <div className="response-panel-head">
                           <span><ShieldCheck size={16} />{data.baseline_snapshot ? '官方基线' : '官方渠道'}</span>
-                          <Tag color="gold">{selectedOfficial.name}</Tag>
+                          <Tag color="gold">{selectedOfficial?.name ?? '未选择渠道'}</Tag>
                         </div>
                         <div className="response-meta">
                           <span>score {metricValue(row.official?.score)}</span>
@@ -393,7 +485,7 @@ export default function RunDetail() {
                       <section className="response-panel candidate">
                         <div className="response-panel-head">
                           <span><GitCompare size={16} />第三方渠道</span>
-                          <Tag color={roleColor[selectedCandidate.role]}>{selectedCandidate.name}</Tag>
+                          <Tag color={selectedCandidate ? roleColor[selectedCandidate.role] : 'default'}>{selectedCandidate?.name ?? '未选择渠道'}</Tag>
                         </div>
                         <div className="response-meta">
                           <span>score {metricValue(row.candidate?.score)}</span>
@@ -429,7 +521,37 @@ export default function RunDetail() {
                 );
               },
             }}
-            columns={[
+            columns={isSamplingRun ? [
+              {
+                title: '题目',
+                width: 260,
+                fixed: 'left',
+                render: (_, row) => (
+                  <Space direction="vertical" size={4}>
+                    <div className="case-summary-line">
+                      <Tag color={row.caseItem.sort_order === 1 ? 'red' : 'default'}>#{row.caseItem.sort_order}</Tag>
+                      <strong>{row.caseItem.title}</strong>
+                    </div>
+                    <Typography.Text type="secondary">{row.caseItem.id}</Typography.Text>
+                    <Tag>{row.caseItem.module}</Tag>
+                  </Space>
+                ),
+              },
+              {
+                title: '采样渠道数据',
+                width: 430,
+                render: (_, row) => resultCell(selectedSampleChannel, row.sample, row.sampleAttempts, true, taxonomy.data, '采样'),
+              },
+              {
+                title: '状态',
+                width: 120,
+                fixed: 'right',
+                render: (_, row) => {
+                  const status = sampleRowStatus(row);
+                  return <Tag color={status.color}>{status.text}</Tag>;
+                },
+              },
+            ] : [
               {
                 title: '题目',
                 width: 260,

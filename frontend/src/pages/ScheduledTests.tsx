@@ -5,6 +5,7 @@ import { BarChart3, Bell, CalendarClock, Edit3, Play, RefreshCw, Send, Settings,
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
+import { formatDateTime } from '../time';
 import type { BaselineSnapshot, Channel, ChannelAlert, ChannelAlertStatus, FeishuBroadcastUpdate, ScheduledChannelTest, TestScope, TestSuite } from '../types';
 
 type ScheduleFormValues = {
@@ -60,10 +61,6 @@ const scheduleStatusColor: Record<string, string> = {
   failed: 'red',
   canceled: 'default',
 };
-
-function formatTime(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : '-';
-}
 
 function intervalText(minutes: number) {
   if (minutes % 1440 === 0) return `${minutes / 1440} 天`;
@@ -383,7 +380,7 @@ export default function ScheduledTests() {
             {
               title: '下次执行',
               width: 180,
-              render: (_, schedule) => formatTime(schedule.next_run_at),
+              render: (_, schedule) => formatDateTime(schedule.next_run_at),
             },
             {
               title: '状态',
@@ -452,7 +449,7 @@ export default function ScheduledTests() {
               render: (_, alert) => (
                 <Space direction="vertical" size={4}>
                   <strong>{alert.message ?? '渠道自动巡检异常'}</strong>
-                  <Typography.Text type="secondary">{formatTime(alert.created_at)}</Typography.Text>
+                  <Typography.Text type="secondary">{formatDateTime(alert.created_at)}</Typography.Text>
                 </Space>
               ),
             },
@@ -561,7 +558,7 @@ export default function ScheduledTests() {
                         { title: '最新评级', dataIndex: 'latest_grade', width: 110, render: (value: string | null) => value ? <Tag color={value === 'A' ? 'green' : value === 'E' ? 'red' : 'gold'}>{value}</Tag> : '-' },
                         { title: '最新分', dataIndex: 'latest_score', width: 110, render: (value: number | null) => value === null || value === undefined ? '-' : value.toFixed(1) },
                         { title: '均分', dataIndex: 'avg_score', width: 110, render: (value: number | null) => value === null || value === undefined ? '-' : value.toFixed(1) },
-                        { title: '最近巡检', dataIndex: 'last_run_at', width: 180, render: formatTime },
+                        { title: '最近巡检', dataIndex: 'last_run_at', width: 180, render: formatDateTime },
                       ]}
                     />
                   ) : (
@@ -584,7 +581,7 @@ export default function ScheduledTests() {
                         { title: '评级', dataIndex: 'grade', width: 90, render: (value: string) => <Tag color={value === 'E' ? 'red' : 'volcano'}>{value}</Tag> },
                         { title: '分数', dataIndex: 'final_score', width: 100, render: (value: number) => value.toFixed(1) },
                         { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Tag color={alertStatusColor[value] ?? 'default'}>{alertStatusLabel[value] ?? value}</Tag> },
-                        { title: '创建时间', dataIndex: 'created_at', width: 180, render: formatTime },
+                        { title: '创建时间', dataIndex: 'created_at', width: 180, render: formatDateTime },
                         { title: '操作', width: 120, render: (_, alert) => <Link to={`/runs/${alert.run_id}`}>查看报告</Link> },
                       ]}
                     />
@@ -667,7 +664,7 @@ export default function ScheduledTests() {
                     <Button type="primary" htmlType="submit" loading={saveFeishu.isPending}>保存设置</Button>
                     <Button icon={<Send size={15} />} loading={testFeishu.isPending} onClick={() => testFeishu.mutate()}>发送测试消息</Button>
                     <Typography.Text type="secondary">
-                      最近日报：{formatTime(feishuSetting.data?.last_daily_report_at)}
+                      最近日报：{formatDateTime(feishuSetting.data?.last_daily_report_at)}
                     </Typography.Text>
                   </Space>
                 </Form>
@@ -708,7 +705,7 @@ export default function ScheduledTests() {
           <Form.Item label="官方基线快照" name="baseline_snapshot_id" rules={[{ required: true, message: '请选择 ready 状态的官方基线' }]}>
             <Select
               placeholder={watchedSuiteId ? '选择可复用官方基线' : '请先选择测试集'}
-              options={readyBaselines.map((baseline) => ({ value: baseline.id, label: `${baseline.name} · ${formatTime(baseline.ready_at)}` }))}
+              options={readyBaselines.map((baseline) => ({ value: baseline.id, label: `${baseline.name} · ${formatDateTime(baseline.ready_at)}` }))}
               notFoundContent={watchedSuiteId ? '当前测试集暂无 ready 状态基线' : '请先选择测试集'}
             />
           </Form.Item>

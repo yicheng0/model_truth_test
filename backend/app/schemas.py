@@ -333,6 +333,10 @@ class BaselineSnapshotRead(BaseModel):
     updated_at: datetime | None = None
 
 
+class BaselineSnapshotUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class BaselineResultRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
