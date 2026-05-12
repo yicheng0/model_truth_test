@@ -21,6 +21,8 @@ from .schemas import (
     ChannelAlertReviewUpdate,
     ChannelCreate,
     ChannelRead,
+    SignatureInteropTestCreate,
+    SignatureInteropTestRead,
     ChannelTaxonomySettingRead,
     ChannelTaxonomySettingUpdate,
     ChannelUpdate,
@@ -38,6 +40,8 @@ from .schemas import (
     ScheduledChannelTestCreate,
     ScheduledChannelTestRead,
     ScheduledChannelTestUpdate,
+    SimulatedMessageResponseCreate,
+    SimulatedMessageResponseRead,
     SmartPatrolReportRead,
     TestCaseCreate,
     TestCaseRead,
@@ -70,7 +74,9 @@ from .services import (
     send_daily_patrol_report,
     send_feishu_test_message,
     seed_demo_data,
+    simulate_message_response,
     smart_patrol_report_markdown,
+    test_signature_interop,
     update_channel_taxonomy_setting,
     update_feishu_setting,
     validate_baseline_for_run,
@@ -201,6 +207,30 @@ def channel_health(channel_id: str, db: Session = Depends(get_db)) -> dict[str, 
         "provider_type": channel.provider_type,
         "message": "MVP health check uses configured metadata; live probes are handled by eval runs.",
     }
+
+
+@app.post("/api/channels/signature-interop-test", response_model=SignatureInteropTestRead)
+async def channel_signature_interop_test(data: SignatureInteropTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    source = db.get(Channel, data.source_channel_id)
+    relay = db.get(Channel, data.relay_channel_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Source channel not found")
+    if not relay:
+        raise HTTPException(status_code=404, detail="Relay channel not found")
+    try:
+        return await test_signature_interop(source, relay, data.stream)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/channels/simulate-message-response", response_model=SimulatedMessageResponseRead)
+def channel_simulate_message_response(data: SimulatedMessageResponseCreate) -> dict[str, object]:
+    try:
+        return simulate_message_response(data.provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/suites", response_model=list[TestSuiteRead])

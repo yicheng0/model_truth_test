@@ -62,6 +62,19 @@ ALERT_RED_FLAGS = {
     "protocol_mismatch",
 }
 
+SIGNATURE_INVALID_ERROR = "Invalid `signature` in `thinking` block"
+SIGNATURE_TEST_PROMPT_A = "请用中文解释：为什么 0.1 + 0.2 不等于 0.3？请展示完整推理过程。"
+SIGNATURE_TEST_PROMPT_B = "好的，那 0.1 + 0.2 + 0.3 == 0.6 是否成立？"
+SIGNATURE_FALLBACK_NOTE = """企业级 API 渠道（AWS/Vertex/Anthropic）
+优先 AWS，风控饱和则以 Vertex/Anthropic 兜底
+都是 Anthropic 和企业云服务商合作
+在不同云服务商托管（AWS/Google），模型质量和使用体验没有任何区别
+
+Claude 三类渠道 id 特征：
+AWS：msg_bdrk_01xxx
+Vertex：msg_vrtx_01xxx
+Anthropic：msg_01xxx"""
+
 FEISHU_SETTING_ID = "global"
 CHANNEL_TAXONOMY_SETTING_ID = "global"
 DEFAULT_ROLE_LABELS = {
@@ -1410,6 +1423,305 @@ async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, An
         response = await client.post(url, headers=headers, json=body)
         response.raise_for_status()
         return response.json()
+
+
+async def test_signature_interop(source: Channel, relay: Channel, stream: bool = False) -> dict[str, Any]:
+    source_credentials = _merged_channel_credentials(source, {})
+    relay_credentials = _merged_channel_credentials(relay, {})
+    _validate_signature_test_channel(source, source_credentials, "source")
+    _validate_signature_test_channel(relay, relay_credentials, "relay")
+
+    source_endpoint = _anthropic_messages_url(source_credentials.get("base_url") or source.base_url)
+    relay_endpoint = _anthropic_messages_url(relay_credentials.get("base_url") or relay.base_url)
+    model = source_credentials.get("model") or source.model_name or "claude-opus-4-6"
+    steps: list[dict[str, str | None]] = [
+        {
+            "name": "步骤 A：请求 Source thinking",
+            "status": "running",
+            "detail": f"向 {source.name} 发起 Anthropic Messages thinking 请求",
+            "excerpt": source_endpoint,
+        }
+    ]
+
+    response_a = await _signature_messages_call(
+        source_endpoint,
+        source_credentials["api_key"],
+        {
+            "model": model,
+            "max_tokens": 4000,
+            "thinking": {"type": "enabled", "budget_tokens": 2000},
+            "messages": [{"role": "user", "content": SIGNATURE_TEST_PROMPT_A}],
+        },
+    )
+    steps[0] = {
+        "name": "步骤 A：请求 Source thinking",
+        "status": "ok",
+        "detail": f"Source 返回 message id：{response_a.get('id') or '-'}",
+        "excerpt": json.dumps(_redact_signature_payload(response_a), ensure_ascii=False)[:1200],
+    }
+    source_content = response_a.get("content") if isinstance(response_a, dict) else None
+    if not isinstance(source_content, list):
+        raise ValueError("source 响应缺少 content 数组，无法进行 signature 互通检测")
+    thinking_blocks = [block for block in source_content if isinstance(block, dict) and block.get("type") == "thinking"]
+    if not thinking_blocks:
+        raise ValueError("source 响应中没有 thinking block，无法进行 signature 互通检测")
+    missing_signature = [index for index, block in enumerate(thinking_blocks) if not block.get("signature")]
+    if missing_signature:
+        raise ValueError(f"source thinking block 缺少 signature 字段，block 索引：{missing_signature}")
+    steps.append(
+        {
+            "name": "Signature 校验",
+            "status": "ok",
+            "detail": f"{len(thinking_blocks)} 个 thinking block 均包含 signature",
+            "excerpt": ", ".join(str(block.get("signature") or "")[:50] for block in thinking_blocks),
+        }
+    )
+
+    model = response_a.get("model") or model
+    relay_payload: dict[str, Any] = {
+        "model": relay_credentials.get("model") or relay.model_name or model,
+        "max_tokens": 4000,
+        "thinking": {"type": "enabled", "budget_tokens": 2000},
+        "messages": [
+            {"role": "user", "content": SIGNATURE_TEST_PROMPT_A},
+            {"role": "assistant", "content": source_content},
+            {"role": "user", "content": SIGNATURE_TEST_PROMPT_B},
+        ],
+    }
+    if stream:
+        relay_payload["stream"] = True
+
+    steps.append(
+        {
+            "name": "步骤 B：发送 Relay 复用请求",
+            "status": "running",
+            "detail": f"向 {relay.name} 发送包含 source assistant content 的三段 messages",
+            "excerpt": relay_endpoint,
+        }
+    )
+    try:
+        response_b = await _signature_messages_call(relay_endpoint, relay_credentials["api_key"], relay_payload)
+    except RuntimeError as exc:
+        raw = str(exc)
+        reason = "signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败"
+        steps[-1] = {"name": "步骤 B：发送 Relay 复用请求", "status": "fail", "detail": "Relay 请求失败", "excerpt": raw[:1200]}
+        steps.append({"name": "最终判定", "status": "fail", "detail": reason, "excerpt": None})
+        return _signature_interop_result(
+            ok=False,
+            reason=reason,
+            source=source,
+            relay=relay,
+            source_endpoint=source_endpoint,
+            relay_endpoint=relay_endpoint,
+            model=str(model),
+            response_a=response_a,
+            response_b={"error": raw},
+            thinking_blocks=thinking_blocks,
+            steps=steps,
+        )
+
+    raw_b = json.dumps(response_b, ensure_ascii=False)
+    has_error = response_b.get("type") == "error" or response_b.get("error") is True or isinstance(response_b.get("error"), dict)
+    ok = not has_error and SIGNATURE_INVALID_ERROR not in raw_b
+    reason = "兼容：relay 成功接受 source 的 thinking block signature" if ok else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw_b else "relay 请求失败")
+    steps[-1] = {
+        "name": "步骤 B：发送 Relay 复用请求",
+        "status": "ok" if ok else "fail",
+        "detail": f"Relay 返回 {response_b.get('type') or 'unknown'}，message id：{response_b.get('id') or '-'}",
+        "excerpt": json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:1200],
+    }
+    steps.append({"name": "最终判定", "status": "ok" if ok else "fail", "detail": reason, "excerpt": None})
+    return _signature_interop_result(
+        ok=ok,
+        reason=reason,
+        source=source,
+        relay=relay,
+        source_endpoint=source_endpoint,
+        relay_endpoint=relay_endpoint,
+        model=str(model),
+        response_a=response_a,
+        response_b=response_b,
+        thinking_blocks=thinking_blocks,
+        steps=steps,
+    )
+
+
+def _validate_signature_test_channel(channel: Channel, credentials: dict[str, Any], label: str) -> None:
+    if not credentials.get("api_key"):
+        raise ValueError(f"{label} 渠道缺少 API Key，无法检测 thinking signature")
+    if not (credentials.get("base_url") or channel.base_url):
+        raise ValueError(f"{label} 渠道缺少 Base URL，无法检测 thinking signature")
+
+
+async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    headers = {
+        "content-type": "application/json",
+        "x-api-key": api_key,
+        "authorization": f"Bearer {api_key}",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "interleaved-thinking-2025-05-14",
+    }
+    timeout = httpx.Timeout(connect=10, read=120, write=10, pool=10)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(endpoint, headers=headers, json=payload)
+        if response.is_error:
+            raise RuntimeError(f"HTTP {response.status_code}: {_signature_response_error_detail(response)}")
+        if payload.get("stream"):
+            return _parse_signature_stream_response(response.text)
+        return response.json()
+
+
+def _signature_response_error_detail(response: httpx.Response) -> str:
+    text = response.text.strip()
+    if not text:
+        return ""
+    try:
+        payload = response.json()
+    except ValueError:
+        return text[:1000]
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("code") or error.get("type")
+        request_id = error.get("request_id") or payload.get("request_id")
+        if message:
+            return f"{message} request_id={request_id}" if request_id else str(message)
+    if isinstance(error, str):
+        return error
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if message:
+        return str(message)
+    return text[:1000]
+
+
+def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
+    events: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("event:"):
+            events.append(line.split(":", 1)[1].strip())
+        if not line.startswith("data:"):
+            continue
+        data = line.split(":", 1)[1].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and payload.get("type") == "error":
+            return payload
+    return {"type": "message", "id": None, "content": [], "stream_events": events, "raw_stream_excerpt": raw[:2000]}
+
+
+def _signature_interop_result(
+    *,
+    ok: bool,
+    reason: str,
+    source: Channel,
+    relay: Channel,
+    source_endpoint: str,
+    relay_endpoint: str,
+    model: str,
+    response_a: dict[str, Any],
+    response_b: dict[str, Any],
+    thinking_blocks: list[dict[str, Any]],
+    steps: list[dict[str, str | None]],
+) -> dict[str, Any]:
+    relay_raw_excerpt = json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:3000]
+    source_message_id = response_a.get("id")
+    relay_message_id = response_b.get("id")
+    return {
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "reason": reason,
+        "source_channel_id": source.id,
+        "relay_channel_id": relay.id,
+        "source_endpoint": source_endpoint,
+        "relay_endpoint": relay_endpoint,
+        "model": model,
+        "thinking_block_count": len(thinking_blocks),
+        "signature_prefixes": [str(block.get("signature") or "")[:50] for block in thinking_blocks],
+        "source_message_id": source_message_id,
+        "source_message_channel_type": classify_claude_message_id(source_message_id),
+        "relay_message_id": relay_message_id,
+        "relay_message_channel_type": classify_claude_message_id(relay_message_id),
+        "relay_raw_excerpt": relay_raw_excerpt,
+        "fallback_note": SIGNATURE_FALLBACK_NOTE,
+        "steps": steps,
+    }
+
+
+def _redact_signature_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "signature" and isinstance(item, str):
+                redacted[key] = f"{item[:50]}..."
+            elif key == "thinking" and isinstance(item, str):
+                redacted[key] = f"{item[:500]}..." if len(item) > 500 else item
+            else:
+                redacted[key] = _redact_signature_payload(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_signature_payload(item) for item in value]
+    return value
+
+
+def classify_claude_message_id(message_id: str | None) -> str:
+    value = str(message_id or "")
+    if value.startswith("msg_bdrk_01"):
+        return "AWS Bedrock"
+    if value.startswith("msg_vrtx_01"):
+        return "Vertex"
+    if value.startswith("msg_01"):
+        return "Anthropic"
+    return "未知"
+
+
+def simulate_message_response(provider: str = "aws") -> dict[str, Any]:
+    normalized_provider = (provider or "aws").strip().lower()
+    prefixes = {
+        "aws": "msg_bdrk_01",
+        "vertex": "msg_vrtx_01",
+        "anthropic": "msg_01",
+    }
+    if normalized_provider not in prefixes:
+        raise ValueError("Unsupported simulated provider")
+    message_id = f"{prefixes[normalized_provider]}{uuid.uuid4().hex[:18]}"
+    model_by_provider = {
+        "aws": "anthropic.claude-sonnet-4-5-v1:0",
+        "vertex": "claude-sonnet-4-5@20250929",
+        "anthropic": "claude-sonnet-4-5",
+    }
+    raw_request = {
+        "model": model_by_provider[normalized_provider],
+        "max_tokens": 256,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": "请用一句话返回当前渠道的 Claude message id 特征。"}],
+    }
+    raw_response = {
+        "id": message_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model_by_provider[normalized_provider],
+        "content": [
+            {
+                "type": "text",
+                "text": f"这是 {classify_claude_message_id(message_id)} 渠道风格的模拟 Claude Messages 响应。",
+            }
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 24, "output_tokens": 18},
+    }
+    return {
+        "provider": normalized_provider,
+        "message_id": message_id,
+        "message_channel_type": classify_claude_message_id(message_id),
+        "raw_request": raw_request,
+        "raw_response": raw_response,
+        "fallback_note": SIGNATURE_FALLBACK_NOTE,
+    }
 
 
 async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:

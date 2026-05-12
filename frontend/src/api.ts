@@ -14,6 +14,7 @@ import type {
   RunMode,
   RunResults,
   ScheduledChannelTest,
+  SignatureInteropResult,
   SmartPatrolReport,
   TestCase,
   TestScope,
@@ -81,6 +82,8 @@ export const api = {
     request<Channel>(`/api/channels/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteChannel: (id: string) => request<{ deleted: boolean }>(`/api/channels/${id}`, { method: 'DELETE' }),
   healthCheck: (id: string) => request<Record<string, unknown>>(`/api/channels/${id}/health-check`, { method: 'POST' }),
+  signatureInteropTest: (payload: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) =>
+    request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),
   suites: () => request<TestSuite[]>('/api/suites'),
   createSuite: (payload: Partial<TestSuite>) => request<TestSuite>('/api/test-suites', { method: 'POST', body: JSON.stringify(payload) }),
   cases: (suiteId?: string) => request<TestCase[]>(suiteId ? `/api/suites/${suiteId}/cases` : '/api/test-cases'),

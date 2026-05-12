@@ -30,6 +30,31 @@ export type ChannelTaxonomyUpdate = {
   model_options?: Array<string | null>;
 };
 
+export type SignatureInteropResult = {
+  ok: boolean;
+  status: 'pass' | 'fail' | string;
+  reason: string;
+  source_channel_id: string;
+  relay_channel_id: string;
+  source_endpoint: string;
+  relay_endpoint: string;
+  model: string;
+  thinking_block_count: number;
+  signature_prefixes: string[];
+  source_message_id?: string | null;
+  source_message_channel_type: string;
+  relay_message_id?: string | null;
+  relay_message_channel_type: string;
+  relay_raw_excerpt: string;
+  fallback_note: string;
+  steps: Array<{
+    name: string;
+    status: 'ok' | 'fail' | 'running' | string;
+    detail: string;
+    excerpt?: string | null;
+  }>;
+};
+
 export type TestSuite = {
   id: string;
   name: string;

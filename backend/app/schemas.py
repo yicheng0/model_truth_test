@@ -39,6 +39,52 @@ class ChannelRead(ChannelBase):
     updated_at: datetime | None = None
 
 
+class SignatureInteropTestCreate(BaseModel):
+    source_channel_id: str
+    relay_channel_id: str
+    stream: bool = False
+
+
+class SignatureInteropStepRead(BaseModel):
+    name: str
+    status: str
+    detail: str
+    excerpt: str | None = None
+
+
+class SignatureInteropTestRead(BaseModel):
+    ok: bool
+    status: str
+    reason: str
+    source_channel_id: str
+    relay_channel_id: str
+    source_endpoint: str
+    relay_endpoint: str
+    model: str
+    thinking_block_count: int
+    signature_prefixes: list[str]
+    source_message_id: str | None = None
+    source_message_channel_type: str
+    relay_message_id: str | None = None
+    relay_message_channel_type: str
+    relay_raw_excerpt: str
+    fallback_note: str
+    steps: list[SignatureInteropStepRead]
+
+
+class SimulatedMessageResponseCreate(BaseModel):
+    provider: str = "aws"
+
+
+class SimulatedMessageResponseRead(BaseModel):
+    provider: str
+    message_id: str
+    message_channel_type: str
+    raw_request: dict[str, Any]
+    raw_response: dict[str, Any]
+    fallback_note: str
+
+
 class TestSuiteBase(BaseModel):
     name: str
     description: str | None = None

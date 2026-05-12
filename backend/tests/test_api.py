@@ -8,13 +8,14 @@ os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 os.environ.setdefault("SKIP_BUILTIN_CHANNEL_CLEANUP", "1")
 
 from fastapi.testclient import TestClient
+import httpx
 from sqlalchemy import delete, func, select
 
 from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_messages_url, _live_call, _merged_channel_credentials, apply_repeat_consistency_scores, build_raw_request, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
+from app.services import _anthropic_messages_url, _live_call, _merged_channel_credentials, apply_repeat_consistency_scores, build_raw_request, classify_claude_message_id, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
 
 
 def reset_database() -> None:
@@ -995,6 +996,235 @@ def test_baseline_build_rejects_out_of_range_repeat_count_and_concurrency() -> N
 
     assert low_repeat.status_code == 422
     assert high_concurrency.status_code == 422
+
+
+def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypatch) -> None:
+    reset_database()
+    calls: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            calls.append({"url": url, "json": json, "headers": headers})
+            request = httpx.Request("POST", url)
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_bdrk_01source",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "content": [
+                            {"type": "thinking", "thinking": "source thinking", "signature": "sig-source-compatible"},
+                            {"type": "text", "text": "source answer"},
+                        ],
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_vrtx_01relay",
+                    "type": "message",
+                    "model": "claude-opus-4-6",
+                    "content": [{"type": "text", "text": "relay answer"}],
+                },
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Source",
+                "provider_type": "anthropic",
+                "base_url": "https://source.example",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "source-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Relay",
+                "provider_type": "anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "relay-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["status"] == "pass"
+    assert payload["source_message_channel_type"] == "AWS Bedrock"
+    assert payload["relay_message_channel_type"] == "Vertex"
+    assert payload["signature_prefixes"] == ["sig-source-compatible"]
+    assert [step["name"] for step in payload["steps"]] == [
+        "步骤 A：请求 Source thinking",
+        "Signature 校验",
+        "步骤 B：发送 Relay 复用请求",
+        "最终判定",
+    ]
+    assert payload["steps"][-1]["status"] == "ok"
+    assert calls[0]["url"] == "https://source.example/v1/messages"
+    assert calls[1]["url"] == "https://relay.example/v1/messages"
+    assert calls[1]["json"]["messages"][1]["content"][0]["signature"] == "sig-source-compatible"
+
+
+def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> None:
+    reset_database()
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_01source",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "content": [{"type": "thinking", "thinking": "source thinking", "signature": "sig-bad"}],
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                400,
+                json={"type": "error", "error": {"message": "Invalid `signature` in `thinking` block", "request_id": "req_123"}},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Source",
+                "provider_type": "anthropic",
+                "base_url": "https://source.example",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "source-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Relay",
+                "provider_type": "anthropic",
+                "base_url": "https://relay.example",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "relay-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["status"] == "fail"
+    assert "signature 不兼容" in payload["reason"]
+    assert "req_123" in payload["relay_raw_excerpt"]
+    assert payload["source_message_channel_type"] == "Anthropic"
+    assert payload["steps"][-1]["status"] == "fail"
+    assert "signature 不兼容" in payload["steps"][-1]["detail"]
+
+
+def test_signature_interop_rejects_source_without_signature(monkeypatch) -> None:
+    reset_database()
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                200,
+                json={"id": "msg_01source", "type": "message", "model": "claude-opus-4-6", "content": [{"type": "thinking", "thinking": "no signature"}]},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Source",
+                "provider_type": "anthropic",
+                "base_url": "https://source.example",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "source-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Relay",
+                "provider_type": "anthropic",
+                "base_url": "https://relay.example",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "relay-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id},
+        )
+
+    assert response.status_code == 400
+    assert "缺少 signature" in response.json()["detail"]
+
+
+def test_classify_claude_message_id_prefixes() -> None:
+    assert classify_claude_message_id("msg_bdrk_01abc") == "AWS Bedrock"
+    assert classify_claude_message_id("msg_vrtx_01abc") == "Vertex"
+    assert classify_claude_message_id("msg_01abc") == "Anthropic"
+    assert classify_claude_message_id("chatcmpl_abc") == "未知"
 
 
 def test_cors_origins_are_read_from_environment() -> None:

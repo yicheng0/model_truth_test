@@ -1,6 +1,6 @@
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Popover, Typography } from 'antd';
-import { Activity, CalendarClock, ClipboardList, Database, GitCompare, Headphones, ListChecks, Network } from 'lucide-react';
+import { Activity, CalendarClock, ClipboardList, Database, GitCompare, Headphones, ListChecks, Network, ShieldCheck } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Channels from './pages/Channels';
 import Baselines from './pages/Baselines';
@@ -9,12 +9,14 @@ import Runs from './pages/Runs';
 import RunDetail from './pages/RunDetail';
 import TestCases from './pages/TestCases';
 import ScheduledTests from './pages/ScheduledTests';
+import SignatureInterop from './pages/SignatureInterop';
 
 const { Content, Sider } = Layout;
 
 const navItems = [
   { key: '/', icon: Activity, label: '总览', to: '/' },
   { key: '/channels', icon: Network, label: '渠道管理', to: '/channels' },
+  { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
   { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },
   { key: '/baselines', icon: Database, label: '基线管理', to: '/baselines' },
   { key: '/scheduled-tests', icon: CalendarClock, label: '自动巡检', to: '/scheduled-tests' },
@@ -74,6 +76,7 @@ function Shell() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/channels" element={<Channels />} />
+            <Route path="/signature-interop" element={<SignatureInterop />} />
             <Route path="/test-cases" element={<TestCases />} />
             <Route path="/baselines" element={<Baselines />} />
             <Route path="/scheduled-tests" element={<ScheduledTests />} />
