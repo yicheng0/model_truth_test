@@ -143,4 +143,31 @@ describe('api request handling', () => {
     );
     fetchMock.mockRestore();
   });
+
+  it('simulates Claude message responses through the expected endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          provider: 'aws',
+          message_id: 'msg_bdrk_01abc',
+          message_channel_type: 'AWS Bedrock',
+          raw_request: { messages: [] },
+          raw_response: { id: 'msg_bdrk_01abc', type: 'message' },
+          fallback_note: 'note',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.simulateMessageResponse({ provider: 'aws' });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/simulate-message-response',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ provider: 'aws' }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
 });

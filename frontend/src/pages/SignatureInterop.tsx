@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Descriptions, Form, Select, Space, Steps, Switch, Tag, Typography, message } from 'antd';
-import { Play, ShieldCheck } from 'lucide-react';
+import { Play, Send, ShieldCheck } from 'lucide-react';
 import { api } from '../api';
-import type { Channel, SignatureInteropResult } from '../types';
+import type { Channel, SignatureInteropResult, SimulatedMessageResponse } from '../types';
 
 type DisplayStep = SignatureInteropResult['steps'][number];
 
@@ -35,6 +35,8 @@ export default function SignatureInterop() {
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<SignatureInteropResult | null>(null);
   const [displaySteps, setDisplaySteps] = useState<DisplayStep[]>(defaultSteps);
+  const [simulateProvider, setSimulateProvider] = useState('aws');
+  const [simulatedResult, setSimulatedResult] = useState<SimulatedMessageResponse | null>(null);
 
   const availableChannels = useMemo(
     () => (channels.data ?? []).filter((channel) => channel.enabled && channel.base_url && channelApiKey(channel)),
@@ -69,6 +71,17 @@ export default function SignatureInterop() {
     },
   });
 
+  const simulateMessage = useMutation({
+    mutationFn: api.simulateMessageResponse,
+    onSuccess: (payload) => {
+      setSimulatedResult(payload);
+      message.success(`已生成 ${payload.message_channel_type} 模拟响应`);
+    },
+    onError: (error) => {
+      message.error(error instanceof Error ? error.message : '模拟请求失败');
+    },
+  });
+
   function submit(values: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) {
     setResult(null);
     setDisplaySteps([
@@ -86,6 +99,10 @@ export default function SignatureInterop() {
       relay_channel_id: availableChannels.find((channel) => !channel.is_reference)?.id ?? availableChannels[1]?.id ?? availableChannels[0]?.id,
       stream: false,
     });
+  }
+
+  function runSimulation() {
+    simulateMessage.mutate({ provider: simulateProvider });
   }
 
   return (
@@ -135,6 +152,56 @@ export default function SignatureInterop() {
               </Button>
             </Space>
           </Form>
+        </Space>
+      </Card>
+
+      <Card title={<span className="card-title-with-icon"><Send size={18} />模拟请求</span>} bordered={false}>
+        <Space direction="vertical" size={16} className="full-width">
+          <Alert
+            type="info"
+            showIcon
+            message="独立模拟 Claude Messages 响应"
+            description="点击按钮后生成一份本地模拟响应，直接展示 AWS / Vertex / Anthropic 对应的 message id 前缀，不调用真实外部 API。"
+          />
+          <Space wrap>
+            <Select
+              value={simulateProvider}
+              onChange={(value) => {
+                setSimulateProvider(value);
+                setSimulatedResult(null);
+              }}
+              style={{ width: 180 }}
+              options={[
+                { value: 'aws', label: 'AWS' },
+                { value: 'vertex', label: 'Vertex' },
+                { value: 'anthropic', label: 'Anthropic' },
+              ]}
+            />
+            <Button type="primary" htmlType="button" loading={simulateMessage.isPending} onClick={runSimulation} icon={<Send size={16} />}>
+              模拟请求
+            </Button>
+          </Space>
+          {simulatedResult ? (
+            <Space direction="vertical" size={16} className="full-width">
+              <Descriptions bordered size="small" column={2}>
+                <Descriptions.Item label="Message ID">{simulatedResult.message_id}</Descriptions.Item>
+                <Descriptions.Item label="渠道特征">{simulatedResult.message_channel_type}</Descriptions.Item>
+                <Descriptions.Item label="Provider">{simulatedResult.provider}</Descriptions.Item>
+                <Descriptions.Item label="响应类型">{String(simulatedResult.raw_response.type ?? '-')}</Descriptions.Item>
+              </Descriptions>
+              <div className="signature-sim-grid">
+                <Card title="模拟请求" bordered={false}>
+                  <pre className="signature-step-excerpt">{JSON.stringify(simulatedResult.raw_request, null, 2)}</pre>
+                </Card>
+                <Card title="模拟响应" bordered={false}>
+                  <pre className="signature-step-excerpt">{JSON.stringify(simulatedResult.raw_response, null, 2)}</pre>
+                </Card>
+              </div>
+              <Card title="兜底渠道说明" bordered={false}>
+                <pre className="signature-note">{simulatedResult.fallback_note}</pre>
+              </Card>
+            </Space>
+          ) : null}
         </Space>
       </Card>
 

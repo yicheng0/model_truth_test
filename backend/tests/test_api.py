@@ -1227,6 +1227,48 @@ def test_classify_claude_message_id_prefixes() -> None:
     assert classify_claude_message_id("chatcmpl_abc") == "未知"
 
 
+def test_simulate_message_response_defaults_to_aws() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.post("/api/channels/simulate-message-response", json={})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["provider"] == "aws"
+    assert payload["message_id"].startswith("msg_bdrk_01")
+    assert payload["message_channel_type"] == "AWS Bedrock"
+    assert payload["raw_response"]["id"] == payload["message_id"]
+    assert payload["raw_response"]["type"] == "message"
+    assert payload["raw_request"]["messages"][0]["role"] == "user"
+
+
+def test_simulate_message_response_supports_all_claude_id_prefixes() -> None:
+    reset_database()
+    expected = {
+        "aws": ("msg_bdrk_01", "AWS Bedrock"),
+        "vertex": ("msg_vrtx_01", "Vertex"),
+        "anthropic": ("msg_01", "Anthropic"),
+    }
+    with TestClient(app) as client:
+        for provider, (prefix, channel_type) in expected.items():
+            response = client.post("/api/channels/simulate-message-response", json={"provider": provider})
+            payload = response.json()
+
+            assert response.status_code == 200
+            assert payload["provider"] == provider
+            assert payload["message_id"].startswith(prefix)
+            assert payload["message_channel_type"] == channel_type
+
+
+def test_simulate_message_response_rejects_unknown_provider() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.post("/api/channels/simulate-message-response", json={"provider": "azure"})
+
+    assert response.status_code == 400
+    assert "Unsupported simulated provider" in response.json()["detail"]
+
+
 def test_cors_origins_are_read_from_environment() -> None:
     os.environ["CORS_ORIGINS"] = "http://localhost:5173, https://example.com "
     assert cors_origins() == ["http://localhost:5173", "https://example.com"]

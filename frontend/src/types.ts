@@ -55,6 +55,15 @@ export type SignatureInteropResult = {
   }>;
 };
 
+export type SimulatedMessageResponse = {
+  provider: 'aws' | 'vertex' | 'anthropic' | string;
+  message_id: string;
+  message_channel_type: string;
+  raw_request: Record<string, unknown>;
+  raw_response: Record<string, unknown>;
+  fallback_note: string;
+};
+
 export type TestSuite = {
   id: string;
   name: string;

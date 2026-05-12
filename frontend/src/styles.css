@@ -1021,6 +1021,12 @@ textarea:focus-visible,
   align-items: start;
 }
 
+.signature-sim-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
 .signature-step-excerpt,
 .signature-note {
   max-height: 260px;
@@ -1678,6 +1684,7 @@ textarea:focus-visible,
   .metric-strip,
   .relay-card,
   .signature-config-grid,
+  .signature-sim-grid,
   .channel-pair-grid,
   .fixed-channel-grid,
   .ab-compare-grid {
@@ -1748,6 +1755,7 @@ textarea:focus-visible,
     .relay-card,
     .relay-metrics,
     .signature-config-grid,
+    .signature-sim-grid,
     .form-grid,
   .case-filter-grid,
   .case-form-grid,
