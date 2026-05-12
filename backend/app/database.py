@@ -99,7 +99,7 @@ def _ensure_run_baseline_columns() -> None:
     scheduled_columns = {column["name"] for column in inspector.get_columns("scheduled_channel_tests")}
     with engine.begin() as connection:
         if "test_scope" not in scheduled_columns:
-            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN test_scope VARCHAR(30) NOT NULL DEFAULT 'quick'"))
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN test_scope VARCHAR(30) NOT NULL DEFAULT 'full'"))
 
 
 def get_db() -> Generator[Session, None, None]:

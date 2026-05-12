@@ -185,7 +185,7 @@ class ScheduledChannelTestBase(BaseModel):
     baseline_snapshot_id: str
     enabled: bool = True
     interval_minutes: int = Field(default=1440, ge=5)
-    test_scope: str = "quick"
+    test_scope: str = "full"
     repeat_count: int = Field(default=1, ge=1, le=5)
     concurrency: int = Field(default=4, ge=1, le=16)
     use_mock: bool = False

@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, Modal, Popconfirm, Radio, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import { BarChart3, Bell, CalendarClock, Edit3, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
-import type { BaselineSnapshot, Channel, ChannelAlert, ChannelAlertStatus, FeishuBroadcastUpdate, ScheduledChannelTest, TestScope, TestSuite } from '../types';
+import type { BaselineSnapshot, Channel, ChannelAlert, ChannelAlertStatus, FeishuBroadcastUpdate, ScheduledChannelTest, TestSuite } from '../types';
 
 type ScheduleFormValues = {
   name: string;
@@ -14,7 +14,6 @@ type ScheduleFormValues = {
   suite_id: string;
   baseline_snapshot_id: string;
   interval_minutes: number;
-  test_scope: TestScope;
   repeat_count: number;
   concurrency: number;
   enabled: boolean;
@@ -237,7 +236,6 @@ export default function ScheduledTests() {
     scheduleForm.resetFields();
     scheduleForm.setFieldsValue({
       interval_minutes: 1440,
-      test_scope: 'quick',
       repeat_count: 1,
       concurrency: 4,
       enabled: true,
@@ -254,7 +252,6 @@ export default function ScheduledTests() {
       suite_id: schedule.suite_id,
       baseline_snapshot_id: schedule.baseline_snapshot_id,
       interval_minutes: schedule.interval_minutes,
-      test_scope: schedule.test_scope,
       repeat_count: schedule.repeat_count,
       concurrency: schedule.concurrency,
       enabled: schedule.enabled,
@@ -264,11 +261,12 @@ export default function ScheduledTests() {
   }
 
   async function submitSchedule(values: ScheduleFormValues) {
+    const payload = { ...values, test_scope: 'full' as const };
     if (editingSchedule) {
-      updateSchedule.mutate({ id: editingSchedule.id, payload: values });
+      updateSchedule.mutate({ id: editingSchedule.id, payload });
       return;
     }
-    createSchedule.mutate(values);
+    createSchedule.mutate(payload);
   }
 
   function openReview(alert: ChannelAlert) {
@@ -371,11 +369,6 @@ export default function ScheduledTests() {
               title: '频率',
               width: 110,
               render: (_, schedule) => intervalText(schedule.interval_minutes),
-            },
-            {
-              title: '范围',
-              width: 110,
-              render: (_, schedule) => <Tag color={schedule.test_scope === 'quick' ? 'blue' : 'purple'}>{schedule.test_scope === 'quick' ? '快速' : '完整'}</Tag>,
             },
             {
               title: '下次执行',
@@ -708,12 +701,6 @@ export default function ScheduledTests() {
               options={readyBaselines.map((baseline) => ({ value: baseline.id, label: `${baseline.name} · ${formatDateTime(baseline.ready_at)}` }))}
               notFoundContent={watchedSuiteId ? '当前测试集暂无 ready 状态基线' : '请先选择测试集'}
             />
-          </Form.Item>
-          <Form.Item label="检测范围" name="test_scope" rules={[{ required: true, message: '请选择检测范围' }]}>
-            <Radio.Group>
-              <Radio.Button value="quick">快速检测</Radio.Button>
-              <Radio.Button value="full">完整检测</Radio.Button>
-            </Radio.Group>
           </Form.Item>
           <Space size="large" wrap>
             <Form.Item label="执行间隔（分钟）" name="interval_minutes" rules={[{ required: true }]}>

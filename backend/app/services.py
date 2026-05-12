@@ -60,6 +60,7 @@ ALERT_RED_FLAGS = {
     "invalid_request_not_rejected",
     "request_failed",
     "protocol_mismatch",
+    "signature_interop_failed",
 }
 
 SIGNATURE_INVALID_ERROR = "Invalid `signature` in `thinking` block"
@@ -471,7 +472,7 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
         baseline_snapshot_id=data.baseline_snapshot_id,
         enabled=data.enabled,
         interval_minutes=max(5, data.interval_minutes),
-        test_scope=data.test_scope if data.test_scope in {"quick", "full"} else "quick",
+        test_scope=data.test_scope if data.test_scope in {"quick", "full"} else "full",
         repeat_count=max(1, data.repeat_count),
         concurrency=max(1, data.concurrency),
         use_mock=data.use_mock,
@@ -753,6 +754,8 @@ async def execute_scheduled_channel_test(
             scheduled.last_status = run.status
             scheduled.last_error = None if run.status == "completed" else f"Run finished with status {run.status}"
             db.commit()
+            if run.status == "completed":
+                await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
             if run.status in {"completed", "failed"}:
                 await create_alerts_for_run(session_factory, run.id, scheduled.id)
             db.refresh(run)
@@ -767,6 +770,118 @@ async def execute_scheduled_channel_test(
                     scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
                 db.commit()
         return None
+
+
+async def attach_signature_interop_to_scheduled_run(
+    session_factory: sessionmaker[Session],
+    run_id: str,
+    scheduled_id: str,
+) -> dict[str, Any] | None:
+    with session_factory() as db:
+        scheduled = db.get(ScheduledChannelTest, scheduled_id)
+        run = db.get(Run, run_id)
+        if not scheduled or not run:
+            return None
+        source = _signature_source_for_scheduled_test(db, scheduled)
+        relay = db.get(Channel, scheduled.channel_id)
+        if not source or not relay:
+            return None
+        if scheduled.use_mock:
+            skipped_result = {
+                "ok": True,
+                "status": "skipped",
+                "reason": "mock 巡检未发起 Thinking Signature 互通检测",
+                "source_channel_id": source.id,
+                "relay_channel_id": relay.id,
+                "fallback_note": SIGNATURE_FALLBACK_NOTE,
+                "steps": [
+                    {
+                        "name": "自动巡检 Signature 互通检测",
+                        "status": "skipped",
+                        "detail": "mock 巡检不会调用真实渠道",
+                        "excerpt": None,
+                    }
+                ],
+            }
+            _attach_signature_interop_result_to_reports(db, run_id, relay.id, skipped_result)
+            return skipped_result
+
+    try:
+        signature_result = await test_signature_interop(source, relay)
+    except Exception as exc:
+        signature_result = {
+            "ok": False,
+            "status": "fail",
+            "reason": str(exc),
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "fallback_note": SIGNATURE_FALLBACK_NOTE,
+            "steps": [
+                {
+                    "name": "自动巡检 Signature 互通检测",
+                    "status": "fail",
+                    "detail": str(exc),
+                    "excerpt": None,
+                }
+            ],
+        }
+
+    with session_factory() as db:
+        _attach_signature_interop_result_to_reports(db, run_id, relay.id, signature_result)
+    return signature_result
+
+
+def _attach_signature_interop_result_to_reports(
+    db: Session,
+    run_id: str,
+    relay_channel_id: str,
+    signature_result: dict[str, Any],
+) -> None:
+    reports = db.scalars(select(Report).where(Report.run_id == run_id, Report.channel_id == relay_channel_id)).all()
+    for report in reports:
+        evidence = dict(report.evidence or {})
+        labels = sorted({str(label) for label in evidence.get("labels", []) if isinstance(label, str)})
+        if signature_result.get("status") != "skipped" and not signature_result.get("ok") and "signature_interop_failed" not in labels:
+            labels.append("signature_interop_failed")
+        evidence["labels"] = sorted(labels)
+        evidence["red_flags"] = sorted(set(labels).intersection(ALERT_RED_FLAGS))
+        evidence["label_explanations"] = label_explanations(sorted(labels))
+        evidence["signature_interop"] = _signature_interop_report_evidence(signature_result)
+        report.evidence = evidence
+        if signature_result.get("status") != "skipped" and not signature_result.get("ok"):
+            report.grade = worse_grade(report.grade, "D")
+            report.summary = f"{report.summary or _summary_for(report.grade)} Signature 互通检测未通过。"
+        channel = db.get(Channel, report.channel_id)
+        if channel:
+            report.markdown = report_markdown(channel, report.final_score, report.grade, report.summary or _summary_for(report.grade), evidence)
+    db.commit()
+
+
+def _signature_source_for_scheduled_test(db: Session, scheduled: ScheduledChannelTest) -> Channel | None:
+    snapshot = db.get(BaselineSnapshot, scheduled.baseline_snapshot_id)
+    for channel_id in snapshot.channel_ids or [] if snapshot else []:
+        channel = db.get(Channel, channel_id)
+        if channel and channel.enabled:
+            return channel
+    return db.scalar(select(Channel).where(Channel.is_reference.is_(True), Channel.enabled.is_(True)).limit(1))
+
+
+def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": bool(result.get("ok")),
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "source_channel_id": result.get("source_channel_id"),
+        "relay_channel_id": result.get("relay_channel_id"),
+        "source_message_id": result.get("source_message_id"),
+        "source_message_channel_type": result.get("source_message_channel_type"),
+        "relay_message_id": result.get("relay_message_id"),
+        "relay_message_channel_type": result.get("relay_message_channel_type"),
+        "thinking_block_count": result.get("thinking_block_count"),
+        "signature_prefixes": result.get("signature_prefixes") or [],
+        "fallback_note": result.get("fallback_note") or SIGNATURE_FALLBACK_NOTE,
+        "steps": result.get("steps") or [],
+    }
 
 
 async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: str, scheduled_id: str | None = None) -> list[ChannelAlert]:
@@ -2265,6 +2380,7 @@ LABEL_EXPLANATIONS = {
     "baseline_cloud_missing": "当前题缺少官方云参考基线。",
     "invalid_request_not_rejected": "无效请求没有被正确拒绝。",
     "request_failed": "请求失败，未获得可评分响应。",
+    "signature_interop_failed": "Thinking Signature 互通检测未通过，relay 无法复用 source 生成的签名 thinking block。",
 }
 
 
@@ -2334,6 +2450,7 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
         if evidence.get("baseline_snapshot_id")
         else "- 基线模式：本次任务内同步对比\n"
     )
+    signature_line = signature_interop_markdown(evidence.get("signature_interop"))
     return f"""# Claude 渠道真实性测评报告
 
 ## 基本信息
@@ -2369,10 +2486,34 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
 
 {label_lines}
 
+## Thinking Signature 互通
+
+{signature_line}
+
 ## 风险说明
 
 本报告不写“100% 真/假”，只基于协议、能力、工具调用、截断、多轮上下文、安全边界和稳定性证据给出风险评级。若本次复用了历史官方基线，只代表与该基线快照的差异，不证明渠道永久可信。
 """
+
+
+def signature_interop_markdown(signature: Any) -> str:
+    if not isinstance(signature, dict):
+        return "本次未执行 Thinking Signature 互通检测。"
+    status = "通过" if signature.get("ok") else "未通过"
+    steps = signature.get("steps") if isinstance(signature.get("steps"), list) else []
+    step_lines = "\n".join(
+        f"- {step.get('name', '步骤')}：{step.get('status', '-')}，{step.get('detail', '-')}"
+        for step in steps[:5]
+        if isinstance(step, dict)
+    ) or "- 暂无步骤记录"
+    return (
+        f"- 结果：{status}\n"
+        f"- 原因：{signature.get('reason') or '-'}\n"
+        f"- Source：{signature.get('source_channel_id') or '-'} / {signature.get('source_message_channel_type') or '-'}\n"
+        f"- Relay：{signature.get('relay_channel_id') or '-'} / {signature.get('relay_message_channel_type') or '-'}\n"
+        f"- 兜底说明：{signature.get('fallback_note') or SIGNATURE_FALLBACK_NOTE}\n"
+        f"{step_lines}"
+    )
 
 
 def _fmt_optional_score(value: Any) -> str:

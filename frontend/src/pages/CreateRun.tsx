@@ -6,7 +6,7 @@ import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
 import { roleColor, roleLabel } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
-import type { BaselineSnapshot, Channel, TestScope, TestSuite } from '../types';
+import type { BaselineSnapshot, Channel, TestSuite } from '../types';
 
 type CreateMode = 'baseline_build' | 'candidate_eval';
 const DEFAULT_SUITE_ID = 'claude_full_35';
@@ -15,7 +15,6 @@ type CreateRunValues = {
   name: string;
   suite_id: string;
   mode: CreateMode;
-  test_scope: TestScope;
   baseline_snapshot_id?: string;
   reference_channel_ids?: string[];
   candidate_channel_ids?: string[];
@@ -111,7 +110,6 @@ export default function CreateRun() {
     setLoading(true);
     try {
       const suiteId = values.suite_id ?? selectedSuiteId;
-      const testScope = values.test_scope ?? 'full';
       if (!suiteId) {
         message.error('内置题库加载失败，请刷新后重试');
         return;
@@ -134,7 +132,7 @@ export default function CreateRun() {
         channel_ids: grouped,
         repeat_count: 1,
         concurrency: 1,
-        test_scope: testScope,
+        test_scope: 'full',
         use_mock: false,
         runtime_credentials: runtimeCredentials,
       };
@@ -168,7 +166,7 @@ export default function CreateRun() {
             style={{ marginBottom: 16 }}
           />
         ) : null}
-        <Form form={form} layout="vertical" onFinish={submit} initialValues={{ mode: initialMode, test_scope: 'full' }}>
+        <Form form={form} layout="vertical" onFinish={submit} initialValues={{ mode: initialMode }}>
           <Form.Item label="任务名" name="name" rules={[{ required: true }]}>
             <Input size="large" placeholder={selectedMode === 'baseline_build' ? 'Sonnet 4.5 对照样本采样' : 'Sonnet 4.5 渠道对比测试'} />
           </Form.Item>
@@ -176,12 +174,6 @@ export default function CreateRun() {
             <Radio.Group size="large">
               <Radio.Button value="baseline_build">创建对照样本</Radio.Button>
               <Radio.Button value="candidate_eval">对比测试</Radio.Button>
-            </Radio.Group>
-          </Form.Item>
-          <Form.Item label="任务范围" name="test_scope" rules={[{ required: true }]}>
-            <Radio.Group size="large">
-              <Radio.Button value="full">完整任务</Radio.Button>
-              <Radio.Button value="quick">快速任务</Radio.Button>
             </Radio.Group>
           </Form.Item>
           {!suites.isLoading && !builtInSuite ? (

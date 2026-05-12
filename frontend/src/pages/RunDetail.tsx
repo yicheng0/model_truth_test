@@ -319,7 +319,7 @@ export default function RunDetail() {
           </Descriptions.Item>
           <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
           <Descriptions.Item label="运行模式">{data.run.mode}</Descriptions.Item>
-          <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '快速检测' : '完整检测'}</Descriptions.Item>
+          <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
           <Descriptions.Item label={isSamplingRun ? '对照样本' : '官方基线'}>
             {data.baseline_snapshot?.name ?? (isSamplingRun ? '采样生成中' : '本次同步对比')}
           </Descriptions.Item>

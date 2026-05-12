@@ -531,6 +531,80 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
     assert alerts[0]["channel_id"] == "negative_sample"
     assert alerts[0]["notification_status"] == "skipped"
 
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == updated_schedule["last_run_id"], Report.channel_id == "negative_sample"))
+
+    assert report is not None
+    assert report.evidence["signature_interop"]["ok"] is True
+    assert report.evidence["signature_interop"]["status"] == "skipped"
+
+
+def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+
+    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
+        return {
+            "ok": False,
+            "status": "fail",
+            "reason": "signature 不兼容：relay 无法使用 source 生成的 signature",
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "source_message_id": "msg_bdrk_01source",
+            "source_message_channel_type": "AWS Bedrock",
+            "relay_message_id": None,
+            "relay_message_channel_type": "unknown",
+            "thinking_block_count": 1,
+            "signature_prefixes": ["sig-bad"],
+            "fallback_note": "fallback note",
+            "steps": [{"name": "最终判定", "status": "fail", "detail": "signature 不兼容", "excerpt": None}],
+        }
+
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        baseline_run = client.post(
+            "/api/baselines/build",
+            json={
+                "name": "signature patrol baseline",
+                "suite_id": suite_id,
+                "channel_ids": {"gold": ["anthropic_official"], "official_cloud": ["aws_bedrock"]},
+                "use_mock": True,
+            },
+        ).json()
+        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "signature patrol",
+                "channel_id": "third_party_demo",
+                "suite_id": suite_id,
+                "baseline_snapshot_id": snapshot["id"],
+                "interval_minutes": 60,
+                "repeat_count": 1,
+                "concurrency": 4,
+                "use_mock": False,
+            },
+        ).json()
+
+    asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+
+    with TestClient(app) as client:
+        updated_schedule = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+        alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    signature_alerts = [alert for alert in alerts if "signature_interop_failed" in (alert.get("trigger_labels") or [])]
+    assert updated_schedule["last_status"] == "completed"
+    assert signature_alerts
+
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == updated_schedule["last_run_id"], Report.channel_id == "third_party_demo"))
+
+    assert report is not None
+    assert report.evidence["signature_interop"]["status"] == "fail"
+    assert "signature_interop_failed" in report.evidence["labels"]
+    assert "Thinking Signature 互通" in (report.markdown or "")
+
 
 def test_alert_review_updates_status_and_reviewer() -> None:
     reset_database()
