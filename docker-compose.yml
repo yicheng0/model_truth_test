@@ -5,8 +5,6 @@ services:
       POSTGRES_DB: claude_eval
       POSTGRES_USER: claude_eval
       POSTGRES_PASSWORD: claude_eval
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -20,9 +18,7 @@ services:
       context: ./backend
     environment:
       DATABASE_URL: postgresql+psycopg://claude_eval:claude_eval@postgres:5432/claude_eval
-      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
-    ports:
-      - "8000:8000"
+      CORS_ORIGINS: http://localhost:15173,http://127.0.0.1:15173
     depends_on:
       postgres:
         condition: service_healthy
@@ -31,7 +27,7 @@ services:
     build:
       context: ./frontend
     ports:
-      - "5173:80"
+      - "15173:80"
     depends_on:
       - backend
 
