@@ -13,8 +13,8 @@ def default_suite() -> dict[str, str]:
     return {
         "id": DEFAULT_SUITE_ID,
         "name": "Claude 完整真实性检测题库",
-        "description": "29 道题覆盖身份、协议、工具调用、推理、代码、知识边界、长上下文、安全和格式约束。",
-        "version": "2026.05-optimized-29",
+        "description": "28 道题覆盖身份、协议、工具调用、推理、代码、知识边界、长上下文、安全和格式约束。",
+        "version": "2026.05-optimized-28",
         "visibility": "public",
     }
 
@@ -235,27 +235,6 @@ def default_cases() -> list[dict[str, Any]]:
             {"max_tokens": 128},
             DEFAULT_SYSTEM_PROMPT,
         ),
-        (
-            "protocol_09",
-            "AWS thinking temperature 纯度探针",
-            "请用一句话回答：这是 thinking temperature 纯度探针。",
-            {
-                "expected_error_any": [
-                    "temperature may only be set to 1 when thinking is enabled",
-                    "temperature",
-                    "thinking",
-                ],
-                "expected_error_contains": "temperature may only be set to 1 when thinking is enabled",
-                "expected_error_variant_any": ["temperature", "thinking"],
-            },
-            {
-                "max_tokens": 2048,
-                "temperature": 0.2,
-                "thinking": {"type": "enabled", "budget_tokens": 1024},
-                "reasoning_effort": "medium",
-            },
-            DEFAULT_SYSTEM_PROMPT,
-        ),
     ]
     for cid, title, prompt, rules, params, system_prompt in protocol_cases:
         cases.append(_case(cid, "protocol", title, prompt, rules, params, system_prompt=system_prompt))
@@ -305,7 +284,6 @@ QUICK_CASE_IDS = {
     "protocol_03",
     "protocol_04",
     "protocol_07",
-    "protocol_09",
     "format_01",
 }
 

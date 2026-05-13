@@ -52,6 +52,33 @@ def create_ready_baseline(client: TestClient, name: str = "managed baseline") ->
     return suite_id, run, snapshot
 
 
+def manual_thinking_temperature_probe_case() -> TestCaseModel:
+    return TestCaseModel(
+        id="manual_thinking_temperature_probe",
+        suite_id="manual_model_request_probe",
+        module="manual_probe",
+        title="AWS thinking temperature 纯度探针",
+        prompt="请用一句话回答：这是 thinking temperature 纯度探针。",
+        request_params={
+            "max_tokens": 2048,
+            "temperature": 0.2,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "reasoning_effort": "medium",
+        },
+        scoring_rules={
+            "expected_error_any": [
+                "temperature may only be set to 1 when thinking is enabled",
+                "temperature",
+                "thinking",
+            ],
+            "expected_error_contains": "temperature may only be set to 1 when thinking is enabled",
+            "expected_error_variant_any": ["temperature", "thinking"],
+        },
+        is_hidden=False,
+        enabled=True,
+    )
+
+
 def test_health_check_reports_database_ok() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -111,18 +138,18 @@ def test_default_suite_is_optimized_28_and_removes_stale_default_cases() -> None
         case_ids = list(db.scalars(select(TestCaseModel.id).where(TestCaseModel.suite_id == "claude_full_35").order_by(TestCaseModel.sort_order)).all())
 
     assert suite is not None
-    assert suite.version == "2026.05-optimized-29"
-    assert len(case_ids) == 29
+    assert suite.version == "2026.05-optimized-28"
+    assert len(case_ids) == 28
     assert "identity_03" not in case_ids
     assert case_ids[:5] == ["websearch_01", "identity_01", "identity_02", "identity_04", "identity_10"]
-    assert "protocol_09" in case_ids
+    assert "protocol_09" not in case_ids
     with SessionLocal() as db:
         quick_count = sum(
             1
             for case in db.scalars(select(TestCaseModel).where(TestCaseModel.suite_id == "claude_full_35")).all()
             if (case.scoring_rules or {}).get("quick") is True
         )
-    assert quick_count == 9
+    assert quick_count == 8
 
 
 def test_quick_run_uses_only_quick_cases() -> None:
@@ -146,8 +173,8 @@ def test_quick_run_uses_only_quick_cases() -> None:
         payload = client.get(f"/api/runs/{run['id']}/results").json()
 
     assert payload["run"]["test_scope"] == "quick"
-    assert payload["run"]["total_jobs"] == 18
-    assert len(payload["results"]) == 18
+    assert payload["run"]["total_jobs"] == 16
+    assert len(payload["results"]) == 16
 
 
 def test_score_result_supports_optimized_rules() -> None:
@@ -218,8 +245,8 @@ def test_score_result_validates_thinking_temperature_expected_error() -> None:
     reset_database()
     with SessionLocal() as db:
         channel = db.get(Channel, "aws_bedrock")
-        case = db.get(TestCaseModel, "protocol_09")
-        assert channel is not None and case is not None
+        case = manual_thinking_temperature_probe_case()
+        assert channel is not None
 
         exact_score, exact_labels = score_result(
             channel,
@@ -1610,8 +1637,8 @@ def test_anthropic_request_passes_thinking_params(monkeypatch) -> None:
 
     with SessionLocal() as db:
         channel = db.get(Channel, "anthropic_official")
-        case = db.get(TestCaseModel, "protocol_09")
-        assert channel is not None and case is not None
+        case = manual_thinking_temperature_probe_case()
+        assert channel is not None
         asyncio.run(_anthropic_compatible_call(channel, build_raw_request(channel, case), {"api_key": "test-key"}))
 
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
@@ -1652,8 +1679,8 @@ def test_openai_request_passes_reasoning_effort_and_thinking(monkeypatch) -> Non
 
     with SessionLocal() as db:
         channel = db.get(Channel, "openai_compat_demo")
-        case = db.get(TestCaseModel, "protocol_09")
-        assert channel is not None and case is not None
+        case = manual_thinking_temperature_probe_case()
+        assert channel is not None
         asyncio.run(_openai_compatible_call(channel, build_raw_request(channel, case), {"api_key": "test-key"}))
 
     assert captured["url"] == "https://relay.example/v1/chat/completions"
@@ -1677,8 +1704,8 @@ def test_aws_thinking_probe_uses_raw_messages_body() -> None:
 
     with SessionLocal() as db:
         channel = db.get(Channel, "aws_bedrock")
-        case = db.get(TestCaseModel, "protocol_09")
-        assert channel is not None and case is not None
+        case = manual_thinking_temperature_probe_case()
+        assert channel is not None
         payload = _aws_bedrock_messages_call(FakeAwsClient(), channel, case, {}, case.request_params)
 
     body = json.loads(captured["body"])
