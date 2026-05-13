@@ -72,6 +72,8 @@ from .services import (
     get_or_create_channel_taxonomy_setting,
     feishu_setting_read,
     get_or_create_feishu_setting,
+    MANUAL_PROBE_MODE,
+    MANUAL_PROBE_SUITE_ID,
     refresh_baseline_status,
     scheduled_test_loop,
     send_alert_notification,
@@ -265,7 +267,7 @@ async def channel_models(channel_id: str, db: Session = Depends(get_db)) -> list
 
 @app.get("/api/suites", response_model=list[TestSuiteRead])
 def list_suites(db: Session = Depends(get_db)) -> list[TestSuite]:
-    return list(db.scalars(select(TestSuite).order_by(TestSuite.name)).all())
+    return list(db.scalars(select(TestSuite).where(TestSuite.id != MANUAL_PROBE_SUITE_ID).order_by(TestSuite.name)).all())
 
 
 @app.get("/api/test-suites", response_model=list[TestSuiteRead])
@@ -314,6 +316,8 @@ def list_test_cases_alias(suite_id: str | None = Query(default=None), db: Sessio
     stmt = select(TestCase).order_by(TestCase.sort_order, TestCase.module, TestCase.id)
     if suite_id:
         stmt = stmt.where(TestCase.suite_id == suite_id)
+    else:
+        stmt = stmt.where(TestCase.suite_id != MANUAL_PROBE_SUITE_ID, TestCase.module != MANUAL_PROBE_MODE)
     return list(db.scalars(stmt).all())
 
 

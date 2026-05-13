@@ -1495,6 +1495,60 @@ def test_model_request_test_persists_manual_probe_result(monkeypatch) -> None:
     assert case.system_prompt == "你是测试助手"
 
 
+def test_manual_probe_is_hidden_from_default_suite_and_case_lists(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_live_call(channel, case, raw_request, credentials):  # noqa: ANN001
+        return (
+            {
+                "id": "msg_01hiddenmanualprobe",
+                "type": "message",
+                "role": "assistant",
+                "model": channel.model_name,
+                "content": [{"type": "text", "text": "manual response"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            },
+            "anthropic_messages",
+            "https://relay.example/v1/messages",
+        )
+
+    monkeypatch.setattr("app.services._live_call_with_metadata", fake_live_call)
+
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Hidden Manual Probe Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            f"/api/channels/{channel_id}/model-request-test",
+            json={"prompt": "manual probe", "request_params": {"max_tokens": 32, "temperature": 0}},
+        )
+        payload = response.json()
+        manual_case_id = payload["result"]["test_case_id"]
+
+        suites = client.get("/api/suites").json()
+        test_suites = client.get("/api/test-suites").json()
+        test_cases = client.get("/api/test-cases").json()
+        explicit_cases = client.get("/api/suites/manual_model_request_probe/cases").json()
+        run_detail = client.get(f"/api/runs/{payload['run']['id']}/results").json()
+
+    assert response.status_code == 200
+    assert "manual_model_request_probe" not in {suite["id"] for suite in suites}
+    assert "manual_model_request_probe" not in {suite["id"] for suite in test_suites}
+    assert manual_case_id not in {case["id"] for case in test_cases}
+    assert manual_case_id in {case["id"] for case in explicit_cases}
+    assert run_detail["run"]["id"] == payload["run"]["id"]
+    assert run_detail["results"][0]["id"] == payload["result"]["id"]
+
+
 def test_model_request_test_persists_expected_error_probe_result(monkeypatch) -> None:
     reset_database()
 
