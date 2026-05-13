@@ -64,6 +64,15 @@ export type SimulatedMessageResponse = {
   fallback_note: string;
 };
 
+export type ModelRequestTestResult = {
+  run: Run;
+  result: Result;
+  message_id?: string | null;
+  message_channel_type: string;
+  request_protocol?: string | null;
+  provider_endpoint?: string | null;
+};
+
 export type TestSuite = {
   id: string;
   name: string;
@@ -104,7 +113,7 @@ export type Run = {
   created_at?: string | null;
 };
 
-export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval';
+export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe';
 export type TestScope = 'quick' | 'full';
 
 export type RunChannel = {

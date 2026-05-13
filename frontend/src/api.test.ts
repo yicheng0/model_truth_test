@@ -170,4 +170,39 @@ describe('api request handling', () => {
     );
     fetchMock.mockRestore();
   });
+
+  it('sends real model request tests through the channel endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          run: { id: 'run_1', suite_id: 'manual_model_request_probe', name: 'probe', mode: 'manual_probe', test_scope: 'quick', status: 'completed', repeat_count: 1, concurrency: 1, total_jobs: 1, completed_jobs: 1 },
+          result: { id: 'res_1', run_id: 'run_1', test_case_id: 'case_1', channel_id: 'ch_1', attempt_index: 1, score: 100 },
+          message_id: 'msg_01abc',
+          message_channel_type: 'Anthropic',
+          request_protocol: 'anthropic_messages',
+          provider_endpoint: 'https://api.anthropic.com/v1/messages',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.modelRequestTest('ch_1', {
+      prompt: 'hello',
+      system_prompt: null,
+      request_params: { max_tokens: 16, temperature: 0 },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/ch_1/model-request-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          prompt: 'hello',
+          system_prompt: null,
+          request_params: { max_tokens: 16, temperature: 0 },
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
 });

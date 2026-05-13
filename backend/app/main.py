@@ -31,6 +31,8 @@ from .schemas import (
     FeishuBroadcastSettingUpdate,
     FeishuTestMessageRead,
     ManualScoreUpdate,
+    ModelRequestTestCreate,
+    ModelRequestTestRead,
     ReportRead,
     ResultRead,
     RunChannelRead,
@@ -59,11 +61,13 @@ from .services import (
     create_baseline_build,
     create_case,
     create_channel,
+    create_model_request_test,
     create_run,
     create_scheduled_channel_test,
     create_suite,
     execute_run,
     execute_scheduled_channel_test,
+    fetch_channel_models,
     finalize_baseline_from_run,
     get_or_create_channel_taxonomy_setting,
     feishu_setting_read,
@@ -231,6 +235,32 @@ def channel_simulate_message_response(data: SimulatedMessageResponseCreate) -> d
         return simulate_message_response(data.provider)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/channels/{channel_id}/model-request-test", response_model=ModelRequestTestRead)
+async def channel_model_request_test(channel_id: str, data: ModelRequestTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        return await create_model_request_test(db, channel, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/channels/{channel_id}/models", response_model=list[str])
+async def channel_models(channel_id: str, db: Session = Depends(get_db)) -> list[str]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        return await fetch_channel_models(channel)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/suites", response_model=list[TestSuiteRead])

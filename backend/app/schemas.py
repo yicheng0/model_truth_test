@@ -85,6 +85,13 @@ class SimulatedMessageResponseRead(BaseModel):
     fallback_note: str
 
 
+class ModelRequestTestCreate(BaseModel):
+    prompt: str = Field(min_length=1, max_length=20000)
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    request_params: dict[str, Any] = Field(default_factory=dict)
+    run_name: str | None = Field(default=None, max_length=200)
+
+
 class TestSuiteBase(BaseModel):
     name: str
     description: str | None = None
@@ -447,6 +454,15 @@ class RunResultsRead(BaseModel):
     reports: list[ReportRead]
     baseline_snapshot: BaselineSnapshotRead | None = None
     baseline_results: list[BaselineResultRead] = Field(default_factory=list)
+
+
+class ModelRequestTestRead(BaseModel):
+    run: RunRead
+    result: ResultRead
+    message_id: str | None = None
+    message_channel_type: str
+    request_protocol: str | None = None
+    provider_endpoint: str | None = None
 
 
 class ManualScoreUpdate(BaseModel):

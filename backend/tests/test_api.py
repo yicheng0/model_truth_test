@@ -15,7 +15,7 @@ from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_messages_url, _live_call, _merged_channel_credentials, apply_repeat_consistency_scores, build_raw_request, classify_claude_message_id, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, score_result, seed_demo_data
+from app.services import _anthropic_messages_url, _live_call, _merged_channel_credentials, apply_repeat_consistency_scores, build_raw_request, classify_claude_message_id, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, invoke_channel, score_result, seed_demo_data
 
 
 def reset_database() -> None:
@@ -489,8 +489,77 @@ def test_candidate_eval_rejects_stale_baseline_after_case_change() -> None:
     assert "fingerprint" in response.json()["detail"]
 
 
+def test_candidate_eval_keeps_baseline_ready_after_channel_config_changes() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id, _run, snapshot = create_ready_baseline(client, "channel config can change")
+        patch_response = client.patch(
+            "/api/channels/anthropic_official",
+            json={
+                "is_reference": False,
+                "base_url": "https://changed.example/v1",
+                "model_name": "changed-model",
+                "auth_config": {"api_key": "changed-key"},
+            },
+        )
+        eval_response = client.post(
+            "/api/runs",
+            json={
+                "name": "uses historical baseline after channel change",
+                "suite_id": suite_id,
+                "mode": "candidate_eval",
+                "baseline_snapshot_id": snapshot["id"],
+                "channel_ids": {"candidate": ["third_party_demo"]},
+                "use_mock": True,
+            },
+        )
+        refreshed = client.get(f"/api/baselines/{snapshot['id']}")
+
+    assert patch_response.status_code == 200
+    assert eval_response.status_code == 200
+    assert refreshed.status_code == 200
+    assert refreshed.json()["status"] == "ready"
+
+
+def test_invalid_baseline_with_results_is_restored_when_only_channel_check_was_stale() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        _suite_id, _run, snapshot = create_ready_baseline(client, "restore invalid baseline")
+
+    with SessionLocal() as db:
+        stored = db.get(BaselineSnapshot, snapshot["id"])
+        assert stored is not None
+        stored.status = "invalid"
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/baselines/{snapshot['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+
+
 def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+
+    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
+        return {
+            "ok": True,
+            "status": "pass",
+            "reason": "兼容：relay 成功接受 source 的 thinking block signature",
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "source_message_id": "msg_bdrk_01source",
+            "source_message_channel_type": "AWS Bedrock",
+            "relay_message_id": "msg_vrtx_01relay",
+            "relay_message_channel_type": "Vertex",
+            "thinking_block_count": 1,
+            "signature_prefixes": ["sig-source"],
+            "fallback_note": "fallback note",
+            "steps": [{"name": "最终判定", "status": "ok", "detail": "兼容", "excerpt": None}],
+        }
+
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
     reset_database()
     with TestClient(app) as client:
         suite_id = client.get("/api/suites").json()[0]["id"]
@@ -865,211 +934,151 @@ def test_live_call_uses_anthropic_messages_for_custom_provider_key(monkeypatch) 
     assert response["type"] == "message"
 
 
-def test_anthropic_messages_url_accepts_base_version_or_full_endpoint() -> None:
-    assert _anthropic_messages_url(None) == "https://api.anthropic.com/v1/messages"
-    assert _anthropic_messages_url("https://api.anthropic.com") == "https://api.anthropic.com/v1/messages"
-    assert _anthropic_messages_url("https://api.anthropic.com/v1") == "https://api.anthropic.com/v1/messages"
-    assert _anthropic_messages_url("https://relay.example/v1/messages") == "https://relay.example/v1/messages"
-    assert _anthropic_messages_url("https://relay.example/messages") == "https://relay.example/messages"
-
-
-def test_custom_reference_channel_can_build_baseline() -> None:
+def test_live_call_dispatches_openai_compatible_provider(monkeypatch) -> None:
     reset_database()
+    called: dict[str, object] = {}
+
+    async def fake_openai_call(channel, raw_request, credentials):  # noqa: ANN001
+        called["provider_type"] = channel.provider_type
+        called["base_url"] = channel.base_url
+        return {
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "model": channel.model_name,
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr("app.services._openai_compatible_call", fake_openai_call)
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "openai_compat_demo")
+        case = db.get(TestCaseModel, "identity_01")
+        assert channel is not None and case is not None
+        raw_request = build_raw_request(channel, case)
+        response = asyncio.run(_live_call(channel, case, raw_request, {"api_key": "test-key"}))
+
+    assert called == {"provider_type": "third_party_openai_compatible", "base_url": "https://relay.example/v1"}
+    assert response["object"] == "chat.completion"
+
+
+def test_live_call_dispatches_aws_bedrock_provider(monkeypatch) -> None:
+    reset_database()
+    called: dict[str, object] = {}
+
+    def fake_aws_call(channel, case, credentials):  # noqa: ANN001
+        called["provider_type"] = channel.provider_type
+        called["case_id"] = case.id
+        called["region"] = credentials["region"]
+        return {
+            "id": "aws_test",
+            "type": "message",
+            "model": channel.model_name,
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr("app.services._aws_bedrock_call", fake_aws_call)
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "aws_bedrock")
+        case = db.get(TestCaseModel, "identity_01")
+        assert channel is not None and case is not None
+        raw_request = build_raw_request(channel, case)
+        response = asyncio.run(_live_call(channel, case, raw_request, {"region": "us-west-2"}))
+
+    assert called == {"provider_type": "aws_bedrock", "case_id": "identity_01", "region": "us-west-2"}
+    assert response["type"] == "message"
+
+
+def test_live_run_without_api_key_records_error_instead_of_mock() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "anthropic_official")
+        case = db.get(TestCaseModel, "identity_01")
+        assert channel is not None and case is not None
+        normalized = asyncio.run(invoke_channel(channel, case, 1, {}, use_mock=False))
+
+    assert normalized["request_mode"] == "live"
+    assert normalized["request_attempted"] is False
+    assert normalized["error"] == "缺少 API Key，未发起正式请求"
+    assert normalized["content_text"] == ""
+
+
+def test_openai_http_error_preserves_upstream_message(monkeypatch) -> None:
+    reset_database()
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                503,
+                json={"error": {"code": "model_not_found", "message": "模型 claude-bad 无可用渠道"}},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "openai_compat_demo")
+        case = db.get(TestCaseModel, "identity_01")
+        assert channel is not None and case is not None
+        channel.model_name = "claude-bad"
+        raw_request = build_raw_request(channel, case)
+        response = asyncio.run(invoke_channel(channel, case, 1, {"api_key": "test-key"}, use_mock=False))
+
+    assert "模型 claude-bad 无可用渠道" in response["error"]
+
+
+def test_channel_models_endpoint_returns_model_ids(monkeypatch) -> None:
+    reset_database()
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "claude-sonnet-4-6"}, {"id": "claude-haiku-4-5-20251001"}]},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
     with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        created = client.post(
+        channel_id = client.post(
             "/api/channels",
             json={
-                "name": "Custom Reference",
-                "provider_type": "custom_provider",
-                "role": "review_control",
-                "model_name": "custom-model",
-                "is_reference": True,
+                "name": "Model List Channel",
+                "provider_type": "apipro",
+                "base_url": "https://api.wenwen-ai.com",
+                "model_name": "claude-bad",
+                "auth_config": {"api_key": "test-key"},
                 "enabled": True,
             },
-        )
-        run = client.post(
-            "/api/baselines/build",
-            json={"name": "custom reference baseline", "suite_id": suite_id, "channel_ids": {"reference": [created.json()["id"]]}, "use_mock": True},
-        )
-        payload = client.get(f"/api/runs/{run.json()['id']}/results").json()
+        ).json()["id"]
+        response = client.get(f"/api/channels/{channel_id}/models")
 
-    assert created.status_code == 200
-    assert created.json()["is_reference"] is True
-    assert run.status_code == 200
-    assert {item["role_in_run"] for item in payload["run_channels"]} == {"reference"}
-    assert payload["baseline_snapshot"]["channel_ids"] == [created.json()["id"]]
-
-
-def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None:
-    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
-    reset_database()
-    with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        baseline_run = client.post(
-            "/api/baselines/build",
-            json={"name": "report baseline", "suite_id": suite_id, "channel_ids": {"gold": ["anthropic_official"]}, "use_mock": True},
-        ).json()
-        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
-        schedule = client.post(
-            "/api/scheduled-tests",
-            json={
-                "name": "report patrol",
-                "channel_id": "negative_sample",
-                "suite_id": suite_id,
-                "baseline_snapshot_id": snapshot["id"],
-                "interval_minutes": 60,
-                "use_mock": True,
-            },
-        ).json()
-        client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
-        report = client.get("/api/scheduled-tests/report").json()
-        markdown = client.get("/api/scheduled-tests/report.md")
-
-    assert report["run_count"] >= 1
-    assert report["alert_count"] >= 1
-    assert report["pending_review_count"] >= 1
-    assert report["channel_summaries"]
-    assert markdown.status_code == 200
-    assert "智能巡检汇总报告" in markdown.text
-
-
-def test_running_run_must_be_canceled_before_delete() -> None:
-    reset_database()
-    with SessionLocal() as db:
-        suite_id = db.scalar(select(TestSuiteModel.id))
-        run = create_run(db, RunCreate(name="running run", suite_id=suite_id, use_mock=True))
-        run.status = "running"
-        db.commit()
-        run_id = run.id
-
-    with TestClient(app) as client:
-        blocked = client.delete(f"/api/runs/{run_id}")
-        canceled = client.post(f"/api/runs/{run_id}/cancel")
-
-    assert blocked.status_code == 409
-    assert canceled.status_code == 200
-    assert canceled.json()["status"] == "canceled"
-
-
-def test_cancel_run_is_idempotent_and_does_not_reopen_terminal_runs() -> None:
-    reset_database()
-    with SessionLocal() as db:
-        suite_id = db.scalar(select(TestSuiteModel.id))
-        pending = create_run(db, RunCreate(name="pending run", suite_id=suite_id, use_mock=True))
-        completed = create_run(db, RunCreate(name="completed run", suite_id=suite_id, use_mock=True))
-        completed.status = "completed"
-        db.commit()
-        pending_id = pending.id
-        completed_id = completed.id
-
-    with TestClient(app) as client:
-        first_cancel = client.post(f"/api/runs/{pending_id}/cancel")
-        second_cancel = client.post(f"/api/runs/{pending_id}/cancel")
-        completed_cancel = client.post(f"/api/runs/{completed_id}/cancel")
-
-    assert first_cancel.status_code == 200
-    assert first_cancel.json()["status"] == "canceled"
-    assert second_cancel.status_code == 200
-    assert second_cancel.json()["status"] == "canceled"
-    assert completed_cancel.status_code == 200
-    assert completed_cancel.json()["status"] == "completed"
-
-    with SessionLocal() as db:
-        pending = db.get(Run, pending_id)
-        completed = db.get(Run, completed_id)
-
-    assert pending is not None
-    assert pending.status == "canceled"
-    assert pending.finished_at is not None
-    assert completed is not None
-    assert completed.status == "completed"
-
-
-def test_execute_run_stops_remaining_jobs_when_canceled(monkeypatch) -> None:
-    reset_database()
-
-    async def scenario() -> str:
-        started = asyncio.Event()
-        started_count = 0
-
-        async def slow_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
-            nonlocal started_count
-            started_count += 1
-            started.set()
-            await asyncio.sleep(30)
-            return {"content_text": "late response", "raw_request": {}, "raw_response": {}, "latency_ms": 1, "first_token_ms": 1}
-
-        monkeypatch.setattr("app.services.invoke_channel", slow_invoke)
-
-        with SessionLocal() as db:
-            suite_id = db.scalar(select(TestSuiteModel.id))
-            run = create_run(
-                db,
-                RunCreate(
-                    name="cancelable run",
-                    suite_id=suite_id,
-                    channel_ids={"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
-                    repeat_count=2,
-                    concurrency=2,
-                    use_mock=True,
-                ),
-            )
-            run_id = run.id
-
-        task = asyncio.create_task(execute_run(SessionLocal, run_id, use_mock=True))
-        await asyncio.wait_for(started.wait(), timeout=2)
-
-        with SessionLocal() as db:
-            run = db.get(Run, run_id)
-            assert run is not None
-            assert run.status == "running"
-            run.status = "canceled"
-            db.commit()
-
-        await asyncio.wait_for(task, timeout=3)
-
-        with SessionLocal() as db:
-            run = db.get(Run, run_id)
-            result_count = db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id))
-            report_count = db.scalar(select(func.count()).select_from(Report).where(Report.run_id == run_id))
-
-        assert started_count <= 2
-        assert run is not None
-        assert run.status == "canceled"
-        assert run.finished_at is not None
-        assert run.completed_jobs < run.total_jobs
-        assert result_count == 0
-        assert report_count == 0
-        return run_id
-
-    asyncio.run(scenario())
-
-
-def test_run_create_rejects_out_of_range_repeat_count_and_concurrency() -> None:
-    reset_database()
-    with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        low_repeat = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "repeat_count": 0, "use_mock": True})
-        high_repeat = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "repeat_count": 6, "use_mock": True})
-        low_concurrency = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "concurrency": 0, "use_mock": True})
-        high_concurrency = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "concurrency": 17, "use_mock": True})
-
-    assert low_repeat.status_code == 422
-    assert high_repeat.status_code == 422
-    assert low_concurrency.status_code == 422
-    assert high_concurrency.status_code == 422
-
-
-def test_baseline_build_rejects_out_of_range_repeat_count_and_concurrency() -> None:
-    reset_database()
-    with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        low_repeat = client.post("/api/baselines/build", json={"name": "bad", "suite_id": suite_id, "repeat_count": 0, "use_mock": True})
-        high_concurrency = client.post("/api/baselines/build", json={"name": "bad", "suite_id": suite_id, "concurrency": 17, "use_mock": True})
-
-    assert low_repeat.status_code == 422
-    assert high_concurrency.status_code == 422
+    assert response.status_code == 200
+    assert response.json() == ["claude-haiku-4-5-20251001", "claude-sonnet-4-6"]
 
 
 def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypatch) -> None:
@@ -1341,6 +1350,404 @@ def test_simulate_message_response_rejects_unknown_provider() -> None:
 
     assert response.status_code == 400
     assert "Unsupported simulated provider" in response.json()["detail"]
+
+
+def test_model_request_test_persists_manual_probe_result(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_live_call(channel, case, raw_request, credentials):  # noqa: ANN001
+        return (
+            {
+                "id": "msg_01manualprobe",
+                "type": "message",
+                "role": "assistant",
+                "model": channel.model_name,
+                "content": [{"type": "text", "text": "真实响应内容"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 8, "output_tokens": 4},
+            },
+            "anthropic_messages",
+            "https://relay.example/v1/messages",
+        )
+
+    monkeypatch.setattr("app.services._live_call_with_metadata", fake_live_call)
+
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Manual Probe Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            f"/api/channels/{channel_id}/model-request-test",
+            json={
+                "prompt": "请返回一句真实内容",
+                "system_prompt": "你是测试助手",
+                "request_params": {"max_tokens": 32, "temperature": 0},
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["message_id"] == "msg_01manualprobe"
+    assert payload["message_channel_type"] == "Anthropic"
+    assert payload["request_protocol"] == "anthropic_messages"
+    assert payload["run"]["mode"] == "manual_probe"
+    assert payload["run"]["status"] == "completed"
+    assert payload["result"]["normalized_response"]["content_text"] == "真实响应内容"
+    assert payload["result"]["raw_request"]["messages"][0]["content"] == "请返回一句真实内容"
+
+    with SessionLocal() as db:
+        run = db.get(Run, payload["run"]["id"])
+        result = db.get(Result, payload["result"]["id"])
+        case = db.get(TestCaseModel, payload["result"]["test_case_id"])
+
+    assert run is not None
+    assert run.completed_jobs == 1
+    assert result is not None
+    assert result.raw_response["id"] == "msg_01manualprobe"
+    assert case is not None
+    assert case.system_prompt == "你是测试助手"
+
+
+def test_model_request_test_persists_missing_key_failure() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Missing Key Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            f"/api/channels/{channel_id}/model-request-test",
+            json={"prompt": "hello", "request_params": {"max_tokens": 16, "temperature": 0}},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["run"]["status"] == "failed"
+    assert payload["result"]["labels"] == ["request_failed"]
+    assert payload["result"]["normalized_response"]["request_attempted"] is False
+    assert "缺少 API Key" in payload["result"]["normalized_response"]["error"]
+
+
+def test_auto_protocol_falls_back_to_openai_compatible(monkeypatch) -> None:
+    reset_database()
+    calls: list[str] = []
+
+    async def failing_anthropic(channel, raw_request, credentials):  # noqa: ANN001
+        calls.append("anthropic")
+        raise RuntimeError("anthropic unavailable")
+
+    async def successful_openai(channel, raw_request, credentials):  # noqa: ANN001
+        calls.append("openai")
+        return {
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "model": channel.model_name,
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr("app.services._anthropic_compatible_call", failing_anthropic)
+    monkeypatch.setattr("app.services._openai_compatible_call", successful_openai)
+
+    with SessionLocal() as db:
+        channel = Channel(
+            id="apipro_auto",
+            name="APIPro Auto",
+            provider_type="AWS官",
+            role="reference",
+            base_url="https://api.wenwen-ai.com/",
+            model_name="claude-test",
+            enabled=True,
+        )
+        db.add(channel)
+        db.commit()
+        case = db.get(TestCaseModel, "identity_01")
+        assert case is not None
+        normalized = asyncio.run(invoke_channel(channel, case, 1, {"api_key": "test-key"}, use_mock=False))
+
+    assert calls == ["anthropic", "openai"]
+    assert normalized["content_text"] == "ok"
+    assert normalized["request_protocol"] == "openai_chat_completions"
+    assert normalized["provider_endpoint"] == "https://api.wenwen-ai.com/v1/chat/completions"
+
+
+def test_execute_run_stops_channel_after_preflight_failure(monkeypatch) -> None:
+    reset_database()
+    calls: list[str] = []
+
+    async def failing_anthropic(channel, raw_request, credentials):  # noqa: ANN001
+        calls.append("anthropic")
+        raise RuntimeError("anthropic unavailable")
+
+    async def failing_openai(channel, raw_request, credentials):  # noqa: ANN001
+        calls.append("openai")
+        raise RuntimeError("openai unavailable")
+
+    monkeypatch.setattr("app.services._anthropic_compatible_call", failing_anthropic)
+    monkeypatch.setattr("app.services._openai_compatible_call", failing_openai)
+
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        channel = Channel(
+            id="apipro_failing",
+            name="APIPro Failing",
+            provider_type="AWS官",
+            role="reference",
+            base_url="https://api.wenwen-ai.com/",
+            model_name="claude-test",
+            auth_config_encrypted={"api_key": "test-key"},
+            is_reference=True,
+            enabled=True,
+        )
+        db.add(channel)
+        db.commit()
+        run = create_run(
+            db,
+            RunCreate(
+                name="preflight failure",
+                suite_id=suite_id,
+                channel_ids={"reference": [channel.id]},
+                repeat_count=1,
+                concurrency=4,
+                use_mock=False,
+                mode="baseline_build",
+            ),
+        )
+        run_id = run.id
+
+    asyncio.run(execute_run(SessionLocal, run_id, use_mock=False))
+
+    with SessionLocal() as db:
+        run = db.get(Run, run_id)
+        result_count = db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id))
+        labels = db.scalar(select(Result.labels).where(Result.run_id == run_id).limit(1))
+
+    assert calls == ["anthropic", "openai"]
+    assert run is not None
+    assert run.status == "completed"
+    assert result_count == run.total_jobs
+    assert labels == ["channel_preflight_failed", "request_failed"]
+
+
+def test_anthropic_messages_url_accepts_base_version_or_full_endpoint() -> None:
+    assert _anthropic_messages_url(None) == "https://api.anthropic.com/v1/messages"
+    assert _anthropic_messages_url("https://api.anthropic.com") == "https://api.anthropic.com/v1/messages"
+    assert _anthropic_messages_url("https://api.anthropic.com/v1") == "https://api.anthropic.com/v1/messages"
+    assert _anthropic_messages_url("https://relay.example/v1/messages") == "https://relay.example/v1/messages"
+    assert _anthropic_messages_url("https://relay.example/messages") == "https://relay.example/messages"
+
+
+def test_custom_reference_channel_can_build_baseline() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        created = client.post(
+            "/api/channels",
+            json={
+                "name": "Custom Reference",
+                "provider_type": "custom_provider",
+                "role": "review_control",
+                "model_name": "custom-model",
+                "is_reference": True,
+                "enabled": True,
+            },
+        )
+        run = client.post(
+            "/api/baselines/build",
+            json={"name": "custom reference baseline", "suite_id": suite_id, "channel_ids": {"reference": [created.json()["id"]]}, "use_mock": True},
+        )
+        payload = client.get(f"/api/runs/{run.json()['id']}/results").json()
+
+    assert created.status_code == 200
+    assert created.json()["is_reference"] is True
+    assert run.status_code == 200
+    assert {item["role_in_run"] for item in payload["run_channels"]} == {"reference"}
+    assert payload["baseline_snapshot"]["channel_ids"] == [created.json()["id"]]
+
+
+def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        baseline_run = client.post(
+            "/api/baselines/build",
+            json={"name": "report baseline", "suite_id": suite_id, "channel_ids": {"gold": ["anthropic_official"]}, "use_mock": True},
+        ).json()
+        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "report patrol",
+                "channel_id": "negative_sample",
+                "suite_id": suite_id,
+                "baseline_snapshot_id": snapshot["id"],
+                "interval_minutes": 60,
+                "use_mock": True,
+            },
+        ).json()
+        client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
+        report = client.get("/api/scheduled-tests/report").json()
+        markdown = client.get("/api/scheduled-tests/report.md")
+
+    assert report["run_count"] >= 1
+    assert report["alert_count"] >= 1
+    assert report["pending_review_count"] >= 1
+    assert report["channel_summaries"]
+    assert markdown.status_code == 200
+    assert "智能巡检汇总报告" in markdown.text
+
+
+def test_running_run_must_be_canceled_before_delete() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = create_run(db, RunCreate(name="running run", suite_id=suite_id, use_mock=True))
+        run.status = "running"
+        db.commit()
+        run_id = run.id
+
+    with TestClient(app) as client:
+        blocked = client.delete(f"/api/runs/{run_id}")
+        canceled = client.post(f"/api/runs/{run_id}/cancel")
+
+    assert blocked.status_code == 409
+    assert canceled.status_code == 200
+    assert canceled.json()["status"] == "canceled"
+
+
+def test_cancel_run_is_idempotent_and_does_not_reopen_terminal_runs() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        pending = create_run(db, RunCreate(name="pending run", suite_id=suite_id, use_mock=True))
+        completed = create_run(db, RunCreate(name="completed run", suite_id=suite_id, use_mock=True))
+        completed.status = "completed"
+        db.commit()
+        pending_id = pending.id
+        completed_id = completed.id
+
+    with TestClient(app) as client:
+        first_cancel = client.post(f"/api/runs/{pending_id}/cancel")
+        second_cancel = client.post(f"/api/runs/{pending_id}/cancel")
+        completed_cancel = client.post(f"/api/runs/{completed_id}/cancel")
+
+    assert first_cancel.status_code == 200
+    assert first_cancel.json()["status"] == "canceled"
+    assert second_cancel.status_code == 200
+    assert second_cancel.json()["status"] == "canceled"
+    assert completed_cancel.status_code == 200
+    assert completed_cancel.json()["status"] == "completed"
+
+    with SessionLocal() as db:
+        pending = db.get(Run, pending_id)
+        completed = db.get(Run, completed_id)
+
+    assert pending is not None
+    assert pending.status == "canceled"
+    assert pending.finished_at is not None
+    assert completed is not None
+    assert completed.status == "completed"
+
+
+def test_execute_run_stops_remaining_jobs_when_canceled(monkeypatch) -> None:
+    reset_database()
+
+    async def scenario() -> str:
+        started = asyncio.Event()
+        started_count = 0
+
+        async def slow_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
+            nonlocal started_count
+            started_count += 1
+            started.set()
+            await asyncio.sleep(30)
+            return {"content_text": "late response", "raw_request": {}, "raw_response": {}, "latency_ms": 1, "first_token_ms": 1}
+
+        monkeypatch.setattr("app.services.invoke_channel", slow_invoke)
+
+        with SessionLocal() as db:
+            suite_id = db.scalar(select(TestSuiteModel.id))
+            run = create_run(
+                db,
+                RunCreate(
+                    name="cancelable run",
+                    suite_id=suite_id,
+                    channel_ids={"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
+                    repeat_count=2,
+                    concurrency=2,
+                    use_mock=True,
+                ),
+            )
+            run_id = run.id
+
+        task = asyncio.create_task(execute_run(SessionLocal, run_id, use_mock=True))
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        with SessionLocal() as db:
+            run = db.get(Run, run_id)
+            assert run is not None
+            assert run.status == "running"
+            run.status = "canceled"
+            db.commit()
+
+        await asyncio.wait_for(task, timeout=3)
+
+        with SessionLocal() as db:
+            run = db.get(Run, run_id)
+            result_count = db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id))
+            report_count = db.scalar(select(func.count()).select_from(Report).where(Report.run_id == run_id))
+
+        assert started_count <= 2
+        assert run is not None
+        assert run.status == "canceled"
+        assert run.finished_at is not None
+        assert run.completed_jobs < run.total_jobs
+        assert result_count == 0
+        assert report_count == 0
+        return run_id
+
+    asyncio.run(scenario())
+
+
+def test_run_create_rejects_out_of_range_repeat_count_and_concurrency() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        low_repeat = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "repeat_count": 0, "use_mock": True})
+        high_repeat = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "repeat_count": 6, "use_mock": True})
+        low_concurrency = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "concurrency": 0, "use_mock": True})
+        high_concurrency = client.post("/api/runs", json={"name": "bad", "suite_id": suite_id, "concurrency": 17, "use_mock": True})
+
+    assert low_repeat.status_code == 422
+    assert high_repeat.status_code == 422
+    assert low_concurrency.status_code == 422
+    assert high_concurrency.status_code == 422
+
+
+def test_baseline_build_rejects_out_of_range_repeat_count_and_concurrency() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        low_repeat = client.post("/api/baselines/build", json={"name": "bad", "suite_id": suite_id, "repeat_count": 0, "use_mock": True})
+        high_concurrency = client.post("/api/baselines/build", json={"name": "bad", "suite_id": suite_id, "concurrency": 17, "use_mock": True})
+
+    assert low_repeat.status_code == 422
+    assert high_concurrency.status_code == 422
 
 
 def test_cors_origins_are_read_from_environment() -> None:

@@ -15,11 +15,11 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
-from .schemas import BaselineBuildCreate, ChannelCreate, ChannelTaxonomySettingUpdate, FeishuBroadcastSettingUpdate, RunCreate, ScheduledChannelTestCreate, TestCaseCreate, TestSuiteCreate
+from .schemas import BaselineBuildCreate, ChannelCreate, ChannelTaxonomySettingUpdate, FeishuBroadcastSettingUpdate, ModelRequestTestCreate, RunCreate, ScheduledChannelTestCreate, TestCaseCreate, TestSuiteCreate
 from .suite_seed import default_cases, default_suite
 
 
@@ -63,6 +63,12 @@ ALERT_RED_FLAGS = {
     "signature_interop_failed",
 }
 
+REQUEST_PROTOCOL_AUTO = "auto"
+REQUEST_PROTOCOL_ANTHROPIC = "anthropic_messages"
+REQUEST_PROTOCOL_OPENAI = "openai_chat_completions"
+REQUEST_PROTOCOL_AWS_BEDROCK = "aws_bedrock"
+MANUAL_PROBE_SUITE_ID = "manual_model_request_probe"
+MANUAL_PROBE_MODE = "manual_probe"
 SIGNATURE_INVALID_ERROR = "Invalid `signature` in `thinking` block"
 SIGNATURE_TEST_PROMPT_A = "请用中文解释：为什么 0.1 + 0.2 不等于 0.3？请展示完整推理过程。"
 SIGNATURE_TEST_PROMPT_B = "好的，那 0.1 + 0.2 + 0.3 == 0.6 是否成立？"
@@ -390,7 +396,7 @@ def create_run(db: Session, data: RunCreate) -> Run:
     test_scope = data.test_scope or "full"
     if test_scope not in {"quick", "full"}:
         raise ValueError(f"Unsupported test scope: {test_scope}")
-    if mode not in {"full_comparison", "baseline_build", "candidate_eval"}:
+    if mode not in {"full_comparison", "baseline_build", "candidate_eval", MANUAL_PROBE_MODE}:
         raise ValueError(f"Unsupported run mode: {mode}")
     if mode == "candidate_eval":
         if not data.baseline_snapshot_id:
@@ -556,6 +562,101 @@ def _merged_channel_credentials(channel: Channel, runtime: dict[str, Any] | None
     return credentials
 
 
+def _result_from_normalized(run_id: str, case: TestCase, channel: Channel, attempt: int, normalized: dict[str, Any]) -> Result:
+    score, labels = score_result(channel, case, normalized)
+    return Result(
+        id=new_id("res"),
+        run_id=run_id,
+        test_case_id=case.id,
+        channel_id=channel.id,
+        attempt_index=attempt,
+        normalized_response=normalized,
+        raw_request=normalized.get("raw_request"),
+        raw_response=normalized.get("raw_response"),
+        metrics={"latency_ms": normalized.get("latency_ms"), "first_token_ms": normalized.get("first_token_ms")},
+        score=score,
+        labels=labels,
+    )
+
+
+def _manual_probe_suite(db: Session) -> TestSuite:
+    suite = db.get(TestSuite, MANUAL_PROBE_SUITE_ID)
+    if suite:
+        return suite
+    suite = TestSuite(
+        id=MANUAL_PROBE_SUITE_ID,
+        name="手动模型请求",
+        description="从 Signature 检测页发起的单次真实模型请求记录。",
+        version="manual",
+        visibility="private",
+    )
+    db.add(suite)
+    db.commit()
+    db.refresh(suite)
+    return suite
+
+
+async def create_model_request_test(db: Session, channel: Channel, data: ModelRequestTestCreate) -> dict[str, Any]:
+    prompt = data.prompt.strip()
+    if not prompt:
+        raise ValueError("Prompt cannot be empty")
+    if not channel.enabled:
+        raise ValueError("Channel is disabled")
+
+    suite = _manual_probe_suite(db)
+    request_params = data.request_params or {}
+    case = TestCase(
+        id=new_id("case"),
+        suite_id=suite.id,
+        module="manual_probe",
+        sort_order=1,
+        title="手动真实模型请求",
+        prompt=prompt,
+        system_prompt=data.system_prompt.strip() if data.system_prompt else None,
+        request_params=request_params,
+        scoring_rules={},
+        is_hidden=False,
+        enabled=True,
+    )
+    started_at = datetime.now(timezone.utc)
+    run = Run(
+        id=new_id("run"),
+        suite_id=suite.id,
+        name=(data.run_name or f"手动模型请求 · {channel.name}")[:200],
+        mode=MANUAL_PROBE_MODE,
+        test_scope="quick",
+        status="running",
+        repeat_count=1,
+        concurrency=1,
+        total_jobs=1,
+        completed_jobs=0,
+        started_at=started_at,
+    )
+    db.add(case)
+    db.add(run)
+    db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=channel.id, role_in_run=channel.role or "candidate"))
+    db.commit()
+
+    credentials = _merged_channel_credentials(channel, {})
+    normalized = await invoke_channel(channel, case, 1, credentials, use_mock=False)
+    result = _result_from_normalized(run.id, case, channel, 1, normalized)
+    run.completed_jobs = 1
+    run.finished_at = datetime.now(timezone.utc)
+    run.status = "failed" if normalized.get("error") else "completed"
+    db.add(result)
+    db.commit()
+    db.refresh(run)
+    db.refresh(result)
+    return {
+        "run": run,
+        "result": result,
+        "message_id": normalized.get("provider_message_id"),
+        "message_channel_type": classify_claude_message_id(normalized.get("provider_message_id")),
+        "request_protocol": normalized.get("request_protocol"),
+        "provider_endpoint": normalized.get("provider_endpoint"),
+    }
+
+
 async def execute_run(
     session_factory: sessionmaker[Session],
     run_id: str,
@@ -568,6 +669,10 @@ async def execute_run(
         run = db.get(Run, run_id)
         if not run:
             return
+
+        def add_result(case: TestCase, channel: Channel, attempt: int, normalized: dict[str, Any]) -> None:
+            db.add(_result_from_normalized(run.id, case, channel, attempt, normalized))
+            run.completed_jobs += 1
 
         async def cancel_active_tasks(tasks: set[asyncio.Task[tuple[TestCase, Channel, int, dict[str, Any]]]]) -> None:
             for pending_task in tasks:
@@ -604,11 +709,47 @@ async def execute_run(
                 for channel in _sort_channels_for_run(channels)
                 for attempt in range(1, run.repeat_count + 1)
             ]
+            preflight_result_keys: set[tuple[str, str, int]] = set()
+            failed_preflight_channel_ids: set[str] = set()
+            resolved_protocol_by_channel: dict[str, str] = {}
+
+            if not use_mock and cases and channels:
+                preflight_case = next((case for case in cases if not (case.scoring_rules or {}).get("invalid_request_probe")), cases[0])
+                for channel in _sort_channels_for_run(channels):
+                    db.refresh(run)
+                    if run.status == "canceled":
+                        finish_canceled_run()
+                        return
+                    credentials = _merged_channel_credentials(channel, runtime_credentials.get(channel.id, {}))
+                    normalized = await invoke_channel(channel, preflight_case, 1, credentials, use_mock=False)
+                    if normalized.get("error"):
+                        failed_preflight_channel_ids.add(channel.id)
+                        for case in cases:
+                            for attempt in range(1, run.repeat_count + 1):
+                                failure = channel_preflight_failure_response(channel, case, attempt, normalized)
+                                add_result(case, channel, attempt, failure)
+                        db.commit()
+                        continue
+                    resolved_protocol = normalized.get("request_protocol")
+                    if isinstance(resolved_protocol, str) and resolved_protocol != REQUEST_PROTOCOL_AUTO:
+                        resolved_protocol_by_channel[channel.id] = resolved_protocol
+                    add_result(preflight_case, channel, 1, normalized)
+                    preflight_result_keys.add((preflight_case.id, channel.id, 1))
+                    db.commit()
+
+                jobs = [
+                    (case, channel, attempt)
+                    for case, channel, attempt in jobs
+                    if channel.id not in failed_preflight_channel_ids and (case.id, channel.id, attempt) not in preflight_result_keys
+                ]
+
             job_index = 0
             concurrency = max(1, min(run.concurrency, len(jobs) or 1))
 
             async def invoke_job(case: TestCase, channel: Channel, attempt: int) -> tuple[TestCase, Channel, int, dict[str, Any]]:
                 credentials = _merged_channel_credentials(channel, runtime_credentials.get(channel.id, {}))
+                if channel.id in resolved_protocol_by_channel:
+                    credentials["request_protocol"] = resolved_protocol_by_channel[channel.id]
                 normalized = await invoke_channel(channel, case, attempt, credentials, use_mock)
                 return case, channel, attempt, normalized
 
@@ -645,23 +786,7 @@ async def execute_run(
                         await cancel_active_tasks(active_tasks)
                         finish_canceled_run()
                         return
-                    score, labels = score_result(channel, case, normalized)
-                    db.add(
-                        Result(
-                            id=new_id("res"),
-                            run_id=run.id,
-                            test_case_id=case.id,
-                            channel_id=channel.id,
-                            attempt_index=attempt,
-                            normalized_response=normalized,
-                            raw_request=normalized.get("raw_request"),
-                            raw_response=normalized.get("raw_response"),
-                            metrics={"latency_ms": normalized.get("latency_ms"), "first_token_ms": normalized.get("first_token_ms")},
-                            score=score,
-                            labels=labels,
-                        )
-                    )
-                    run.completed_jobs += 1
+                    add_result(case, channel, attempt, normalized)
                     db.commit()
 
             db.refresh(run)
@@ -671,7 +796,7 @@ async def execute_run(
             apply_repeat_consistency_scores(db, run.id)
             if run.mode == "baseline_build":
                 finalize_baseline_from_run(db, run.id)
-            else:
+            elif run.mode != MANUAL_PROBE_MODE:
                 build_comparisons(db, run.id, run.baseline_snapshot_id)
                 build_reports(db, run.id)
             run.status = "completed"
@@ -1381,10 +1506,6 @@ def validate_baseline_for_run(db: Session, baseline_snapshot_id: str, suite_id: 
         snapshot.status = "invalid"
         db.commit()
         raise ValueError("Baseline request fingerprint is no longer valid")
-    if snapshot.channel_fingerprint != channel_fingerprint(db, snapshot.channel_ids or []):
-        snapshot.status = "invalid"
-        db.commit()
-        raise ValueError("Baseline channel fingerprint is no longer valid")
     return snapshot
 
 
@@ -1393,7 +1514,23 @@ def refresh_baseline_status(db: Session, snapshot: BaselineSnapshot) -> Baseline
         snapshot.status = "expired"
         db.commit()
         db.refresh(snapshot)
+        return snapshot
+    if snapshot.status == "invalid" and _baseline_snapshot_can_be_restored(db, snapshot):
+        snapshot.status = "ready"
+        db.commit()
+        db.refresh(snapshot)
     return snapshot
+
+
+def _baseline_snapshot_can_be_restored(db: Session, snapshot: BaselineSnapshot) -> bool:
+    if snapshot.expires_at and _as_utc(snapshot.expires_at) < datetime.now(timezone.utc):
+        return False
+    if snapshot.suite_fingerprint != suite_fingerprint(db, snapshot.suite_id):
+        return False
+    if snapshot.request_fingerprint != request_fingerprint(db, snapshot.suite_id):
+        return False
+    result_count = db.scalar(select(func.count()).select_from(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
+    return bool(result_count)
 
 
 def finalize_baseline_from_run(db: Session, run_id: str) -> BaselineSnapshot | None:
@@ -1470,21 +1607,75 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
             120 + attempt * 5,
             120 + attempt * 5,
             "invalid_request_error",
+            request_mode="synthetic",
+            request_attempted=True,
         )
-    if use_mock or not credentials:
+    if use_mock:
         await asyncio.sleep(0.03)
         raw_response = simulate_raw_response(channel, case, attempt)
         latency_ms = 420 + len(case.prompt) * 2 + len(channel.name) * 7 + attempt * 13
-        return normalize_response(channel, case, raw_request, raw_response, latency_ms, max(100, latency_ms // 3), None)
+        return normalize_response(
+            channel,
+            case,
+            raw_request,
+            raw_response,
+            latency_ms,
+            max(100, latency_ms // 3),
+            None,
+            request_mode="mock",
+            request_attempted=False,
+        )
+
+    protocol = _request_protocol(channel, credentials)
+    endpoint = _provider_endpoint(channel, credentials, protocol)
+    missing_credentials = _missing_live_credentials(channel, credentials)
+    if missing_credentials:
+        return normalize_response(
+            channel,
+            case,
+            raw_request,
+            {"error": missing_credentials},
+            0,
+            0,
+            missing_credentials,
+            request_mode="live",
+            request_attempted=False,
+            provider_endpoint=endpoint,
+            request_protocol=protocol,
+        )
 
     started = time.perf_counter()
     try:
-        raw_response = await _live_call(channel, case, raw_request, credentials)
+        raw_response, resolved_protocol, endpoint = await _live_call_with_metadata(channel, case, raw_request, credentials)
         latency_ms = int((time.perf_counter() - started) * 1000)
-        return normalize_response(channel, case, raw_request, raw_response, latency_ms, latency_ms, None)
+        return normalize_response(
+            channel,
+            case,
+            raw_request,
+            raw_response,
+            latency_ms,
+            latency_ms,
+            None,
+            request_mode="live",
+            request_attempted=True,
+            provider_endpoint=endpoint,
+            request_protocol=resolved_protocol,
+        )
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
-        return normalize_response(channel, case, raw_request, {"error": str(exc)}, latency_ms, latency_ms, str(exc))
+        return normalize_response(
+            channel,
+            case,
+            raw_request,
+            {"error": str(exc)},
+            latency_ms,
+            latency_ms,
+            str(exc),
+            request_mode="live",
+            request_attempted=True,
+            provider_endpoint=endpoint,
+            request_protocol=protocol,
+        )
 
 
 def build_raw_request(channel: Channel, case: TestCase) -> dict[str, Any]:
@@ -1499,7 +1690,117 @@ def build_raw_request(channel: Channel, case: TestCase) -> dict[str, Any]:
 
 
 async def _live_call(channel: Channel, case: TestCase, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
+    response, _protocol, _endpoint = await _live_call_with_metadata(channel, case, raw_request, credentials)
+    return response
+
+
+async def _live_call_with_metadata(
+    channel: Channel,
+    case: TestCase,
+    raw_request: dict[str, Any],
+    credentials: dict[str, Any],
+) -> tuple[dict[str, Any], str, str | None]:
+    protocol = _request_protocol(channel, credentials)
+    if protocol == REQUEST_PROTOCOL_AUTO:
+        return await _auto_live_call(channel, case, raw_request, credentials)
+    raw_response = await _live_call_for_protocol(channel, case, raw_request, credentials, protocol)
+    return raw_response, protocol, _provider_endpoint(channel, credentials, protocol)
+
+
+async def _auto_live_call(
+    channel: Channel,
+    case: TestCase,
+    raw_request: dict[str, Any],
+    credentials: dict[str, Any],
+) -> tuple[dict[str, Any], str, str | None]:
+    protocols = _auto_protocol_candidates(channel)
+    errors: list[str] = []
+    for protocol in protocols:
+        endpoint = _provider_endpoint(channel, credentials, protocol)
+        try:
+            raw_response = await _live_call_for_protocol(channel, case, raw_request, credentials, protocol)
+            return raw_response, protocol, endpoint
+        except Exception as exc:
+            errors.append(f"{protocol} {endpoint or '-'}: {exc}")
+    raise RuntimeError("自动协议探测失败：" + "；".join(errors))
+
+
+async def _live_call_for_protocol(
+    channel: Channel,
+    case: TestCase,
+    raw_request: dict[str, Any],
+    credentials: dict[str, Any],
+    protocol: str,
+) -> dict[str, Any]:
+    if protocol == REQUEST_PROTOCOL_AWS_BEDROCK:
+        return await asyncio.to_thread(_aws_bedrock_call, channel, case, credentials)
+    if protocol == REQUEST_PROTOCOL_OPENAI:
+        return await _openai_compatible_call(channel, raw_request, credentials)
     return await _anthropic_compatible_call(channel, raw_request, credentials)
+
+
+def _request_protocol(channel: Channel, credentials: dict[str, Any]) -> str:
+    value = str(credentials.get("request_protocol") or credentials.get("protocol") or "").strip()
+    if value in {REQUEST_PROTOCOL_AUTO, REQUEST_PROTOCOL_ANTHROPIC, REQUEST_PROTOCOL_OPENAI, REQUEST_PROTOCOL_AWS_BEDROCK}:
+        return value
+    provider_kind = _provider_kind(channel.provider_type)
+    if provider_kind == "aws_bedrock":
+        return REQUEST_PROTOCOL_AWS_BEDROCK
+    if provider_kind == "openai_compatible":
+        return REQUEST_PROTOCOL_OPENAI
+    if provider_kind == "anthropic_compatible" and _looks_like_known_anthropic_provider(channel.provider_type):
+        return REQUEST_PROTOCOL_ANTHROPIC
+    return REQUEST_PROTOCOL_AUTO
+
+
+def _auto_protocol_candidates(channel: Channel) -> list[str]:
+    provider_kind = _provider_kind(channel.provider_type)
+    if provider_kind == "aws_bedrock":
+        return [REQUEST_PROTOCOL_AWS_BEDROCK]
+    if provider_kind == "openai_compatible":
+        return [REQUEST_PROTOCOL_OPENAI, REQUEST_PROTOCOL_ANTHROPIC]
+    return [REQUEST_PROTOCOL_ANTHROPIC, REQUEST_PROTOCOL_OPENAI]
+
+
+def _looks_like_known_anthropic_provider(provider_type: str | None) -> bool:
+    normalized = (provider_type or "").lower()
+    return normalized in {"anthropic", "third_party_anthropic"} or "anthropic" in normalized or "claude" in normalized
+
+
+def _provider_kind(provider_type: str | None) -> str:
+    normalized = (provider_type or "").lower()
+    if normalized == "aws_bedrock" or "bedrock" in normalized:
+        return "aws_bedrock"
+    if "openai" in normalized:
+        return "openai_compatible"
+    return "anthropic_compatible"
+
+
+def _provider_endpoint(channel: Channel, credentials: dict[str, Any], protocol: str | None = None) -> str | None:
+    protocol = protocol or _request_protocol(channel, credentials)
+    if protocol == REQUEST_PROTOCOL_AWS_BEDROCK:
+        return f"aws_bedrock:{credentials.get('region') or 'us-east-1'}"
+    if protocol == REQUEST_PROTOCOL_OPENAI:
+        base_url = (credentials.get("base_url") or channel.base_url or "").rstrip("/")
+        if not base_url:
+            return None
+        return _openai_chat_completions_url(base_url)
+    return _anthropic_messages_url(credentials.get("base_url") or channel.base_url)
+
+
+def _missing_live_credentials(channel: Channel, credentials: dict[str, Any]) -> str | None:
+    protocol = _request_protocol(channel, credentials)
+    if protocol == REQUEST_PROTOCOL_AWS_BEDROCK:
+        has_explicit_keys = credentials.get("aws_access_key_id") and credentials.get("aws_secret_access_key")
+        has_environment_keys = os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")
+        if not has_explicit_keys and not has_environment_keys:
+            return "缺少 AWS Bedrock 凭据，未发起正式请求"
+        return None
+    if not credentials.get("api_key"):
+        return "缺少 API Key，未发起正式请求"
+    if protocol in {REQUEST_PROTOCOL_OPENAI, REQUEST_PROTOCOL_AUTO} and not (credentials.get("base_url") or channel.base_url):
+        return "缺少 OpenAI-compatible Base URL，未发起正式请求"
+    return None
 
 
 def _anthropic_messages_url(base_url: str | None) -> str:
@@ -1509,6 +1810,56 @@ def _anthropic_messages_url(base_url: str | None) -> str:
     if normalized.endswith("/v1"):
         return f"{normalized}/messages"
     return f"{normalized}/v1/messages"
+
+
+def _openai_chat_completions_url(base_url: str | None) -> str:
+    normalized = (base_url or "").rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/chat/completions"
+    return f"{normalized}/v1/chat/completions"
+
+
+def _openai_models_url(base_url: str | None) -> str:
+    normalized = (base_url or "").rstrip("/")
+    if normalized.endswith("/models"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/models"
+    return f"{normalized}/v1/models"
+
+
+def _raise_for_status_with_body(response: httpx.Response) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = _response_error_detail(response)
+        if detail:
+            raise RuntimeError(f"{exc}; response body: {detail}") from exc
+        raise
+
+
+def _response_error_detail(response: httpx.Response) -> str:
+    text = response.text.strip()
+    if not text:
+        return ""
+    try:
+        payload = response.json()
+    except ValueError:
+        return text[:1000]
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("code") or error.get("type")
+        request_id = error.get("request_id") or payload.get("request_id")
+        if message:
+            return f"{message} request_id={request_id}" if request_id else str(message)
+    if isinstance(error, str):
+        return error
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if message:
+        return str(message)
+    return text[:1000]
 
 
 async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
@@ -1534,9 +1885,9 @@ async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, An
     if params.get("stop_sequences"):
         body["stop_sequences"] = params["stop_sequences"]
     timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(url, headers=headers, json=body)
-        response.raise_for_status()
+        _raise_for_status_with_body(response)
         return response.json()
 
 
@@ -1618,12 +1969,23 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         response_b = await _signature_messages_call(relay_endpoint, relay_credentials["api_key"], relay_payload)
     except RuntimeError as exc:
         raw = str(exc)
-        reason = "signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败"
-        steps[-1] = {"name": "步骤 B：发送 Relay 复用请求", "status": "fail", "detail": "Relay 请求失败", "excerpt": raw[:1200]}
-        steps.append({"name": "最终判定", "status": "fail", "detail": reason, "excerpt": None})
+        steps[-1] = {
+            "name": "步骤 B：发送 Relay 复用请求",
+            "status": "fail",
+            "detail": "Relay 请求失败",
+            "excerpt": raw[:1200],
+        }
+        steps.append(
+            {
+                "name": "最终判定",
+                "status": "fail",
+                "detail": "signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败",
+                "excerpt": None,
+            }
+        )
         return _signature_interop_result(
             ok=False,
-            reason=reason,
+            reason="signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败",
             source=source,
             relay=relay,
             source_endpoint=source_endpoint,
@@ -1638,7 +2000,11 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     raw_b = json.dumps(response_b, ensure_ascii=False)
     has_error = response_b.get("type") == "error" or response_b.get("error") is True or isinstance(response_b.get("error"), dict)
     ok = not has_error and SIGNATURE_INVALID_ERROR not in raw_b
-    reason = "兼容：relay 成功接受 source 的 thinking block signature" if ok else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw_b else "relay 请求失败")
+    reason = (
+        "兼容：relay 成功接受 source 的 thinking block signature"
+        if ok
+        else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw_b else "relay 请求失败")
+    )
     steps[-1] = {
         "name": "步骤 B：发送 Relay 复用请求",
         "status": "ok" if ok else "fail",
@@ -1677,35 +2043,12 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
         "anthropic-beta": "interleaved-thinking-2025-05-14",
     }
     timeout = httpx.Timeout(connect=10, read=120, write=10, pool=10)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(endpoint, headers=headers, json=payload)
-        if response.is_error:
-            raise RuntimeError(f"HTTP {response.status_code}: {_signature_response_error_detail(response)}")
+        _raise_for_status_with_body(response)
         if payload.get("stream"):
             return _parse_signature_stream_response(response.text)
         return response.json()
-
-
-def _signature_response_error_detail(response: httpx.Response) -> str:
-    text = response.text.strip()
-    if not text:
-        return ""
-    try:
-        payload = response.json()
-    except ValueError:
-        return text[:1000]
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if isinstance(error, dict):
-        message = error.get("message") or error.get("code") or error.get("type")
-        request_id = error.get("request_id") or payload.get("request_id")
-        if message:
-            return f"{message} request_id={request_id}" if request_id else str(message)
-    if isinstance(error, str):
-        return error
-    message = payload.get("message") if isinstance(payload, dict) else None
-    if message:
-        return str(message)
-    return text[:1000]
 
 
 def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
@@ -1841,7 +2184,7 @@ def simulate_message_response(provider: str = "aws") -> dict[str, Any]:
 
 async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
     base_url = (credentials.get("base_url") or channel.base_url or "").rstrip("/")
-    url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+    url = _openai_chat_completions_url(base_url)
     params = raw_request["params"]
     headers = {"authorization": f"Bearer {credentials.get('api_key', '')}", "content-type": "application/json"}
     body = {
@@ -1851,10 +2194,33 @@ async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any],
         "temperature": params.get("temperature", 0),
     }
     timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(url, headers=headers, json=body)
-        response.raise_for_status()
+        _raise_for_status_with_body(response)
         return response.json()
+
+
+async def fetch_channel_models(channel: Channel) -> list[str]:
+    credentials = _merged_channel_credentials(channel, {})
+    api_key = credentials.get("api_key")
+    if not api_key:
+        raise ValueError("缺少 API Key，无法拉取模型列表")
+    url = _openai_models_url(credentials.get("base_url") or channel.base_url)
+    headers = {"authorization": f"Bearer {api_key}", "content-type": "application/json"}
+    timeout = httpx.Timeout(connect=10, read=30, write=10, pool=10)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        response = await client.get(url, headers=headers)
+        _raise_for_status_with_body(response)
+        payload = response.json()
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    models: list[str] = []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and item.get("id"):
+                models.append(str(item["id"]))
+            elif isinstance(item, str):
+                models.append(item)
+    return sorted(dict.fromkeys(models))
 
 
 def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, Any]) -> dict[str, Any]:
@@ -1989,7 +2355,45 @@ def _answer_for_case(case: TestCase, channel: Channel) -> str:
     return "Claude 风格的谨慎回答。"
 
 
-def normalize_response(channel: Channel, case: TestCase, raw_request: dict[str, Any], raw_response: dict[str, Any], latency_ms: int, first_token_ms: int, error: str | None) -> dict[str, Any]:
+def channel_preflight_failure_response(channel: Channel, case: TestCase, attempt: int, preflight: dict[str, Any]) -> dict[str, Any]:
+    error = preflight.get("error") or "渠道预检失败，未继续执行该渠道的剩余题目"
+    raw_request = build_raw_request(channel, case)
+    return normalize_response(
+        channel,
+        case,
+        raw_request,
+        {
+            "error": error,
+            "preflight_error": preflight.get("error"),
+            "preflight_endpoint": preflight.get("provider_endpoint"),
+            "preflight_protocol": preflight.get("request_protocol"),
+        },
+        0,
+        0,
+        f"渠道预检失败：{error}",
+        request_mode="live",
+        request_attempted=False,
+        provider_endpoint=preflight.get("provider_endpoint"),
+        request_protocol=preflight.get("request_protocol"),
+        channel_preflight_failed=True,
+    )
+
+
+def normalize_response(
+    channel: Channel,
+    case: TestCase,
+    raw_request: dict[str, Any],
+    raw_response: dict[str, Any],
+    latency_ms: int,
+    first_token_ms: int,
+    error: str | None,
+    *,
+    request_mode: str = "live",
+    request_attempted: bool = True,
+    provider_endpoint: str | None = None,
+    request_protocol: str | None = None,
+    channel_preflight_failed: bool = False,
+) -> dict[str, Any]:
     text = ""
     content_blocks: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
@@ -2030,6 +2434,11 @@ def normalize_response(channel: Channel, case: TestCase, raw_request: dict[str, 
         "raw_request": raw_request,
         "raw_response": raw_response,
         "error": error,
+        "request_mode": request_mode,
+        "request_attempted": request_attempted,
+        "provider_endpoint": provider_endpoint,
+        "request_protocol": request_protocol,
+        "channel_preflight_failed": channel_preflight_failed,
     }
 
 
@@ -2052,6 +2461,8 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         if normalized.get("error") or normalized.get("status_code", 200) >= 400 or normalized["raw_response"].get("type") == "error":
             return 100.0, []
         return 0.0, ["invalid_request_not_rejected"]
+    if normalized.get("channel_preflight_failed"):
+        return 0.0, ["channel_preflight_failed", "request_failed"]
     if normalized.get("error"):
         return 0.0, ["request_failed"]
     if normalized["raw_response"].get("type") != "message":
@@ -2380,6 +2791,7 @@ LABEL_EXPLANATIONS = {
     "baseline_cloud_missing": "当前题缺少官方云参考基线。",
     "invalid_request_not_rejected": "无效请求没有被正确拒绝。",
     "request_failed": "请求失败，未获得可评分响应。",
+    "channel_preflight_failed": "渠道预检失败，已停止该渠道剩余题目的正式请求。",
     "signature_interop_failed": "Thinking Signature 互通检测未通过，relay 无法复用 source 生成的签名 thinking block。",
 }
 

@@ -1,0 +1,183 @@
+import { useEffect, useMemo, useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Select, Space, Tag, Typography, message } from 'antd';
+import { Link } from 'react-router-dom';
+import { Send } from 'lucide-react';
+import { api } from '../api';
+import type { Channel, ModelRequestTestResult } from '../types';
+
+type ModelRequestForm = {
+  channel_id: string;
+  prompt: string;
+  system_prompt?: string;
+  max_tokens?: number;
+  temperature?: number;
+};
+
+function channelApiKey(channel: Channel) {
+  const value = channel.auth_config?.api_key;
+  return typeof value === 'string' ? value : '';
+}
+
+function prettyJson(value: unknown) {
+  return JSON.stringify(value ?? null, null, 2);
+}
+
+function normalizedValue(result: ModelRequestTestResult | null, key: string) {
+  const normalized = result?.result.normalized_response;
+  return normalized && typeof normalized === 'object' ? normalized[key] : undefined;
+}
+
+export default function ModelRequestTest() {
+  const [form] = Form.useForm<ModelRequestForm>();
+  const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
+  const [result, setResult] = useState<ModelRequestTestResult | null>(null);
+  const [requestError, setRequestError] = useState<string | null>(null);
+
+  const availableChannels = useMemo(
+    () => (channels.data ?? []).filter((channel) => channel.enabled && channel.base_url && channelApiKey(channel)),
+    [channels.data],
+  );
+
+  const channelOptions = availableChannels.map((channel) => ({
+    value: channel.id,
+    label: `${channel.name} · ${channel.model_name || '未配置模型'}`,
+  }));
+
+  useEffect(() => {
+    if (!availableChannels.length || form.getFieldValue('channel_id')) return;
+    form.setFieldsValue({ channel_id: availableChannels[0].id });
+  }, [availableChannels, form]);
+
+  const requestModel = useMutation({
+    mutationFn: (values: ModelRequestForm) =>
+      api.modelRequestTest(values.channel_id, {
+        prompt: values.prompt,
+        system_prompt: values.system_prompt?.trim() || null,
+        request_params: {
+          max_tokens: values.max_tokens ?? 256,
+          temperature: values.temperature ?? 0,
+        },
+      }),
+    onSuccess: (payload) => {
+      setRequestError(null);
+      setResult(payload);
+      if (payload.result.normalized_response?.error) {
+        message.warning('真实请求已保存，但渠道返回失败');
+      } else {
+        message.success('真实请求已完成并保存');
+      }
+    },
+    onError: (error) => {
+      const detail = error instanceof Error ? error.message : '真实请求失败';
+      setRequestError(detail);
+      message.error(detail);
+    },
+  });
+
+  function submit(values: ModelRequestForm) {
+    setResult(null);
+    setRequestError(null);
+    requestModel.mutate(values);
+  }
+
+  return (
+    <Space direction="vertical" size={24} className="page-stack">
+      <div className="page-heading">
+        <div>
+          <Typography.Text className="section-kicker">MODEL REQUEST</Typography.Text>
+          <Typography.Title level={2}>真实模型请求</Typography.Title>
+          <Typography.Paragraph>
+            单独向某个渠道发送真实请求，查看渠道返回的 message id、协议、endpoint 和原始响应。
+          </Typography.Paragraph>
+        </div>
+        <Tag color="blue">可请求渠道 {availableChannels.length}</Tag>
+      </div>
+
+      <Card title={<span className="card-title-with-icon"><Send size={18} />请求配置</span>} bordered={false}>
+        <Space direction="vertical" size={16} className="full-width">
+          {!availableChannels.length ? (
+            <Alert type="warning" showIcon message="没有可请求渠道" description="请先到渠道管理页为启用渠道配置 Base URL 和 API Key。" />
+          ) : null}
+          <Alert
+            type="info"
+            showIcon
+            message="会向所选渠道发起真实请求"
+            description="请求和响应会保存为一条手动模型请求任务。API Key 只读取渠道配置，不写入原始请求。"
+          />
+          <Form
+            form={form}
+            layout="vertical"
+            initialValues={{ max_tokens: 256, temperature: 0 }}
+            onFinish={submit}
+            onValuesChange={() => {
+              setResult(null);
+              setRequestError(null);
+            }}
+          >
+            <div className="signature-config-grid">
+              <Form.Item name="channel_id" label="请求渠道" rules={[{ required: true, message: '请选择请求渠道' }]}>
+                <Select options={channelOptions} loading={channels.isLoading} placeholder="选择已配置密钥的渠道" />
+              </Form.Item>
+              <Form.Item name="max_tokens" label="Max tokens" rules={[{ required: true, message: '请输入 max_tokens' }]}>
+                <InputNumber min={1} max={4096} precision={0} className="full-width" />
+              </Form.Item>
+              <Form.Item name="temperature" label="Temperature" rules={[{ required: true, message: '请输入 temperature' }]}>
+                <InputNumber min={0} max={1} step={0.1} className="full-width" />
+              </Form.Item>
+            </div>
+            <Form.Item name="system_prompt" label="System prompt">
+              <Input.TextArea rows={2} placeholder="可选" />
+            </Form.Item>
+            <Form.Item name="prompt" label="Prompt" rules={[{ required: true, message: '请输入真实测试内容' }]}>
+              <Input.TextArea rows={5} placeholder="例如：请用一句话说明你返回的 message id 能体现什么渠道特征。" />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" loading={requestModel.isPending} disabled={channels.isLoading || !availableChannels.length} icon={<Send size={16} />}>
+              {requestModel.isPending ? '发送中' : '发送真实请求'}
+            </Button>
+          </Form>
+
+          {requestError ? (
+            <Alert type="error" showIcon message="真实请求没有发出或接口返回失败" description={requestError} />
+          ) : null}
+        </Space>
+      </Card>
+
+      {result ? (
+        <Space direction="vertical" size={16} className="full-width">
+          <Card title="请求结果" bordered={false}>
+            <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="任务">
+                <Link to={`/runs/${result.run.id}`}>{result.run.id}</Link>
+              </Descriptions.Item>
+              <Descriptions.Item label="状态">{result.run.status}</Descriptions.Item>
+              <Descriptions.Item label="Message ID">{result.message_id || '-'}</Descriptions.Item>
+              <Descriptions.Item label="渠道特征">{result.message_channel_type}</Descriptions.Item>
+              <Descriptions.Item label="协议">{result.request_protocol || '-'}</Descriptions.Item>
+              <Descriptions.Item label="Endpoint">{result.provider_endpoint || '-'}</Descriptions.Item>
+              <Descriptions.Item label="模型">{String(normalizedValue(result, 'provider_model') ?? '-')}</Descriptions.Item>
+              <Descriptions.Item label="延迟">{String(normalizedValue(result, 'latency_ms') ?? '-')} ms</Descriptions.Item>
+            </Descriptions>
+          </Card>
+
+          {result.result.normalized_response?.error ? (
+            <Alert type="error" showIcon message="渠道请求失败" description={String(result.result.normalized_response.error)} />
+          ) : null}
+
+          <Card title="模型输出" bordered={false}>
+            <pre className="output-drawer-pre">{String(normalizedValue(result, 'content_text') ?? '')}</pre>
+          </Card>
+
+          <div className="signature-sim-grid">
+            <Card title="原始请求" bordered={false}>
+              <pre className="signature-step-excerpt">{prettyJson(result.result.raw_request)}</pre>
+            </Card>
+            <Card title="原始响应" bordered={false}>
+              <pre className="signature-step-excerpt">{prettyJson(result.result.raw_response)}</pre>
+            </Card>
+          </div>
+        </Space>
+      ) : null}
+    </Space>
+  );
+}

@@ -8,6 +8,7 @@ import type {
   Comparison,
   FeishuBroadcastSetting,
   FeishuBroadcastUpdate,
+  ModelRequestTestResult,
   Report,
   Result,
   Run,
@@ -87,6 +88,9 @@ export const api = {
     request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),
   simulateMessageResponse: (payload: { provider?: string }) =>
     request<SimulatedMessageResponse>('/api/channels/simulate-message-response', { method: 'POST', body: JSON.stringify(payload) }),
+  modelRequestTest: (channelId: string, payload: { prompt: string; system_prompt?: string | null; request_params?: Record<string, unknown>; run_name?: string | null }) =>
+    request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
+  channelModels: (id: string) => request<string[]>(`/api/channels/${id}/models`),
   suites: () => request<TestSuite[]>('/api/suites'),
   createSuite: (payload: Partial<TestSuite>) => request<TestSuite>('/api/test-suites', { method: 'POST', body: JSON.stringify(payload) }),
   cases: (suiteId?: string) => request<TestCase[]>(suiteId ? `/api/suites/${suiteId}/cases` : '/api/test-cases'),
