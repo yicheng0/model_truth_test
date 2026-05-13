@@ -18,7 +18,7 @@ services:
       context: ./backend
     environment:
       DATABASE_URL: postgresql+psycopg://claude_eval:claude_eval@postgres:5432/claude_eval
-      CORS_ORIGINS: http://localhost:15173,http://127.0.0.1:15173
+      CORS_ORIGINS: http://64.32.27.84:8080,http://localhost:8080,http://127.0.0.1:8080
     depends_on:
       postgres:
         condition: service_healthy
@@ -27,7 +27,7 @@ services:
     build:
       context: ./frontend
     ports:
-      - "15173:80"
+      - "8080:80"
     depends_on:
       - backend
 
