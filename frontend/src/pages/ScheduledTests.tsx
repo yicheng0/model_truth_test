@@ -356,7 +356,7 @@ export default function ScheduledTests() {
               render: (_, schedule) => channelById.get(schedule.channel_id)?.name ?? schedule.channel_id,
             },
             {
-              title: '基线 / 测试集',
+              title: '渠道指纹 / 测试集',
               width: 260,
               render: (_, schedule) => (
                 <Space direction="vertical" size={2}>
@@ -695,11 +695,11 @@ export default function ScheduledTests() {
               options={(suites.data ?? []).map((suite) => ({ value: suite.id, label: `${suite.name} (${suite.version ?? '未标版'})` }))}
             />
           </Form.Item>
-          <Form.Item label="官方基线快照" name="baseline_snapshot_id" rules={[{ required: true, message: '请选择 ready 状态的官方基线' }]}>
+          <Form.Item label="渠道指纹" name="baseline_snapshot_id" rules={[{ required: true, message: '请选择 ready 状态的渠道指纹' }]}>
             <Select
-              placeholder={watchedSuiteId ? '选择可复用官方基线' : '请先选择测试集'}
+              placeholder={watchedSuiteId ? '选择可复用渠道指纹' : '请先选择测试集'}
               options={readyBaselines.map((baseline) => ({ value: baseline.id, label: `${baseline.name} · ${formatDateTime(baseline.ready_at)}` }))}
-              notFoundContent={watchedSuiteId ? '当前测试集暂无 ready 状态基线' : '请先选择测试集'}
+              notFoundContent={watchedSuiteId ? '当前测试集暂无 ready 状态渠道指纹，请先提取渠道指纹' : '请先选择测试集'}
             />
           </Form.Item>
           <Space size="large" wrap>

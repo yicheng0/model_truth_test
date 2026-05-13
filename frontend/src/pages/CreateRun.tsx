@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Form, Input, Radio, Select, Space, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Form, Input, Select, Space, Tag, Typography, message } from 'antd';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
-import { roleColor, roleLabel } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
 import type { BaselineSnapshot, Channel, TestSuite } from '../types';
 
@@ -44,7 +43,7 @@ export default function CreateRun() {
   const [form] = Form.useForm<CreateRunValues>();
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const initialMode: CreateMode = searchParams.get('mode') === 'baseline' ? 'baseline_build' : 'candidate_eval';
   const selectedMode = Form.useWatch('mode', form) ?? initialMode;
   const watchedSuiteId = Form.useWatch('suite_id', form);
@@ -52,7 +51,6 @@ export default function CreateRun() {
   const watchedCandidateChannelIds = Form.useWatch('candidate_channel_ids', form) ?? [];
   const suites = useQuery<TestSuite[]>({ queryKey: ['suites'], queryFn: api.suites });
   const channels = useQuery<Channel[]>({ queryKey: ['channels'], queryFn: api.channels });
-  const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
   const builtInSuite = useMemo(
     () => (suites.data ?? []).find((suite) => suite.id === DEFAULT_SUITE_ID) ?? suites.data?.[0],
     [suites.data],
@@ -76,6 +74,11 @@ export default function CreateRun() {
   useEffect(() => {
     form.setFieldValue('mode', initialMode);
   }, [form, initialMode]);
+
+  function selectMode(mode: CreateMode) {
+    form.setFieldValue('mode', mode);
+    setSearchParams({ mode: mode === 'baseline_build' ? 'baseline' : 'compare' });
+  }
 
   useEffect(() => {
     if (!builtInSuite?.id) return;
@@ -144,7 +147,7 @@ export default function CreateRun() {
               mode,
               baseline_snapshot_id: values.baseline_snapshot_id,
             });
-      message.success(mode === 'baseline_build' ? '对照样本采样任务已创建' : '对比测试任务已创建');
+      message.success(mode === 'baseline_build' ? '渠道指纹提取任务已创建' : '对比测试任务已创建');
       navigate(`/runs/${run.id}`);
     } catch (error) {
       message.error(getErrorMessage(error));
@@ -155,7 +158,7 @@ export default function CreateRun() {
 
   return (
     <div className="page-stack">
-      <Card title={<span style={{ fontSize: '18px', fontWeight: 600 }}>创建检测任务</span>} bordered={false}>
+      <Card title={<span style={{ fontSize: '18px', fontWeight: 600 }}>新建任务</span>} bordered={false}>
         {suites.isError || channels.isError || (selectedMode === 'candidate_eval' && baselines.isError) ? (
           <Alert
             type="error"
@@ -167,14 +170,29 @@ export default function CreateRun() {
           />
         ) : null}
         <Form form={form} layout="vertical" onFinish={submit} initialValues={{ mode: initialMode }}>
-          <Form.Item label="任务名" name="name" rules={[{ required: true }]}>
-            <Input size="large" placeholder={selectedMode === 'baseline_build' ? 'Sonnet 4.5 对照样本采样' : 'Sonnet 4.5 渠道对比测试'} />
+          <Form.Item name="mode" hidden>
+            <Input />
           </Form.Item>
-          <Form.Item label="运行模式" name="mode" rules={[{ required: true }]}>
-            <Radio.Group size="large">
-              <Radio.Button value="baseline_build">创建对照样本</Radio.Button>
-              <Radio.Button value="candidate_eval">对比测试</Radio.Button>
-            </Radio.Group>
+          <div className="task-mode-actions" aria-label="任务类型">
+            <Button
+              htmlType="button"
+              size="large"
+              type={selectedMode === 'baseline_build' ? 'primary' : 'default'}
+              onClick={() => selectMode('baseline_build')}
+            >
+              提取渠道指纹
+            </Button>
+            <Button
+              htmlType="button"
+              size="large"
+              type={selectedMode === 'candidate_eval' ? 'primary' : 'default'}
+              onClick={() => selectMode('candidate_eval')}
+            >
+              对比测试
+            </Button>
+          </div>
+          <Form.Item label="任务名" name="name" rules={[{ required: true }]}>
+            <Input size="large" placeholder={selectedMode === 'baseline_build' ? 'Sonnet 4.5 渠道指纹提取' : 'Sonnet 4.5 渠道对比测试'} />
           </Form.Item>
           {!suites.isLoading && !builtInSuite ? (
             <Alert
@@ -187,19 +205,19 @@ export default function CreateRun() {
           ) : null}
           {selectedMode === 'candidate_eval' ? (
             <Form.Item
-              label="对照样本"
+              label="渠道指纹"
               name="baseline_snapshot_id"
-              rules={[{ validator: (_, value) => (value ? Promise.resolve() : Promise.reject(new Error('请选择一个可用对照样本'))) }]}
+              rules={[{ validator: (_, value) => (value ? Promise.resolve() : Promise.reject(new Error('请选择一个可用渠道指纹'))) }]}
             >
               <Select
                 size="large"
                 loading={baselines.isLoading}
-                placeholder={selectedSuiteId ? '选择可用对照样本' : '请先选择测试集'}
+                placeholder={selectedSuiteId ? '选择可用渠道指纹' : '请先选择测试集'}
                 options={readyBaselines.map((baseline) => ({
                   value: baseline.id,
                   label: `${baseline.name} · ${baseline.ready_at ? formatDateTime(baseline.ready_at) : '未记录生成时间'}`,
                 }))}
-                notFoundContent={selectedSuiteId ? '当前测试集暂无可用对照样本' : '请先选择测试集'}
+                notFoundContent={selectedSuiteId ? '当前测试集暂无可用渠道指纹，请先提取渠道指纹' : '请先选择测试集'}
               />
             </Form.Item>
           ) : null}
@@ -207,17 +225,17 @@ export default function CreateRun() {
             <Alert
               type="warning"
               showIcon
-              message="还没有可用对照渠道"
-              description="请先到渠道管理中新增渠道，并打开该渠道的“对照渠道”开关。"
+              message="还没有可用指纹源渠道"
+              description="请先到渠道管理中新增渠道，并打开该渠道的“指纹源”开关。"
               action={<Button onClick={() => navigate('/channels')}>去渠道管理</Button>}
               style={{ marginBottom: 16 }}
             />
           ) : null}
           {selectedMode === 'baseline_build' ? (
             <Form.Item
-              label="对照渠道"
+              label="指纹源渠道"
               name="reference_channel_ids"
-              rules={[{ validator: (_, value: string[] = []) => (value.length ? Promise.resolve() : Promise.reject(new Error('请选择至少一个对照渠道'))) }]}
+              rules={[{ validator: (_, value: string[] = []) => (value.length ? Promise.resolve() : Promise.reject(new Error('请选择至少一个指纹源渠道'))) }]}
             >
               <Checkbox.Group className="full-width">
                 <div className="run-channel-picker">
@@ -229,8 +247,7 @@ export default function CreateRun() {
                         <small>{channel.model_name || '未配置模型'}</small>
                       </span>
                       <Space wrap>
-                        <Tag color="blue">对照</Tag>
-                        <Tag color={roleColor[channel.role]}>{roleLabel(channel.role, taxonomy.data)}</Tag>
+                        <Tag color="blue">提取指纹</Tag>
                       </Space>
                     </label>
                   ))}
@@ -253,7 +270,6 @@ export default function CreateRun() {
                       <strong>{channel.name}</strong>
                       <small>{channel.model_name || '未配置模型'}</small>
                     </span>
-                  <Tag color={roleColor[channel.role]}>{roleLabel(channel.role, taxonomy.data)}</Tag>
                   </label>
                 ))}
                 {candidateChannels.length === 0 ? (
@@ -296,7 +312,7 @@ export default function CreateRun() {
             </div>
           ) : null}
           <Button type="primary" size="large" htmlType="submit" loading={loading} style={{ height: '44px', fontWeight: 600 }}>
-            {selectedMode === 'baseline_build' ? '创建对照样本' : '启动对比测试'}
+            {selectedMode === 'baseline_build' ? '提取渠道指纹' : '启动对比测试'}
           </Button>
         </Form>
       </Card>

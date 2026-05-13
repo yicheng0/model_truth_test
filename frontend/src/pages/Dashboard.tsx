@@ -42,7 +42,7 @@ export default function Dashboard() {
   const completed = runs.data?.filter((run) => run.status === 'completed').length ?? 0;
   const running = runs.data?.filter((run) => run.status === 'running').length ?? 0;
   const totalJobs = runs.data?.reduce((sum, run) => sum + run.completed_jobs, 0) ?? 0;
-  const officialChannels = channels.data?.filter((channel) => channel.is_reference).length ?? 0;
+  const fingerprintChannels = channels.data?.filter((channel) => channel.is_reference).length ?? 0;
   const latestReports = reports.data?.slice(0, 4) ?? [];
   const recentChannels = channels.data?.slice(0, 6) ?? [];
 
@@ -96,7 +96,7 @@ export default function Dashboard() {
       </section>
 
       <section className="metric-strip">
-        <div><span>对照渠道</span><strong>{officialChannels}</strong></div>
+        <div><span>指纹源渠道</span><strong>{fingerprintChannels}</strong></div>
         <div><span>当前可用</span><strong>{channels.data?.filter((channel) => channel.enabled).length ?? 0}</strong></div>
         <div><span>测评通过</span><strong>{completed}</strong></div>
         <div><span>单次测试</span><strong>{totalJobs || 183}</strong></div>
@@ -105,7 +105,7 @@ export default function Dashboard() {
       <section className="tab-actions">
         <Link className="tab-pill active" to="/">渠道可用性</Link>
         <Link className="tab-pill" to="/runs">渠道质量检测</Link>
-        <Link className="tab-pill" to="/new-run">发起新检测</Link>
+        <Link className="tab-pill" to="/new-run">新建任务</Link>
       </section>
 
       <Card className="section-card" bordered={false}>

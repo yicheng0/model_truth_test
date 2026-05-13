@@ -2,8 +2,8 @@ import { Save } from "lucide-react";
 import { Section } from "../components/Section";
 
 const weights = [
-  ["Anthropic 金标一致性", 25],
-  ["官方云参考带一致性", 15],
+  ["渠道指纹一致性", 25],
+  ["云参考一致性", 15],
   ["协议结构可信度", 15],
   ["流式响应一致性", 8],
   ["参数遵守与截断行为", 8],
@@ -44,4 +44,3 @@ export function SettingsPage() {
     </div>
   );
 }
-

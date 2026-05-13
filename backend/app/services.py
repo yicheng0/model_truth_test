@@ -61,6 +61,7 @@ ALERT_RED_FLAGS = {
     "request_failed",
     "protocol_mismatch",
     "signature_interop_failed",
+    "thinking_temperature_not_rejected",
 }
 
 REQUEST_PROTOCOL_AUTO = "auto"
@@ -605,6 +606,7 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
 
     suite = _manual_probe_suite(db)
     request_params = data.request_params or {}
+    scoring_rules = _manual_probe_scoring_rules(request_params)
     case = TestCase(
         id=new_id("case"),
         suite_id=suite.id,
@@ -614,7 +616,7 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
         prompt=prompt,
         system_prompt=data.system_prompt.strip() if data.system_prompt else None,
         request_params=request_params,
-        scoring_rules={},
+        scoring_rules=scoring_rules,
         is_hidden=False,
         enabled=True,
     )
@@ -642,7 +644,7 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
     result = _result_from_normalized(run.id, case, channel, 1, normalized)
     run.completed_jobs = 1
     run.finished_at = datetime.now(timezone.utc)
-    run.status = "failed" if normalized.get("error") else "completed"
+    run.status = "failed" if normalized.get("error") and result.score <= 0 else "completed"
     db.add(result)
     db.commit()
     db.refresh(run)
@@ -655,6 +657,14 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
         "request_protocol": normalized.get("request_protocol"),
         "provider_endpoint": normalized.get("provider_endpoint"),
     }
+
+
+def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any]:
+    rules: dict[str, Any] = {}
+    for key in ["expected_error_contains", "expected_error_any", "expected_error_variant_any"]:
+        if key in request_params:
+            rules[key] = request_params[key]
+    return rules
 
 
 async def execute_run(
@@ -1663,14 +1673,15 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
         )
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
+        error_message = _message_from_exception(exc)
         return normalize_response(
             channel,
             case,
             raw_request,
-            {"error": str(exc)},
+            {"error": error_message},
             latency_ms,
             latency_ms,
-            str(exc),
+            error_message,
             request_mode="live",
             request_attempted=True,
             provider_endpoint=endpoint,
@@ -1840,6 +1851,16 @@ def _raise_for_status_with_body(response: httpx.Response) -> None:
         raise
 
 
+def _message_from_exception(exc: Exception) -> str:
+    if hasattr(exc, "response"):
+        response = getattr(exc, "response")
+        status_code = getattr(response, "status_code", None)
+        text = getattr(response, "text", "")
+        if status_code or text:
+            return f"{status_code or 'error'} {text}".strip()
+    return str(exc)
+
+
 def _response_error_detail(response: httpx.Response) -> str:
     text = response.text.strip()
     if not text:
@@ -1884,6 +1905,9 @@ async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, An
         body["tools"] = params["tools"]
     if params.get("stop_sequences"):
         body["stop_sequences"] = params["stop_sequences"]
+    if params.get("thinking"):
+        body["thinking"] = params["thinking"]
+    _remove_probe_only_params(body)
     timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(url, headers=headers, json=body)
@@ -2193,6 +2217,11 @@ async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any],
         "max_tokens": params.get("max_tokens", 1024),
         "temperature": params.get("temperature", 0),
     }
+    if params.get("reasoning_effort"):
+        body["reasoning_effort"] = params["reasoning_effort"]
+    if params.get("thinking"):
+        body["thinking"] = params["thinking"]
+    _remove_probe_only_params(body)
     timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(url, headers=headers, json=body)
@@ -2237,6 +2266,8 @@ def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, A
         config=Config(connect_timeout=10, read_timeout=90, retries={"max_attempts": 1}),
     )
     params = case.request_params or {}
+    if params.get("thinking"):
+        return _aws_bedrock_messages_call(client, channel, case, credentials, params)
     response = client.converse(
         modelId=credentials.get("model") or channel.model_name,
         messages=[{"role": "user", "content": [{"text": case.prompt}]}],
@@ -2252,6 +2283,38 @@ def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, A
         "usage": response.get("usage"),
         "cloud_wrapper": {"provider": "aws_bedrock", "region": region},
     }
+
+
+def _aws_bedrock_messages_call(client: Any, channel: Channel, case: TestCase, credentials: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    body = {
+        "anthropic_version": credentials.get("anthropic_version", "bedrock-2023-05-31"),
+        "system": case.system_prompt,
+        "messages": [{"role": "user", "content": case.prompt}],
+        "max_tokens": params.get("max_tokens", 1024),
+        "temperature": params.get("temperature", 0),
+        "thinking": params["thinking"],
+    }
+    _remove_probe_only_params(body)
+    response = client.invoke_model(modelId=credentials.get("model") or channel.model_name, body=json.dumps(body))
+    raw_body = response.get("body")
+    if hasattr(raw_body, "read"):
+        raw_text = raw_body.read().decode("utf-8")
+    elif isinstance(raw_body, bytes):
+        raw_text = raw_body.decode("utf-8")
+    else:
+        raw_text = str(raw_body or "{}")
+    payload = json.loads(raw_text or "{}")
+    if isinstance(payload, dict):
+        payload.setdefault("cloud_wrapper", {"provider": "aws_bedrock", "region": credentials.get("region") or "us-east-1"})
+    return payload
+
+
+def _remove_probe_only_params(body: dict[str, Any]) -> None:
+    for key in ["expected_error_contains", "expected_error_any", "expected_error_variant_any"]:
+        body.pop(key, None)
+    for key, value in list(body.items()):
+        if value is None:
+            body.pop(key)
 
 
 def simulate_raw_response(channel: Channel, case: TestCase, attempt: int) -> dict[str, Any]:
@@ -2456,7 +2519,21 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     score = 100.0
     rules = case.scoring_rules or {}
     text = normalized.get("content_text") or ""
+    error_text = _normalized_error_text(normalized)
 
+    if rules.get("expected_error_contains") or rules.get("expected_error_any"):
+        if not error_text:
+            return 0.0, ["thinking_temperature_not_rejected"]
+        expected_exact = _lower_text(rules.get("expected_error_contains"))
+        if expected_exact and expected_exact in _lower_text(error_text):
+            return 100.0, []
+        expected_any = [_lower_text(item) for item in rules.get("expected_error_any", []) if _lower_text(item)]
+        if expected_any and all(item in _lower_text(error_text) for item in expected_any):
+            return 100.0, ["provider_error_variant"]
+        variant_any = [_lower_text(item) for item in rules.get("expected_error_variant_any", []) if _lower_text(item)]
+        if variant_any and all(item in _lower_text(error_text) for item in variant_any):
+            return 100.0, ["provider_error_variant"]
+        return 0.0, ["unexpected_error_response"]
     if rules.get("invalid_request_probe"):
         if normalized.get("error") or normalized.get("status_code", 200) >= 400 or normalized["raw_response"].get("type") == "error":
             return 100.0, []
@@ -2553,6 +2630,23 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         labels.append("latency_outlier")
 
     return max(0.0, min(100.0, score)), sorted(set(labels))
+
+
+def _lower_text(value: Any) -> str:
+    return str(value or "").lower().replace("`", "")
+
+
+def _normalized_error_text(normalized: dict[str, Any]) -> str:
+    parts: list[str] = []
+    if normalized.get("error"):
+        parts.append(str(normalized["error"]))
+    raw = normalized.get("raw_response")
+    if isinstance(raw, dict):
+        if raw.get("error"):
+            parts.append(json.dumps(raw.get("error"), ensure_ascii=False))
+        if raw.get("message"):
+            parts.append(str(raw.get("message")))
+    return "\n".join(parts)
 
 
 def _dict_contains(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
@@ -2793,6 +2887,9 @@ LABEL_EXPLANATIONS = {
     "request_failed": "请求失败，未获得可评分响应。",
     "channel_preflight_failed": "渠道预检失败，已停止该渠道剩余题目的正式请求。",
     "signature_interop_failed": "Thinking Signature 互通检测未通过，relay 无法复用 source 生成的签名 thinking block。",
+    "thinking_temperature_not_rejected": "启用 thinking 时携带非 1 temperature 未被上游拒绝，疑似中间层改写或非原生协议。",
+    "provider_error_variant": "上游返回了等价的 thinking/temperature 约束错误，但文案与主参考不同。",
+    "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
 }
 
 

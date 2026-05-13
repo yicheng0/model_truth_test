@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import json
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_claude_eval.db")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
@@ -15,7 +16,7 @@ from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_messages_url, _live_call, _merged_channel_credentials, apply_repeat_consistency_scores, build_raw_request, classify_claude_message_id, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, invoke_channel, score_result, seed_demo_data
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, classify_claude_message_id, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, invoke_channel, score_result, seed_demo_data
 
 
 def reset_database() -> None:
@@ -110,17 +111,18 @@ def test_default_suite_is_optimized_28_and_removes_stale_default_cases() -> None
         case_ids = list(db.scalars(select(TestCaseModel.id).where(TestCaseModel.suite_id == "claude_full_35").order_by(TestCaseModel.sort_order)).all())
 
     assert suite is not None
-    assert suite.version == "2026.05-optimized-28"
-    assert len(case_ids) == 28
+    assert suite.version == "2026.05-optimized-29"
+    assert len(case_ids) == 29
     assert "identity_03" not in case_ids
     assert case_ids[:5] == ["websearch_01", "identity_01", "identity_02", "identity_04", "identity_10"]
+    assert "protocol_09" in case_ids
     with SessionLocal() as db:
         quick_count = sum(
             1
             for case in db.scalars(select(TestCaseModel).where(TestCaseModel.suite_id == "claude_full_35")).all()
             if (case.scoring_rules or {}).get("quick") is True
         )
-    assert quick_count == 8
+    assert quick_count == 9
 
 
 def test_quick_run_uses_only_quick_cases() -> None:
@@ -144,8 +146,8 @@ def test_quick_run_uses_only_quick_cases() -> None:
         payload = client.get(f"/api/runs/{run['id']}/results").json()
 
     assert payload["run"]["test_scope"] == "quick"
-    assert payload["run"]["total_jobs"] == 16
-    assert len(payload["results"]) == 16
+    assert payload["run"]["total_jobs"] == 18
+    assert len(payload["results"]) == 18
 
 
 def test_score_result_supports_optimized_rules() -> None:
@@ -210,6 +212,56 @@ def test_score_result_supports_optimized_rules() -> None:
     assert stop_score < 100
     assert "stop_sequence_not_enforced" in stop_labels
     assert "stop_sequence_leaked" in stop_labels
+
+
+def test_score_result_validates_thinking_temperature_expected_error() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "aws_bedrock")
+        case = db.get(TestCaseModel, "protocol_09")
+        assert channel is not None and case is not None
+
+        exact_score, exact_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"error": {"message": "`temperature` may only be set to 1 when thinking is enabled"}},
+                "error": "`temperature` may only be set to 1 when thinking is enabled",
+                "status_code": 500,
+                "content_text": "",
+            },
+        )
+        variant_score, variant_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"error": {"message": "Thinking is not compatible with a custom temperature value"}},
+                "error": "Thinking is not compatible with a custom temperature value",
+                "status_code": 500,
+                "content_text": "",
+            },
+        )
+        normal_score, normal_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"type": "message"},
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "provider_message_id": "msg_bdrk_01ok",
+                "tool_calls": [],
+                "stop_reason": "end_turn",
+                "stream_events": ["message_stop"],
+                "content_text": "ok",
+                "status_code": 200,
+            },
+        )
+
+    assert exact_score == 100
+    assert exact_labels == []
+    assert variant_score == 100
+    assert variant_labels == ["provider_error_variant"]
+    assert normal_score == 0
+    assert normal_labels == ["thinking_temperature_not_rejected"]
 
 
 def test_repeat_consistency_penalizes_drift_between_attempts() -> None:
@@ -1416,6 +1468,47 @@ def test_model_request_test_persists_manual_probe_result(monkeypatch) -> None:
     assert case.system_prompt == "你是测试助手"
 
 
+def test_model_request_test_persists_expected_error_probe_result(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_live_call(channel, case, raw_request, credentials):  # noqa: ANN001
+        raise RuntimeError("400 Bad Request; response body: `temperature` may only be set to 1 when thinking is enabled")
+
+    monkeypatch.setattr("app.services._live_call_with_metadata", fake_live_call)
+
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Expected Error Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            f"/api/channels/{channel_id}/model-request-test",
+            json={
+                "prompt": "probe",
+                "request_params": {
+                    "max_tokens": 2048,
+                    "temperature": 0.2,
+                    "thinking": {"type": "enabled", "budget_tokens": 1024},
+                    "expected_error_contains": "temperature may only be set to 1 when thinking is enabled",
+                },
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["run"]["status"] == "completed"
+    assert payload["result"]["score"] == 100
+    assert payload["result"]["labels"] == []
+    assert "temperature" in payload["result"]["normalized_response"]["error"]
+
+
 def test_model_request_test_persists_missing_key_failure() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -1483,6 +1576,118 @@ def test_auto_protocol_falls_back_to_openai_compatible(monkeypatch) -> None:
     assert normalized["content_text"] == "ok"
     assert normalized["request_protocol"] == "openai_chat_completions"
     assert normalized["provider_endpoint"] == "https://api.wenwen-ai.com/v1/chat/completions"
+
+
+def test_anthropic_request_passes_thinking_params(monkeypatch) -> None:
+    reset_database()
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        text = "{}"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"type": "message", "content": [], "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *args) -> None:  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers=None, json=None):  # noqa: ANN001
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "anthropic_official")
+        case = db.get(TestCaseModel, "protocol_09")
+        assert channel is not None and case is not None
+        asyncio.run(_anthropic_compatible_call(channel, build_raw_request(channel, case), {"api_key": "test-key"}))
+
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+    assert captured["json"]["temperature"] == 0.2
+    assert captured["json"]["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+    assert "expected_error_contains" not in captured["json"]
+
+
+def test_openai_request_passes_reasoning_effort_and_thinking(monkeypatch) -> None:
+    reset_database()
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        text = "{}"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"object": "chat.completion", "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *args) -> None:  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers=None, json=None):  # noqa: ANN001
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "openai_compat_demo")
+        case = db.get(TestCaseModel, "protocol_09")
+        assert channel is not None and case is not None
+        asyncio.run(_openai_compatible_call(channel, build_raw_request(channel, case), {"api_key": "test-key"}))
+
+    assert captured["url"] == "https://relay.example/v1/chat/completions"
+    assert captured["json"]["temperature"] == 0.2
+    assert captured["json"]["reasoning_effort"] == "medium"
+    assert captured["json"]["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+
+def test_aws_thinking_probe_uses_raw_messages_body() -> None:
+    reset_database()
+    captured: dict[str, object] = {}
+
+    class FakeBody:
+        def read(self) -> bytes:
+            return b'{"id":"msg_bdrk_01ok","type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}'
+
+    class FakeAwsClient:
+        def invoke_model(self, **kwargs):  # noqa: ANN001, ANN201
+            captured.update(kwargs)
+            return {"body": FakeBody()}
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "aws_bedrock")
+        case = db.get(TestCaseModel, "protocol_09")
+        assert channel is not None and case is not None
+        payload = _aws_bedrock_messages_call(FakeAwsClient(), channel, case, {}, case.request_params)
+
+    body = json.loads(captured["body"])
+    assert captured["modelId"] == "anthropic.claude-sonnet-4-5-v1:0"
+    assert body["anthropic_version"] == "bedrock-2023-05-31"
+    assert body["temperature"] == 0.2
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+    assert body["messages"][0]["content"] == "请用一句话回答：这是 thinking temperature 纯度探针。"
+    assert payload["id"] == "msg_bdrk_01ok"
 
 
 def test_execute_run_stops_channel_after_preflight_failure(monkeypatch) -> None:

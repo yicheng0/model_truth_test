@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Empty, Progress, Select, Space, Spin, Table, Tag, Typography } from 'antd';
-import { CheckCircle2, Clock3, GitCompare, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { Alert, Button, Card, Descriptions, Drawer, Empty, Progress, Select, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
+import { CheckCircle2, Clock3, Eye, GitCompare, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
-import { roleColor, roleLabel } from '../channelTaxonomy';
-import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunResults, TestCase } from '../types';
+import { roleColor } from '../channelTaxonomy';
+import type { BaselineResult, Channel, Comparison, Result, RunResults, TestCase } from '../types';
 
 type DisplayResult = Result | BaselineResult;
 
@@ -19,6 +19,17 @@ type CasePanelRow = {
   candidate?: DisplayResult;
   candidateAttempts: number;
   comparison?: Comparison;
+};
+
+type OutputDrawerState = {
+  title: string;
+  channelName: string;
+  roleLabel: string;
+  caseTitle: string;
+  attemptIndex: number;
+  score?: number;
+  latency?: number;
+  result?: DisplayResult;
 };
 
 function latestResult(results?: DisplayResult[]) {
@@ -35,6 +46,8 @@ function responseText(result?: DisplayResult) {
   if (typeof text === 'string' && text.trim()) return text;
   const toolCalls = normalized?.tool_calls;
   if (Array.isArray(toolCalls) && toolCalls.length) return JSON.stringify(toolCalls, null, 2);
+  const error = normalized?.error ?? normalized?.raw_response?.error;
+  if (typeof error === 'string' && error.trim()) return `请求失败：${error}`;
   return '等待该渠道返回结果';
 }
 
@@ -44,13 +57,22 @@ function responseSnippet(result?: DisplayResult) {
   return text.length > 120 ? `${text.slice(0, 120)}...` : text;
 }
 
+function prettyJson(value: unknown) {
+  if (value === undefined || value === null) return '-';
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 function metricValue(value?: number) {
   return value === undefined || Number.isNaN(value) ? '-' : value.toFixed(1);
 }
 
 function riskTone(score?: number) {
   if (score === undefined) return { color: 'default', text: '等待对比' };
-  if (score >= 85) return { color: 'green', text: '接近官方' };
+  if (score >= 85) return { color: 'green', text: '接近指纹' };
   if (score >= 70) return { color: 'gold', text: '轻微偏离' };
   return { color: 'red', text: '明显偏离' };
 }
@@ -63,6 +85,7 @@ function rowStatus(row: CasePanelRow) {
 }
 
 function sampleRowStatus(row: CasePanelRow) {
+  if (row.sample?.normalized_response?.error) return { color: 'red', text: '请求失败' };
   if (row.sample) return { color: 'green', text: '已返回' };
   return { color: 'default', text: '排队中' };
 }
@@ -72,19 +95,22 @@ function resultCell(
   result: DisplayResult | undefined,
   attempts: number,
   baseline = false,
-  taxonomy?: ChannelTaxonomySetting,
-  baselineLabel = '官方基线',
+  baselineLabel = '渠道指纹',
+  onOpen?: () => void,
 ) {
   return (
     <div className="result-cell">
       <div className="result-cell-title">
         <strong>{channel?.name ?? '未选择渠道'}</strong>
-        {channel ? <Tag color={roleColor[channel.role]}>{baseline ? baselineLabel : roleLabel(channel.role, taxonomy)}</Tag> : null}
+        {channel && baseline ? <Tag color={roleColor[channel.role]}>{baselineLabel}</Tag> : null}
       </div>
       <div className="result-cell-meta">
         <Tag>score {metricValue(result?.score)}</Tag>
         <Tag>{result?.metrics?.latency_ms ?? '-'} ms</Tag>
         <Tag>{attempts || 0} 次</Tag>
+        <Tooltip title={result ? '查看输出' : '等待返回'}>
+          <Button aria-label="查看输出" size="small" icon={<Eye size={14} />} disabled={!result} onClick={onOpen} />
+        </Tooltip>
       </div>
       <span className="result-cell-snippet">{responseSnippet(result)}</span>
     </div>
@@ -127,6 +153,7 @@ export default function RunDetail() {
   const [selectedOfficialId, setSelectedOfficialId] = useState('');
   const [selectedCandidateId, setSelectedCandidateId] = useState('');
   const [selectedSampleChannelId, setSelectedSampleChannelId] = useState('');
+  const [outputDrawer, setOutputDrawer] = useState<OutputDrawerState | null>(null);
 
   const runResults = useQuery<RunResults>({
     queryKey: ['runResults', runId],
@@ -138,7 +165,6 @@ export default function RunDetail() {
     },
   });
   const channelsQuery = useQuery({ queryKey: ['channels'], queryFn: api.channels });
-  const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
   const casesQuery = useQuery({
     queryKey: ['cases', runResults.data?.run.suite_id],
     queryFn: () => api.cases(runResults.data?.run.suite_id),
@@ -201,6 +227,27 @@ export default function RunDetail() {
   const selectedOfficial = channelById.get(selectedOfficialId);
   const selectedCandidate = channelById.get(selectedCandidateId);
   const selectedSampleChannel = channelById.get(selectedSampleChannelId);
+
+  const openOutputDrawer = (
+    title: string,
+    channel: Channel | undefined,
+    result: DisplayResult | undefined,
+    caseItem: TestCase,
+    baseline = false,
+    displayRoleLabel?: string,
+  ) => {
+    if (!channel || !result) return;
+    setOutputDrawer({
+      title,
+      channelName: channel.name,
+      roleLabel: displayRoleLabel ?? (baseline ? '渠道指纹' : channel.role),
+      caseTitle: `${caseItem.title} · ${caseItem.id}`,
+      attemptIndex: result.attempt_index,
+      score: result.score,
+      latency: result.metrics?.latency_ms,
+      result,
+    });
+  };
 
   const resultByCaseChannel = useMemo(() => {
     const map = new Map<string, Result[]>();
@@ -320,12 +367,12 @@ export default function RunDetail() {
           <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
           <Descriptions.Item label="运行模式">{data.run.mode}</Descriptions.Item>
           <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
-          <Descriptions.Item label={isSamplingRun ? '对照样本' : '官方基线'}>
-            {data.baseline_snapshot?.name ?? (isSamplingRun ? '采样生成中' : '本次同步对比')}
+          <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>
+            {data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}
           </Descriptions.Item>
           <Descriptions.Item label="已返回题目">{returnedRows} / {rows.length}</Descriptions.Item>
           {isSamplingRun ? (
-            <Descriptions.Item label="采样渠道">{sampleChannels.length}</Descriptions.Item>
+            <Descriptions.Item label="指纹源渠道">{sampleChannels.length}</Descriptions.Item>
           ) : (
             <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
           )}
@@ -363,8 +410,8 @@ export default function RunDetail() {
             <Typography.Title level={2}>实时测试数据面板</Typography.Title>
             <Typography.Paragraph>
               {isSamplingRun
-                ? '每道题按执行顺序展示采样渠道的返回、评分和延迟。运行中每 1.8 秒自动刷新。'
-                : '每道题按执行顺序展示官方基线或官方渠道与第三方渠道的返回、评分、延迟和相似度。运行中每 1.8 秒自动刷新。'}
+                ? '每道题按执行顺序展示指纹源渠道的返回、评分和延迟。运行中每 1.8 秒自动刷新。'
+                : '每道题按执行顺序展示渠道指纹与待测渠道的返回、评分、延迟和相似度。运行中每 1.8 秒自动刷新。'}
             </Typography.Paragraph>
           </div>
           <Tag color={data.run.status === 'running' ? 'processing' : 'default'} icon={data.run.status === 'running' ? <Clock3 size={14} /> : undefined}>
@@ -375,12 +422,12 @@ export default function RunDetail() {
         {isSamplingRun ? (
           <div className="channel-pair-grid">
             <div className="channel-pair-card official">
-              <span><ShieldCheck size={16} />采样渠道</span>
+              <span><ShieldCheck size={16} />指纹源渠道</span>
               <Select
                 value={selectedSampleChannelId || undefined}
-                placeholder="选择采样渠道"
+                placeholder="选择指纹源渠道"
                 onChange={setSelectedSampleChannelId}
-                options={sampleChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
+                options={sampleChannels.map((channel) => ({ value: channel.id, label: channel.name }))}
               />
             </div>
             <div className="monitor-stat-card">
@@ -388,28 +435,28 @@ export default function RunDetail() {
               <strong>{sampleReturnedRows} / {rows.length}</strong>
             </div>
             <div className="monitor-stat-card">
-              <span>平均采样分</span>
+              <span>平均指纹分</span>
               <strong>{sampleScoreRows.length ? metricValue(averageSampleScore) : '-'}</strong>
             </div>
           </div>
         ) : (
           <div className="channel-pair-grid">
             <div className="channel-pair-card official">
-              <span><ShieldCheck size={16} />{data.baseline_snapshot ? '官方基线' : '官方渠道'}</span>
+              <span><ShieldCheck size={16} />{data.baseline_snapshot ? '渠道指纹' : '指纹源渠道'}</span>
               <Select
                 value={selectedOfficialId || undefined}
-                placeholder="选择官方渠道"
+                placeholder={data.baseline_snapshot ? '选择渠道指纹来源' : '选择指纹源渠道'}
                 onChange={setSelectedOfficialId}
-                options={officialChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
+                options={officialChannels.map((channel) => ({ value: channel.id, label: channel.name }))}
               />
             </div>
             <div className="channel-pair-card candidate">
-              <span><GitCompare size={16} />第三方渠道</span>
+              <span><GitCompare size={16} />待测渠道</span>
               <Select
                 value={selectedCandidateId || undefined}
-                placeholder="选择第三方渠道"
+                placeholder="选择待测渠道"
                 onChange={setSelectedCandidateId}
-                options={candidateChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)})` }))}
+                options={candidateChannels.map((channel) => ({ value: channel.id, label: channel.name }))}
               />
             </div>
             <div className="monitor-stat-card">
@@ -424,9 +471,9 @@ export default function RunDetail() {
         )}
 
         {isSamplingRun && !selectedSampleChannel ? (
-          <Empty description="请先在创建对照样本时选择可用采样渠道" />
+          <Empty description="请先在提取渠道指纹时选择可用指纹源渠道" />
         ) : !isSamplingRun && (!selectedOfficial || !selectedCandidate) ? (
-          <Empty description="请先在创建检测时选择可用官方基线或官方渠道，并至少选择一个第三方渠道" />
+          <Empty description="请先选择可用渠道指纹，并至少选择一个待测渠道" />
         ) : (
           <Table
             className="live-monitor-table"
@@ -448,7 +495,7 @@ export default function RunDetail() {
                       <div className="ab-compare-grid">
                         <section className="response-panel official">
                           <div className="response-panel-head">
-                            <span><ShieldCheck size={16} />采样渠道</span>
+                            <span><ShieldCheck size={16} />指纹源渠道</span>
                             <Tag color={roleColor[selectedSampleChannel.role]}>{selectedSampleChannel.name}</Tag>
                           </div>
                           <div className="response-meta">
@@ -471,7 +518,7 @@ export default function RunDetail() {
                     <div className="ab-compare-grid">
                       <section className="response-panel official">
                         <div className="response-panel-head">
-                          <span><ShieldCheck size={16} />{data.baseline_snapshot ? '官方基线' : '官方渠道'}</span>
+                          <span><ShieldCheck size={16} />{data.baseline_snapshot ? '渠道指纹' : '指纹源渠道'}</span>
                           <Tag color="gold">{selectedOfficial?.name ?? '未选择渠道'}</Tag>
                         </div>
                         <div className="response-meta">
@@ -484,7 +531,7 @@ export default function RunDetail() {
 
                       <section className="response-panel candidate">
                         <div className="response-panel-head">
-                          <span><GitCompare size={16} />第三方渠道</span>
+                          <span><GitCompare size={16} />待测渠道</span>
                           <Tag color={selectedCandidate ? roleColor[selectedCandidate.role] : 'default'}>{selectedCandidate?.name ?? '未选择渠道'}</Tag>
                         </div>
                         <div className="response-meta">
@@ -502,7 +549,7 @@ export default function RunDetail() {
                         </div>
                         <div className="diff-metrics">
                           <div><span>最终分</span><strong>{metricValue(row.comparison?.final_score)}</strong></div>
-                          <div><span>官方相似度</span><strong>{metricValue(row.comparison?.gold_similarity)}%</strong></div>
+                          <div><span>指纹相似度</span><strong>{metricValue(row.comparison?.gold_similarity)}%</strong></div>
                           <div><span>协议分</span><strong>{metricValue(row.comparison?.protocol_score)}</strong></div>
                           <div><span>能力分</span><strong>{metricValue(row.comparison?.capability_score)}</strong></div>
                         </div>
@@ -512,7 +559,7 @@ export default function RunDetail() {
                           ) : row.candidate ? (
                             <Tag color="green" icon={<CheckCircle2 size={13} />}>暂无异常标签</Tag>
                           ) : (
-                            <Tag>等待第三方渠道结果</Tag>
+                            <Tag>等待待测渠道结果</Tag>
                           )}
                         </Space>
                       </aside>
@@ -538,9 +585,12 @@ export default function RunDetail() {
                 ),
               },
               {
-                title: '采样渠道数据',
+                title: '指纹源渠道数据',
                 width: 430,
-                render: (_, row) => resultCell(selectedSampleChannel, row.sample, row.sampleAttempts, true, taxonomy.data, '采样'),
+                render: (_, row) =>
+                  resultCell(selectedSampleChannel, row.sample, row.sampleAttempts, true, '指纹提取', () =>
+                    openOutputDrawer('指纹源输出', selectedSampleChannel, row.sample, row.caseItem, true, '指纹源'),
+                  ),
               },
               {
                 title: '状态',
@@ -568,14 +618,26 @@ export default function RunDetail() {
                 ),
               },
               {
-                title: '官方渠道数据',
+                title: '渠道指纹数据',
                 width: 330,
-                  render: (_, row) => resultCell(selectedOfficial, row.official, row.officialAttempts, Boolean(data.baseline_snapshot), taxonomy.data),
+                render: (_, row) =>
+                  resultCell(selectedOfficial, row.official, row.officialAttempts, Boolean(data.baseline_snapshot), '渠道指纹', () =>
+                    openOutputDrawer(
+                      data.baseline_snapshot ? '渠道指纹输出' : '指纹源输出',
+                      selectedOfficial,
+                      row.official,
+                      row.caseItem,
+                      Boolean(data.baseline_snapshot),
+                    ),
+                  ),
               },
               {
-                title: '第三方渠道数据',
+                title: '待测渠道数据',
                 width: 330,
-                  render: (_, row) => resultCell(selectedCandidate, row.candidate, row.candidateAttempts, false, taxonomy.data),
+                render: (_, row) =>
+                  resultCell(selectedCandidate, row.candidate, row.candidateAttempts, false, '渠道指纹', () =>
+                    openOutputDrawer('待测输出', selectedCandidate, row.candidate, row.caseItem, false, '待测渠道'),
+                  ),
               },
               {
                 title: '实时对比结果',
@@ -595,6 +657,49 @@ export default function RunDetail() {
           />
         )}
       </Card>
+
+      <Drawer
+        title={outputDrawer ? `${outputDrawer.title} · ${outputDrawer.caseTitle}` : '输出详情'}
+        open={Boolean(outputDrawer)}
+        onClose={() => setOutputDrawer(null)}
+        width={760}
+        destroyOnClose
+      >
+        {outputDrawer ? (
+          <div className="output-drawer">
+            <div className="output-drawer-summary">
+              <div>
+                <span>渠道</span>
+                <strong>{outputDrawer.channelName}</strong>
+              </div>
+              <div>
+                <span>角色</span>
+                <strong>{outputDrawer.roleLabel}</strong>
+              </div>
+              <div>
+                <span>Attempt</span>
+                <strong>{outputDrawer.attemptIndex}</strong>
+              </div>
+              <div>
+                <span>Score / 延迟</span>
+                <strong>
+                  {metricValue(outputDrawer.score)} / {outputDrawer.latency ?? '-'} ms
+                </strong>
+              </div>
+            </div>
+
+            <div className="output-drawer-section">
+              <Typography.Title level={5}>完整输出</Typography.Title>
+              <pre className="output-drawer-pre">{responseText(outputDrawer.result)}</pre>
+            </div>
+
+            <div className="output-drawer-section">
+              <Typography.Title level={5}>原始请求</Typography.Title>
+              <pre className="output-drawer-pre">{prettyJson(outputDrawer.result?.raw_request)}</pre>
+            </div>
+          </div>
+        ) : null}
+      </Drawer>
     </Space>
   );
 }

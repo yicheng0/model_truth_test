@@ -20,9 +20,9 @@ const navItems = [
   { key: '/model-request-test', icon: Send, label: '模型请求', to: '/model-request-test' },
   { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
   { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },
-  { key: '/baselines', icon: Database, label: '基线管理', to: '/baselines' },
+  { key: '/baselines', icon: Database, label: '渠道指纹', to: '/baselines' },
   { key: '/scheduled-tests', icon: CalendarClock, label: '自动巡检', to: '/scheduled-tests' },
-  { key: '/new-run', icon: ListChecks, label: '创建检测', to: '/new-run' },
+  { key: '/new-run', icon: ListChecks, label: '新建任务', to: '/new-run' },
   { key: '/runs', icon: GitCompare, label: '任务列表', to: '/runs' },
 ];
 

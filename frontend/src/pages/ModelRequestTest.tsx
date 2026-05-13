@@ -12,6 +12,16 @@ type ModelRequestForm = {
   system_prompt?: string;
   max_tokens?: number;
   temperature?: number;
+  extra_params?: string;
+};
+
+const AWS_THINKING_PROBE_PROMPT = '请用一句话回答：这是 thinking temperature 纯度探针。';
+const AWS_THINKING_PROBE_EXTRA_PARAMS = {
+  thinking: { type: 'enabled', budget_tokens: 1024 },
+  reasoning_effort: 'medium',
+  expected_error_contains: 'temperature may only be set to 1 when thinking is enabled',
+  expected_error_any: ['temperature', 'thinking'],
+  expected_error_variant_any: ['temperature', 'thinking'],
 };
 
 function channelApiKey(channel: Channel) {
@@ -26,6 +36,15 @@ function prettyJson(value: unknown) {
 function normalizedValue(result: ModelRequestTestResult | null, key: string) {
   const normalized = result?.result.normalized_response;
   return normalized && typeof normalized === 'object' ? normalized[key] : undefined;
+}
+
+function parseExtraParams(value?: string) {
+  if (!value?.trim()) return {};
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Extra params 必须是 JSON object');
+  }
+  return parsed as Record<string, unknown>;
 }
 
 export default function ModelRequestTest() {
@@ -50,15 +69,18 @@ export default function ModelRequestTest() {
   }, [availableChannels, form]);
 
   const requestModel = useMutation({
-    mutationFn: (values: ModelRequestForm) =>
-      api.modelRequestTest(values.channel_id, {
+    mutationFn: (values: ModelRequestForm) => {
+      const extraParams = parseExtraParams(values.extra_params);
+      return api.modelRequestTest(values.channel_id, {
         prompt: values.prompt,
         system_prompt: values.system_prompt?.trim() || null,
         request_params: {
           max_tokens: values.max_tokens ?? 256,
           temperature: values.temperature ?? 0,
+          ...extraParams,
         },
-      }),
+      });
+    },
     onSuccess: (payload) => {
       setRequestError(null);
       setResult(payload);
@@ -80,6 +102,20 @@ export default function ModelRequestTest() {
     setRequestError(null);
     requestModel.mutate(values);
   }
+
+  function applyAwsThinkingProbe() {
+    form.setFieldsValue({
+      prompt: AWS_THINKING_PROBE_PROMPT,
+      max_tokens: 2048,
+      temperature: 0.2,
+      extra_params: JSON.stringify(AWS_THINKING_PROBE_EXTRA_PARAMS, null, 2),
+    });
+    setResult(null);
+    setRequestError(null);
+  }
+
+  const resultLabels = result?.result.labels ?? [];
+  const expectedErrorPassed = result ? result.result.score === 100 && Boolean(normalizedValue(result, 'error')) : false;
 
   return (
     <Space direction="vertical" size={24} className="page-stack">
@@ -105,10 +141,17 @@ export default function ModelRequestTest() {
             message="会向所选渠道发起真实请求"
             description="请求和响应会保存为一条手动模型请求任务。API Key 只读取渠道配置，不写入原始请求。"
           />
+          <Alert
+            type="warning"
+            showIcon
+            message="AWS 纯度探针"
+            description="一键填入 thinking enabled + temperature=0.2。纯 AWS/Claude 路径预期应报错：temperature may only be set to 1 when thinking is enabled。"
+            action={<Button size="small" onClick={applyAwsThinkingProbe}>填入探针</Button>}
+          />
           <Form
             form={form}
             layout="vertical"
-            initialValues={{ max_tokens: 256, temperature: 0 }}
+            initialValues={{ max_tokens: 256, temperature: 0, extra_params: '' }}
             onFinish={submit}
             onValuesChange={() => {
               setResult(null);
@@ -131,6 +174,23 @@ export default function ModelRequestTest() {
             </Form.Item>
             <Form.Item name="prompt" label="Prompt" rules={[{ required: true, message: '请输入真实测试内容' }]}>
               <Input.TextArea rows={5} placeholder="例如：请用一句话说明你返回的 message id 能体现什么渠道特征。" />
+            </Form.Item>
+            <Form.Item
+              name="extra_params"
+              label="Extra params JSON"
+              rules={[
+                {
+                  validator: async (_, value) => {
+                    try {
+                      parseExtraParams(value);
+                    } catch (error) {
+                      throw new Error(error instanceof Error ? error.message : 'JSON 格式不正确');
+                    }
+                  },
+                },
+              ]}
+            >
+              <Input.TextArea rows={6} placeholder='{"thinking":{"type":"enabled","budget_tokens":1024},"reasoning_effort":"medium"}' />
             </Form.Item>
             <Button type="primary" htmlType="submit" loading={requestModel.isPending} disabled={channels.isLoading || !availableChannels.length} icon={<Send size={16} />}>
               {requestModel.isPending ? '发送中' : '发送真实请求'}
@@ -162,6 +222,15 @@ export default function ModelRequestTest() {
 
           {result.result.normalized_response?.error ? (
             <Alert type="error" showIcon message="渠道请求失败" description={String(result.result.normalized_response.error)} />
+          ) : null}
+
+          {result.result.raw_request?.params?.expected_error_contains ? (
+            <Alert
+              type={expectedErrorPassed ? 'success' : 'warning'}
+              showIcon
+              message={expectedErrorPassed ? '预期错误已命中' : '预期错误未命中'}
+              description={`评分 ${result.result.score}，标签：${resultLabels.length ? resultLabels.join(', ') : '无'}`}
+            />
           ) : null}
 
           <Card title="模型输出" bordered={false}>

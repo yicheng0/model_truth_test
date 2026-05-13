@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Popconfirm, Progress, Space, Table, Tag, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { CircleStop, Trash2 } from 'lucide-react';
+import { CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
@@ -62,7 +62,20 @@ export default function Runs() {
     <div className="page-stack">
       <Card
         title={<span style={{ fontSize: '18px', fontWeight: 600 }}>检测任务列表</span>}
-        extra={<Link to="/new-run?mode=compare"><Button type="primary" size="large" style={{ height: '40px', fontWeight: 600 }}>对比测试</Button></Link>}
+        extra={
+          <Space wrap>
+            <Link to="/new-run?mode=baseline">
+              <Button size="large" icon={<Fingerprint size={16} />} style={{ height: '40px', fontWeight: 600 }}>
+                提取渠道指纹
+              </Button>
+            </Link>
+            <Link to="/new-run?mode=compare">
+              <Button type="primary" size="large" icon={<GitCompare size={16} />} style={{ height: '40px', fontWeight: 600 }}>
+                对比测试
+              </Button>
+            </Link>
+          </Space>
+        }
         bordered={false}
       >
         {runs.isError ? (

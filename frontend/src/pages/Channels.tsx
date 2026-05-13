@@ -12,6 +12,7 @@ type ChannelFormValues = {
   model_name?: string | string[];
   base_url?: string;
   api_key?: string;
+  request_protocol?: string;
   is_reference?: boolean;
   enabled?: boolean;
 };
@@ -26,6 +27,22 @@ function channelApiKey(channel: Channel) {
   return typeof value === 'string' ? value : '';
 }
 
+function channelRequestProtocol(channel: Channel) {
+  const value = channel.auth_config?.request_protocol;
+  return typeof value === 'string' && value.trim() ? value : 'auto';
+}
+
+function preferredFetchedModel(models: string[]) {
+  return models.find((model) => model.includes('sonnet-4-6')) ?? models.find((model) => model.includes('sonnet')) ?? models[0];
+}
+
+const requestProtocolOptions = [
+  { value: 'auto', label: '自动探测' },
+  { value: 'anthropic_messages', label: 'Anthropic Messages' },
+  { value: 'openai_chat_completions', label: 'OpenAI Chat Completions' },
+  { value: 'aws_bedrock', label: 'AWS Bedrock' },
+];
+
 export default function Channels() {
   const queryClient = useQueryClient();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
@@ -34,6 +51,7 @@ export default function Channels() {
   const [createForm] = Form.useForm<ChannelFormValues>();
   const [editForm] = Form.useForm<ChannelFormValues>();
   const [editing, setEditing] = useState<Channel | null>(null);
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
 
   const invalidate = async () => {
     await Promise.all([
@@ -83,6 +101,29 @@ export default function Channels() {
     },
   });
 
+  const loadModels = useMutation({
+    mutationFn: async (channel: Channel) => api.channelModels(channel.id),
+    onSuccess: async (models) => {
+      setFetchedModels(models);
+      const existing = editForm.getFieldValue('model_name');
+      const currentModel = firstSelectValue(existing);
+      const preferredModel = preferredFetchedModel(models);
+      if (preferredModel && (!currentModel || !models.includes(currentModel))) {
+        editForm.setFieldValue('model_name', [preferredModel]);
+      }
+      const currentOptions = [...(taxonomy.data?.model_options ?? defaultModelOptions)];
+      const merged = Array.from(new Set([...currentOptions, ...models]));
+      if (models.length && merged.length !== currentOptions.length) {
+        await api.updateChannelTaxonomy({ model_options: merged });
+        await queryClient.invalidateQueries({ queryKey: ['channelTaxonomy'] });
+      }
+      message.success(models.length ? `已拉取 ${models.length} 个模型` : '没有拉取到模型');
+    },
+    onError: (error) => {
+      message.error(error instanceof Error ? error.message : '模型拉取失败');
+    },
+  });
+
   const pendingAlertCountByChannel = useMemo(() => {
     const counts = new Map<string, number>();
     for (const alert of pendingAlerts.data ?? []) {
@@ -91,16 +132,18 @@ export default function Channels() {
     return counts;
   }, [pendingAlerts.data]);
 
-  const channelModelOptions = (taxonomy.data?.model_options ?? defaultModelOptions).map((model) => ({ value: model, label: model }));
+  const channelModelOptions = Array.from(new Set([...(taxonomy.data?.model_options ?? defaultModelOptions), ...fetchedModels])).map((model) => ({ value: model, label: model }));
 
   function openEdit(channel: Channel) {
     setEditing(channel);
+    setFetchedModels([]);
     editForm.setFieldsValue({
       name: channel.name,
       provider_type: channel.provider_type,
       model_name: channel.model_name ? [channel.model_name] : [],
       base_url: channel.base_url ?? '',
       api_key: channelApiKey(channel),
+      request_protocol: channelRequestProtocol(channel),
       is_reference: channel.is_reference,
       enabled: channel.enabled,
     });
@@ -115,7 +158,10 @@ export default function Channels() {
       enabled: values.enabled,
       model_name: modelName || null,
       base_url: values.base_url?.trim() || null,
-      auth_config: values.api_key?.trim() ? { api_key: values.api_key.trim() } : {},
+      auth_config: {
+        ...(values.api_key?.trim() ? { api_key: values.api_key.trim() } : {}),
+        request_protocol: values.request_protocol || 'auto',
+      },
     };
   }
 
@@ -143,11 +189,11 @@ export default function Channels() {
           <Typography.Text className="section-kicker">CHANNELS</Typography.Text>
           <Typography.Title level={2}>渠道管理</Typography.Title>
           <Typography.Paragraph>
-            内部渠道配置只保留必要信息。Provider Type 直接填写你们内部使用的类型名，系统默认按 Anthropic Messages 协议发起真实检测。
+            内部渠道配置只保留必要信息。Provider Type 可填写你们内部类型名，请用请求协议决定真实检测时的上游接口格式。
           </Typography.Paragraph>
         </div>
         <Space wrap>
-          <Tag color="blue">对照渠道 {(channels.data ?? []).filter((channel) => channel.is_reference).length}</Tag>
+          <Tag color="blue">指纹源渠道 {(channels.data ?? []).filter((channel) => channel.is_reference).length}</Tag>
           <Tag color="purple">待测渠道 {(channels.data ?? []).filter((channel) => !channel.is_reference).length}</Tag>
           <Tag color="green">启用 {(channels.data ?? []).filter((channel) => channel.enabled).length}</Tag>
         </Space>
@@ -165,14 +211,17 @@ export default function Channels() {
             <Form.Item name="model_name" label="模型名">
               <Select size="large" mode="tags" maxCount={1} options={channelModelOptions} placeholder="输入模型名，保存后下次可直接选择" />
             </Form.Item>
-            <Form.Item name="base_url" label="Base URL" help="Anthropic Messages 协议可只填根地址，系统会自动补 /v1/messages；也兼容已填 /v1 或完整 /v1/messages。">
-              <Input size="large" placeholder="https://api.anthropic.com 或 https://relay.example/v1" />
+            <Form.Item name="request_protocol" label="请求协议" initialValue="auto">
+              <Select size="large" options={requestProtocolOptions} />
+            </Form.Item>
+            <Form.Item name="base_url" label="Base URL" help="自动探测会先试 Anthropic Messages，再试 OpenAI Chat Completions；也可以显式选择协议。">
+              <Input size="large" placeholder="https://api.example.com 或 https://api.example.com/v1" />
             </Form.Item>
             <Form.Item name="api_key" label="API Key">
               <Input size="large" autoComplete="off" placeholder="sk-ant-..." />
             </Form.Item>
-            <Form.Item name="is_reference" label="对照渠道" valuePropName="checked" initialValue={false}>
-              <Switch checkedChildren="对照" unCheckedChildren="待测" />
+            <Form.Item name="is_reference" label="指纹源渠道" valuePropName="checked" initialValue={false}>
+              <Switch checkedChildren="指纹源" unCheckedChildren="待测" />
             </Form.Item>
           </div>
           <Button type="primary" size="large" htmlType="submit" loading={create.isPending} icon={<Plus size={16} />}>
@@ -196,20 +245,20 @@ export default function Channels() {
                 <Space direction="vertical" size={2}>
                   <Space size={6} wrap>
                     <strong>{name}</strong>
-                    {channel.is_reference ? <Tag color="blue">对照</Tag> : <Tag color="purple">待测</Tag>}
+                    {channel.is_reference ? <Tag color="blue">指纹源</Tag> : <Tag color="purple">待测</Tag>}
                   </Space>
                   <Typography.Text type="secondary">{channel.id}</Typography.Text>
                 </Space>
               ),
             },
             {
-              title: '对照渠道',
+              title: '指纹源',
               dataIndex: 'is_reference',
               width: 130,
               render: (isReference: boolean, channel) => (
                 <Switch
                   checked={isReference}
-                  checkedChildren="对照"
+                  checkedChildren="指纹源"
                   unCheckedChildren="待测"
                   loading={update.isPending}
                   onChange={(checked) => toggleReference(channel, checked)}
@@ -231,6 +280,11 @@ export default function Channels() {
               ),
             },
             { title: 'Provider Type', dataIndex: 'provider_type', width: 220 },
+            {
+              title: '请求协议',
+              width: 180,
+              render: (_, channel) => requestProtocolOptions.find((option) => option.value === channelRequestProtocol(channel))?.label ?? channelRequestProtocol(channel),
+            },
             { title: '模型', dataIndex: 'model_name', width: 220 },
             { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
             {
@@ -296,8 +350,20 @@ export default function Channels() {
           <Form.Item name="model_name" label="模型名">
             <Select mode="tags" maxCount={1} options={channelModelOptions} placeholder="输入模型名，保存后下次可直接选择" />
           </Form.Item>
-          <Form.Item name="base_url" label="Base URL" help="Anthropic Messages 协议可只填根地址，系统会自动补 /v1/messages；也兼容已填 /v1 或完整 /v1/messages。">
-            <Input placeholder="https://api.anthropic.com 或 https://relay.example/v1" />
+          <Button
+            type="default"
+            loading={loadModels.isPending}
+            disabled={!editing}
+            onClick={() => editing && loadModels.mutate(editing)}
+            style={{ marginTop: -12, marginBottom: 12 }}
+          >
+            拉取模型
+          </Button>
+          <Form.Item name="request_protocol" label="请求协议" initialValue="auto">
+            <Select options={requestProtocolOptions} />
+          </Form.Item>
+          <Form.Item name="base_url" label="Base URL" help="自动探测会先试 Anthropic Messages，再试 OpenAI Chat Completions；也可以显式选择协议。">
+            <Input placeholder="https://api.example.com 或 https://api.example.com/v1" />
           </Form.Item>
           <Form.Item name="api_key" label="API Key">
             <Input autoComplete="off" placeholder="sk-ant-..." />
@@ -305,8 +371,8 @@ export default function Channels() {
           <Form.Item name="enabled" label="状态" valuePropName="checked">
             <Switch checkedChildren="启用" unCheckedChildren="停用" />
           </Form.Item>
-          <Form.Item name="is_reference" label="对照渠道" valuePropName="checked">
-            <Switch checkedChildren="对照" unCheckedChildren="待测" />
+          <Form.Item name="is_reference" label="指纹源渠道" valuePropName="checked">
+            <Switch checkedChildren="指纹源" unCheckedChildren="待测" />
           </Form.Item>
         </Form>
       </Modal>

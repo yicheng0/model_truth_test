@@ -53,7 +53,7 @@ export function ComparePage() {
             <article key={channel.id} className="compare-column">
               <div className="compare-head">
                 <strong>{channel.name}</strong>
-                <Badge tone={channel.is_reference ? "blue" : channel.role === "negative" ? "red" : "purple"}>{channel.is_reference ? "对照" : channel.role}</Badge>
+                <Badge tone={channel.is_reference ? "blue" : channel.role === "negative" ? "red" : "purple"}>{channel.is_reference ? "指纹源" : channel.role}</Badge>
               </div>
               <dl className="meta-grid">
                 <div><dt>模型</dt><dd>{result?.normalized_response?.provider_model ?? channel.model_name}</dd></div>
@@ -63,7 +63,7 @@ export function ComparePage() {
               </dl>
               {comparison ? (
                 <div className="comparison-strip">
-                  金标 {comparison.gold_similarity.toFixed(1)}% · 云参考 {comparison.official_cloud_similarity.toFixed(1)}%
+                  指纹 {comparison.gold_similarity.toFixed(1)}% · 云参考 {comparison.official_cloud_similarity.toFixed(1)}%
                 </div>
               ) : null}
               <div className="label-row">
