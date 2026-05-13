@@ -62,6 +62,7 @@ ALERT_RED_FLAGS = {
     "protocol_mismatch",
     "signature_interop_failed",
     "thinking_temperature_not_rejected",
+    "web_search_not_rejected",
 }
 
 REQUEST_PROTOCOL_AUTO = "auto"
@@ -661,7 +662,7 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
 
 def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any]:
     rules: dict[str, Any] = {}
-    for key in ["expected_error_contains", "expected_error_any", "expected_error_variant_any"]:
+    for key in ["expected_error_contains", "expected_error_any", "expected_error_variant_any", "expected_error_missing_label", "expected_error_variant_label"]:
         if key in request_params:
             rules[key] = request_params[key]
     return rules
@@ -724,7 +725,14 @@ async def execute_run(
             resolved_protocol_by_channel: dict[str, str] = {}
 
             if not use_mock and cases and channels:
-                preflight_case = next((case for case in cases if not (case.scoring_rules or {}).get("invalid_request_probe")), cases[0])
+                preflight_case = next(
+                    (
+                        case
+                        for case in cases
+                        if not (case.scoring_rules or {}).get("invalid_request_probe") and not _is_expected_error_probe_case(case)
+                    ),
+                    next((case for case in cases if not (case.scoring_rules or {}).get("invalid_request_probe")), cases[0]),
+                )
                 for channel in _sort_channels_for_run(channels):
                     db.refresh(run)
                     if run.status == "canceled":
@@ -1700,6 +1708,17 @@ def build_raw_request(channel: Channel, case: TestCase) -> dict[str, Any]:
     }
 
 
+def _is_expected_error_probe_case(case: TestCase) -> bool:
+    rules = case.scoring_rules or {}
+    return bool(
+        rules.get("expected_error_contains")
+        or rules.get("expected_error_any")
+        or rules.get("expected_error_variant_any")
+        or rules.get("expected_error_missing_label")
+        or rules.get("expected_error_variant_label")
+    )
+
+
 async def _live_call(channel: Channel, case: TestCase, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
     response, _protocol, _endpoint = await _live_call_with_metadata(channel, case, raw_request, credentials)
     return response
@@ -1724,7 +1743,7 @@ async def _auto_live_call(
     raw_request: dict[str, Any],
     credentials: dict[str, Any],
 ) -> tuple[dict[str, Any], str, str | None]:
-    protocols = _auto_protocol_candidates(channel)
+    protocols = _auto_protocol_candidates_for_case(channel, case)
     errors: list[str] = []
     for protocol in protocols:
         endpoint = _provider_endpoint(channel, credentials, protocol)
@@ -1771,6 +1790,20 @@ def _auto_protocol_candidates(channel: Channel) -> list[str]:
     if provider_kind == "openai_compatible":
         return [REQUEST_PROTOCOL_OPENAI, REQUEST_PROTOCOL_ANTHROPIC]
     return [REQUEST_PROTOCOL_ANTHROPIC, REQUEST_PROTOCOL_OPENAI]
+
+
+def _auto_protocol_candidates_for_case(channel: Channel, case: TestCase | None) -> list[str]:
+    if case and _is_expected_error_probe_case(case):
+        protocol = _request_protocol(channel, {})
+        if protocol != REQUEST_PROTOCOL_AUTO:
+            return [protocol]
+        provider_kind = _provider_kind(channel.provider_type)
+        if provider_kind == "aws_bedrock":
+            return [REQUEST_PROTOCOL_AWS_BEDROCK]
+        if provider_kind == "openai_compatible":
+            return [REQUEST_PROTOCOL_OPENAI]
+        return [REQUEST_PROTOCOL_ANTHROPIC]
+    return _auto_protocol_candidates(channel)
 
 
 def _looks_like_known_anthropic_provider(provider_type: str | None) -> bool:
@@ -1907,6 +1940,8 @@ async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, An
         body["stop_sequences"] = params["stop_sequences"]
     if params.get("thinking"):
         body["thinking"] = params["thinking"]
+    if "stream" in params:
+        body["stream"] = params["stream"]
     _remove_probe_only_params(body)
     timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -2221,6 +2256,10 @@ async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any],
         body["reasoning_effort"] = params["reasoning_effort"]
     if params.get("thinking"):
         body["thinking"] = params["thinking"]
+    if params.get("tools"):
+        body["tools"] = params["tools"]
+    if "stream" in params:
+        body["stream"] = params["stream"]
     _remove_probe_only_params(body)
     timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -2266,7 +2305,7 @@ def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, A
         config=Config(connect_timeout=10, read_timeout=90, retries={"max_attempts": 1}),
     )
     params = case.request_params or {}
-    if params.get("thinking"):
+    if params.get("thinking") or params.get("tools") or "stream" in params:
         return _aws_bedrock_messages_call(client, channel, case, credentials, params)
     response = client.converse(
         modelId=credentials.get("model") or channel.model_name,
@@ -2292,8 +2331,13 @@ def _aws_bedrock_messages_call(client: Any, channel: Channel, case: TestCase, cr
         "messages": [{"role": "user", "content": case.prompt}],
         "max_tokens": params.get("max_tokens", 1024),
         "temperature": params.get("temperature", 0),
-        "thinking": params["thinking"],
     }
+    if params.get("thinking"):
+        body["thinking"] = params["thinking"]
+    if params.get("tools"):
+        body["tools"] = params["tools"]
+    if "stream" in params:
+        body["stream"] = params["stream"]
     _remove_probe_only_params(body)
     response = client.invoke_model(modelId=credentials.get("model") or channel.model_name, body=json.dumps(body))
     raw_body = response.get("body")
@@ -2310,7 +2354,13 @@ def _aws_bedrock_messages_call(client: Any, channel: Channel, case: TestCase, cr
 
 
 def _remove_probe_only_params(body: dict[str, Any]) -> None:
-    for key in ["expected_error_contains", "expected_error_any", "expected_error_variant_any"]:
+    for key in [
+        "expected_error_contains",
+        "expected_error_any",
+        "expected_error_variant_any",
+        "expected_error_missing_label",
+        "expected_error_variant_label",
+    ]:
         body.pop(key, None)
     for key, value in list(body.items()):
         if value is None:
@@ -2521,25 +2571,27 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     text = normalized.get("content_text") or ""
     error_text = _normalized_error_text(normalized)
 
-    if rules.get("expected_error_contains") or rules.get("expected_error_any"):
+    if normalized.get("channel_preflight_failed"):
+        return 0.0, ["channel_preflight_failed", "request_failed"]
+    if rules.get("expected_error_contains") or rules.get("expected_error_any") or rules.get("expected_error_variant_any"):
+        missing_label = str(rules.get("expected_error_missing_label") or "thinking_temperature_not_rejected")
+        variant_label = str(rules.get("expected_error_variant_label") or "provider_error_variant")
         if not error_text:
-            return 0.0, ["thinking_temperature_not_rejected"]
+            return 0.0, [missing_label]
         expected_exact = _lower_text(rules.get("expected_error_contains"))
         if expected_exact and expected_exact in _lower_text(error_text):
             return 100.0, []
         expected_any = [_lower_text(item) for item in rules.get("expected_error_any", []) if _lower_text(item)]
-        if expected_any and all(item in _lower_text(error_text) for item in expected_any):
-            return 100.0, ["provider_error_variant"]
+        if expected_any and any(item in _lower_text(error_text) for item in expected_any):
+            return 100.0, [variant_label]
         variant_any = [_lower_text(item) for item in rules.get("expected_error_variant_any", []) if _lower_text(item)]
-        if variant_any and all(item in _lower_text(error_text) for item in variant_any):
-            return 100.0, ["provider_error_variant"]
+        if variant_any and any(item in _lower_text(error_text) for item in variant_any):
+            return 100.0, [variant_label]
         return 0.0, ["unexpected_error_response"]
     if rules.get("invalid_request_probe"):
         if normalized.get("error") or normalized.get("status_code", 200) >= 400 or normalized["raw_response"].get("type") == "error":
             return 100.0, []
         return 0.0, ["invalid_request_not_rejected"]
-    if normalized.get("channel_preflight_failed"):
-        return 0.0, ["channel_preflight_failed", "request_failed"]
     if normalized.get("error"):
         return 0.0, ["request_failed"]
     if normalized["raw_response"].get("type") != "message":

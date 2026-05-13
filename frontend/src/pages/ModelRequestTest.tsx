@@ -15,14 +15,59 @@ type ModelRequestForm = {
   extra_params?: string;
 };
 
+type ComboProbeKey = 'thinking' | 'web_search';
+
+type ComboProbeResult = {
+  key: ComboProbeKey;
+  title: string;
+  payload: ModelRequestTestResult;
+};
+
 const AWS_THINKING_PROBE_PROMPT = '请用一句话回答：这是 thinking temperature 纯度探针。';
 const AWS_THINKING_PROBE_EXTRA_PARAMS = {
+  max_tokens: 2048,
+  temperature: 0.2,
   thinking: { type: 'enabled', budget_tokens: 1024 },
   reasoning_effort: 'medium',
   expected_error_contains: 'temperature may only be set to 1 when thinking is enabled',
   expected_error_any: ['temperature', 'thinking'],
   expected_error_variant_any: ['temperature', 'thinking'],
 };
+
+const AWS_WEB_SEARCH_PROBE_PROMPT = '请查询今天 Anthropic 官方新闻或博客的最新更新，并给出标题、发布日期和来源链接。注意：如果当前环境没有真实联网或搜索工具，请明确说明无法实时查询，不要凭记忆编造。';
+const AWS_WEB_SEARCH_PROBE_EXTRA_PARAMS = {
+  max_tokens: 900,
+  temperature: 0,
+  stream: true,
+  tools: [
+    {
+      type: 'web_search_20260209',
+      name: 'web_search',
+      max_uses: 5,
+    },
+  ],
+  expected_error_contains: 'web search',
+  expected_error_any: ['web_search', 'unsupported', 'not available', 'tool', 'bedrock'],
+  expected_error_missing_label: 'web_search_not_rejected',
+  expected_error_variant_label: 'provider_error_variant',
+};
+
+const COMBO_PROBES = [
+  {
+    key: 'thinking' as const,
+    title: 'Thinking temperature',
+    prompt: AWS_THINKING_PROBE_PROMPT,
+    request_params: AWS_THINKING_PROBE_EXTRA_PARAMS,
+    run_name: '组合纯度检测 · thinking',
+  },
+  {
+    key: 'web_search' as const,
+    title: 'Web Search tool',
+    prompt: AWS_WEB_SEARCH_PROBE_PROMPT,
+    request_params: AWS_WEB_SEARCH_PROBE_EXTRA_PARAMS,
+    run_name: '组合纯度检测 · web_search',
+  },
+];
 
 function channelApiKey(channel: Channel) {
   const value = channel.auth_config?.api_key;
@@ -43,6 +88,19 @@ function rawResponseHasThinkingSignature(result: ModelRequestTestResult | null) 
   return Array.isArray(content) && content.some((block) => block && typeof block === 'object' && block.type === 'thinking' && block.signature);
 }
 
+function resultErrorText(result: ModelRequestTestResult) {
+  return String(result.result.normalized_response?.error ?? '');
+}
+
+function comboProbePassed(result: ModelRequestTestResult) {
+  return result.result.score === 100 && Boolean(resultErrorText(result));
+}
+
+function comboProbeFailed(result: ModelRequestTestResult) {
+  const labels = result.result.labels ?? [];
+  return labels.includes('thinking_temperature_not_rejected') || labels.includes('web_search_not_rejected') || result.result.score < 100;
+}
+
 function parseExtraParams(value?: string) {
   if (!value?.trim()) return {};
   const parsed = JSON.parse(value) as unknown;
@@ -56,6 +114,7 @@ export default function ModelRequestTest() {
   const [form] = Form.useForm<ModelRequestForm>();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<ModelRequestTestResult | null>(null);
+  const [comboResults, setComboResults] = useState<ComboProbeResult[]>([]);
   const [requestError, setRequestError] = useState<string | null>(null);
 
   const availableChannels = useMemo(
@@ -90,7 +149,7 @@ export default function ModelRequestTest() {
       setRequestError(null);
       setResult(payload);
       const labels = payload.result.labels ?? [];
-      const isProbeFailure = labels.includes('thinking_temperature_not_rejected');
+      const isProbeFailure = labels.includes('web_search_not_rejected');
       if (isProbeFailure) {
         message.warning('探针失败：渠道应报错但返回了正常内容');
       } else if (payload.result.normalized_response?.error) {
@@ -106,20 +165,65 @@ export default function ModelRequestTest() {
     },
   });
 
+  const runComboProbe = useMutation({
+    mutationFn: async (channelId: string) => {
+      const results: ComboProbeResult[] = [];
+      for (const probe of COMBO_PROBES) {
+        const payload = await api.modelRequestTest(channelId, {
+          prompt: probe.prompt,
+          system_prompt: null,
+          request_params: probe.request_params,
+          run_name: probe.run_name,
+        });
+        results.push({ key: probe.key, title: probe.title, payload });
+      }
+      return results;
+    },
+    onSuccess: (payload) => {
+      setRequestError(null);
+      setResult(null);
+      setComboResults(payload);
+      if (payload.every((item) => comboProbePassed(item.payload))) {
+        message.success('组合纯度检测通过');
+      } else {
+        message.warning('组合纯度检测发现可疑项');
+      }
+    },
+    onError: (error) => {
+      const detail = error instanceof Error ? error.message : '组合纯度检测失败';
+      setRequestError(detail);
+      message.error(detail);
+    },
+  });
+
   function submit(values: ModelRequestForm) {
     setResult(null);
+    setComboResults([]);
     setRequestError(null);
     requestModel.mutate(values);
   }
 
-  function applyAwsThinkingProbe() {
+  function submitComboProbe() {
+    const channelId = form.getFieldValue('channel_id');
+    if (!channelId) {
+      message.warning('请选择请求渠道');
+      return;
+    }
+    setResult(null);
+    setComboResults([]);
+    setRequestError(null);
+    runComboProbe.mutate(channelId);
+  }
+
+  function applyAwsWebSearchProbe() {
     form.setFieldsValue({
-      prompt: AWS_THINKING_PROBE_PROMPT,
-      max_tokens: 2048,
-      temperature: 0.2,
-      extra_params: JSON.stringify(AWS_THINKING_PROBE_EXTRA_PARAMS, null, 2),
+      prompt: AWS_WEB_SEARCH_PROBE_PROMPT,
+      max_tokens: 900,
+      temperature: 0,
+      extra_params: JSON.stringify(AWS_WEB_SEARCH_PROBE_EXTRA_PARAMS, null, 2),
     });
     setResult(null);
+    setComboResults([]);
     setRequestError(null);
   }
 
@@ -131,6 +235,8 @@ export default function ModelRequestTest() {
   const errorText = String(normalizedValue(result, 'error') ?? '');
   const evidenceText = expectedErrorPassed ? errorText : outputText || errorText || '无文本输出，请查看原始响应。';
   const hasBedrockSourceFeatures = result?.message_id?.startsWith('msg_bdrk_') || rawResponseHasThinkingSignature(result);
+  const comboPassed = comboResults.length === COMBO_PROBES.length && comboResults.every((item) => comboProbePassed(item.payload));
+  const comboSuspicious = comboResults.some((item) => comboProbeFailed(item.payload));
 
   return (
     <Space direction="vertical" size={24} className="page-stack">
@@ -159,9 +265,9 @@ export default function ModelRequestTest() {
           <Alert
             type="warning"
             showIcon
-            message="AWS 纯度探针"
-            description="一键填入 thinking.enabled，并单独设置 temperature: 0.2。纯 AWS/Claude 路径预期应报错；测 relay 时，如果返回正常内容，就代表 relay 没有保持原生参数校验。要测 AWS 直连，请在渠道管理中选择 AWS Bedrock 请求协议并配置 AWS 凭据。"
-            action={<Button size="small" onClick={applyAwsThinkingProbe}>填入探针</Button>}
+            message="Web Search 纯度探针"
+            description="一键填入 Anthropic Web Search tool 请求。预期在原生 AWS/Bedrock 或不支持该工具的路径上直接报错；如果返回正常内容，说明中间层没有保持原生拒绝行为。"
+            action={<Button size="small" onClick={applyAwsWebSearchProbe}>填入探针</Button>}
           />
           <Form
             form={form}
@@ -207,9 +313,14 @@ export default function ModelRequestTest() {
             >
               <Input.TextArea rows={6} placeholder='{"thinking":{"type":"enabled","budget_tokens":1024},"reasoning_effort":"medium"}' />
             </Form.Item>
-            <Button type="primary" htmlType="submit" loading={requestModel.isPending} disabled={channels.isLoading || !availableChannels.length} icon={<Send size={16} />}>
-              {requestModel.isPending ? '发送中' : '发送真实请求'}
-            </Button>
+            <Space wrap>
+              <Button type="primary" htmlType="submit" loading={requestModel.isPending} disabled={channels.isLoading || !availableChannels.length || runComboProbe.isPending} icon={<Send size={16} />}>
+                {requestModel.isPending ? '发送中' : '发送真实请求'}
+              </Button>
+              <Button onClick={submitComboProbe} loading={runComboProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending}>
+                {runComboProbe.isPending ? '检测中' : '组合纯度检测'}
+              </Button>
+            </Space>
           </Form>
 
           {requestError ? (
@@ -217,6 +328,45 @@ export default function ModelRequestTest() {
           ) : null}
         </Space>
       </Card>
+
+      {comboResults.length ? (
+        <Space direction="vertical" size={16} className="full-width">
+          <Alert
+            type={comboPassed ? 'success' : comboSuspicious ? 'warning' : 'info'}
+            showIcon
+            message={comboPassed ? '组合纯度检测通过' : comboSuspicious ? '组合纯度检测发现可疑项' : '组合纯度检测完成'}
+            description={
+              comboPassed
+                ? '两个探针都命中预期上游错误，渠道保留了关键原生拒绝行为。'
+                : '至少一个探针没有按预期直接报错，请查看对应标签和原始响应。'
+            }
+          />
+          <div className="signature-sim-grid">
+            {comboResults.map(({ key, title, payload }) => {
+              const labels = payload.result.labels ?? [];
+              const error = resultErrorText(payload);
+              const passed = comboProbePassed(payload);
+              return (
+                <Card key={key} title={title} bordered={false}>
+                  <Descriptions bordered size="small" column={1}>
+                    <Descriptions.Item label="任务">
+                      <Link to={`/runs/${payload.run.id}`}>{payload.run.id}</Link>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="结果">
+                      <Tag color={passed ? 'green' : 'orange'}>{passed ? '通过' : '可疑'}</Tag>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="评分">{payload.result.score}</Descriptions.Item>
+                    <Descriptions.Item label="标签">{labels.length ? labels.join(', ') : '-'}</Descriptions.Item>
+                    <Descriptions.Item label="协议">{payload.request_protocol || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="Endpoint">{payload.provider_endpoint || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="错误摘要">{error || '未返回错误'}</Descriptions.Item>
+                  </Descriptions>
+                </Card>
+              );
+            })}
+          </div>
+        </Space>
+      ) : null}
 
       {result ? (
         <Space direction="vertical" size={16} className="full-width">
@@ -246,8 +396,8 @@ export default function ModelRequestTest() {
               message={expectedErrorPassed ? '预期错误已命中' : '应报错但未报错'}
               description={
                 expectedErrorPassed
-                  ? `评分 ${result.result.score}，命中 AWS/Claude 原生 thinking temperature 校验。`
-                  : `评分 ${result.result.score}，标签：${resultLabels.length ? resultLabels.join(', ') : '无'}。该渠道返回了正常 message，说明 temperature 可能被 relay 丢弃、改写，或未走 AWS 原生校验。`
+                  ? `评分 ${result.result.score}，命中预期上游错误。`
+                  : `评分 ${result.result.score}，标签：${resultLabels.length ? resultLabels.join(', ') : '无'}。该渠道返回了正常 message 或非预期错误，说明中间层可能丢弃、改写或未保留原生校验。`
               }
             />
           ) : null}

@@ -205,4 +205,124 @@ describe('api request handling', () => {
     );
     fetchMock.mockRestore();
   });
+
+  it('sends web search probe params through the model request endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          run: { id: 'run_1', suite_id: 'manual_model_request_probe', name: 'probe', mode: 'manual_probe', test_scope: 'quick', status: 'completed', repeat_count: 1, concurrency: 1, total_jobs: 1, completed_jobs: 1 },
+          result: { id: 'res_1', run_id: 'run_1', test_case_id: 'case_1', channel_id: 'ch_1', attempt_index: 1, score: 100 },
+          message_id: 'msg_01abc',
+          message_channel_type: 'Anthropic',
+          request_protocol: 'anthropic_messages',
+          provider_endpoint: 'https://api.anthropic.com/v1/messages',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.modelRequestTest('ch_1', {
+      prompt: '请查询今天 Anthropic 官方新闻或博客的最新更新，并给出标题、发布日期和来源链接。',
+      system_prompt: null,
+      request_params: {
+        max_tokens: 900,
+        stream: true,
+        tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
+        expected_error_contains: 'web search',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/ch_1/model-request-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          prompt: '请查询今天 Anthropic 官方新闻或博客的最新更新，并给出标题、发布日期和来源链接。',
+          system_prompt: null,
+          request_params: {
+            max_tokens: 900,
+            stream: true,
+            tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
+            expected_error_contains: 'web search',
+          },
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('can send both combo purity probes through the existing model request endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            run: { id: 'run_thinking', suite_id: 'manual_model_request_probe', name: 'thinking', mode: 'manual_probe', test_scope: 'quick', status: 'completed', repeat_count: 1, concurrency: 1, total_jobs: 1, completed_jobs: 1 },
+            result: { id: 'res_thinking', run_id: 'run_thinking', test_case_id: 'case_1', channel_id: 'ch_1', attempt_index: 1, score: 100 },
+            message_id: null,
+            message_channel_type: 'Unknown',
+            request_protocol: 'anthropic_messages',
+            provider_endpoint: 'https://api.example/v1/messages',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            run: { id: 'run_web', suite_id: 'manual_model_request_probe', name: 'web', mode: 'manual_probe', test_scope: 'quick', status: 'completed', repeat_count: 1, concurrency: 1, total_jobs: 1, completed_jobs: 1 },
+            result: { id: 'res_web', run_id: 'run_web', test_case_id: 'case_2', channel_id: 'ch_1', attempt_index: 1, score: 100 },
+            message_id: null,
+            message_channel_type: 'Unknown',
+            request_protocol: 'anthropic_messages',
+            provider_endpoint: 'https://api.example/v1/messages',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+
+    await api.modelRequestTest('ch_1', {
+      prompt: '请用一句话回答：这是 thinking temperature 纯度探针。',
+      system_prompt: null,
+      run_name: '组合纯度检测 · thinking',
+      request_params: {
+        max_tokens: 2048,
+        temperature: 0.2,
+        thinking: { type: 'enabled', budget_tokens: 1024 },
+        reasoning_effort: 'medium',
+        expected_error_contains: 'temperature may only be set to 1 when thinking is enabled',
+      },
+    });
+    await api.modelRequestTest('ch_1', {
+      prompt: '请查询今天 Anthropic 官方新闻或博客的最新更新，并给出标题、发布日期和来源链接。',
+      system_prompt: null,
+      run_name: '组合纯度检测 · web_search',
+      request_params: {
+        max_tokens: 900,
+        temperature: 0,
+        stream: true,
+        tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
+        expected_error_any: ['web_search', 'unsupported', 'not available', 'tool', 'bedrock'],
+        expected_error_missing_label: 'web_search_not_rejected',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/channels/ch_1/model-request-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('组合纯度检测 · thinking'),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/channels/ch_1/model-request-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('web_search_20260209'),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
 });

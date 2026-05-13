@@ -291,6 +291,69 @@ def test_score_result_validates_thinking_temperature_expected_error() -> None:
     assert normal_labels == ["thinking_temperature_not_rejected"]
 
 
+def test_websearch_seed_case_uses_web_search_probe_payload() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        case = db.get(TestCaseModel, "websearch_01")
+
+    assert case is not None
+    assert case.title == "Web Search AWS 纯度报错探针"
+    assert case.request_params["max_tokens"] == 900
+    assert case.request_params["stream"] is True
+    assert case.request_params["tools"][0]["type"] == "web_search_20260209"
+    assert case.scoring_rules["expected_error_missing_label"] == "web_search_not_rejected"
+
+
+def test_score_result_validates_web_search_expected_error() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "aws_bedrock")
+        case = db.get(TestCaseModel, "websearch_01")
+        assert channel is not None and case is not None
+
+        exact_score, exact_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"error": {"message": "web search is not available on this channel"}},
+                "error": "web search is not available on this channel",
+                "status_code": 500,
+                "content_text": "",
+            },
+        )
+        variant_score, variant_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"error": {"message": "unsupported tool web_search_20260209"}},
+                "error": "unsupported tool web_search_20260209",
+                "status_code": 500,
+                "content_text": "",
+            },
+        )
+        normal_score, normal_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"type": "message"},
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "provider_message_id": "msg_bdrk_01ok",
+                "tool_calls": [],
+                "stop_reason": "end_turn",
+                "stream_events": ["message_stop"],
+                "content_text": "最新更新：标题、发布日期、链接",
+                "status_code": 200,
+            },
+        )
+
+    assert exact_score == 100
+    assert exact_labels == ["provider_error_variant"]
+    assert variant_score == 100
+    assert variant_labels == ["provider_error_variant"]
+    assert normal_score == 0
+    assert normal_labels == ["web_search_not_rejected"]
+
+
 def test_repeat_consistency_penalizes_drift_between_attempts() -> None:
     reset_database()
     with SessionLocal() as db:
@@ -1743,6 +1806,46 @@ def test_openai_request_passes_reasoning_effort_and_thinking(monkeypatch) -> Non
     assert captured["json"]["thinking"] == {"type": "enabled", "budget_tokens": 1024}
 
 
+def test_openai_request_passes_tools_and_stream(monkeypatch) -> None:
+    reset_database()
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        text = "{}"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"object": "chat.completion", "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *args) -> None:  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers=None, json=None):  # noqa: ANN001
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "openai_compat_demo")
+        case = db.get(TestCaseModel, "websearch_01")
+        assert channel is not None and case is not None
+        asyncio.run(_openai_compatible_call(channel, build_raw_request(channel, case), {"api_key": "test-key"}))
+
+    assert captured["json"]["tools"][0]["type"] == "web_search_20260209"
+    assert captured["json"]["stream"] is True
+
+
 def test_aws_thinking_probe_uses_raw_messages_body() -> None:
     reset_database()
     captured: dict[str, object] = {}
@@ -1768,6 +1871,32 @@ def test_aws_thinking_probe_uses_raw_messages_body() -> None:
     assert body["temperature"] == 0.2
     assert body["thinking"] == {"type": "enabled", "budget_tokens": 1024}
     assert body["messages"][0]["content"] == "请用一句话回答：这是 thinking temperature 纯度探针。"
+    assert payload["id"] == "msg_bdrk_01ok"
+
+
+def test_aws_web_search_probe_uses_raw_messages_body() -> None:
+    reset_database()
+    captured: dict[str, object] = {}
+
+    class FakeBody:
+        def read(self) -> bytes:
+            return b'{"id":"msg_bdrk_01ok","type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}'
+
+    class FakeAwsClient:
+        def invoke_model(self, **kwargs):  # noqa: ANN001, ANN201
+            captured.update(kwargs)
+            return {"body": FakeBody()}
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "aws_bedrock")
+        case = db.get(TestCaseModel, "websearch_01")
+        assert channel is not None and case is not None
+        payload = _aws_bedrock_messages_call(FakeAwsClient(), channel, case, {}, case.request_params or {})
+
+    body = json.loads(captured["body"])
+    assert body["max_tokens"] == 900
+    assert body["stream"] is True
+    assert body["tools"][0]["name"] == "web_search"
     assert payload["id"] == "msg_bdrk_01ok"
 
 
