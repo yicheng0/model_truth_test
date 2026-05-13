@@ -38,6 +38,11 @@ function normalizedValue(result: ModelRequestTestResult | null, key: string) {
   return normalized && typeof normalized === 'object' ? normalized[key] : undefined;
 }
 
+function rawResponseHasThinkingSignature(result: ModelRequestTestResult | null) {
+  const content = result?.result.raw_response?.content;
+  return Array.isArray(content) && content.some((block) => block && typeof block === 'object' && block.type === 'thinking' && block.signature);
+}
+
 function parseExtraParams(value?: string) {
   if (!value?.trim()) return {};
   const parsed = JSON.parse(value) as unknown;
@@ -84,7 +89,11 @@ export default function ModelRequestTest() {
     onSuccess: (payload) => {
       setRequestError(null);
       setResult(payload);
-      if (payload.result.normalized_response?.error) {
+      const labels = payload.result.labels ?? [];
+      const isProbeFailure = labels.includes('thinking_temperature_not_rejected');
+      if (isProbeFailure) {
+        message.warning('探针失败：渠道应报错但返回了正常内容');
+      } else if (payload.result.normalized_response?.error) {
         message.warning('真实请求已保存，但渠道返回失败');
       } else {
         message.success('真实请求已完成并保存');
@@ -115,7 +124,13 @@ export default function ModelRequestTest() {
   }
 
   const resultLabels = result?.result.labels ?? [];
-  const expectedErrorPassed = result ? result.result.score === 100 && Boolean(normalizedValue(result, 'error')) : false;
+  const isExpectedErrorProbe = Boolean(result?.result.raw_request?.params?.expected_error_contains);
+  const expectedErrorPassed = isExpectedErrorProbe && result ? result.result.score === 100 && Boolean(normalizedValue(result, 'error')) : false;
+  const expectedErrorFailed = isExpectedErrorProbe && !expectedErrorPassed;
+  const outputText = String(normalizedValue(result, 'content_text') ?? '');
+  const errorText = String(normalizedValue(result, 'error') ?? '');
+  const evidenceText = expectedErrorPassed ? errorText : outputText || errorText || '无文本输出，请查看原始响应。';
+  const hasBedrockSourceFeatures = result?.message_id?.startsWith('msg_bdrk_') || rawResponseHasThinkingSignature(result);
 
   return (
     <Space direction="vertical" size={24} className="page-stack">
@@ -145,7 +160,7 @@ export default function ModelRequestTest() {
             type="warning"
             showIcon
             message="AWS 纯度探针"
-            description="一键填入 thinking enabled + temperature=0.2。纯 AWS/Claude 路径预期应报错：temperature may only be set to 1 when thinking is enabled。"
+            description="一键填入 thinking enabled + temperature=0.2。纯 AWS/Claude 路径预期应报错；测 relay 时，如果返回正常内容，就代表 relay 没有保持原生参数校验。要测 AWS 直连，请在渠道管理中选择 AWS Bedrock 请求协议并配置 AWS 凭据。"
             action={<Button size="small" onClick={applyAwsThinkingProbe}>填入探针</Button>}
           />
           <Form
@@ -224,17 +239,30 @@ export default function ModelRequestTest() {
             <Alert type="error" showIcon message="渠道请求失败" description={String(result.result.normalized_response.error)} />
           ) : null}
 
-          {result.result.raw_request?.params?.expected_error_contains ? (
+          {isExpectedErrorProbe ? (
             <Alert
               type={expectedErrorPassed ? 'success' : 'warning'}
               showIcon
-              message={expectedErrorPassed ? '预期错误已命中' : '预期错误未命中'}
-              description={`评分 ${result.result.score}，标签：${resultLabels.length ? resultLabels.join(', ') : '无'}`}
+              message={expectedErrorPassed ? '预期错误已命中' : '应报错但未报错'}
+              description={
+                expectedErrorPassed
+                  ? `评分 ${result.result.score}，命中 AWS/Claude 原生 thinking temperature 校验。`
+                  : `评分 ${result.result.score}，标签：${resultLabels.length ? resultLabels.join(', ') : '无'}。该渠道返回了正常 message，说明 temperature 可能被 relay 丢弃、改写，或未走 AWS 原生校验。`
+              }
             />
           ) : null}
 
-          <Card title="模型输出" bordered={false}>
-            <pre className="output-drawer-pre">{String(normalizedValue(result, 'content_text') ?? '')}</pre>
+          {expectedErrorFailed && hasBedrockSourceFeatures ? (
+            <Alert
+              type="info"
+              showIcon
+              message="模型源特征存在，但参数纯度失败"
+              description="返回里出现 msg_bdrk_ 或 thinking signature，说明后端可能仍是 Bedrock/Claude；但本探针要求原生校验直接拒绝，正常输出不能算通过。"
+            />
+          ) : null}
+
+          <Card title={isExpectedErrorProbe ? '探针结果 / 异常证据' : '模型输出'} bordered={false}>
+            <pre className="output-drawer-pre">{evidenceText}</pre>
           </Card>
 
           <div className="signature-sim-grid">
