@@ -160,7 +160,7 @@ export default function ModelRequestTest() {
             type="warning"
             showIcon
             message="AWS 纯度探针"
-            description="一键填入 thinking enabled + temperature=0.2。纯 AWS/Claude 路径预期应报错；测 relay 时，如果返回正常内容，就代表 relay 没有保持原生参数校验。要测 AWS 直连，请在渠道管理中选择 AWS Bedrock 请求协议并配置 AWS 凭据。"
+            description="一键填入 thinking.enabled，并单独设置 temperature: 0.2。纯 AWS/Claude 路径预期应报错；测 relay 时，如果返回正常内容，就代表 relay 没有保持原生参数校验。要测 AWS 直连，请在渠道管理中选择 AWS Bedrock 请求协议并配置 AWS 凭据。"
             action={<Button size="small" onClick={applyAwsThinkingProbe}>填入探针</Button>}
           />
           <Form
