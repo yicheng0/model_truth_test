@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Select, Space, Tag, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { Send } from 'lucide-react';
+import { Bug, Send } from 'lucide-react';
 import { api } from '../api';
 import type { Channel, ModelRequestTestResult } from '../types';
 
@@ -52,6 +52,21 @@ const AWS_WEB_SEARCH_PROBE_EXTRA_PARAMS = {
   expected_error_variant_label: 'provider_error_variant',
 };
 
+const THINKING_ADAPTIVE_ENABLED_PROBE_PROMPT = '回复OK';
+const THINKING_ADAPTIVE_ENABLED_PROBE_EXTRA_PARAMS = {
+  max_tokens: 2000,
+  temperature: 0,
+  thinking: {
+    type: 'enabled',
+    adaptive: { enabled: true },
+    budget_tokens: 8000,
+    max_tokens: 2000,
+  },
+  expected_error_any: ['adaptive', 'enabled', 'output_config.effort', 'not supported', 'ValidationException', 'thinking'],
+  expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
+  expected_error_variant_label: 'provider_error_variant',
+};
+
 const COMBO_PROBES = [
   {
     key: 'thinking' as const,
@@ -98,7 +113,7 @@ function comboProbePassed(result: ModelRequestTestResult) {
 
 function comboProbeFailed(result: ModelRequestTestResult) {
   const labels = result.result.labels ?? [];
-  return labels.includes('thinking_temperature_not_rejected') || labels.includes('web_search_not_rejected') || result.result.score < 100;
+  return labels.includes('thinking_temperature_not_rejected') || labels.includes('web_search_not_rejected') || labels.includes('thinking_adaptive_enabled_not_rejected') || result.result.score < 100;
 }
 
 function parseExtraParams(value?: string) {
@@ -196,6 +211,34 @@ export default function ModelRequestTest() {
     },
   });
 
+  const runAdaptiveEnabledProbe = useMutation({
+    mutationFn: (channelId: string) =>
+      api.modelRequestTest(channelId, {
+        prompt: THINKING_ADAPTIVE_ENABLED_PROBE_PROMPT,
+        system_prompt: null,
+        request_params: THINKING_ADAPTIVE_ENABLED_PROBE_EXTRA_PARAMS,
+        run_name: 'thinking.adaptive.enabled 纯度检测',
+      }),
+    onSuccess: (payload) => {
+      setRequestError(null);
+      setComboResults([]);
+      setResult(payload);
+      const labels = payload.result.labels ?? [];
+      if (payload.result.score === 100 && payload.result.normalized_response?.error) {
+        message.success('adaptive.enabled 探针通过');
+      } else if (labels.includes('thinking_adaptive_enabled_not_rejected')) {
+        message.warning('探针失败：渠道应报错但返回了正常内容');
+      } else {
+        message.warning('adaptive.enabled 探针返回非预期结果');
+      }
+    },
+    onError: (error) => {
+      const detail = error instanceof Error ? error.message : 'adaptive.enabled 探针失败';
+      setRequestError(detail);
+      message.error(detail);
+    },
+  });
+
   function submit(values: ModelRequestForm) {
     setResult(null);
     setComboResults([]);
@@ -213,6 +256,18 @@ export default function ModelRequestTest() {
     setComboResults([]);
     setRequestError(null);
     runComboProbe.mutate(channelId);
+  }
+
+  function submitAdaptiveEnabledProbe() {
+    const channelId = form.getFieldValue('channel_id');
+    if (!channelId) {
+      message.warning('请选择请求渠道');
+      return;
+    }
+    setResult(null);
+    setComboResults([]);
+    setRequestError(null);
+    runAdaptiveEnabledProbe.mutate(channelId);
   }
 
   function applyAwsWebSearchProbe() {
@@ -319,6 +374,9 @@ export default function ModelRequestTest() {
               </Button>
               <Button onClick={submitComboProbe} loading={runComboProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending}>
                 {runComboProbe.isPending ? '检测中' : '组合纯度检测'}
+              </Button>
+              <Button onClick={submitAdaptiveEnabledProbe} loading={runAdaptiveEnabledProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runComboProbe.isPending} icon={<Bug size={16} />}>
+                {runAdaptiveEnabledProbe.isPending ? '测试中' : '测试 adaptive.enabled'}
               </Button>
             </Space>
           </Form>

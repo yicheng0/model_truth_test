@@ -325,4 +325,65 @@ describe('api request handling', () => {
     );
     fetchMock.mockRestore();
   });
+
+  it('sends the thinking adaptive enabled purity probe through the model request endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          run: { id: 'run_adaptive', suite_id: 'manual_model_request_probe', name: 'adaptive', mode: 'manual_probe', test_scope: 'quick', status: 'completed', repeat_count: 1, concurrency: 1, total_jobs: 1, completed_jobs: 1 },
+          result: { id: 'res_adaptive', run_id: 'run_adaptive', test_case_id: 'case_1', channel_id: 'ch_1', attempt_index: 1, score: 100 },
+          message_id: null,
+          message_channel_type: 'Unknown',
+          request_protocol: 'anthropic_messages',
+          provider_endpoint: 'https://api.example/v1/messages',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.modelRequestTest('ch_1', {
+      prompt: '回复OK',
+      system_prompt: null,
+      run_name: 'thinking.adaptive.enabled 纯度检测',
+      request_params: {
+        max_tokens: 2000,
+        temperature: 0,
+        thinking: {
+          type: 'enabled',
+          adaptive: { enabled: true },
+          budget_tokens: 8000,
+          max_tokens: 2000,
+        },
+        expected_error_any: ['adaptive', 'enabled', 'output_config.effort', 'not supported', 'ValidationException', 'thinking'],
+        expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
+        expected_error_variant_label: 'provider_error_variant',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/ch_1/model-request-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          prompt: '回复OK',
+          system_prompt: null,
+          run_name: 'thinking.adaptive.enabled 纯度检测',
+          request_params: {
+            max_tokens: 2000,
+            temperature: 0,
+            thinking: {
+              type: 'enabled',
+              adaptive: { enabled: true },
+              budget_tokens: 8000,
+              max_tokens: 2000,
+            },
+            expected_error_any: ['adaptive', 'enabled', 'output_config.effort', 'not supported', 'ValidationException', 'thinking'],
+            expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
+            expected_error_variant_label: 'provider_error_variant',
+          },
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
 });

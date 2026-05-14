@@ -63,6 +63,7 @@ ALERT_RED_FLAGS = {
     "signature_interop_failed",
     "thinking_temperature_not_rejected",
     "web_search_not_rejected",
+    "thinking_adaptive_enabled_not_rejected",
 }
 
 REQUEST_PROTOCOL_AUTO = "auto"
@@ -2940,6 +2941,7 @@ LABEL_EXPLANATIONS = {
     "channel_preflight_failed": "渠道预检失败，已停止该渠道剩余题目的正式请求。",
     "signature_interop_failed": "Thinking Signature 互通检测未通过，relay 无法复用 source 生成的签名 thinking block。",
     "thinking_temperature_not_rejected": "启用 thinking 时携带非 1 temperature 未被上游拒绝，疑似中间层改写或非原生协议。",
+    "thinking_adaptive_enabled_not_rejected": "thinking.adaptive.enabled 未被上游拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。",
     "provider_error_variant": "上游返回了等价的 thinking/temperature 约束错误，但文案与主参考不同。",
     "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
 }
