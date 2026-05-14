@@ -354,9 +354,9 @@ describe('api request handling', () => {
           budget_tokens: 8000,
           max_tokens: 2000,
         },
-        expected_error_any: ['adaptive', 'enabled', 'output_config.effort', 'not supported', 'ValidationException', 'thinking'],
+        expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
         expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
-        expected_error_variant_label: 'provider_error_variant',
+        expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
       },
     });
 
@@ -377,9 +377,9 @@ describe('api request handling', () => {
               budget_tokens: 8000,
               max_tokens: 2000,
             },
-            expected_error_any: ['adaptive', 'enabled', 'output_config.effort', 'not supported', 'ValidationException', 'thinking'],
+            expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
             expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
-            expected_error_variant_label: 'provider_error_variant',
+            expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
           },
         }),
       }),

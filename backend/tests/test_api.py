@@ -97,16 +97,9 @@ def manual_thinking_adaptive_enabled_probe_case() -> TestCaseModel:
             },
         },
         scoring_rules={
-            "expected_error_any": [
-                "adaptive",
-                "enabled",
-                "output_config.effort",
-                "not supported",
-                "ValidationException",
-                "thinking",
-            ],
+            "expected_error_required_all": ["enabled", "not supported", "output_config.effort"],
             "expected_error_missing_label": "thinking_adaptive_enabled_not_rejected",
-            "expected_error_variant_label": "provider_error_variant",
+            "expected_error_unexpected_label": "thinking_adaptive_enabled_wrong_error",
         },
         is_hidden=False,
         enabled=True,
@@ -332,7 +325,7 @@ def test_score_result_validates_thinking_adaptive_enabled_expected_error() -> No
         case = manual_thinking_adaptive_enabled_probe_case()
         assert channel is not None
 
-        variant_score, variant_labels = score_result(
+        exact_score, exact_labels = score_result(
             channel,
             case,
             {
@@ -342,6 +335,16 @@ def test_score_result_validates_thinking_adaptive_enabled_expected_error() -> No
                     }
                 },
                 "error": '"***.***.enabled" is not supported for this model. Use "***.***.adaptive" and "output_config.effort" to control thinking behavior.',
+                "status_code": 400,
+                "content_text": "",
+            },
+        )
+        wrong_error_score, wrong_error_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"error": {"message": "`temperature` may only be set to 1 when thinking is enabled"}},
+                "error": "`temperature` may only be set to 1 when thinking is enabled",
                 "status_code": 400,
                 "content_text": "",
             },
@@ -361,8 +364,10 @@ def test_score_result_validates_thinking_adaptive_enabled_expected_error() -> No
             },
         )
 
-    assert variant_score == 100
-    assert variant_labels == ["provider_error_variant"]
+    assert exact_score == 100
+    assert exact_labels == []
+    assert wrong_error_score == 0
+    assert wrong_error_labels == ["thinking_adaptive_enabled_wrong_error"]
     assert normal_score == 0
     assert normal_labels == ["thinking_adaptive_enabled_not_rejected"]
 
@@ -1876,7 +1881,9 @@ def test_anthropic_request_passes_adaptive_enabled_thinking_probe(monkeypatch) -
         assert channel is not None
         case.request_params = {
             **(case.request_params or {}),
+            "expected_error_required_all": ["enabled", "not supported", "output_config.effort"],
             "expected_error_missing_label": "thinking_adaptive_enabled_not_rejected",
+            "expected_error_unexpected_label": "thinking_adaptive_enabled_wrong_error",
         }
         asyncio.run(_anthropic_compatible_call(channel, build_raw_request(channel, case), {"api_key": "test-key"}))
 
@@ -1889,6 +1896,8 @@ def test_anthropic_request_passes_adaptive_enabled_thinking_probe(monkeypatch) -
         "max_tokens": 2000,
     }
     assert "expected_error_missing_label" not in captured["json"]
+    assert "expected_error_required_all" not in captured["json"]
+    assert "expected_error_unexpected_label" not in captured["json"]
 
 
 def test_openai_request_passes_reasoning_effort_and_thinking(monkeypatch) -> None:
@@ -2020,7 +2029,9 @@ def test_aws_adaptive_enabled_probe_uses_raw_messages_body() -> None:
         assert channel is not None
         params = {
             **(case.request_params or {}),
+            "expected_error_required_all": ["enabled", "not supported", "output_config.effort"],
             "expected_error_missing_label": "thinking_adaptive_enabled_not_rejected",
+            "expected_error_unexpected_label": "thinking_adaptive_enabled_wrong_error",
         }
         payload = _aws_bedrock_messages_call(FakeAwsClient(), channel, case, {}, params)
 
@@ -2035,6 +2046,8 @@ def test_aws_adaptive_enabled_probe_uses_raw_messages_body() -> None:
         "max_tokens": 2000,
     }
     assert "expected_error_missing_label" not in body
+    assert "expected_error_required_all" not in body
+    assert "expected_error_unexpected_label" not in body
     assert payload["id"] == "msg_bdrk_01ok"
 
 

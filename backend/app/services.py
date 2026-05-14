@@ -663,7 +663,15 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
 
 def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any]:
     rules: dict[str, Any] = {}
-    for key in ["expected_error_contains", "expected_error_any", "expected_error_variant_any", "expected_error_missing_label", "expected_error_variant_label"]:
+    for key in [
+        "expected_error_contains",
+        "expected_error_any",
+        "expected_error_variant_any",
+        "expected_error_required_all",
+        "expected_error_missing_label",
+        "expected_error_variant_label",
+        "expected_error_unexpected_label",
+    ]:
         if key in request_params:
             rules[key] = request_params[key]
     return rules
@@ -1715,8 +1723,10 @@ def _is_expected_error_probe_case(case: TestCase) -> bool:
         rules.get("expected_error_contains")
         or rules.get("expected_error_any")
         or rules.get("expected_error_variant_any")
+        or rules.get("expected_error_required_all")
         or rules.get("expected_error_missing_label")
         or rules.get("expected_error_variant_label")
+        or rules.get("expected_error_unexpected_label")
     )
 
 
@@ -2359,8 +2369,10 @@ def _remove_probe_only_params(body: dict[str, Any]) -> None:
         "expected_error_contains",
         "expected_error_any",
         "expected_error_variant_any",
+        "expected_error_required_all",
         "expected_error_missing_label",
         "expected_error_variant_label",
+        "expected_error_unexpected_label",
     ]:
         body.pop(key, None)
     for key, value in list(body.items()):
@@ -2574,11 +2586,18 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
 
     if normalized.get("channel_preflight_failed"):
         return 0.0, ["channel_preflight_failed", "request_failed"]
-    if rules.get("expected_error_contains") or rules.get("expected_error_any") or rules.get("expected_error_variant_any"):
+    if rules.get("expected_error_contains") or rules.get("expected_error_any") or rules.get("expected_error_variant_any") or rules.get("expected_error_required_all"):
         missing_label = str(rules.get("expected_error_missing_label") or "thinking_temperature_not_rejected")
         variant_label = str(rules.get("expected_error_variant_label") or "provider_error_variant")
+        unexpected_label = str(rules.get("expected_error_unexpected_label") or "unexpected_error_response")
         if not error_text:
             return 0.0, [missing_label]
+        required_all = [_lower_text(item) for item in rules.get("expected_error_required_all", []) if _lower_text(item)]
+        if required_all:
+            lowered_error = _lower_text(error_text)
+            if all(item in lowered_error for item in required_all):
+                return 100.0, []
+            return 0.0, [unexpected_label]
         expected_exact = _lower_text(rules.get("expected_error_contains"))
         if expected_exact and expected_exact in _lower_text(error_text):
             return 100.0, []
@@ -2588,7 +2607,7 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         variant_any = [_lower_text(item) for item in rules.get("expected_error_variant_any", []) if _lower_text(item)]
         if variant_any and any(item in _lower_text(error_text) for item in variant_any):
             return 100.0, [variant_label]
-        return 0.0, ["unexpected_error_response"]
+        return 0.0, [unexpected_label]
     if rules.get("invalid_request_probe"):
         if normalized.get("error") or normalized.get("status_code", 200) >= 400 or normalized["raw_response"].get("type") == "error":
             return 100.0, []
@@ -2942,6 +2961,7 @@ LABEL_EXPLANATIONS = {
     "signature_interop_failed": "Thinking Signature 互通检测未通过，relay 无法复用 source 生成的签名 thinking block。",
     "thinking_temperature_not_rejected": "启用 thinking 时携带非 1 temperature 未被上游拒绝，疑似中间层改写或非原生协议。",
     "thinking_adaptive_enabled_not_rejected": "thinking.adaptive.enabled 未被上游拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。",
+    "thinking_adaptive_enabled_wrong_error": "上游返回了错误，但错误内容不是 thinking.adaptive.enabled 目标参数的原生拒绝。",
     "provider_error_variant": "上游返回了等价的 thinking/temperature 约束错误，但文案与主参考不同。",
     "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
 }

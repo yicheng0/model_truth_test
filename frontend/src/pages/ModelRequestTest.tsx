@@ -62,9 +62,9 @@ const THINKING_ADAPTIVE_ENABLED_PROBE_EXTRA_PARAMS = {
     budget_tokens: 8000,
     max_tokens: 2000,
   },
-  expected_error_any: ['adaptive', 'enabled', 'output_config.effort', 'not supported', 'ValidationException', 'thinking'],
+  expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
   expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
-  expected_error_variant_label: 'provider_error_variant',
+  expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
 };
 
 const COMBO_PROBES = [
@@ -225,9 +225,11 @@ export default function ModelRequestTest() {
       setResult(payload);
       const labels = payload.result.labels ?? [];
       if (payload.result.score === 100 && payload.result.normalized_response?.error) {
-        message.success('adaptive.enabled 探针通过');
+        message.success('命中 adaptive.enabled 原生拒绝');
       } else if (labels.includes('thinking_adaptive_enabled_not_rejected')) {
-        message.warning('探针失败：渠道应报错但返回了正常内容');
+        message.warning('未拒绝 adaptive.enabled：渠道返回了正常内容');
+      } else if (labels.includes('thinking_adaptive_enabled_wrong_error')) {
+        message.warning('返回了错误，但不是 adaptive.enabled 目标错误');
       } else {
         message.warning('adaptive.enabled 探针返回非预期结果');
       }
@@ -283,7 +285,13 @@ export default function ModelRequestTest() {
   }
 
   const resultLabels = result?.result.labels ?? [];
-  const isExpectedErrorProbe = Boolean(result?.result.raw_request?.params?.expected_error_contains);
+  const resultParams = result?.result.raw_request?.params;
+  const isExpectedErrorProbe = Boolean(
+    resultParams?.expected_error_contains ||
+      resultParams?.expected_error_any ||
+      resultParams?.expected_error_variant_any ||
+      resultParams?.expected_error_required_all,
+  );
   const expectedErrorPassed = isExpectedErrorProbe && result ? result.result.score === 100 && Boolean(normalizedValue(result, 'error')) : false;
   const expectedErrorFailed = isExpectedErrorProbe && !expectedErrorPassed;
   const outputText = String(normalizedValue(result, 'content_text') ?? '');
