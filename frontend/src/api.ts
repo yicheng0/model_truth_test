@@ -10,10 +10,14 @@ import type {
   FeishuBroadcastUpdate,
   ModelRequestTestResult,
   Report,
+  ReportCompare,
+  ReportDetail,
+  ReportSummary,
   Result,
   Run,
   RunMode,
   RunResults,
+  RunSummary,
   ScheduledChannelTest,
   SignatureInteropResult,
   SimulatedMessageResponse,
@@ -21,6 +25,8 @@ import type {
   TestCase,
   TestScope,
   TestSuite,
+  TestSuiteBundle,
+  TestSuiteDiff,
 } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
@@ -36,6 +42,28 @@ type RunCreatePayload = {
   baseline_snapshot_id?: string;
   use_mock?: boolean;
   runtime_credentials?: Record<string, Record<string, unknown>>;
+  benchmark_config?: {
+    concurrency_steps?: number[];
+    duration_seconds?: number;
+    warmup_requests?: number;
+    target_qps?: number | null;
+    sla_p95_ms?: number | null;
+    max_error_rate?: number | null;
+  } | null;
+};
+
+type ArenaRunCreatePayload = {
+  name: string;
+  suite_id: string;
+  candidate_channel_ids: string[];
+  judge_channel_id?: string | null;
+  repeat_count: number;
+  concurrency: number;
+  use_mock?: boolean;
+  test_scope?: TestScope;
+  runtime_credentials?: Record<string, Record<string, unknown>>;
+  judge_mode?: string;
+  judge_rubric?: string | null;
 };
 
 type ChannelWritePayload = Partial<Omit<Channel, 'auth_config'>> & { auth_config?: Record<string, unknown> | null };
@@ -93,6 +121,9 @@ export const api = {
   channelModels: (id: string) => request<string[]>(`/api/channels/${id}/models`),
   suites: () => request<TestSuite[]>('/api/suites'),
   createSuite: (payload: Partial<TestSuite>) => request<TestSuite>('/api/test-suites', { method: 'POST', body: JSON.stringify(payload) }),
+  importSuite: (payload: TestSuiteBundle) => request<{ suite: TestSuite; created_suite: boolean; created_cases: number; updated_cases: number; case_count: number }>('/api/test-suites/import', { method: 'POST', body: JSON.stringify(payload) }),
+  exportSuite: (suiteId: string) => request<TestSuiteBundle>(`/api/test-suites/${suiteId}/export`),
+  diffSuite: (suiteId: string, against: string) => request<TestSuiteDiff>(`/api/test-suites/${suiteId}/diff?against=${encodeURIComponent(against)}`),
   cases: (suiteId?: string) => request<TestCase[]>(suiteId ? `/api/suites/${suiteId}/cases` : '/api/test-cases'),
   createCase: (payload: Partial<TestCase>) => request<TestCase>('/api/test-cases', { method: 'POST', body: JSON.stringify(payload) }),
   updateCase: (id: string, payload: Partial<TestCase>) => request<TestCase>(`/api/test-cases/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
@@ -100,7 +131,9 @@ export const api = {
   runs: () => request<Run[]>('/api/runs'),
   run: (runId: string) => request<Run>(`/api/runs/${runId}`),
   runResults: (runId: string) => request<RunResults>(`/api/runs/${runId}/results`),
+  runSummary: (runId: string) => request<RunSummary>(`/api/runs/${runId}/summary`),
   startRun: (payload: unknown) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
+  startArenaRun: (payload: ArenaRunCreatePayload) => request<Run>('/api/runs/arena', { method: 'POST', body: JSON.stringify(payload) }),
   baselines: (suiteId?: string) => request<BaselineSnapshot[]>(suiteId ? `/api/baselines?suite_id=${encodeURIComponent(suiteId)}` : '/api/baselines'),
   baseline: (id: string) => request<BaselineSnapshot>(`/api/baselines/${id}`),
   baselineResults: (id: string) => request<BaselineResult[]>(`/api/baselines/${id}/results`),
@@ -148,6 +181,9 @@ export const api = {
   results: (runId: string) => request<Result[]>(`/api/runs/${runId}/raw-results`),
   comparisons: (runId: string) => request<Comparison[]>(`/api/runs/${runId}/comparisons`),
   reports: () => request<Report[]>('/api/reports'),
+  reportSummaries: () => request<ReportSummary[]>('/api/reports/summary'),
+  reportDetail: (id: string) => request<ReportDetail>(`/api/reports/${id}/detail`),
+  compareReports: (ids: string[]) => request<ReportCompare>(`/api/reports/compare?ids=${encodeURIComponent(ids.join(','))}`),
   finalize: (runId: string) => request<{ status: string }>(`/api/runs/${runId}/finalize`, { method: 'POST' }),
   reportUrl: (runId: string) => `${API_BASE}/api/runs/${runId}/report.md`,
 };

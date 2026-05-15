@@ -153,6 +153,34 @@ class TestCaseRead(TestCaseBase):
     created_at: datetime | None = None
 
 
+class BenchmarkConfig(BaseModel):
+    concurrency_steps: list[int] = Field(default_factory=lambda: [1], min_length=1)
+    duration_seconds: int = Field(default=0, ge=0, le=3600)
+    warmup_requests: int = Field(default=0, ge=0, le=1000)
+    target_qps: float | None = Field(default=None, gt=0, le=10000)
+    sla_p95_ms: int | None = Field(default=None, gt=0)
+    max_error_rate: float | None = Field(default=None, ge=0, le=100)
+
+
+class ArenaJudgeConfig(BaseModel):
+    judge_mode: str = "direct_score"
+    judge_rubric: str | None = None
+
+
+class TestSuiteBundle(BaseModel):
+    suite: TestSuiteCreate
+    cases: list[TestCaseCreate] = Field(default_factory=list)
+
+
+class TestSuiteDiffRead(BaseModel):
+    suite_id: str
+    against: str
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    changed: list[dict[str, Any]] = Field(default_factory=list)
+    unchanged: list[str] = Field(default_factory=list)
+
+
 class RunCreate(BaseModel):
     name: str
     suite_id: str
@@ -164,6 +192,21 @@ class RunCreate(BaseModel):
     test_scope: str = "full"
     baseline_snapshot_id: str | None = None
     runtime_credentials: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    benchmark_config: BenchmarkConfig | None = None
+
+
+class ArenaRunCreate(BaseModel):
+    name: str
+    suite_id: str
+    candidate_channel_ids: list[str] = Field(min_length=2)
+    judge_channel_id: str | None = None
+    repeat_count: int = Field(default=1, ge=1, le=5)
+    concurrency: int = Field(default=1, ge=1, le=16)
+    use_mock: bool = True
+    test_scope: str = "quick"
+    runtime_credentials: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    judge_mode: str = "direct_score"
+    judge_rubric: str | None = None
 
 
 class RunRead(BaseModel):
@@ -446,6 +489,88 @@ class ReportRead(BaseModel):
     created_at: datetime | None = None
 
 
+class PerformanceSummary(BaseModel):
+    request_count: int = 0
+    error_count: int = 0
+    success_rate: float = 0.0
+    avg_score: float | None = None
+    avg_latency_ms: float | None = None
+    p50_latency_ms: float | None = None
+    p95_latency_ms: float | None = None
+    p99_latency_ms: float | None = None
+    avg_ttft_ms: float | None = None
+    avg_tpot_ms: float | None = None
+    avg_tokens_per_second: float | None = None
+    latency_avg_ms: float | None = None
+    latency_p50_ms: float | None = None
+    latency_p95_ms: float | None = None
+    latency_p99_ms: float | None = None
+    first_token_avg_ms: float | None = None
+    first_token_p95_ms: float | None = None
+    success_count: int = 0
+    failure_count: int = 0
+    failure_rate: float = 0.0
+    slow_case_ids: list[str] = Field(default_factory=list)
+
+
+class ReportSummaryRead(BaseModel):
+    report_id: str
+    run_id: str
+    run_name: str
+    mode: str
+    channel_id: str
+    channel_name: str
+    channel_role: str
+    suite_id: str
+    grade: str
+    final_score: float
+    summary: str | None = None
+    labels: list[str] = Field(default_factory=list)
+    dimension_scores: dict[str, float | None] = Field(default_factory=dict)
+    performance: PerformanceSummary
+    created_at: datetime | None = None
+
+
+class ReportPredictionRowRead(BaseModel):
+    test_case_id: str
+    title: str
+    module: str
+    sort_order: int
+    prompt: str
+    system_prompt: str | None = None
+    request_params: dict[str, Any] | None = None
+    scoring_rules: dict[str, Any] | None = None
+    result: ResultRead | None = None
+    baseline_results: list[BaselineResultRead] = Field(default_factory=list)
+    comparison: ComparisonRead | None = None
+    labels: list[str] = Field(default_factory=list)
+    score: float | None = None
+    latency_ms: float | None = None
+
+
+class ReportDetailRead(BaseModel):
+    report: ReportRead
+    run: RunRead
+    channel: ChannelRead
+    suite: TestSuiteRead | None = None
+    cases: list[TestCaseRead]
+    results: list[ResultRead]
+    comparisons: list[ComparisonRead]
+    baseline_results: list[BaselineResultRead]
+    prediction_rows: list[ReportPredictionRowRead]
+    performance_summary: PerformanceSummary
+
+
+class ReportCompareRead(BaseModel):
+    mode: str
+    reports: list[ReportSummaryRead]
+    dimensions: list[str]
+    score_matrix: list[dict[str, Any]]
+    prediction_rows: list[dict[str, Any]]
+    label_diff: dict[str, list[str]]
+    performance_matrix: list[dict[str, Any]]
+
+
 class RunResultsRead(BaseModel):
     run: RunRead
     run_channels: list[RunChannelRead]
@@ -454,6 +579,26 @@ class RunResultsRead(BaseModel):
     reports: list[ReportRead]
     baseline_snapshot: BaselineSnapshotRead | None = None
     baseline_results: list[BaselineResultRead] = Field(default_factory=list)
+
+
+class RunSummaryRead(BaseModel):
+    run: RunRead
+    channel_count: int
+    result_count: int
+    comparison_count: int
+    report_count: int
+    avg_score: float | None = None
+    avg_latency_ms: float | None = None
+    avg_ttft_ms: float | None = None
+    avg_tpot_ms: float | None = None
+    avg_tokens_per_second: float | None = None
+    success_rate: float | None = None
+    p95_latency_ms: float | None = None
+    grade_distribution: dict[str, int] = Field(default_factory=dict)
+    label_distribution: dict[str, int] = Field(default_factory=dict)
+    performance_by_channel: list[dict[str, Any]] = Field(default_factory=list)
+    arena_rankings: list[dict[str, Any]] = Field(default_factory=list)
+    top_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ModelRequestTestRead(BaseModel):

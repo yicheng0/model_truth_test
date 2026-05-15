@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
-import { Edit3, Plus, Trash2 } from 'lucide-react';
+import { Alert, Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
+import { Download, Edit3, Plus, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
 import type { TestCase, TestSuite } from '../types';
 
@@ -73,6 +73,8 @@ export default function TestCases() {
   const [suiteFilter, setSuiteFilter] = useState<string>('all');
   const [moduleFilter, setModuleFilter] = useState<string>('all');
   const [enabledFilter, setEnabledFilter] = useState<string>('all');
+  const [bundleText, setBundleText] = useState('');
+  const [diffAgainst, setDiffAgainst] = useState('');
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['cases'] });
@@ -106,6 +108,28 @@ export default function TestCases() {
       await invalidate();
     },
     onError: (error) => message.error(error instanceof Error ? error.message : '删除失败'),
+  });
+
+  const importBundle = useMutation({
+    mutationFn: (payload: unknown) => api.importSuite(payload as any),
+    onSuccess: async (result) => {
+      message.success(`题库已导入：新增 ${result.created_cases}，更新 ${result.updated_cases}`);
+      setBundleText('');
+      await invalidate();
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : '导入失败'),
+  });
+
+  const selectedExportSuiteId = suiteFilter !== 'all' ? suiteFilter : suites.data?.[0]?.id;
+  const exportedBundle = useQuery({
+    queryKey: ['suiteExport', selectedExportSuiteId],
+    queryFn: () => api.exportSuite(selectedExportSuiteId || ''),
+    enabled: Boolean(selectedExportSuiteId),
+  });
+  const suiteDiff = useQuery({
+    queryKey: ['suiteDiff', selectedExportSuiteId, diffAgainst],
+    queryFn: () => api.diffSuite(selectedExportSuiteId || '', diffAgainst),
+    enabled: Boolean(selectedExportSuiteId && diffAgainst.trim()),
   });
 
   const filteredCases = useMemo(() => {
@@ -201,6 +225,26 @@ export default function TestCases() {
     update.mutate({ id: testCase.id, values: { enabled } });
   }
 
+  function submitBundleImport() {
+    try {
+      const parsed = JSON.parse(bundleText);
+      importBundle.mutate(parsed);
+    } catch {
+      message.error('导入内容必须是合法 JSON');
+    }
+  }
+
+  function downloadBundle() {
+    if (!exportedBundle.data) return;
+    const blob = new Blob([JSON.stringify(exportedBundle.data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${exportedBundle.data.suite.id || selectedExportSuiteId}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <Space direction="vertical" size={24} className="page-stack">
       <div className="page-heading">
@@ -211,9 +255,12 @@ export default function TestCases() {
             内置题库会在这里完整展示，也可以新增自定义题目、编辑 Prompt 与评分规则，并控制是否参与后续检测任务。
           </Typography.Paragraph>
         </div>
-        <Button type="primary" size="large" icon={<Plus size={16} />} onClick={openCreate}>
-          新增题目
-        </Button>
+        <Space wrap>
+          <Button icon={<Download size={16} />} onClick={downloadBundle} disabled={!exportedBundle.data}>导出题库</Button>
+          <Button type="primary" size="large" icon={<Plus size={16} />} onClick={openCreate}>
+            新增题目
+          </Button>
+        </Space>
       </div>
 
       <section className="metric-strip">
@@ -245,6 +292,39 @@ export default function TestCases() {
             ]}
           />
         </div>
+      </Card>
+
+      <Card title={<span className="card-title-with-icon"><Upload size={18} />题库导入与差异</span>} bordered={false}>
+        <Space direction="vertical" size={14} className="full-width">
+          <Input.TextArea
+            rows={5}
+            value={bundleText}
+            onChange={(event) => setBundleText(event.target.value)}
+            placeholder="粘贴 TestSuite bundle JSON，包含 suite 与 cases"
+          />
+          <Space wrap>
+            <Button type="primary" icon={<Upload size={16} />} loading={importBundle.isPending} disabled={!bundleText.trim()} onClick={submitBundleImport}>导入/更新题库</Button>
+            <Button onClick={() => exportedBundle.data && setBundleText(JSON.stringify(exportedBundle.data, null, 2))} disabled={!exportedBundle.data}>填入当前导出</Button>
+          </Space>
+          <Input.TextArea
+            rows={3}
+            value={diffAgainst}
+            onChange={(event) => setDiffAgainst(event.target.value)}
+            placeholder="粘贴对比 bundle JSON，或输入另一个 suite_id"
+          />
+          {suiteDiff.data ? (
+            <Alert
+              type="info"
+              showIcon
+              message={`差异：新增 ${suiteDiff.data.added.length}，删除 ${suiteDiff.data.removed.length}，变更 ${suiteDiff.data.changed.length}，未变 ${suiteDiff.data.unchanged.length}`}
+              description={
+                <Space wrap>
+                  {suiteDiff.data.changed.slice(0, 6).map((item) => <Tag key={item.id}>{item.id}: {item.fields.join(', ')}</Tag>)}
+                </Space>
+              }
+            />
+          ) : null}
+        </Space>
       </Card>
 
       <Card title="内置与自定义题目" bordered={false}>

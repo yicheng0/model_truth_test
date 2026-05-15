@@ -146,6 +146,99 @@ def test_mock_run_generates_results_comparisons_and_reports() -> None:
     assert payload["reports"]
 
 
+def test_report_summary_detail_and_compare_endpoints() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        first = client.post(
+            "/api/runs",
+            json={
+                "name": "pytest report one",
+                "suite_id": suite_id,
+                "channel_ids": {"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
+                "repeat_count": 1,
+                "concurrency": 4,
+                "use_mock": True,
+            },
+        ).json()
+        second = client.post(
+            "/api/runs",
+            json={
+                "name": "pytest report two",
+                "suite_id": suite_id,
+                "channel_ids": {"gold": ["anthropic_official"], "candidate": ["negative_sample"]},
+                "repeat_count": 1,
+                "concurrency": 4,
+                "use_mock": True,
+            },
+        ).json()
+
+        summary = client.get("/api/reports/summary")
+        assert summary.status_code == 200
+        summaries = summary.json()
+        assert len(summaries) >= 2
+        assert summaries[0]["mode"]
+        assert summaries[0]["performance"]["success_count"] >= 0
+
+        report_ids = [item["report_id"] for item in summaries if item["run_id"] in {first["id"], second["id"]}][:2]
+        detail = client.get(f"/api/reports/{report_ids[0]}/detail")
+        assert detail.status_code == 200
+        detail_payload = detail.json()
+        assert detail_payload["prediction_rows"]
+        assert detail_payload["performance_summary"]["failure_rate"] >= 0
+
+        compare = client.get("/api/reports/compare", params={"ids": ",".join(report_ids)})
+        assert compare.status_code == 200
+        compare_payload = compare.json()
+        assert len(compare_payload["reports"]) == 2
+        assert compare_payload["score_matrix"]
+        assert compare_payload["prediction_rows"]
+
+        assert client.get("/api/reports/compare", params={"ids": report_ids[0]}).status_code == 400
+        assert client.get("/api/reports/compare", params={"ids": f"{report_ids[0]},missing"}).status_code == 404
+
+
+def test_report_compare_rejects_mixed_modes() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        compare_run = client.post(
+            "/api/runs",
+            json={
+                "name": "pytest authenticity report",
+                "suite_id": suite_id,
+                "channel_ids": {"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
+                "repeat_count": 1,
+                "concurrency": 4,
+                "use_mock": True,
+            },
+        ).json()
+        performance_run = client.post(
+            "/api/runs",
+            json={
+                "name": "pytest performance report",
+                "suite_id": suite_id,
+                "mode": "performance_benchmark",
+                "test_scope": "quick",
+                "channel_ids": {"candidate": ["third_party_demo"]},
+                "repeat_count": 1,
+                "concurrency": 2,
+                "use_mock": True,
+            },
+        ).json()
+        summaries = client.get("/api/reports/summary").json()
+        report_ids = [
+            item["report_id"]
+            for item in summaries
+            if item["run_id"] in {compare_run["id"], performance_run["id"]}
+        ]
+
+        response = client.get("/api/reports/compare", params={"ids": ",".join(report_ids[:2])})
+
+    assert response.status_code == 400
+    assert "modes must match" in response.json()["detail"]
+
+
 def test_default_suite_is_optimized_28_and_removes_stale_default_cases() -> None:
     reset_database()
     with SessionLocal() as db:
@@ -202,6 +295,110 @@ def test_quick_run_uses_only_quick_cases() -> None:
     assert payload["run"]["test_scope"] == "quick"
     assert payload["run"]["total_jobs"] == 16
     assert len(payload["results"]) == 16
+
+
+def test_performance_benchmark_writes_evalscope_style_metrics_and_summary() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        response = client.post(
+            "/api/runs",
+            json={
+                "name": "pytest perf run",
+                "suite_id": suite_id,
+                "test_scope": "quick",
+                "mode": "performance_benchmark",
+                "channel_ids": {"candidate": ["third_party_demo"]},
+                "repeat_count": 1,
+                "concurrency": 4,
+                "use_mock": True,
+                "benchmark_config": {
+                    "concurrency_steps": [1, 3],
+                    "warmup_requests": 1,
+                    "sla_p95_ms": 5000,
+                    "max_error_rate": 5,
+                },
+            },
+        )
+        assert response.status_code == 200
+        run = response.json()
+        payload = client.get(f"/api/runs/{run['id']}/results").json()
+        summary = client.get(f"/api/runs/{run['id']}/summary").json()
+
+    assert payload["run"]["status"] == "completed"
+    assert payload["reports"]
+    first_metrics = payload["results"][0]["metrics"]
+    assert first_metrics["ttft_ms"] is not None
+    assert "tpot_ms" in first_metrics
+    assert "tokens_per_second" in first_metrics
+    assert summary["avg_ttft_ms"] is not None
+    assert summary["performance_by_channel"][0]["channel_id"] == "third_party_demo"
+    assert payload["reports"][0]["evidence"]["benchmark_config"]["concurrency_steps"] == [1, 3]
+    assert "performance_distribution" in payload["reports"][0]["evidence"]
+
+
+def test_arena_run_generates_rankings_and_reports() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        response = client.post(
+            "/api/runs/arena",
+            json={
+                "name": "pytest arena run",
+                "suite_id": suite_id,
+                "candidate_channel_ids": ["third_party_demo", "negative_sample"],
+                "judge_channel_id": "anthropic_official",
+                "judge_mode": "direct_score",
+                "judge_rubric": "Prefer safe, concise, instruction-following answers.",
+                "repeat_count": 1,
+                "concurrency": 4,
+                "use_mock": True,
+            },
+        )
+        assert response.status_code == 200
+        run = response.json()
+        payload = client.get(f"/api/runs/{run['id']}/results").json()
+        summary = client.get(f"/api/runs/{run['id']}/summary").json()
+
+    assert payload["run"]["mode"] == "arena_comparison"
+    assert payload["reports"]
+    assert summary["arena_rankings"]
+    assert {item["channel_id"] for item in summary["arena_rankings"]} == {"third_party_demo", "negative_sample"}
+    assert payload["reports"][0]["evidence"]["arena_matrix"]
+    assert payload["reports"][0]["evidence"]["judge_evidence"]["judge_channel_id"] == "anthropic_official"
+
+
+def test_suite_bundle_import_export_and_diff() -> None:
+    reset_database()
+    bundle = {
+        "suite": {"id": "custom_suite", "name": "Custom Suite", "description": "demo", "version": "v1", "visibility": "public"},
+        "cases": [
+            {
+                "id": "custom_case_1",
+                "suite_id": "custom_suite",
+                "module": "identity",
+                "sort_order": 1,
+                "title": "Identity",
+                "prompt": "你是谁？",
+                "request_params": {"max_tokens": 64},
+                "scoring_rules": {"required_any": ["Claude"]},
+                "enabled": True,
+            }
+        ],
+    }
+    with TestClient(app) as client:
+        imported = client.post("/api/test-suites/import", json=bundle)
+        assert imported.status_code == 200
+        exported = client.get("/api/test-suites/custom_suite/export")
+        assert exported.status_code == 200
+        changed_bundle = exported.json()
+        changed_bundle["cases"][0]["prompt"] = "你是谁？请只用一句话回答。"
+        diff = client.get("/api/test-suites/custom_suite/diff", params={"against": json.dumps(changed_bundle, ensure_ascii=False)})
+        assert diff.status_code == 200
+
+    assert imported.json()["created_cases"] == 1
+    assert exported.json()["suite"]["id"] == "custom_suite"
+    assert diff.json()["changed"][0]["id"] == "custom_case_1"
 
 
 def test_score_result_supports_optimized_rules() -> None:

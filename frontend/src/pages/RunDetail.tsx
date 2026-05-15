@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Drawer, Empty, Progress, Select, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Button, Card, Descriptions, Drawer, Empty, Progress, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { CheckCircle2, Clock3, Eye, GitCompare, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { useParams } from 'react-router-dom';
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
 import { api, getErrorMessage } from '../api';
 import { roleColor } from '../channelTaxonomy';
-import type { BaselineResult, Channel, Comparison, Result, RunResults, TestCase } from '../types';
+import type { BaselineResult, Channel, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
 
 type DisplayResult = Result | BaselineResult;
 
@@ -148,6 +149,14 @@ function labelDescription(label: string, report?: RunResults['reports'][number])
   return label;
 }
 
+function runModeLabel(mode?: RunMode | string) {
+  if (mode === 'baseline_build') return '渠道指纹提取';
+  if (mode === 'performance_benchmark') return '性能诊断';
+  if (mode === 'arena_comparison') return 'Arena 排名';
+  if (mode === 'manual_probe') return '模型请求探针';
+  return '真实性对比';
+}
+
 export default function RunDetail() {
   const { runId = '' } = useParams();
   const [selectedOfficialId, setSelectedOfficialId] = useState('');
@@ -164,6 +173,15 @@ export default function RunDetail() {
       return status === 'pending' || status === 'running' ? 1800 : false;
     },
   });
+  const runSummary = useQuery<RunSummary>({
+    queryKey: ['runSummary', runId],
+    queryFn: () => api.runSummary(runId),
+    enabled: Boolean(runId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.run.status;
+      return status === 'pending' || status === 'running' ? 1800 : false;
+    },
+  });
   const channelsQuery = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const casesQuery = useQuery({
     queryKey: ['cases', runResults.data?.run.suite_id],
@@ -172,9 +190,13 @@ export default function RunDetail() {
   });
 
   const data = runResults.data ?? null;
+  const summary = runSummary.data ?? null;
   const channels = channelsQuery.data ?? [];
   const cases = casesQuery.data ?? [];
   const isSamplingRun = data?.run.mode === 'baseline_build';
+  const isPerformanceRun = data?.run.mode === 'performance_benchmark';
+  const isArenaRun = data?.run.mode === 'arena_comparison';
+  const isAuthenticityRun = data?.run.mode === 'candidate_eval' || data?.run.mode === 'full_comparison';
 
   const channelById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels]);
   const runChannelIds = useMemo(() => new Set((data?.run_channels ?? []).map((item) => item.channel_id)), [data?.run_channels]);
@@ -321,9 +343,23 @@ export default function RunDetail() {
   const selectedReport = data?.reports.find((report) => report.channel_id === selectedCandidateId);
   const dimensionScores = selectedReport?.evidence?.dimension_scores ?? {};
   const confidence = selectedReport?.evidence?.confidence ?? '-';
+  const performanceChartData = (summary?.performance_by_channel ?? []).map((item) => ({
+    name: String(item.channel_name ?? item.channel_id ?? '-'),
+    p95: Number(item.p95_latency_ms ?? 0),
+    ttft: Number(item.avg_ttft_ms ?? 0),
+    tps: Number(item.avg_tokens_per_second ?? 0),
+    success: Number(item.success_rate ?? 0),
+  }));
+  const arenaChartData = (summary?.arena_rankings ?? []).map((item) => ({
+    name: String(channelById.get(String(item.channel_id))?.name ?? item.channel_id ?? '-'),
+    score: Number(item.score ?? 0),
+    winRate: Number(item.win_rate ?? 0),
+    avgCaseScore: Number(item.avg_case_score ?? 0),
+  }));
+  const labelRows = Object.entries(summary?.label_distribution ?? {}).map(([label, count]) => ({ label, count }));
 
-  if (runResults.isError || channelsQuery.isError || casesQuery.isError) {
-    const error = runResults.error ?? channelsQuery.error ?? casesQuery.error;
+  if (runResults.isError || channelsQuery.isError || casesQuery.isError || runSummary.isError) {
+    const error = runResults.error ?? channelsQuery.error ?? casesQuery.error ?? runSummary.error;
     return (
       <Card bordered={false}>
         <Alert
@@ -331,13 +367,13 @@ export default function RunDetail() {
           showIcon
           message="任务详情加载失败"
           description={getErrorMessage(error)}
-          action={<Button onClick={() => Promise.all([runResults.refetch(), channelsQuery.refetch(), casesQuery.refetch()])}>重试</Button>}
+            action={<Button onClick={() => Promise.all([runResults.refetch(), runSummary.refetch(), channelsQuery.refetch(), casesQuery.refetch()])}>重试</Button>}
         />
       </Card>
     );
   }
 
-  if (runResults.isLoading || channelsQuery.isLoading || casesQuery.isLoading || !data) {
+  if (runResults.isLoading || runSummary.isLoading || channelsQuery.isLoading || casesQuery.isLoading || !data) {
     return <Card loading />;
   }
 
@@ -365,7 +401,7 @@ export default function RunDetail() {
             </Tag>
           </Descriptions.Item>
           <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
-          <Descriptions.Item label="运行模式">{data.run.mode}</Descriptions.Item>
+          <Descriptions.Item label="运行模式">{runModeLabel(data.run.mode)}</Descriptions.Item>
           <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
           <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>
             {data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}
@@ -380,7 +416,198 @@ export default function RunDetail() {
         <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
       </Card>
 
-      {selectedReport ? (
+      {summary ? (
+        <Card bordered={false}>
+          <Tabs
+            items={[
+              {
+                key: 'summary',
+                label: '报告摘要',
+                children: (
+                  <Space direction="vertical" size={18} style={{ width: '100%' }}>
+                    <div className="channel-pair-grid">
+                      <div className="monitor-stat-card">
+                        <span>成功率</span>
+                        <strong>{summary.success_rate === null || summary.success_rate === undefined ? '-' : `${summary.success_rate.toFixed(1)}%`}</strong>
+                      </div>
+                      <div className="monitor-stat-card">
+                        <span>P95 延迟</span>
+                        <strong>{summary.p95_latency_ms === null || summary.p95_latency_ms === undefined ? '-' : `${summary.p95_latency_ms.toFixed(0)} ms`}</strong>
+                      </div>
+                      <div className="monitor-stat-card">
+                        <span>平均 TTFT</span>
+                        <strong>{summary.avg_ttft_ms === null || summary.avg_ttft_ms === undefined ? '-' : `${summary.avg_ttft_ms.toFixed(0)} ms`}</strong>
+                      </div>
+                      <div className="monitor-stat-card">
+                        <span>平均吞吐</span>
+                        <strong>{summary.avg_tokens_per_second === null || summary.avg_tokens_per_second === undefined ? '-' : `${summary.avg_tokens_per_second.toFixed(1)} t/s`}</strong>
+                      </div>
+                    </div>
+                    <Table
+                      size="small"
+                      rowKey="label"
+                      dataSource={labelRows.slice(0, 8)}
+                      pagination={false}
+                      columns={[
+                        { title: '异常标签', dataIndex: 'label', render: (label: string) => <Tag color="volcano">{label}</Tag> },
+                        { title: '次数', dataIndex: 'count', width: 100 },
+                      ]}
+                      locale={{ emptyText: '暂无异常标签' }}
+                    />
+                  </Space>
+                ),
+              },
+              {
+                key: 'performance',
+                label: '性能视图',
+                children: performanceChartData.length ? (
+                  <div style={{ height: 320 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={performanceChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="name" angle={-20} textAnchor="end" interval={0} height={70} />
+                        <YAxis />
+                        <ChartTooltip />
+                        <Bar dataKey="p95" name="P95 延迟(ms)" fill="#3B82F6" />
+                        <Bar dataKey="ttft" name="平均 TTFT(ms)" fill="#F97316" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <Empty description="暂无性能指标" />
+                ),
+              },
+              {
+                key: 'arena',
+                label: 'Arena 排名',
+                children: arenaChartData.length ? (
+                  <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                    <div style={{ height: 300 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={arenaChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                          <XAxis dataKey="name" angle={-20} textAnchor="end" interval={0} height={70} />
+                          <YAxis />
+                          <ChartTooltip />
+                          <Bar dataKey="score" name="Arena 总分" fill="#2563EB" />
+                          <Bar dataKey="winRate" name="胜率(%)" fill="#16A34A" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <Table
+                      size="small"
+                      rowKey="name"
+                      dataSource={arenaChartData}
+                      pagination={false}
+                      columns={[
+                        { title: '渠道', dataIndex: 'name' },
+                        { title: 'Arena 总分', dataIndex: 'score', width: 120, render: (value: number) => value.toFixed(1) },
+                        { title: '胜率', dataIndex: 'winRate', width: 110, render: (value: number) => `${value.toFixed(1)}%` },
+                        { title: '平均题目分', dataIndex: 'avgCaseScore', width: 130, render: (value: number) => value.toFixed(1) },
+                      ]}
+                    />
+                  </Space>
+                ) : (
+                  <Empty description="当前任务不是 Arena 模式，或暂无排名数据" />
+                ),
+              },
+            ]}
+          />
+        </Card>
+      ) : null}
+
+      {isPerformanceRun && summary ? (
+        <Card bordered={false} className="live-monitor-card">
+          <div className="live-monitor-header">
+            <div>
+              <Typography.Text className="brand-kicker">PERFORMANCE DIAGNOSTICS</Typography.Text>
+              <Typography.Title level={2}>性能诊断面板</Typography.Title>
+              <Typography.Paragraph>
+                这里展示单个或多个渠道各自的延迟、首 token、吞吐和失败率，不代表渠道是否接近官方 Claude 指纹。
+              </Typography.Paragraph>
+            </div>
+            <Tag color={data.run.status === 'running' ? 'processing' : 'default'}>{data.run.status === 'running' ? '实时刷新中' : '当前为静态快照'}</Tag>
+          </div>
+          <div className="channel-pair-grid">
+            <div className="monitor-stat-card"><span>成功率</span><strong>{summary.success_rate === null || summary.success_rate === undefined ? '-' : `${summary.success_rate.toFixed(1)}%`}</strong></div>
+            <div className="monitor-stat-card"><span>P95 延迟</span><strong>{summary.p95_latency_ms === null || summary.p95_latency_ms === undefined ? '-' : `${summary.p95_latency_ms.toFixed(0)} ms`}</strong></div>
+            <div className="monitor-stat-card"><span>平均 TTFT</span><strong>{summary.avg_ttft_ms === null || summary.avg_ttft_ms === undefined ? '-' : `${summary.avg_ttft_ms.toFixed(0)} ms`}</strong></div>
+            <div className="monitor-stat-card"><span>平均吞吐</span><strong>{summary.avg_tokens_per_second === null || summary.avg_tokens_per_second === undefined ? '-' : `${summary.avg_tokens_per_second.toFixed(1)} t/s`}</strong></div>
+          </div>
+          {performanceChartData.length ? (
+            <div style={{ height: 320 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={performanceChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="name" angle={-20} textAnchor="end" interval={0} height={70} />
+                  <YAxis />
+                  <ChartTooltip />
+                  <Bar dataKey="p95" name="P95 延迟(ms)" fill="#F97316" />
+                  <Bar dataKey="ttft" name="平均 TTFT(ms)" fill="#2563EB" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          ) : <Empty description="暂无性能指标" />}
+          <Table
+            rowKey="channel_id"
+            dataSource={summary.performance_by_channel}
+            pagination={false}
+            scroll={{ x: 900 }}
+            columns={[
+              { title: '渠道', dataIndex: 'channel_name', width: 220 },
+              { title: '成功率', dataIndex: 'success_rate', width: 120, render: (value: number) => value === undefined ? '-' : `${value.toFixed(1)}%` },
+              { title: 'P95 延迟', dataIndex: 'p95_latency_ms', width: 130, render: (value: number) => value === undefined || value === null ? '-' : `${value.toFixed(0)} ms` },
+              { title: 'TTFT', dataIndex: 'avg_ttft_ms', width: 120, render: (value: number) => value === undefined || value === null ? '-' : `${value.toFixed(0)} ms` },
+              { title: 'TPOT', dataIndex: 'avg_tpot_ms', width: 120, render: (value: number) => value === undefined || value === null ? '-' : `${value.toFixed(1)} ms` },
+              { title: '吞吐', dataIndex: 'avg_tokens_per_second', width: 130, render: (value: number) => value === undefined || value === null ? '-' : `${value.toFixed(1)} t/s` },
+            ]}
+          />
+        </Card>
+      ) : null}
+
+      {isArenaRun && summary ? (
+        <Card bordered={false} className="live-monitor-card">
+          <div className="live-monitor-header">
+            <div>
+              <Typography.Text className="brand-kicker">ARENA RANKING</Typography.Text>
+              <Typography.Title level={2}>Arena 排名面板</Typography.Title>
+              <Typography.Paragraph>
+                Arena 用于候选渠道之间的横向排名和样本分歧分析，不引用官方基线，因此不作为真实性结论。
+              </Typography.Paragraph>
+            </div>
+            <Tag color="purple">排名视图</Tag>
+          </div>
+          {arenaChartData.length ? (
+            <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <div style={{ height: 320 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={arenaChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="name" angle={-20} textAnchor="end" interval={0} height={70} />
+                    <YAxis />
+                    <ChartTooltip />
+                    <Bar dataKey="score" name="Arena 总分" fill="#2563EB" />
+                    <Bar dataKey="winRate" name="胜率(%)" fill="#16A34A" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <Table
+                rowKey="name"
+                dataSource={arenaChartData}
+                pagination={false}
+                columns={[
+                  { title: '渠道', dataIndex: 'name' },
+                  { title: 'Arena 总分', dataIndex: 'score', width: 120, render: (value: number) => value.toFixed(1) },
+                  { title: '胜率', dataIndex: 'winRate', width: 110, render: (value: number) => `${value.toFixed(1)}%` },
+                  { title: '平均题目分', dataIndex: 'avgCaseScore', width: 130, render: (value: number) => value.toFixed(1) },
+                ]}
+              />
+            </Space>
+          ) : <Empty description="暂无 Arena 排名数据" />}
+        </Card>
+      ) : null}
+
+      {isAuthenticityRun && selectedReport ? (
         <Card bordered={false}>
           <div className="channel-pair-grid">
             <div className="monitor-stat-card">
@@ -403,6 +630,7 @@ export default function RunDetail() {
         </Card>
       ) : null}
 
+      {isAuthenticityRun || isSamplingRun ? (
       <Card bordered={false} className="live-monitor-card">
         <div className="live-monitor-header">
           <div>
@@ -657,6 +885,7 @@ export default function RunDetail() {
           />
         )}
       </Card>
+      ) : null}
 
       <Drawer
         title={outputDrawer ? `${outputDrawer.title} · ${outputDrawer.caseTitle}` : '输出详情'}

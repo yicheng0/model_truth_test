@@ -71,7 +71,7 @@ export default function Runs() {
             </Link>
             <Link to="/new-run?mode=compare">
               <Button type="primary" size="large" icon={<GitCompare size={16} />} style={{ height: '40px', fontWeight: 600 }}>
-                对比测试
+                真实性对比
               </Button>
             </Link>
           </Space>

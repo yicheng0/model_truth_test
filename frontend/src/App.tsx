@@ -1,16 +1,21 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Popover, Typography } from 'antd';
-import { Activity, CalendarClock, ClipboardList, Database, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck } from 'lucide-react';
-import Dashboard from './pages/Dashboard';
-import Channels from './pages/Channels';
-import Baselines from './pages/Baselines';
-import CreateRun from './pages/CreateRun';
-import Runs from './pages/Runs';
-import RunDetail from './pages/RunDetail';
-import TestCases from './pages/TestCases';
-import ScheduledTests from './pages/ScheduledTests';
-import SignatureInterop from './pages/SignatureInterop';
-import ModelRequestTest from './pages/ModelRequestTest';
+import { Activity, CalendarClock, ClipboardList, Database, FileText, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck } from 'lucide-react';
+
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Channels = lazy(() => import('./pages/Channels'));
+const Baselines = lazy(() => import('./pages/Baselines'));
+const CreateRun = lazy(() => import('./pages/CreateRun'));
+const Runs = lazy(() => import('./pages/Runs'));
+const RunDetail = lazy(() => import('./pages/RunDetail'));
+const TestCases = lazy(() => import('./pages/TestCases'));
+const ScheduledTests = lazy(() => import('./pages/ScheduledTests'));
+const SignatureInterop = lazy(() => import('./pages/SignatureInterop'));
+const ModelRequestTest = lazy(() => import('./pages/ModelRequestTest'));
+const ReportsPage = lazy(() => import('./pages/ReportsPage'));
+const ReportDetailPage = lazy(() => import('./pages/ReportDetailPage'));
+const ComparePage = lazy(() => import('./pages/ComparePage'));
 
 const { Content, Sider } = Layout;
 
@@ -24,6 +29,7 @@ const navItems = [
   { key: '/scheduled-tests', icon: CalendarClock, label: '自动巡检', to: '/scheduled-tests' },
   { key: '/new-run', icon: ListChecks, label: '新建任务', to: '/new-run' },
   { key: '/runs', icon: GitCompare, label: '任务列表', to: '/runs' },
+  { key: '/reports', icon: FileText, label: '报告中心', to: '/reports' },
 ];
 
 function Shell() {
@@ -75,19 +81,24 @@ function Shell() {
 
       <Layout className="workspace">
         <Content className="content">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/channels" element={<Channels />} />
-            <Route path="/model-request-test" element={<ModelRequestTest />} />
-            <Route path="/signature-interop" element={<SignatureInterop />} />
-            <Route path="/test-cases" element={<TestCases />} />
-            <Route path="/baselines" element={<Baselines />} />
-            <Route path="/scheduled-tests" element={<ScheduledTests />} />
-            <Route path="/new-run" element={<CreateRun />} />
-            <Route path="/runs" element={<Runs />} />
-            <Route path="/runs/:runId" element={<RunDetail />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+          <Suspense fallback={<div className="route-loading">加载中...</div>}>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/channels" element={<Channels />} />
+              <Route path="/model-request-test" element={<ModelRequestTest />} />
+              <Route path="/signature-interop" element={<SignatureInterop />} />
+              <Route path="/test-cases" element={<TestCases />} />
+              <Route path="/baselines" element={<Baselines />} />
+              <Route path="/scheduled-tests" element={<ScheduledTests />} />
+              <Route path="/new-run" element={<CreateRun />} />
+              <Route path="/runs" element={<Runs />} />
+              <Route path="/runs/:runId" element={<RunDetail />} />
+              <Route path="/reports" element={<ReportsPage />} />
+              <Route path="/reports/:reportId" element={<ReportDetailPage />} />
+              <Route path="/compare" element={<ComparePage />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
         </Content>
       </Layout>
     </Layout>

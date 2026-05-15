@@ -113,7 +113,7 @@ export type Run = {
   created_at?: string | null;
 };
 
-export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe';
+export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe' | 'performance_benchmark' | 'arena_comparison';
 export type TestScope = 'quick' | 'full';
 
 export type RunChannel = {
@@ -192,6 +192,116 @@ export type Report = {
   summary?: string | null;
   evidence?: Record<string, any> | null;
   markdown?: string | null;
+  created_at?: string | null;
+};
+
+export type TestSuiteBundle = {
+  suite: Partial<TestSuite>;
+  cases: Array<Partial<TestCase>>;
+};
+
+export type TestSuiteDiff = {
+  suite_id: string;
+  against: string;
+  added: string[];
+  removed: string[];
+  changed: Array<{ id: string; fields: string[] }>;
+  unchanged: string[];
+};
+
+export type PerformanceSummary = {
+  request_count?: number;
+  error_count?: number;
+  success_rate?: number;
+  avg_score?: number | null;
+  avg_latency_ms?: number | null;
+  p50_latency_ms?: number | null;
+  p95_latency_ms?: number | null;
+  p99_latency_ms?: number | null;
+  avg_ttft_ms?: number | null;
+  avg_tpot_ms?: number | null;
+  avg_tokens_per_second?: number | null;
+  latency_avg_ms?: number | null;
+  latency_p50_ms?: number | null;
+  latency_p95_ms?: number | null;
+  latency_p99_ms?: number | null;
+  first_token_avg_ms?: number | null;
+  first_token_p95_ms?: number | null;
+  success_count: number;
+  failure_count: number;
+  failure_rate: number;
+  slow_case_ids: string[];
+};
+
+export type ReportSummary = {
+  report_id: string;
+  run_id: string;
+  run_name: string;
+  mode: RunMode;
+  channel_id: string;
+  channel_name: string;
+  channel_role: string;
+  suite_id: string;
+  grade: Report['grade'];
+  final_score: number;
+  summary?: string | null;
+  labels: string[];
+  dimension_scores: Record<string, number | null | undefined>;
+  performance: PerformanceSummary;
+  created_at?: string | null;
+};
+
+export type ReportPredictionRow = {
+  test_case_id: string;
+  title: string;
+  module: string;
+  sort_order: number;
+  prompt: string;
+  system_prompt?: string | null;
+  request_params?: Record<string, any> | null;
+  scoring_rules?: Record<string, any> | null;
+  result?: Result | null;
+  baseline_results: BaselineResult[];
+  comparison?: Comparison | null;
+  labels: string[];
+  score?: number | null;
+  latency_ms?: number | null;
+};
+
+export type ReportDetail = {
+  report: Report;
+  run: Run;
+  channel: Channel;
+  suite?: TestSuite | null;
+  cases: TestCase[];
+  results: Result[];
+  comparisons: Comparison[];
+  baseline_results: BaselineResult[];
+  prediction_rows: ReportPredictionRow[];
+  performance_summary: PerformanceSummary;
+};
+
+export type ReportCompare = {
+  mode: RunMode;
+  reports: ReportSummary[];
+  dimensions: string[];
+  score_matrix: Array<Record<string, any>>;
+  prediction_rows: Array<{
+    test_case_id: string;
+    title: string;
+    module: string;
+    sort_order: number;
+    prompt: string;
+    reports: Record<string, {
+      result?: Result | null;
+      comparison?: Comparison | null;
+      labels: string[];
+      score?: number | null;
+      latency_ms?: number | null;
+    } | null>;
+  }>;
+  label_diff: Record<string, string[]>;
+  performance_matrix: Array<Record<string, any>>;
 };
 
 export type RunResults = {
@@ -202,6 +312,26 @@ export type RunResults = {
   reports: Report[];
   baseline_snapshot?: BaselineSnapshot | null;
   baseline_results: BaselineResult[];
+};
+
+export type RunSummary = {
+  run: Run;
+  channel_count: number;
+  result_count: number;
+  comparison_count: number;
+  report_count: number;
+  avg_score?: number | null;
+  avg_latency_ms?: number | null;
+  avg_ttft_ms?: number | null;
+  avg_tpot_ms?: number | null;
+  avg_tokens_per_second?: number | null;
+  success_rate?: number | null;
+  p95_latency_ms?: number | null;
+  grade_distribution: Record<string, number>;
+  label_distribution: Record<string, number>;
+  performance_by_channel: Array<Record<string, any>>;
+  arena_rankings: Array<Record<string, any>>;
+  top_evidence: Array<Record<string, any>>;
 };
 
 export type ScheduledChannelTest = {

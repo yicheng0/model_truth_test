@@ -17,6 +17,7 @@ from .schemas import (
     BaselineResultRead,
     BaselineSnapshotRead,
     BaselineSnapshotUpdate,
+    ArenaRunCreate,
     ChannelAlertRead,
     ChannelAlertReviewUpdate,
     ChannelCreate,
@@ -34,11 +35,17 @@ from .schemas import (
     ModelRequestTestCreate,
     ModelRequestTestRead,
     ReportRead,
+    ReportCompareRead,
+    ReportDetailRead,
+    ReportSummaryRead,
     ResultRead,
     RunChannelRead,
     RunCreate,
     RunRead,
     RunResultsRead,
+    RunSummaryRead,
+    TestSuiteBundle,
+    TestSuiteDiffRead,
     ScheduledChannelTestCreate,
     ScheduledChannelTestRead,
     ScheduledChannelTestUpdate,
@@ -55,6 +62,8 @@ from .schemas import (
 from .services import (
     build_comparisons,
     build_reports,
+    build_special_run_reports,
+    build_run_summary,
     build_smart_patrol_report,
     channel_taxonomy_setting_read,
     create_alerts_for_run,
@@ -65,6 +74,8 @@ from .services import (
     create_run,
     create_scheduled_channel_test,
     create_suite,
+    compare_reports,
+    export_suite_bundle,
     execute_run,
     execute_scheduled_channel_test,
     fetch_channel_models,
@@ -72,9 +83,12 @@ from .services import (
     get_or_create_channel_taxonomy_setting,
     feishu_setting_read,
     get_or_create_feishu_setting,
+    get_report_detail,
+    list_report_summaries,
     MANUAL_PROBE_MODE,
     MANUAL_PROBE_SUITE_ID,
     refresh_baseline_status,
+    import_suite_bundle,
     scheduled_test_loop,
     send_alert_notification,
     send_daily_patrol_report,
@@ -82,6 +96,7 @@ from .services import (
     seed_demo_data,
     simulate_message_response,
     smart_patrol_report_markdown,
+    suite_diff,
     test_signature_interop,
     update_channel_taxonomy_setting,
     update_feishu_setting,
@@ -300,6 +315,30 @@ def update_test_suite_alias(suite_id: str, data: TestSuiteUpdate, db: Session = 
     return suite
 
 
+@app.post("/api/test-suites/import")
+def import_test_suite_bundle(data: TestSuiteBundle, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return import_suite_bundle(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/test-suites/{suite_id}/export")
+def export_test_suite_bundle(suite_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return export_suite_bundle(db, suite_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/test-suites/{suite_id}/diff", response_model=TestSuiteDiffRead)
+def diff_test_suite_bundle(suite_id: str, against: str = Query(...), db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return suite_diff(db, suite_id, against)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/api/suites/{suite_id}/cases", response_model=list[TestCaseRead])
 def list_cases(suite_id: str, db: Session = Depends(get_db)) -> list[TestCase]:
     return list(
@@ -364,7 +403,14 @@ def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = 
         run = create_run(db, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    background_tasks.add_task(execute_run, SessionLocal, run.id, data.runtime_credentials, data.use_mock)
+    background_tasks.add_task(
+        execute_run,
+        SessionLocal,
+        run.id,
+        data.runtime_credentials,
+        data.use_mock,
+        benchmark_config=data.benchmark_config.model_dump() if data.benchmark_config else None,
+    )
     return run
 
 
@@ -381,6 +427,40 @@ def list_runs_alias(db: Session = Depends(get_db)) -> list[Run]:
 @app.post("/api/runs", response_model=RunRead)
 def start_run_alias(data: RunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Run:
     return start_run(data, background_tasks, db)
+
+
+@app.post("/api/runs/arena", response_model=RunRead)
+def start_arena_run(data: ArenaRunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Run:
+    channel_ids = {"candidate": data.candidate_channel_ids}
+    if data.judge_channel_id and not db.get(Channel, data.judge_channel_id):
+        raise HTTPException(status_code=404, detail="Judge channel not found")
+    try:
+        run = create_run(
+            db,
+            RunCreate(
+                name=data.name,
+                suite_id=data.suite_id,
+                channel_ids=channel_ids,
+                repeat_count=data.repeat_count,
+                concurrency=data.concurrency,
+                use_mock=data.use_mock,
+                mode="arena_comparison",
+                test_scope=data.test_scope,
+                runtime_credentials=data.runtime_credentials,
+                benchmark_config=None,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    background_tasks.add_task(
+        execute_run,
+        SessionLocal,
+        run.id,
+        data.runtime_credentials,
+        data.use_mock,
+        arena_config={"judge_channel_id": data.judge_channel_id, "judge_mode": data.judge_mode, "judge_rubric": data.judge_rubric},
+    )
+    return run
 
 
 @app.get("/api/baselines", response_model=list[BaselineSnapshotRead])
@@ -458,7 +538,13 @@ def build_baseline(data: BaselineBuildCreate, background_tasks: BackgroundTasks,
         run, _snapshot = create_baseline_build(db, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    background_tasks.add_task(execute_run, SessionLocal, run.id, data.runtime_credentials, data.use_mock)
+    background_tasks.add_task(
+        execute_run,
+        SessionLocal,
+        run.id,
+        data.runtime_credentials,
+        data.use_mock,
+    )
     return run
 
 
@@ -689,6 +775,14 @@ def run_progress_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, 
     return {"run_id": run.id, "status": run.status, "completed_jobs": run.completed_jobs, "total_jobs": run.total_jobs, "percent": percent}
 
 
+@app.get("/api/runs/{run_id}/summary", response_model=RunSummaryRead)
+def get_run_summary_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return build_run_summary(db, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/api/eval-runs/{run_id}/results", response_model=RunResultsRead)
 def get_run_results(run_id: str, db: Session = Depends(get_db)) -> RunResultsRead:
     run = db.get(Run, run_id)
@@ -805,6 +899,8 @@ def finalize_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.mode == "baseline_build":
         finalize_baseline_from_run(db, run_id)
+    elif run.mode in {"performance_benchmark", "arena_comparison"}:
+        build_special_run_reports(db, run_id)
     else:
         build_comparisons(db, run_id, run.baseline_snapshot_id)
         build_reports(db, run_id)
@@ -833,6 +929,34 @@ def download_report_alias(run_id: str, db: Session = Depends(get_db)) -> Respons
 @app.get("/api/reports", response_model=list[ReportRead])
 def list_reports_alias(db: Session = Depends(get_db)) -> list[Report]:
     return list(db.scalars(select(Report).order_by(Report.created_at.desc())).all())
+
+
+@app.get("/api/reports/summary", response_model=list[ReportSummaryRead])
+def list_report_summary_alias(db: Session = Depends(get_db)) -> list[dict[str, object]]:
+    return list_report_summaries(db)
+
+
+@app.get("/api/reports/compare", response_model=ReportCompareRead)
+def compare_reports_alias(ids: str = Query(..., description="Comma-separated report ids, 2-3 reports"), db: Session = Depends(get_db)) -> dict[str, object]:
+    report_ids = [item.strip() for item in ids.split(",") if item.strip()]
+    if len(report_ids) < 2:
+        raise HTTPException(status_code=400, detail="Select at least 2 reports")
+    if len(report_ids) > 3:
+        raise HTTPException(status_code=400, detail="Select at most 3 reports")
+    try:
+        return compare_reports(db, report_ids)
+    except ValueError as exc:
+        if "modes must match" in str(exc):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/reports/{report_id}/detail", response_model=ReportDetailRead)
+def get_report_detail_alias(report_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    detail = get_report_detail(db, report_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return detail
 
 
 @app.get("/api/reports/{report_id}", response_model=ReportRead)

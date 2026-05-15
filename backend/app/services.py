@@ -16,10 +16,30 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
-from .schemas import BaselineBuildCreate, ChannelCreate, ChannelTaxonomySettingUpdate, FeishuBroadcastSettingUpdate, ModelRequestTestCreate, RunCreate, ScheduledChannelTestCreate, TestCaseCreate, TestSuiteCreate
+from .schemas import (
+    BaselineBuildCreate,
+    BaselineResultRead,
+    ChannelCreate,
+    ChannelRead,
+    ChannelTaxonomySettingUpdate,
+    ComparisonRead,
+    FeishuBroadcastSettingUpdate,
+    ModelRequestTestCreate,
+    ReportRead,
+    ResultRead,
+    RunCreate,
+    RunRead,
+    ScheduledChannelTestCreate,
+    TestSuiteBundle,
+    TestCaseCreate,
+    TestCaseRead,
+    TestSuiteCreate,
+    TestSuiteRead,
+)
 from .suite_seed import default_cases, default_suite
 
 
@@ -104,6 +124,8 @@ REMOVED_BUILT_IN_MODEL_OPTIONS = {
 }
 REFERENCE_RUN_ROLES = {"reference", "gold", "official_cloud"}
 CANDIDATE_RUN_ROLES = {"candidate", "negative"}
+COMPARISON_RUN_MODES = {"full_comparison", "candidate_eval"}
+SPECIAL_REPORT_RUN_MODES = {"performance_benchmark", "arena_comparison"}
 
 
 def get_or_create_channel_taxonomy_setting(db: Session) -> ChannelTaxonomySetting:
@@ -319,6 +341,15 @@ def _clean_auth_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def create_suite(db: Session, data: TestSuiteCreate) -> TestSuite:
+    existing = db.get(TestSuite, data.id) if data.id else None
+    if existing:
+        existing.name = data.name
+        existing.description = data.description
+        existing.version = data.version
+        existing.visibility = data.visibility
+        db.commit()
+        db.refresh(existing)
+        return existing
     suite = TestSuite(
         id=data.id or new_id("suite"),
         name=data.name,
@@ -333,6 +364,21 @@ def create_suite(db: Session, data: TestSuiteCreate) -> TestSuite:
 
 
 def create_case(db: Session, data: TestCaseCreate) -> TestCase:
+    existing = db.get(TestCase, data.id) if data.id else None
+    if existing:
+        existing.suite_id = data.suite_id
+        existing.module = data.module
+        existing.sort_order = data.sort_order
+        existing.title = data.title
+        existing.prompt = data.prompt
+        existing.system_prompt = data.system_prompt
+        existing.request_params = data.request_params or {}
+        existing.scoring_rules = data.scoring_rules or {}
+        existing.is_hidden = data.is_hidden
+        existing.enabled = data.enabled
+        db.commit()
+        db.refresh(existing)
+        return existing
     existing_orders = db.scalars(select(TestCase.sort_order).where(TestCase.suite_id == data.suite_id)).all()
     next_order = max([order for order in existing_orders if order is not None], default=0) + 1
     sort_order = data.sort_order if data.sort_order not in {None, 0, 1000} else next_order
@@ -353,6 +399,118 @@ def create_case(db: Session, data: TestCaseCreate) -> TestCase:
     db.commit()
     db.refresh(case)
     return case
+
+
+def export_suite_bundle(db: Session, suite_id: str) -> dict[str, Any]:
+    suite = db.get(TestSuite, suite_id)
+    if not suite:
+        raise ValueError("Test suite not found")
+    cases = db.scalars(
+        select(TestCase)
+        .where(TestCase.suite_id == suite_id)
+        .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
+    ).all()
+    return {
+        "suite": {
+            "id": suite.id,
+            "name": suite.name,
+            "description": suite.description,
+            "version": suite.version,
+            "visibility": suite.visibility,
+        },
+        "cases": [
+            {
+                "id": case.id,
+                "suite_id": suite.id,
+                "module": case.module,
+                "sort_order": case.sort_order,
+                "title": case.title,
+                "prompt": case.prompt,
+                "system_prompt": case.system_prompt,
+                "request_params": case.request_params or {},
+                "scoring_rules": case.scoring_rules or {},
+                "is_hidden": case.is_hidden,
+                "enabled": case.enabled,
+            }
+            for case in cases
+        ],
+    }
+
+
+def import_suite_bundle(db: Session, bundle: TestSuiteBundle) -> dict[str, Any]:
+    suite_data = bundle.suite
+    suite_id = suite_data.id or new_id("suite")
+    suite = db.get(TestSuite, suite_id)
+    created_suite = suite is None
+    if suite is None:
+        suite = TestSuite(
+            id=suite_id,
+            name=suite_data.name,
+            description=suite_data.description,
+            version=suite_data.version,
+            visibility=suite_data.visibility,
+        )
+        db.add(suite)
+    else:
+        suite.name = suite_data.name
+        suite.description = suite_data.description
+        suite.version = suite_data.version
+        suite.visibility = suite_data.visibility
+
+    created_cases = 0
+    updated_cases = 0
+    for index, case_data in enumerate(bundle.cases, start=1):
+        case_id = case_data.id or new_id("tc")
+        case = db.get(TestCase, case_id)
+        if case is None:
+            case = TestCase(id=case_id, suite_id=suite_id)
+            db.add(case)
+            created_cases += 1
+        else:
+            updated_cases += 1
+        case.suite_id = suite_id
+        case.module = case_data.module
+        case.sort_order = case_data.sort_order or index
+        case.title = case_data.title
+        case.prompt = case_data.prompt
+        case.system_prompt = case_data.system_prompt
+        case.request_params = case_data.request_params or {}
+        case.scoring_rules = case_data.scoring_rules or {}
+        case.is_hidden = case_data.is_hidden
+        case.enabled = case_data.enabled
+    db.commit()
+    db.refresh(suite)
+    return {
+        "suite": TestSuiteRead.model_validate(suite),
+        "created_suite": created_suite,
+        "created_cases": created_cases,
+        "updated_cases": updated_cases,
+        "case_count": len(bundle.cases),
+    }
+
+
+def suite_diff(db: Session, suite_id: str, against: str) -> dict[str, Any]:
+    current = export_suite_bundle(db, suite_id)
+    try:
+        reference = json.loads(against)
+    except json.JSONDecodeError:
+        reference = export_suite_bundle(db, against)
+    current_cases = {case["id"]: case for case in current["cases"]}
+    reference_cases = {case["id"]: case for case in reference.get("cases", []) if case.get("id")}
+    added = sorted(set(current_cases) - set(reference_cases))
+    removed = sorted(set(reference_cases) - set(current_cases))
+    changed: list[dict[str, Any]] = []
+    unchanged: list[str] = []
+    for case_id in sorted(set(current_cases) & set(reference_cases)):
+        fields = []
+        for field in ["module", "sort_order", "title", "prompt", "system_prompt", "request_params", "scoring_rules", "is_hidden", "enabled"]:
+            if current_cases[case_id].get(field) != reference_cases[case_id].get(field):
+                fields.append(field)
+        if fields:
+            changed.append({"id": case_id, "fields": fields})
+        else:
+            unchanged.append(case_id)
+    return {"suite_id": suite_id, "against": reference.get("suite", {}).get("id", against), "added": added, "removed": removed, "changed": changed, "unchanged": unchanged}
 
 
 def seed_demo_data(db: Session) -> None:
@@ -397,9 +555,10 @@ def seed_demo_data(db: Session) -> None:
 def create_run(db: Session, data: RunCreate) -> Run:
     mode = data.mode or "full_comparison"
     test_scope = data.test_scope or "full"
+    benchmark_config = normalize_benchmark_config(data.benchmark_config.model_dump() if data.benchmark_config else None)
     if test_scope not in {"quick", "full"}:
         raise ValueError(f"Unsupported test scope: {test_scope}")
-    if mode not in {"full_comparison", "baseline_build", "candidate_eval", MANUAL_PROBE_MODE}:
+    if mode not in {"full_comparison", "baseline_build", "candidate_eval", "performance_benchmark", "arena_comparison", MANUAL_PROBE_MODE}:
         raise ValueError(f"Unsupported run mode: {mode}")
     if mode == "candidate_eval":
         if not data.baseline_snapshot_id:
@@ -408,6 +567,14 @@ def create_run(db: Session, data: RunCreate) -> Run:
     channel_ids_by_role = _normalize_channel_ids_for_mode(db, data.channel_ids or _default_channel_ids_by_role(db, mode), mode)
     selected_ids = [(channel_id, role) for role, ids in channel_ids_by_role.items() for channel_id in ids]
     cases = cases_for_scope(db, data.suite_id, test_scope)
+    repeat_count = max(1, data.repeat_count)
+    concurrency = max(1, data.concurrency)
+    if mode == "performance_benchmark" and benchmark_config:
+        concurrency = max(benchmark_config["concurrency_steps"])
+        min_attempts = benchmark_config["warmup_requests"] + len(benchmark_config["concurrency_steps"])
+        if benchmark_config["duration_seconds"]:
+            min_attempts += max(1, benchmark_config["duration_seconds"] // 30)
+        repeat_count = max(repeat_count, min(20, max(1, min_attempts)))
     run = Run(
         id=new_id("run"),
         suite_id=data.suite_id,
@@ -416,9 +583,9 @@ def create_run(db: Session, data: RunCreate) -> Run:
         test_scope=test_scope,
         baseline_snapshot_id=data.baseline_snapshot_id,
         status="pending",
-        repeat_count=max(1, data.repeat_count),
-        concurrency=max(1, data.concurrency),
-        total_jobs=len(selected_ids) * len(cases) * max(1, data.repeat_count),
+        repeat_count=repeat_count,
+        concurrency=concurrency,
+        total_jobs=len(selected_ids) * len(cases) * repeat_count,
     )
     db.add(run)
     db.commit()
@@ -427,6 +594,23 @@ def create_run(db: Session, data: RunCreate) -> Run:
     db.commit()
     db.refresh(run)
     return run
+
+
+def normalize_benchmark_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not config:
+        return None
+    steps = config.get("concurrency_steps") or [config.get("concurrency") or 1]
+    concurrency_steps = sorted({max(1, min(64, int(step))) for step in steps if str(step).strip()})
+    if not concurrency_steps:
+        concurrency_steps = [1]
+    return {
+        "concurrency_steps": concurrency_steps,
+        "duration_seconds": max(0, min(3600, int(config.get("duration_seconds") or 0))),
+        "warmup_requests": max(0, min(1000, int(config.get("warmup_requests") or 0))),
+        "target_qps": float(config["target_qps"]) if config.get("target_qps") else None,
+        "sla_p95_ms": int(config["sla_p95_ms"]) if config.get("sla_p95_ms") else None,
+        "max_error_rate": float(config["max_error_rate"]) if config.get("max_error_rate") is not None else None,
+    }
 
 
 def create_baseline_build(db: Session, data: BaselineBuildCreate) -> tuple[Run, BaselineSnapshot]:
@@ -528,6 +712,9 @@ def _filter_channel_ids_for_mode(channel_ids_by_role: dict[str, list[str]], mode
         "baseline_build": REFERENCE_RUN_ROLES,
         "candidate_eval": CANDIDATE_RUN_ROLES,
         "full_comparison": REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
+        "performance_benchmark": REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
+        "arena_comparison": REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
+        MANUAL_PROBE_MODE: REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
     }[mode]
     return {role: ids for role, ids in channel_ids_by_role.items() if role in allowed and ids}
 
@@ -576,10 +763,24 @@ def _result_from_normalized(run_id: str, case: TestCase, channel: Channel, attem
         normalized_response=normalized,
         raw_request=normalized.get("raw_request"),
         raw_response=normalized.get("raw_response"),
-        metrics={"latency_ms": normalized.get("latency_ms"), "first_token_ms": normalized.get("first_token_ms")},
+        metrics=metrics_from_normalized(normalized),
         score=score,
         labels=labels,
     )
+
+
+def metrics_from_normalized(normalized: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "latency_ms": normalized.get("latency_ms"),
+        "first_token_ms": normalized.get("first_token_ms"),
+        "ttft_ms": normalized.get("ttft_ms") or normalized.get("first_token_ms"),
+        "tpot_ms": normalized.get("tpot_ms"),
+        "input_tokens": normalized.get("input_tokens"),
+        "output_tokens": normalized.get("output_tokens"),
+        "tokens_per_second": normalized.get("tokens_per_second"),
+        "status_code": normalized.get("status_code"),
+        "error_type": normalized.get("error_type"),
+    }
 
 
 def _manual_probe_suite(db: Session) -> TestSuite:
@@ -682,8 +883,12 @@ async def execute_run(
     run_id: str,
     runtime_credentials: dict[str, dict[str, Any]] | None = None,
     use_mock: bool = True,
+    benchmark_config: dict[str, Any] | None = None,
+    arena_config: dict[str, Any] | None = None,
 ) -> None:
     runtime_credentials = runtime_credentials or {}
+    benchmark_config = normalize_benchmark_config(benchmark_config)
+    arena_config = arena_config or {}
     active_tasks: set[asyncio.Task[tuple[TestCase, Channel, int, dict[str, Any]]]] = set()
     with session_factory() as db:
         run = db.get(Run, run_id)
@@ -705,8 +910,17 @@ async def execute_run(
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
 
+        def refresh_active_run() -> bool:
+            try:
+                db.refresh(run)
+                return True
+            except InvalidRequestError:
+                db.rollback()
+                return False
+
         try:
-            db.refresh(run)
+            if not refresh_active_run():
+                return
             if run.status == "canceled":
                 run.finished_at = run.finished_at or datetime.now(timezone.utc)
                 db.commit()
@@ -743,7 +957,8 @@ async def execute_run(
                     next((case for case in cases if not (case.scoring_rules or {}).get("invalid_request_probe")), cases[0]),
                 )
                 for channel in _sort_channels_for_run(channels):
-                    db.refresh(run)
+                    if not refresh_active_run():
+                        return
                     if run.status == "canceled":
                         finish_canceled_run()
                         return
@@ -781,7 +996,9 @@ async def execute_run(
                 return case, channel, attempt, normalized
 
             while job_index < len(jobs) or active_tasks:
-                db.refresh(run)
+                if not refresh_active_run():
+                    await cancel_active_tasks(active_tasks)
+                    return
                 if run.status == "canceled":
                     await cancel_active_tasks(active_tasks)
                     finish_canceled_run()
@@ -799,7 +1016,10 @@ async def execute_run(
                 if not done:
                     continue
 
-                db.refresh(run)
+                if not refresh_active_run():
+                    await asyncio.gather(*done, return_exceptions=True)
+                    await cancel_active_tasks(active_tasks)
+                    return
                 if run.status == "canceled":
                     await asyncio.gather(*done, return_exceptions=True)
                     await cancel_active_tasks(active_tasks)
@@ -808,7 +1028,9 @@ async def execute_run(
 
                 for task in done:
                     case, channel, attempt, normalized = await task
-                    db.refresh(run)
+                    if not refresh_active_run():
+                        await cancel_active_tasks(active_tasks)
+                        return
                     if run.status == "canceled":
                         await cancel_active_tasks(active_tasks)
                         finish_canceled_run()
@@ -816,22 +1038,26 @@ async def execute_run(
                     add_result(case, channel, attempt, normalized)
                     db.commit()
 
-            db.refresh(run)
+            if not refresh_active_run():
+                return
             if run.status == "canceled":
                 finish_canceled_run()
                 return
             apply_repeat_consistency_scores(db, run.id)
             if run.mode == "baseline_build":
                 finalize_baseline_from_run(db, run.id)
-            elif run.mode != MANUAL_PROBE_MODE:
+            elif run.mode in COMPARISON_RUN_MODES:
                 build_comparisons(db, run.id, run.baseline_snapshot_id)
                 build_reports(db, run.id)
+            elif run.mode in SPECIAL_REPORT_RUN_MODES:
+                build_special_run_reports(db, run.id, benchmark_config=benchmark_config, arena_config=arena_config)
             run.status = "completed"
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
         except Exception as exc:  # keep failed runs inspectable
             await cancel_active_tasks(active_tasks)
-            db.refresh(run)
+            if not refresh_active_run():
+                return
             if run.status == "canceled":
                 finish_canceled_run()
                 return
@@ -2540,6 +2766,14 @@ def normalize_response(
     elif error:
         text = ""
 
+    input_tokens = _usage_value(usage, "input_tokens", "prompt_tokens")
+    output_tokens = _usage_value(usage, "output_tokens", "completion_tokens")
+    if output_tokens is None:
+        output_tokens = _estimate_token_count(text)
+    ttft_ms = first_token_ms or latency_ms
+    tpot_ms = _tpot_ms(latency_ms, ttft_ms, output_tokens)
+    tokens_per_second = _tokens_per_second(output_tokens, latency_ms)
+
     return {
         "channel_id": channel.id,
         "channel_name": channel.name,
@@ -2548,6 +2782,12 @@ def normalize_response(
         "status_code": 500 if error else 200,
         "latency_ms": latency_ms,
         "first_token_ms": first_token_ms,
+        "ttft_ms": ttft_ms,
+        "tpot_ms": tpot_ms,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "tokens_per_second": tokens_per_second,
+        "error_type": _error_type(error, raw_response),
         "provider_message_id": provider_message_id,
         "provider_model": provider_model,
         "stop_reason": stop_reason,
@@ -2566,6 +2806,49 @@ def normalize_response(
         "request_protocol": request_protocol,
         "channel_preflight_failed": channel_preflight_failed,
     }
+
+
+def _usage_value(usage: Any, *keys: str) -> int | None:
+    if not isinstance(usage, dict):
+        return None
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+    return None
+
+
+def _estimate_token_count(text: str) -> int:
+    if not text:
+        return 0
+    ascii_words = len([part for part in text.replace("\n", " ").split(" ") if part.strip()])
+    cjk_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    return max(1, ascii_words + cjk_chars)
+
+
+def _tpot_ms(latency_ms: int, ttft_ms: int, output_tokens: int | None) -> float | None:
+    if not output_tokens or output_tokens <= 1:
+        return None
+    return round(max(0, latency_ms - ttft_ms) / max(1, output_tokens - 1), 2)
+
+
+def _tokens_per_second(output_tokens: int | None, latency_ms: int) -> float | None:
+    if not output_tokens or latency_ms <= 0:
+        return None
+    return round(output_tokens / (latency_ms / 1000), 2)
+
+
+def _error_type(error: str | None, raw_response: dict[str, Any]) -> str | None:
+    if not error:
+        return None
+    raw_error = raw_response.get("error")
+    if isinstance(raw_error, dict):
+        error_type = raw_error.get("type") or raw_error.get("code")
+        if error_type:
+            return str(error_type)
+    return str(error).split(":", 1)[0][:80]
 
 
 def _stream_events_for(channel: Channel, raw_response: dict[str, Any]) -> list[str]:
@@ -2870,6 +3153,741 @@ def build_reports(db: Session, run_id: str) -> None:
     db.commit()
 
 
+def build_special_run_reports(db: Session, run_id: str, benchmark_config: dict[str, Any] | None = None, arena_config: dict[str, Any] | None = None) -> None:
+    run = db.get(Run, run_id)
+    if not run:
+        return
+    if run.mode == "performance_benchmark":
+        build_performance_reports(db, run_id, benchmark_config)
+    elif run.mode == "arena_comparison":
+        build_arena_reports(db, run_id, arena_config or {})
+
+
+def build_performance_reports(db: Session, run_id: str, benchmark_config: dict[str, Any] | None = None) -> None:
+    db.execute(delete(Report).where(Report.run_id == run_id))
+    channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
+    results = db.scalars(select(Result).where(Result.run_id == run_id)).all()
+    by_channel: dict[str, list[Result]] = defaultdict(list)
+    for result in results:
+        by_channel[result.channel_id].append(result)
+    for channel_id, items in by_channel.items():
+        channel = channels.get(channel_id)
+        if not channel:
+            continue
+        performance = performance_summary_for_results(items)
+        score = performance_score(performance)
+        labels = performance_labels(performance)
+        grade = capped_grade_from_score(score, labels)
+        evidence = {
+            "mode": "performance_benchmark",
+            "benchmark_config": benchmark_config or {},
+            "performance": performance,
+            "performance_distribution": performance_distribution(items),
+            "labels": labels,
+            "label_explanations": label_explanations(labels),
+            "top_evidence": performance_evidence(items),
+            "comparison_count": len(items),
+        }
+        summary = f"诊断成功率 {performance.get('success_rate', 0):.1f}%，P95 延迟 {performance.get('p95_latency_ms') or '-'} ms。"
+        db.add(
+            Report(
+                id=new_id("rep"),
+                run_id=run_id,
+                channel_id=channel_id,
+                final_score=round(score, 2),
+                grade=grade,
+                summary=summary,
+                evidence=evidence,
+                markdown=special_report_markdown(channel, "性能诊断报告", score, grade, summary, evidence),
+            )
+        )
+    db.commit()
+
+
+def build_arena_reports(db: Session, run_id: str, arena_config: dict[str, Any] | None = None) -> None:
+    db.execute(delete(Report).where(Report.run_id == run_id))
+    channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
+    results = _arena_candidate_results(
+        db,
+        run_id,
+        list(db.scalars(select(Result).where(Result.run_id == run_id)).all()),
+    )
+    cases = {case.id: case for case in db.scalars(select(TestCase)).all()}
+    rankings = arena_rankings_for_results(results, cases)
+    matrix = arena_matrix_for_results(results, cases)
+    judge_evidence = arena_judge_evidence(results, cases, arena_config or {})
+    performance_by_channel = {item["channel_id"]: item for item in performance_by_channel_for_results(results, channels)}
+    for item in rankings:
+        channel = channels.get(item["channel_id"])
+        if not channel:
+            continue
+        labels = item.get("labels", [])
+        grade = capped_grade_from_score(item["score"], labels)
+        evidence = {
+            "mode": "arena_comparison",
+            "arena": item,
+            "arena_matrix": matrix,
+            "judge_evidence": judge_evidence.get(channel.id, {}),
+            "performance": performance_by_channel.get(channel.id, {}),
+            "labels": labels,
+            "label_explanations": label_explanations(labels),
+            "top_evidence": item.get("top_losses", []),
+            "comparison_count": item.get("case_count", 0),
+        }
+        summary = f"Arena 胜率 {item['win_rate']:.1f}%，平均题目分 {item['avg_case_score']:.1f}。"
+        db.add(
+            Report(
+                id=new_id("rep"),
+                run_id=run_id,
+                channel_id=channel.id,
+                final_score=round(item["score"], 2),
+                grade=grade,
+                summary=summary,
+                evidence=evidence,
+                markdown=special_report_markdown(channel, "Arena 排名报告", item["score"], grade, summary, evidence),
+            )
+        )
+    db.commit()
+
+
+def _arena_candidate_channel_ids(db: Session, run_id: str) -> set[str]:
+    return set(
+        db.scalars(
+            select(RunChannel.channel_id).where(
+                RunChannel.run_id == run_id,
+                RunChannel.role_in_run == "candidate",
+            )
+        ).all()
+    )
+
+
+def _arena_candidate_results(db: Session, run_id: str, results: list[Result]) -> list[Result]:
+    candidate_ids = _arena_candidate_channel_ids(db, run_id)
+    if not candidate_ids:
+        return results
+    return [result for result in results if result.channel_id in candidate_ids]
+
+
+def performance_score(performance: dict[str, Any]) -> float:
+    score = 100.0
+    success_rate = float(performance.get("success_rate") or 0)
+    p95 = performance.get("p95_latency_ms")
+    ttft = performance.get("avg_ttft_ms")
+    if success_rate < 100:
+        score -= min(45, (100 - success_rate) * 1.5)
+    if isinstance(p95, (int, float)) and p95 > 5000:
+        score -= min(25, (p95 - 5000) / 400)
+    if isinstance(ttft, (int, float)) and ttft > 2500:
+        score -= min(15, (ttft - 2500) / 300)
+    return max(0.0, min(100.0, score))
+
+
+def performance_labels(performance: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    if (performance.get("success_rate") or 0) < 95:
+        labels.append("performance_error_rate_high")
+    p95 = performance.get("p95_latency_ms")
+    if isinstance(p95, (int, float)) and p95 > 5000:
+        labels.append("latency_outlier")
+    ttft = performance.get("avg_ttft_ms")
+    if isinstance(ttft, (int, float)) and ttft > 2500:
+        labels.append("ttft_outlier")
+    return labels
+
+
+def performance_evidence(results: list[Result], limit: int = 5) -> list[dict[str, Any]]:
+    ranked = sorted(results, key=lambda result: (_metric_number(result, "latency_ms") or 0), reverse=True)
+    return [
+        {
+            "test_case_id": result.test_case_id,
+            "score": result.score,
+            "labels": result.labels or [],
+            "latency_ms": _metric_number(result, "latency_ms"),
+            "ttft_ms": _metric_number(result, "ttft_ms"),
+            "tokens_per_second": _metric_number(result, "tokens_per_second"),
+        }
+        for result in ranked[:limit]
+    ]
+
+
+def performance_distribution(results: list[Result]) -> dict[str, Any]:
+    latencies = [_metric_number(result, "latency_ms") for result in results]
+    ttfts = [_metric_number(result, "ttft_ms") for result in results]
+    tpots = [_metric_number(result, "tpot_ms") for result in results]
+    return {
+        "latency_ms": {
+            "p50": _percentile(latencies, 50),
+            "p95": _percentile(latencies, 95),
+            "p99": _percentile(latencies, 99),
+        },
+        "ttft_ms": {
+            "p50": _percentile(ttfts, 50),
+            "p95": _percentile(ttfts, 95),
+            "p99": _percentile(ttfts, 99),
+        },
+        "tpot_ms": {
+            "p50": _percentile(tpots, 50),
+            "p95": _percentile(tpots, 95),
+            "p99": _percentile(tpots, 99),
+        },
+        "error_types": _count_values([str((result.metrics or {}).get("error_type") or "none") for result in results if (result.normalized_response or {}).get("error")]),
+    }
+
+
+def arena_rankings_for_results(results: list[Result], cases: dict[str, TestCase]) -> list[dict[str, Any]]:
+    by_channel: dict[str, list[Result]] = defaultdict(list)
+    by_case: dict[str, list[Result]] = defaultdict(list)
+    for result in results:
+        by_channel[result.channel_id].append(result)
+        by_case[result.test_case_id].append(result)
+    wins_by_channel: dict[str, float] = defaultdict(float)
+    pair_count_by_channel: dict[str, int] = defaultdict(int)
+    top_losses_by_channel: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for case_id, case_results in by_case.items():
+        latest_by_channel: dict[str, Result] = {}
+        for result in sorted(case_results, key=lambda item: item.attempt_index):
+            latest_by_channel[result.channel_id] = result
+        values = list(latest_by_channel.values())
+        for left in values:
+            for right in values:
+                if left.channel_id >= right.channel_id:
+                    continue
+                left_score = _arena_case_score(left, cases.get(case_id))
+                right_score = _arena_case_score(right, cases.get(case_id))
+                if left_score == right_score:
+                    wins_by_channel[left.channel_id] += 0.5
+                    wins_by_channel[right.channel_id] += 0.5
+                elif left_score > right_score:
+                    wins_by_channel[left.channel_id] += 1
+                    top_losses_by_channel[right.channel_id].append(_arena_loss_evidence(right, left, case_id, left_score, right_score))
+                else:
+                    wins_by_channel[right.channel_id] += 1
+                    top_losses_by_channel[left.channel_id].append(_arena_loss_evidence(left, right, case_id, right_score, left_score))
+                pair_count_by_channel[left.channel_id] += 1
+                pair_count_by_channel[right.channel_id] += 1
+
+    rankings = []
+    for channel_id, channel_results in by_channel.items():
+        scores = [_arena_case_score(result, cases.get(result.test_case_id)) for result in channel_results]
+        pair_count = pair_count_by_channel[channel_id]
+        win_rate = _pct(wins_by_channel[channel_id], pair_count) or 0.0
+        avg_case_score = _avg(scores) or 0.0
+        score = (win_rate * 0.55) + (avg_case_score * 0.45)
+        labels = sorted({label for result in channel_results for label in (result.labels or [])})
+        rankings.append(
+            {
+                "channel_id": channel_id,
+                "score": round(score, 2),
+                "win_rate": round(win_rate, 2),
+                "wins": round(wins_by_channel[channel_id], 2),
+                "pair_count": pair_count,
+                "avg_case_score": round(avg_case_score, 2),
+                "case_count": len({result.test_case_id for result in channel_results}),
+                "labels": labels,
+                "top_losses": sorted(top_losses_by_channel[channel_id], key=lambda item: item["margin"], reverse=True)[:5],
+            }
+        )
+    return sorted(rankings, key=lambda item: item["score"], reverse=True)
+
+
+def arena_matrix_for_results(results: list[Result], cases: dict[str, TestCase]) -> list[dict[str, Any]]:
+    channel_ids = sorted({result.channel_id for result in results})
+    rankings = {item["channel_id"]: item for item in arena_rankings_for_results(results, cases)}
+    rows = []
+    for left in channel_ids:
+        row: dict[str, Any] = {"channel_id": left}
+        for right in channel_ids:
+            if left == right:
+                row[right] = None
+                continue
+            left_score = rankings.get(left, {}).get("score", 0)
+            right_score = rankings.get(right, {}).get("score", 0)
+            row[right] = round(left_score - right_score, 2)
+        rows.append(row)
+    return rows
+
+
+def arena_judge_evidence(results: list[Result], cases: dict[str, TestCase], arena_config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    judge_channel_id = arena_config.get("judge_channel_id")
+    judge_mode = arena_config.get("judge_mode") or "direct_score"
+    rubric = arena_config.get("judge_rubric") or "Score answer quality, instruction following, safety, and protocol faithfulness."
+    by_channel: dict[str, list[Result]] = defaultdict(list)
+    for result in results:
+        by_channel[result.channel_id].append(result)
+    evidence: dict[str, dict[str, Any]] = {}
+    for channel_id, channel_results in by_channel.items():
+        case_scores = []
+        for result in channel_results:
+            case = cases.get(result.test_case_id)
+            case_scores.append({"test_case_id": result.test_case_id, "score": round(_arena_case_score(result, case), 2), "labels": result.labels or []})
+        avg_score = _avg([item["score"] for item in case_scores]) or 0.0
+        evidence[channel_id] = {
+            "judge_channel_id": judge_channel_id,
+            "judge_mode": judge_mode,
+            "rubric": rubric,
+            "automated": True,
+            "avg_judge_score": round(avg_score, 2),
+            "sample_count": len(case_scores),
+            "low_confidence_samples": sorted(case_scores, key=lambda item: item["score"])[:5],
+            "note": "Mock/local judge evidence uses deterministic scoring; live judge calls can reuse this evidence shape without storing credentials.",
+        }
+    return evidence
+
+
+def _arena_case_score(result: Result, case: TestCase | None) -> float:
+    response = result.normalized_response or {}
+    text = response.get("content_text") or ""
+    latency = _metric_number(result, "latency_ms") or 0
+    score = result.score * 0.85
+    if text:
+        score += min(10, len(text) / 160)
+    if latency > 5000:
+        score -= 5
+    return max(0.0, min(100.0, score * case_weight(case)))
+
+
+def _arena_loss_evidence(loser: Result, winner: Result, case_id: str, winner_score: float, loser_score: float) -> dict[str, Any]:
+    return {
+        "test_case_id": case_id,
+        "winner_channel_id": winner.channel_id,
+        "loser_channel_id": loser.channel_id,
+        "winner_score": round(winner_score, 2),
+        "loser_score": round(loser_score, 2),
+        "margin": round(winner_score - loser_score, 2),
+        "labels": loser.labels or [],
+    }
+
+
+def build_run_summary(db: Session, run_id: str) -> dict[str, Any]:
+    run = db.get(Run, run_id)
+    if not run:
+        raise ValueError("Run not found")
+    results = db.scalars(select(Result).where(Result.run_id == run_id)).all()
+    comparisons = db.scalars(select(Comparison).where(Comparison.run_id == run_id)).all()
+    reports = db.scalars(select(Report).where(Report.run_id == run_id)).all()
+    channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
+    labels = [label for result in results for label in (result.labels or [])]
+    labels.extend(label for comparison in comparisons for label in (comparison.labels or []))
+    report_top_evidence = [
+        item
+        for report in reports
+        for item in ((report.evidence or {}).get("top_evidence") or [])
+        if isinstance(item, dict)
+    ]
+    cases = {case.id: case for case in db.scalars(select(TestCase)).all()}
+    arena_results = _arena_candidate_results(db, run_id, list(results)) if run.mode == "arena_comparison" else []
+    performance_results = arena_results if run.mode == "arena_comparison" else results
+    return {
+        "run": run,
+        "channel_count": len({result.channel_id for result in results}),
+        "result_count": len(results),
+        "comparison_count": len(comparisons),
+        "report_count": len(reports),
+        "avg_score": _avg([result.score for result in results]),
+        "avg_latency_ms": _avg([_metric_number(result, "latency_ms") for result in results]),
+        "avg_ttft_ms": _avg([_metric_number(result, "ttft_ms") for result in results]),
+        "avg_tpot_ms": _avg([_metric_number(result, "tpot_ms") for result in results]),
+        "avg_tokens_per_second": _avg([_metric_number(result, "tokens_per_second") for result in results]),
+        "success_rate": _pct(len([result for result in results if not (result.normalized_response or {}).get("error")]), len(results)),
+        "p95_latency_ms": _percentile([_metric_number(result, "latency_ms") for result in results], 95),
+        "grade_distribution": _count_values([report.grade for report in reports]),
+        "label_distribution": _count_values(labels),
+        "performance_by_channel": performance_by_channel_for_results(performance_results, channels),
+        "arena_rankings": arena_rankings_for_results(arena_results, cases) if run.mode == "arena_comparison" else [],
+        "top_evidence": report_top_evidence[:8],
+    }
+
+
+def performance_by_channel_for_results(results: list[Result], channels: dict[str, Channel]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Result]] = defaultdict(list)
+    for result in results:
+        grouped[result.channel_id].append(result)
+    rows = []
+    for channel_id, items in grouped.items():
+        summary = performance_summary_for_results(items)
+        rows.append(
+            {
+                "channel_id": channel_id,
+                "channel_name": channels.get(channel_id).name if channels.get(channel_id) else channel_id,
+                **summary,
+            }
+        )
+    return sorted(rows, key=lambda item: (-(item.get("success_rate") or 0), item.get("p95_latency_ms") or 999999, item["channel_name"]))
+
+
+def special_report_markdown(channel: Channel, title: str, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
+    labels = ", ".join(evidence.get("labels") or []) or "未发现显著异常"
+    performance = evidence.get("performance") or {}
+    arena = evidence.get("arena") or {}
+    return f"""# {title}
+
+## 基本信息
+
+- 渠道：{channel.name}
+- 声称模型：{channel.model_name or "未配置"}
+- 评级：{grade}
+- 总分：{score:.1f} / 100
+- 结论：{summary}
+- 异常标签：{labels}
+
+## 性能指标
+
+- 成功率：{performance.get("success_rate", "-")}%
+- P95 延迟：{performance.get("p95_latency_ms", "-")} ms
+- 平均 TTFT：{performance.get("avg_ttft_ms", "-")} ms
+- 平均 TPOT：{performance.get("avg_tpot_ms", "-")} ms
+- 平均吞吐：{performance.get("avg_tokens_per_second", "-")} tokens/s
+
+## Arena 指标
+
+- 胜率：{arena.get("win_rate", "-")}%
+- 平均题目分：{arena.get("avg_case_score", "-")}
+- 对战样本数：{arena.get("pair_count", "-")}
+"""
+
+
+def list_report_summaries(db: Session) -> list[dict[str, Any]]:
+    reports = list(db.scalars(select(Report).order_by(Report.created_at.desc())).all())
+    return [_report_summary(db, report) for report in reports if db.get(Run, report.run_id) and db.get(Channel, report.channel_id)]
+
+
+def get_report_detail(db: Session, report_id: str) -> dict[str, Any] | None:
+    report = db.get(Report, report_id)
+    if not report:
+        return None
+    run = db.get(Run, report.run_id)
+    channel = db.get(Channel, report.channel_id)
+    if not run or not channel:
+        return None
+
+    suite = db.get(TestSuite, run.suite_id)
+    cases = list(
+        db.scalars(
+            select(TestCase)
+            .where(TestCase.suite_id == run.suite_id)
+            .order_by(TestCase.sort_order, TestCase.id)
+        ).all()
+    )
+    results = list(
+        db.scalars(
+            select(Result)
+            .where(Result.run_id == run.id, Result.channel_id == channel.id)
+            .order_by(Result.test_case_id, Result.attempt_index, Result.created_at)
+        ).all()
+    )
+    comparisons = list(
+        db.scalars(
+            select(Comparison)
+            .where(Comparison.run_id == run.id, Comparison.candidate_channel_id == channel.id)
+            .order_by(Comparison.test_case_id)
+        ).all()
+    )
+    baseline_results = _baseline_results_for_run(db, run)
+    prediction_rows = _prediction_rows(cases, results, comparisons, baseline_results)
+    return {
+        "report": ReportRead.model_validate(report),
+        "run": RunRead.model_validate(run),
+        "channel": ChannelRead.model_validate(channel),
+        "suite": TestSuiteRead.model_validate(suite) if suite else None,
+        "cases": [TestCaseRead.model_validate(case) for case in cases],
+        "results": [ResultRead.model_validate(result) for result in results],
+        "comparisons": [ComparisonRead.model_validate(comparison) for comparison in comparisons],
+        "baseline_results": [BaselineResultRead.model_validate(result) for result in baseline_results],
+        "prediction_rows": prediction_rows,
+        "performance_summary": performance_summary_for_results(results),
+    }
+
+
+def compare_reports(db: Session, report_ids: list[str]) -> dict[str, Any]:
+    reports = [db.get(Report, report_id) for report_id in report_ids]
+    missing = [report_id for report_id, report in zip(report_ids, reports) if report is None]
+    if missing:
+        raise ValueError(f"Report not found: {', '.join(missing)}")
+
+    concrete_reports = [report for report in reports if report is not None]
+    run_modes = {
+        (db.get(Run, report.run_id).mode if db.get(Run, report.run_id) else "unknown")
+        for report in concrete_reports
+    }
+    if len(run_modes) > 1:
+        raise ValueError("Report modes must match for comparison")
+    mode = next(iter(run_modes), "unknown")
+    summaries = [_report_summary(db, report) for report in concrete_reports]
+    dimensions = _compare_dimensions(concrete_reports)
+    score_matrix = [
+        {
+            "dimension": dimension,
+            **{
+                report.id: ((report.evidence or {}).get("dimension_scores") or {}).get(dimension)
+                for report in concrete_reports
+            },
+        }
+        for dimension in dimensions
+    ]
+    performance_matrix = [
+        {"report_id": summary["report_id"], "channel_name": summary["channel_name"], **summary["performance"]}
+        for summary in summaries
+    ]
+    prediction_rows = _compare_prediction_rows(db, concrete_reports)
+    label_diff = _label_diff(concrete_reports)
+    return {
+        "mode": mode,
+        "reports": summaries,
+        "dimensions": dimensions,
+        "score_matrix": score_matrix,
+        "prediction_rows": prediction_rows,
+        "label_diff": label_diff,
+        "performance_matrix": performance_matrix,
+    }
+
+
+def _report_summary(db: Session, report: Report) -> dict[str, Any]:
+    run = db.get(Run, report.run_id)
+    channel = db.get(Channel, report.channel_id)
+    if not run or not channel:
+        raise ValueError("Report has missing run or channel")
+    results = list(db.scalars(select(Result).where(Result.run_id == run.id, Result.channel_id == channel.id)).all())
+    evidence = report.evidence or {}
+    return {
+        "report_id": report.id,
+        "run_id": run.id,
+        "run_name": run.name,
+        "mode": run.mode,
+        "channel_id": channel.id,
+        "channel_name": channel.name,
+        "channel_role": channel.role,
+        "suite_id": run.suite_id,
+        "grade": report.grade,
+        "final_score": report.final_score,
+        "summary": report.summary,
+        "labels": list(evidence.get("labels") or []),
+        "dimension_scores": evidence.get("dimension_scores") or {},
+        "performance": performance_summary_for_results(results),
+        "created_at": report.created_at,
+    }
+
+
+def performance_summary_for_results(results: list[Result]) -> dict[str, Any]:
+    latencies = sorted(_metric_number(result, "latency_ms") for result in results)
+    latencies = [value for value in latencies if value is not None]
+    first_tokens = sorted((_metric_number(result, "first_token_ms") or _metric_number(result, "ttft_ms")) for result in results)
+    first_tokens = [value for value in first_tokens if value is not None]
+    tpots = [_metric_number(result, "tpot_ms") for result in results]
+    tps = [_metric_number(result, "tokens_per_second") for result in results]
+    scores = [result.score for result in results]
+    failures = [
+        result for result in results
+        if (result.normalized_response or {}).get("error") or "request_failed" in (result.labels or []) or (result.score <= 0 and result.labels)
+    ]
+    p95 = _percentile(latencies, 95)
+    slow_threshold = max(5000.0, p95 or 0)
+    slow_case_ids = sorted(
+        {
+            result.test_case_id
+            for result in results
+            if (_metric_number(result.metrics, "latency_ms") or 0) >= slow_threshold
+        }
+    )
+    total = len(results)
+    failure_count = len(failures)
+    success_count = max(0, total - failure_count)
+    success_rate = round(success_count / total * 100, 2) if total else 0.0
+    failure_rate = round(failure_count / total * 100, 2) if total else 0.0
+    return {
+        "request_count": total,
+        "error_count": failure_count,
+        "success_rate": success_rate,
+        "avg_score": _avg(scores),
+        "avg_latency_ms": _avg(latencies),
+        "p50_latency_ms": _percentile(latencies, 50),
+        "p95_latency_ms": p95,
+        "p99_latency_ms": _percentile(latencies, 99),
+        "avg_ttft_ms": _avg(first_tokens),
+        "avg_tpot_ms": _avg(tpots),
+        "avg_tokens_per_second": _avg(tps),
+        "latency_avg_ms": _avg(latencies),
+        "latency_p50_ms": _percentile(latencies, 50),
+        "latency_p95_ms": p95,
+        "latency_p99_ms": _percentile(latencies, 99),
+        "first_token_avg_ms": _avg(first_tokens),
+        "first_token_p95_ms": _percentile(first_tokens, 95),
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "failure_rate": failure_rate,
+        "slow_case_ids": slow_case_ids,
+    }
+
+
+def _prediction_rows(
+    cases: list[TestCase],
+    results: list[Result],
+    comparisons: list[Comparison],
+    baseline_results: list[BaselineResult],
+) -> list[dict[str, Any]]:
+    result_by_case: dict[str, list[Result]] = defaultdict(list)
+    for result in results:
+        result_by_case[result.test_case_id].append(result)
+    comparison_by_case = {comparison.test_case_id: comparison for comparison in comparisons}
+    baseline_by_case: dict[str, list[BaselineResult]] = defaultdict(list)
+    for result in baseline_results:
+        baseline_by_case[result.test_case_id].append(result)
+
+    rows: list[dict[str, Any]] = []
+    for case in cases:
+        latest = _latest_result(result_by_case.get(case.id, []))
+        comparison = comparison_by_case.get(case.id)
+        row_labels = sorted(set((latest.labels if latest else []) or []) | set((comparison.labels if comparison else []) or []))
+        rows.append(
+            {
+                "test_case_id": case.id,
+                "title": case.title,
+                "module": case.module,
+                "sort_order": case.sort_order,
+                "prompt": case.prompt,
+                "system_prompt": case.system_prompt,
+                "request_params": case.request_params,
+                "scoring_rules": case.scoring_rules,
+                "result": ResultRead.model_validate(latest) if latest else None,
+                "baseline_results": [BaselineResultRead.model_validate(result) for result in baseline_by_case.get(case.id, [])],
+                "comparison": ComparisonRead.model_validate(comparison) if comparison else None,
+                "labels": row_labels,
+                "score": comparison.final_score if comparison else (latest.score if latest else None),
+                "latency_ms": _metric_number(latest.metrics if latest else None, "latency_ms"),
+            }
+        )
+    return rows
+
+
+def _compare_prediction_rows(db: Session, reports: list[Report]) -> list[dict[str, Any]]:
+    details = [get_report_detail(db, report.id) for report in reports]
+    concrete_details = [detail for detail in details if detail]
+    case_meta: dict[str, dict[str, Any]] = {}
+    row_by_case_report: dict[tuple[str, str], dict[str, Any]] = {}
+    for detail in concrete_details:
+        report_id = detail["report"].id
+        for row in detail["prediction_rows"]:
+            case_meta.setdefault(
+                row["test_case_id"],
+                {
+                    "test_case_id": row["test_case_id"],
+                    "title": row["title"],
+                    "module": row["module"],
+                    "sort_order": row["sort_order"],
+                    "prompt": row["prompt"],
+                },
+            )
+            result = row["result"]
+            comparison = row["comparison"]
+            row_by_case_report[(row["test_case_id"], report_id)] = {
+                "result": result.model_dump() if result else None,
+                "comparison": comparison.model_dump() if comparison else None,
+                "labels": row["labels"],
+                "score": row["score"],
+                "latency_ms": row["latency_ms"],
+            }
+    output: list[dict[str, Any]] = []
+    for case_id, meta in sorted(case_meta.items(), key=lambda item: (item[1]["sort_order"], item[0])):
+        output.append(
+            {
+                **meta,
+                "reports": {
+                    report.id: row_by_case_report.get((case_id, report.id))
+                    for report in reports
+                },
+            }
+        )
+    return output
+
+
+def _baseline_results_for_run(db: Session, run: Run) -> list[BaselineResult]:
+    if not run.baseline_snapshot_id:
+        return []
+    snapshot = db.get(BaselineSnapshot, run.baseline_snapshot_id)
+    if not snapshot:
+        return []
+    refresh_baseline_status(db, snapshot)
+    return list(
+        db.scalars(
+            select(BaselineResult)
+            .where(BaselineResult.baseline_snapshot_id == snapshot.id)
+            .order_by(BaselineResult.test_case_id, BaselineResult.channel_id, BaselineResult.attempt_index)
+        ).all()
+    )
+
+
+def _latest_result(results: list[Result]) -> Result | None:
+    if not results:
+        return None
+    return sorted(results, key=lambda result: (result.attempt_index, str(result.created_at or "")), reverse=True)[0]
+
+
+def _metric_number(source: Result | dict[str, Any] | None, key: str) -> float | None:
+    metrics = source.metrics if isinstance(source, Result) else source
+    value = (metrics or {}).get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _avg(values: list[float | None]) -> float | None:
+    clean = [float(value) for value in values if isinstance(value, (int, float))]
+    return round(sum(clean) / len(clean), 2) if clean else None
+
+
+def _percentile(values: list[float | None], percentile: int) -> float | None:
+    clean = sorted(float(value) for value in values if isinstance(value, (int, float)))
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return round(clean[0], 2)
+    position = (len(clean) - 1) * percentile / 100
+    lower = int(position)
+    upper = min(lower + 1, len(clean) - 1)
+    weight = position - lower
+    return round(clean[lower] * (1 - weight) + clean[upper] * weight, 2)
+
+
+def _pct(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(numerator / denominator * 100, 2)
+
+
+def _count_values(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for value in values:
+        if value:
+            counts[value] += 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _compare_dimensions(reports: list[Report]) -> list[str]:
+    dimensions: list[str] = []
+    for report in reports:
+        for dimension in ((report.evidence or {}).get("dimension_scores") or {}).keys():
+            if dimension not in dimensions:
+                dimensions.append(dimension)
+    return dimensions or ["authenticity", "quality", "stability"]
+
+
+def _label_diff(reports: list[Report]) -> dict[str, list[str]]:
+    label_sets = {
+        report.id: set((report.evidence or {}).get("labels") or [])
+        for report in reports
+    }
+    all_labels = set().union(*label_sets.values()) if label_sets else set()
+    common = set.intersection(*label_sets.values()) if label_sets else set()
+    diff: dict[str, list[str]] = {"common": sorted(common)}
+    for report_id, labels in label_sets.items():
+        other_labels = set().union(*(items for key, items in label_sets.items() if key != report_id))
+        diff[report_id] = sorted(labels - other_labels)
+    diff["all"] = sorted(all_labels)
+    return diff
+
+
 def weighted_comparison_score(items: list[Comparison], cases: dict[str, TestCase]) -> float:
     weighted_sum = 0.0
     weight_sum = 0.0
@@ -2952,6 +3970,8 @@ LABEL_EXPLANATIONS = {
     "unsafe_response": "安全题中给出了不应提供的危险或违法内容。",
     "suspected_model_swap": "负样本或候选渠道表现出疑似模型替换特征。",
     "latency_outlier": "延迟明显偏高，可能存在中转链路或路由异常。",
+    "ttft_outlier": "首 token 延迟明显偏高，用户首屏等待风险较高。",
+    "performance_error_rate_high": "性能诊断请求失败率偏高，渠道可用性或限流策略需要复核。",
     "repeat_inconsistent": "同一题多次运行输出差异过大，存在稳定性或混路由风险。",
     "baseline_gold_missing": "当前题缺少 Anthropic 官方金标基线。",
     "baseline_cloud_missing": "当前题缺少官方云参考基线。",
