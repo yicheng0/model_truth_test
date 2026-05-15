@@ -239,6 +239,12 @@ class ScheduledChannelTestBase(BaseModel):
     repeat_count: int = Field(default=1, ge=1, le=5)
     concurrency: int = Field(default=4, ge=1, le=16)
     use_mock: bool = False
+    alert_grade_threshold: str = Field(default="D", pattern=r"^[CDE]$")
+    alert_score_threshold: float | None = Field(default=None, ge=0, le=100)
+    alert_red_flags_enabled: bool = True
+    quiet_minutes: int = Field(default=0, ge=0, le=10080)
+    max_retries: int = Field(default=0, ge=0, le=3)
+    retry_interval_minutes: int = Field(default=5, ge=1, le=60)
     next_run_at: datetime | None = None
 
 
@@ -257,6 +263,12 @@ class ScheduledChannelTestUpdate(BaseModel):
     repeat_count: int | None = Field(default=None, ge=1, le=5)
     concurrency: int | None = Field(default=None, ge=1, le=16)
     use_mock: bool | None = None
+    alert_grade_threshold: str | None = Field(default=None, pattern=r"^[CDE]$")
+    alert_score_threshold: float | None = Field(default=None, ge=0, le=100)
+    alert_red_flags_enabled: bool | None = None
+    quiet_minutes: int | None = Field(default=None, ge=0, le=10080)
+    max_retries: int | None = Field(default=None, ge=0, le=3)
+    retry_interval_minutes: int | None = Field(default=None, ge=1, le=60)
     next_run_at: datetime | None = None
 
 

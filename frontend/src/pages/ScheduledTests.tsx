@@ -18,6 +18,12 @@ type ScheduleFormValues = {
   concurrency: number;
   enabled: boolean;
   use_mock: boolean;
+  alert_grade_threshold: 'C' | 'D' | 'E';
+  alert_score_threshold?: number | null;
+  alert_red_flags_enabled: boolean;
+  quiet_minutes: number;
+  max_retries: number;
+  retry_interval_minutes: number;
 };
 
 type ReviewFormValues = {
@@ -65,6 +71,15 @@ function intervalText(minutes: number) {
   if (minutes % 1440 === 0) return `${minutes / 1440} 天`;
   if (minutes % 60 === 0) return `${minutes / 60} 小时`;
   return `${minutes} 分钟`;
+}
+
+function schedulePolicyText(schedule: ScheduledChannelTest) {
+  const grade = schedule.alert_grade_threshold ?? 'D';
+  const score = schedule.alert_score_threshold === null || schedule.alert_score_threshold === undefined ? '' : ` / <=${schedule.alert_score_threshold}分`;
+  const redFlags = schedule.alert_red_flags_enabled ? ' + 红旗' : '';
+  const quiet = schedule.quiet_minutes ? ` · 静默 ${intervalText(schedule.quiet_minutes)}` : '';
+  const retry = schedule.max_retries ? ` · 重试 ${schedule.max_retries} 次` : '';
+  return `${grade}级及以下${score}${redFlags}${quiet}${retry}`;
 }
 
 function reportRangeToDates(range: string) {
@@ -240,6 +255,12 @@ export default function ScheduledTests() {
       concurrency: 4,
       enabled: true,
       use_mock: false,
+      alert_grade_threshold: 'D',
+      alert_score_threshold: null,
+      alert_red_flags_enabled: true,
+      quiet_minutes: 0,
+      max_retries: 0,
+      retry_interval_minutes: 5,
     });
     setScheduleModalOpen(true);
   }
@@ -256,12 +277,18 @@ export default function ScheduledTests() {
       concurrency: schedule.concurrency,
       enabled: schedule.enabled,
       use_mock: schedule.use_mock,
+      alert_grade_threshold: schedule.alert_grade_threshold ?? 'D',
+      alert_score_threshold: schedule.alert_score_threshold ?? null,
+      alert_red_flags_enabled: schedule.alert_red_flags_enabled ?? true,
+      quiet_minutes: schedule.quiet_minutes ?? 0,
+      max_retries: schedule.max_retries ?? 0,
+      retry_interval_minutes: schedule.retry_interval_minutes ?? 5,
     });
     setScheduleModalOpen(true);
   }
 
   async function submitSchedule(values: ScheduleFormValues) {
-    const payload = { ...values, test_scope: 'full' as const };
+    const payload = { ...values, alert_score_threshold: values.alert_score_threshold ?? null, test_scope: 'full' as const };
     if (editingSchedule) {
       updateSchedule.mutate({ id: editingSchedule.id, payload });
       return;
@@ -338,7 +365,7 @@ export default function ScheduledTests() {
           loading={schedules.isLoading || channels.isLoading || suites.isLoading || baselines.isLoading}
           dataSource={schedules.data ?? []}
           pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1120 }}
+          scroll={{ x: 1380 }}
           columns={[
             {
               title: '计划',
@@ -369,6 +396,15 @@ export default function ScheduledTests() {
               title: '频率',
               width: 110,
               render: (_, schedule) => intervalText(schedule.interval_minutes),
+            },
+            {
+              title: '策略',
+              width: 260,
+              render: (_, schedule) => (
+                <Tooltip title="评级阈值、分数阈值、红旗标签、静默窗口和失败重试设置">
+                  <Typography.Text>{schedulePolicyText(schedule)}</Typography.Text>
+                </Tooltip>
+              ),
             },
             {
               title: '下次执行',
@@ -705,14 +741,108 @@ export default function ScheduledTests() {
           <Space size="large" wrap>
             <Form.Item label="执行间隔（分钟）" name="interval_minutes" rules={[{ required: true }]}>
               <InputNumber min={5} max={43200} style={{ width: 160 }} />
+              <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                最小 5 分钟；日常巡检建议 60 或 1440，排查期可临时调短。
+              </Typography.Text>
             </Form.Item>
             <Form.Item label="重复次数" name="repeat_count" rules={[{ required: true }]}>
               <InputNumber min={1} max={5} style={{ width: 120 }} />
+              <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                范围 1-5；次数越高越容易发现低概率混路，调用成本也越高。
+              </Typography.Text>
             </Form.Item>
             <Form.Item label="并发度" name="concurrency" rules={[{ required: true }]}>
               <InputNumber min={1} max={16} style={{ width: 120 }} />
+              <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                范围 1-16；限流严格或不稳定渠道建议 1-4。
+              </Typography.Text>
             </Form.Item>
           </Space>
+          <Typography.Title level={5}>告警策略</Typography.Title>
+          <Typography.Paragraph type="secondary">
+            默认保持兼容：D/E 评级或红旗标签会创建告警。分数阈值留空时不按分数单独触发。
+          </Typography.Paragraph>
+          <Row gutter={16}>
+            <Col xs={24} md={8}>
+              <Tooltip title="当报告评级达到该等级或更差时触发告警。D 表示 D/E，C 表示 C/D/E。">
+                <Form.Item label="评级阈值" name="alert_grade_threshold" rules={[{ required: true }]}>
+                  <Select
+                    options={[
+                      { value: 'C', label: 'C 及以下' },
+                      { value: 'D', label: 'D 及以下' },
+                      { value: 'E', label: '仅 E' },
+                    ]}
+                  />
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                    默认 D 及以下；C 更敏感，E 更保守。
+                  </Typography.Text>
+                </Form.Item>
+              </Tooltip>
+            </Col>
+            <Col xs={24} md={8}>
+              <Tooltip title="可选。报告分数小于等于该值时触发告警，范围 0-100；留空表示不启用。">
+                <Form.Item label="分数阈值" name="alert_score_threshold">
+                  <InputNumber min={0} max={100} precision={1} style={{ width: '100%' }} placeholder="留空" />
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                    留空不启用；填写后低于或等于该分数会告警。
+                  </Typography.Text>
+                </Form.Item>
+              </Tooltip>
+            </Col>
+            <Col xs={24} md={8}>
+              <Tooltip title="开启后，身份错配、协议异常、请求失败、Signature 互通失败等红旗标签会触发告警。">
+                <Form.Item label="红旗标签告警" name="alert_red_flags_enabled" valuePropName="checked">
+                  <Switch checkedChildren="启用" unCheckedChildren="关闭" />
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                    覆盖身份错配、协议异常、请求失败、Signature 失败等高风险信号。
+                  </Typography.Text>
+                </Form.Item>
+              </Tooltip>
+            </Col>
+            <Col xs={24} md={8}>
+              <Tooltip title="同计划同渠道已有待复审告警时，静默期内不重复创建和发送告警。0 表示不静默。">
+                <Form.Item label="重复告警静默（分钟）" name="quiet_minutes" rules={[{ required: true }]}>
+                  <InputNumber min={0} max={10080} style={{ width: '100%' }} />
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                    0 表示不静默；建议 360，避免同一问题反复刷屏。
+                  </Typography.Text>
+                </Form.Item>
+              </Tooltip>
+            </Col>
+          </Row>
+          <Typography.Title level={5}>失败重试</Typography.Title>
+          <Typography.Paragraph type="secondary">
+            只在巡检任务执行失败时重试，不会因为低分或异常标签重试。默认不重试。
+          </Typography.Paragraph>
+          <Row gutter={16}>
+            <Col xs={24} md={8}>
+              <Tooltip title="巡检失败后的最大重试次数，范围 0-3。0 表示失败后不自动重试。">
+                <Form.Item label="最大重试次数" name="max_retries" rules={[{ required: true }]}>
+                  <InputNumber min={0} max={3} style={{ width: '100%' }} />
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                    只在任务执行失败时重试；低分或异常标签不会触发重试。
+                  </Typography.Text>
+                </Form.Item>
+              </Tooltip>
+            </Col>
+            <Col xs={24} md={8}>
+              <Tooltip title="两次失败重试之间等待的分钟数，范围 1-60。">
+                <Form.Item label="重试间隔（分钟）" name="retry_interval_minutes" rules={[{ required: true }]}>
+                  <InputNumber min={1} max={60} style={{ width: '100%' }} />
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                    建议 5-10 分钟，给渠道短时波动留恢复时间。
+                  </Typography.Text>
+                </Form.Item>
+              </Tooltip>
+            </Col>
+          </Row>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="参数配置建议"
+            description="日常巡检：1440 分钟 / 重复 1 / 并发 1-4 / D 及以下 / 静默 360 分钟 / 重试 1 次。排查期：60 分钟 / 重复 3 / 并发 1-2 / C 及以下 / 静默 60 分钟。"
+          />
           <Space size="large" wrap>
             <Form.Item name="enabled" valuePropName="checked">
               <Checkbox>启用计划</Checkbox>

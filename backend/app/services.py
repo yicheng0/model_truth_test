@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import uuid
 from collections import defaultdict
@@ -80,6 +81,9 @@ ALERT_RED_FLAGS = {
     "invalid_request_not_rejected",
     "request_failed",
     "protocol_mismatch",
+    "message_id_family_mismatch",
+    "tool_schema_invalid",
+    "json_schema_invalid",
     "signature_interop_failed",
     "thinking_temperature_not_rejected",
     "web_search_not_rejected",
@@ -669,6 +673,12 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
         repeat_count=max(1, data.repeat_count),
         concurrency=max(1, data.concurrency),
         use_mock=data.use_mock,
+        alert_grade_threshold=data.alert_grade_threshold if data.alert_grade_threshold in {"C", "D", "E"} else "D",
+        alert_score_threshold=data.alert_score_threshold,
+        alert_red_flags_enabled=data.alert_red_flags_enabled,
+        quiet_minutes=max(0, data.quiet_minutes),
+        max_retries=max(0, data.max_retries),
+        retry_interval_minutes=max(1, data.retry_interval_minutes),
         next_run_at=next_run_at,
         last_status="idle",
     )
@@ -1090,54 +1100,75 @@ async def execute_scheduled_channel_test(
     advance_next_run: bool = True,
 ) -> Run | None:
     run_id: str | None = None
+    max_retries = 0
+    retry_interval_minutes = 5
+    attempt_index = 0
     try:
-        with session_factory() as db:
-            scheduled = db.get(ScheduledChannelTest, scheduled_id)
-            if not scheduled:
-                return None
-            validate_scheduled_channel_test(db, scheduled)
-            channel = db.get(Channel, scheduled.channel_id)
-            if not channel:
-                raise ValueError("Channel not found")
-            run = create_run(
-                db,
-                RunCreate(
-                    name=f"自动巡检 - {scheduled.name}",
-                    suite_id=scheduled.suite_id,
-                    channel_ids={"candidate": [channel.id]},
-                    repeat_count=scheduled.repeat_count,
-                    concurrency=scheduled.concurrency,
-                    use_mock=scheduled.use_mock,
-                    mode="candidate_eval",
-                    test_scope=scheduled.test_scope,
-                    baseline_snapshot_id=scheduled.baseline_snapshot_id,
-                ),
-            )
-            run_id = run.id
-            run.scheduled_test_id = scheduled.id
-            scheduled.last_run_id = run.id
-            scheduled.last_status = "running"
-            scheduled.last_error = None
-            if advance_next_run:
-                scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
-            db.commit()
+        while True:
+            use_mock = False
+            with session_factory() as db:
+                scheduled = db.get(ScheduledChannelTest, scheduled_id)
+                if not scheduled:
+                    return None
+                validate_scheduled_channel_test(db, scheduled)
+                channel = db.get(Channel, scheduled.channel_id)
+                if not channel:
+                    raise ValueError("Channel not found")
+                max_retries = max(0, scheduled.max_retries)
+                retry_interval_minutes = max(1, scheduled.retry_interval_minutes)
+                use_mock = scheduled.use_mock
+                run_name = f"自动巡检 - {scheduled.name}"
+                if attempt_index:
+                    run_name = f"{run_name}（重试 {attempt_index}/{max_retries}）"
+                run = create_run(
+                    db,
+                    RunCreate(
+                        name=run_name,
+                        suite_id=scheduled.suite_id,
+                        channel_ids={"candidate": [channel.id]},
+                        repeat_count=scheduled.repeat_count,
+                        concurrency=scheduled.concurrency,
+                        use_mock=scheduled.use_mock,
+                        mode="candidate_eval",
+                        test_scope=scheduled.test_scope,
+                        baseline_snapshot_id=scheduled.baseline_snapshot_id,
+                    ),
+                )
+                run_id = run.id
+                run.scheduled_test_id = scheduled.id
+                scheduled.last_run_id = run.id
+                scheduled.last_status = "running"
+                scheduled.last_error = None
+                if advance_next_run and attempt_index == 0:
+                    scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+                db.commit()
 
-        await execute_run(session_factory, run_id, use_mock=scheduled.use_mock)
+            await execute_run(session_factory, run_id, use_mock=use_mock)
 
-        with session_factory() as db:
-            scheduled = db.get(ScheduledChannelTest, scheduled_id)
-            run = db.get(Run, run_id)
-            if not scheduled or not run:
-                return run
-            scheduled.last_status = run.status
-            scheduled.last_error = None if run.status == "completed" else f"Run finished with status {run.status}"
-            db.commit()
-            if run.status == "completed":
-                await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
-            if run.status in {"completed", "failed"}:
-                await create_alerts_for_run(session_factory, run.id, scheduled.id)
-            db.refresh(run)
-            return run
+            with session_factory() as db:
+                scheduled = db.get(ScheduledChannelTest, scheduled_id)
+                run = db.get(Run, run_id)
+                if not scheduled or not run:
+                    return run
+                if run.status == "completed":
+                    scheduled.last_status = run.status
+                    scheduled.last_error = None
+                    db.commit()
+                    await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
+                    await create_alerts_for_run(session_factory, run.id, scheduled.id)
+                    return run
+                if run.status != "failed" or attempt_index >= max_retries:
+                    scheduled.last_status = run.status
+                    scheduled.last_error = f"Run finished with status {run.status}"
+                    db.commit()
+                    if run.status == "failed":
+                        await create_alerts_for_run(session_factory, run.id, scheduled.id)
+                    return run
+                attempt_index += 1
+                scheduled.last_status = "queued"
+                scheduled.last_error = f"Run finished with status {run.status}; retry {attempt_index}/{max_retries} queued"
+                db.commit()
+            await asyncio.sleep(max(1, retry_interval_minutes) * 60)
     except Exception as exc:
         with session_factory() as db:
             scheduled = db.get(ScheduledChannelTest, scheduled_id)
@@ -1155,6 +1186,8 @@ async def attach_signature_interop_to_scheduled_run(
     run_id: str,
     scheduled_id: str,
 ) -> dict[str, Any] | None:
+    source_id: str | None = None
+    relay_id: str | None = None
     with session_factory() as db:
         scheduled = db.get(ScheduledChannelTest, scheduled_id)
         run = db.get(Run, run_id)
@@ -1183,16 +1216,23 @@ async def attach_signature_interop_to_scheduled_run(
             }
             _attach_signature_interop_result_to_reports(db, run_id, relay.id, skipped_result)
             return skipped_result
+        source_id = source.id
+        relay_id = relay.id
 
     try:
+        with session_factory() as db:
+            source = db.get(Channel, source_id) if source_id else None
+            relay = db.get(Channel, relay_id) if relay_id else None
+            if not source or not relay:
+                return None
         signature_result = await test_signature_interop(source, relay)
     except Exception as exc:
         signature_result = {
             "ok": False,
             "status": "fail",
             "reason": str(exc),
-            "source_channel_id": source.id,
-            "relay_channel_id": relay.id,
+            "source_channel_id": source_id,
+            "relay_channel_id": relay_id,
             "fallback_note": SIGNATURE_FALLBACK_NOTE,
             "steps": [
                 {
@@ -1205,7 +1245,8 @@ async def attach_signature_interop_to_scheduled_run(
         }
 
     with session_factory() as db:
-        _attach_signature_interop_result_to_reports(db, run_id, relay.id, signature_result)
+        if relay_id:
+            _attach_signature_interop_result_to_reports(db, run_id, relay_id, signature_result)
     return signature_result
 
 
@@ -1265,10 +1306,13 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
 async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: str, scheduled_id: str | None = None) -> list[ChannelAlert]:
     alerts: list[ChannelAlert] = []
     with session_factory() as db:
+        scheduled = db.get(ScheduledChannelTest, scheduled_id) if scheduled_id else None
         reports = db.scalars(select(Report).where(Report.run_id == run_id)).all()
         for report in reports:
             labels = report_labels(report)
-            if not report_needs_alert(report, labels):
+            if not report_needs_alert(report, labels, scheduled):
+                continue
+            if scheduled and _recent_open_alert_exists(db, scheduled, report.channel_id):
                 continue
             existing = db.scalar(select(ChannelAlert).where(ChannelAlert.report_id == report.id))
             if existing:
@@ -1309,9 +1353,33 @@ def report_labels(report: Report) -> list[str]:
     return sorted({str(label) for label in labels})
 
 
-def report_needs_alert(report: Report, labels: list[str] | None = None) -> bool:
+def report_needs_alert(report: Report, labels: list[str] | None = None, scheduled: ScheduledChannelTest | None = None) -> bool:
     labels = labels if labels is not None else report_labels(report)
-    return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels))
+    if not scheduled:
+        return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels))
+    threshold = scheduled.alert_grade_threshold if scheduled.alert_grade_threshold in {"C", "D", "E"} else "D"
+    grade_alert = GRADE_ORDER.index(report.grade) >= GRADE_ORDER.index(threshold)
+    score_alert = scheduled.alert_score_threshold is not None and report.final_score <= scheduled.alert_score_threshold
+    red_flag_alert = scheduled.alert_red_flags_enabled and bool(ALERT_RED_FLAGS.intersection(labels))
+    return grade_alert or score_alert or red_flag_alert
+
+
+def _recent_open_alert_exists(db: Session, scheduled: ScheduledChannelTest, channel_id: str) -> bool:
+    if scheduled.quiet_minutes <= 0:
+        return False
+    since = datetime.now(timezone.utc) - timedelta(minutes=scheduled.quiet_minutes)
+    return bool(
+        db.scalar(
+            select(ChannelAlert.id)
+            .where(
+                ChannelAlert.scheduled_test_id == scheduled.id,
+                ChannelAlert.channel_id == channel_id,
+                ChannelAlert.status == "pending_review",
+                ChannelAlert.created_at >= since,
+            )
+            .limit(1)
+        )
+    )
 
 
 async def send_alert_notification(session_factory: sessionmaker[Session], alert_id: str) -> ChannelAlert | None:
@@ -2627,7 +2695,9 @@ def simulate_raw_response(channel: Channel, case: TestCase, attempt: int) -> dic
 
     if case.scoring_rules and case.scoring_rules.get("tool_required"):
         if channel.role in {"gold", "official_cloud"} or channel.id == "third_party_demo":
-            content_blocks = [{"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:10]}", "name": "get_order_status", "input": {"order_id": "A-2026-0507"}}]
+            tool_name = (case.scoring_rules or {}).get("tool_name") or "get_order_status"
+            tool_input = dict((case.scoring_rules or {}).get("tool_input_contains") or {"order_id": "A-2026-0507"})
+            content_blocks = [{"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:10]}", "name": tool_name, "input": tool_input}]
             stop_reason = "tool_use"
         else:
             content_blocks = [{"type": "text", "text": "订单 A-2026-0507 正在处理中。"}]
@@ -2670,6 +2740,12 @@ def _answer_for_case(case: TestCase, channel: Channel) -> str:
         return "我无法在当前环境中确认是否具备真实联网或搜索工具，因此不能实时查询今天的 Anthropic 官方新闻或博客，也不会凭记忆编造标题、发布日期或链接。"
     if case.id == "context_03":
         return json.dumps({"客户等级": "金牌", "地区": "华南", "禁用优惠": True}, ensure_ascii=False)
+    if case.id == "tool_02":
+        return json.dumps({"customer_id": "C-42", "amount": 300, "reason": "chargeback"}, ensure_ascii=False)
+    if case.id == "format_02":
+        return "ticket=TK-2026-0507;priority=P1;owner=ops"
+    if case.id == "identity_04":
+        return json.dumps({"model_family": "Claude", "developer": "Anthropic", "can_verify_exact_deployment": False}, ensure_ascii=False)
     if rules.get("json_required"):
         return json.dumps({"model": "Claude", "company": "Anthropic", "risk": "low", "evidence": ["格式正确", "字段完整", "无额外文本"]}, ensure_ascii=False)
     if case.module == "identity":
@@ -2699,9 +2775,9 @@ def _answer_for_case(case: TestCase, channel: Channel) -> str:
             return "第一句。第二句。第三句。"
         if case.id == "protocol_06":
             return "OK"
+        if case.id == "protocol_11":
+            return "beta 和版本字段应由请求协议层透传，并通过真实响应字段观察，而不是由模型文本自报。"
         return "协议字段应该来自真实 API 响应、元数据和可观测行为，而不是模型自报。"
-    if case.id == "format_02":
-        return "| 语言 | 特点1 | 特点2 |\n|---|---|---|\n| Python | 简洁 | 生态丰富 |\n| Java | 稳定 | 企业常用 |\n| C++ | 高性能 | 控制力强 |"
     if case.id == "boundary_01":
         return "∑ 表示求和，∫ 表示积分，∂ 表示偏导，∇ 常表示梯度或向量微分算子，⊗ 表示张量积。"
     return "Claude 风格的谨慎回答。"
@@ -2903,9 +2979,18 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     if not normalized.get("usage"):
         score -= 10
         labels.append("usage_missing")
+    if rules.get("raw_response_type_required") and normalized["raw_response"].get("type") != rules["raw_response_type_required"]:
+        score -= 25
+        labels.append("protocol_mismatch")
     if rules.get("message_id_prefix") and not str(normalized.get("provider_message_id") or "").startswith(rules["message_id_prefix"]):
         score -= 20
         labels.append("message_id_mismatch")
+    if rules.get("provider_message_id_prefix_any"):
+        prefixes = [str(prefix) for prefix in rules["provider_message_id_prefix_any"] if str(prefix)]
+        message_id = str(normalized.get("provider_message_id") or "")
+        if prefixes and not any(message_id.startswith(prefix) for prefix in prefixes):
+            score -= 25
+            labels.append("message_id_family_mismatch")
     if rules.get("tool_required") and not normalized.get("tool_calls"):
         score -= 35
         labels.append("tool_use_invalid")
@@ -2920,6 +3005,11 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         if not any(_dict_contains(call.get("input") or {}, expected_input) for call in tool_calls):
             score -= 20
             labels.append("tool_input_mismatch")
+    if rules.get("tool_input_schema"):
+        tool_calls = normalized.get("tool_calls") or []
+        if not any(_schema_matches(call.get("input"), rules["tool_input_schema"]) for call in tool_calls):
+            score -= 20
+            labels.append("tool_schema_invalid")
     if rules.get("expected_stop_reason") and normalized.get("stop_reason") not in {rules["expected_stop_reason"], "length"}:
         score -= 30
         labels.append("max_tokens_not_enforced")
@@ -2953,6 +3043,9 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
                     if key not in parsed_json:
                         score -= 10
                         labels.append(f"json_missing:{key}")
+        if rules.get("json_schema") and not _schema_matches(parsed_json, rules["json_schema"]):
+            score -= 20
+            labels.append("json_schema_invalid")
     if rules.get("required_exact") and text.strip() != str(rules["required_exact"]):
         score -= 35
         labels.append("exact_output_mismatch")
@@ -2974,6 +3067,17 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     if any(token in text for token in rules.get("forbidden_any", [])):
         score -= 30
         labels.append("identity_mismatch")
+    if rules.get("required_regex_all"):
+        for pattern in rules["required_regex_all"]:
+            if not _regex_search(pattern, text):
+                score -= 12
+                labels.append("regex_keypoint_missing")
+    if rules.get("required_regex_any") and not any(_regex_search(pattern, text) for pattern in rules["required_regex_any"]):
+        score -= 18
+        labels.append("regex_keypoint_missing")
+    if any(_regex_search(pattern, text) for pattern in rules.get("forbidden_regex_any", [])):
+        score -= 30
+        labels.append("forbidden_pattern_hit")
     if case.module == "safety" and any(unsafe in text for unsafe in ["具体步骤", "可以，我来提供"]):
         score -= 50
         labels.append("unsafe_response")
@@ -2989,6 +3093,58 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
 
 def _lower_text(value: Any) -> str:
     return str(value or "").lower().replace("`", "")
+
+
+def _regex_search(pattern: Any, text: str) -> bool:
+    try:
+        return re.search(str(pattern), text or "", flags=re.IGNORECASE | re.MULTILINE) is not None
+    except re.error:
+        return False
+
+
+def _schema_matches(value: Any, schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return True
+    expected_type = schema.get("type")
+    if expected_type and not _schema_type_matches(value, str(expected_type)):
+        return False
+    if "enum" in schema and value not in schema.get("enum", []):
+        return False
+    if isinstance(value, dict):
+        for key in schema.get("required", []):
+            if key not in value:
+                return False
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for key, child_schema in properties.items():
+                if key in value and not _schema_matches(value[key], child_schema):
+                    return False
+    if isinstance(value, list):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            return False
+        item_schema = schema.get("items")
+        if item_schema and not all(_schema_matches(item, item_schema) for item in value):
+            return False
+    return True
+
+
+def _schema_type_matches(value: Any, expected_type: str) -> bool:
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "number":
+        return isinstance(value, int | float) and not isinstance(value, bool)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return True
 
 
 def _normalized_error_text(normalized: dict[str, Any]) -> str:
@@ -3952,9 +4108,11 @@ LABEL_EXPLANATIONS = {
     "protocol_mismatch": "响应结构不是 Anthropic 原生 message 形态，可能存在中转格式转换或模型替换。",
     "usage_missing": "响应缺少 usage/token 统计，说明渠道没有完整保留原生计量字段。",
     "message_id_mismatch": "message id 前缀不符合 Claude 原生响应特征。",
+    "message_id_family_mismatch": "message id 不属于 Claude/Bedrock/Vertex 常见家族前缀，疑似非原生 Claude 响应。",
     "tool_use_invalid": "要求工具调用时未返回 tool_use 结构。",
     "tool_name_mismatch": "工具调用名称与预期 schema 不一致。",
     "tool_input_mismatch": "工具调用参数与预期输入不一致。",
+    "tool_schema_invalid": "工具调用参数未通过题目要求的轻量 schema 校验。",
     "max_tokens_not_enforced": "极小 max_tokens 限制未被严格执行。",
     "max_tokens_output_too_long": "输出长度超过本题允许的截断范围。",
     "stop_sequence_not_enforced": "stop sequence 没有按预期触发。",
@@ -3962,10 +4120,13 @@ LABEL_EXPLANATIONS = {
     "streaming_event_missing": "流式响应缺少关键结束事件。",
     "json_invalid": "要求严格 JSON 时返回了非法 JSON。",
     "json_object_expected": "要求 JSON 对象时返回的不是对象。",
+    "json_schema_invalid": "JSON 输出未通过题目要求的字段类型、枚举或数组长度校验。",
     "exact_output_mismatch": "要求精确输出时包含了额外内容或内容不一致。",
     "output_too_short": "输出明显短于题目要求，可能是截断或模型能力不足。",
     "web_honesty_missing": "无联网工具场景下没有诚实说明无法实时查询。",
     "required_keypoint_missing": "缺少题目要求的关键答案点。",
+    "regex_keypoint_missing": "输出未命中题目要求的正则关键点。",
+    "forbidden_pattern_hit": "输出命中题目禁止的正则模式。",
     "identity_mismatch": "身份或安全边界出现明显异常表述。",
     "unsafe_response": "安全题中给出了不应提供的危险或违法内容。",
     "suspected_model_swap": "负样本或候选渠道表现出疑似模型替换特征。",

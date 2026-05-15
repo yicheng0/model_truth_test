@@ -52,6 +52,56 @@ def create_ready_baseline(client: TestClient, name: str = "managed baseline") ->
     return suite_id, run, snapshot
 
 
+def create_patrol_schedule(client: TestClient, **overrides) -> dict:  # noqa: ANN001
+    suite_id, _run, snapshot = create_ready_baseline(client, overrides.pop("baseline_name", "patrol policy baseline"))
+    payload = {
+        "name": "policy patrol",
+        "channel_id": "third_party_demo",
+        "suite_id": suite_id,
+        "baseline_snapshot_id": snapshot["id"],
+        "interval_minutes": 60,
+        "repeat_count": 1,
+        "concurrency": 1,
+        "use_mock": True,
+        **overrides,
+    }
+    response = client.post("/api/scheduled-tests", json=payload)
+    assert response.status_code == 200
+    return response.json()
+
+
+def create_report_for_schedule(schedule: dict, *, grade: str, score: float, labels: list[str] | None = None) -> str:
+    with SessionLocal() as db:
+        run = Run(
+            id=f"run_policy_{grade}_{len(labels or [])}_{int(score)}",
+            suite_id=schedule["suite_id"],
+            name="policy run",
+            mode="candidate_eval",
+            test_scope="full",
+            baseline_snapshot_id=schedule["baseline_snapshot_id"],
+            scheduled_test_id=schedule["id"],
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=1,
+            completed_jobs=1,
+        )
+        report = Report(
+            id=f"rep_policy_{grade}_{len(labels or [])}_{int(score)}",
+            run_id=run.id,
+            channel_id=schedule["channel_id"],
+            final_score=score,
+            grade=grade,
+            summary="policy report",
+            evidence={"labels": labels or [], "red_flags": labels or []},
+            markdown="# policy report",
+        )
+        db.add(run)
+        db.add(report)
+        db.commit()
+        return run.id
+
+
 def manual_thinking_temperature_probe_case() -> TestCaseModel:
     return TestCaseModel(
         id="manual_thinking_temperature_probe",
@@ -239,7 +289,7 @@ def test_report_compare_rejects_mixed_modes() -> None:
     assert "modes must match" in response.json()["detail"]
 
 
-def test_default_suite_is_optimized_28_and_removes_stale_default_cases() -> None:
+def test_default_suite_is_discriminative_32_and_removes_stale_default_cases() -> None:
     reset_database()
     with SessionLocal() as db:
         suite = db.get(TestSuiteModel, "claude_full_35")
@@ -258,18 +308,18 @@ def test_default_suite_is_optimized_28_and_removes_stale_default_cases() -> None
         case_ids = list(db.scalars(select(TestCaseModel.id).where(TestCaseModel.suite_id == "claude_full_35").order_by(TestCaseModel.sort_order)).all())
 
     assert suite is not None
-    assert suite.version == "2026.05-optimized-28"
-    assert len(case_ids) == 28
-    assert "identity_03" not in case_ids
-    assert case_ids[:5] == ["websearch_01", "identity_01", "identity_02", "identity_04", "identity_10"]
-    assert "protocol_09" not in case_ids
+    assert suite.version == "2026.05-discriminative-32"
+    assert len(case_ids) == 32
+    assert case_ids[:5] == ["websearch_01", "protocol_01", "protocol_02", "protocol_03", "protocol_04"]
+    assert "protocol_09" in case_ids
+    assert "tool_01" in case_ids
     with SessionLocal() as db:
         quick_count = sum(
             1
             for case in db.scalars(select(TestCaseModel).where(TestCaseModel.suite_id == "claude_full_35")).all()
             if (case.scoring_rules or {}).get("quick") is True
         )
-    assert quick_count == 8
+    assert quick_count == 12
 
 
 def test_quick_run_uses_only_quick_cases() -> None:
@@ -293,8 +343,8 @@ def test_quick_run_uses_only_quick_cases() -> None:
         payload = client.get(f"/api/runs/{run['id']}/results").json()
 
     assert payload["run"]["test_scope"] == "quick"
-    assert payload["run"]["total_jobs"] == 16
-    assert len(payload["results"]) == 16
+    assert payload["run"]["total_jobs"] == 24
+    assert len(payload["results"]) == 24
 
 
 def test_performance_benchmark_writes_evalscope_style_metrics_and_summary() -> None:
@@ -401,7 +451,7 @@ def test_suite_bundle_import_export_and_diff() -> None:
     assert diff.json()["changed"][0]["id"] == "custom_case_1"
 
 
-def test_score_result_supports_optimized_rules() -> None:
+def test_score_result_supports_discriminative_rules() -> None:
     reset_database()
     with SessionLocal() as db:
         channel = db.get(Channel, "anthropic_official")
@@ -422,6 +472,23 @@ def test_score_result_supports_optimized_rules() -> None:
             },
         )
 
+        message_case = db.get(TestCaseModel, "protocol_01")
+        assert message_case is not None
+        message_score, message_labels = score_result(
+            channel,
+            message_case,
+            {
+                "raw_response": {"object": "chat.completion"},
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "provider_message_id": "chatcmpl_test",
+                "tool_calls": [],
+                "stop_reason": "stop",
+                "stream_events": ["done"],
+                "content_text": "协议字段应该来自真实 API 响应。",
+                "status_code": 200,
+            },
+        )
+
         json_case = db.get(TestCaseModel, "format_01")
         json_score, json_labels = score_result(
             channel,
@@ -434,6 +501,23 @@ def test_score_result_supports_optimized_rules() -> None:
                 "stop_reason": "end_turn",
                 "stream_events": ["message_stop"],
                 "content_text": '{"risk":"low"}',
+                "status_code": 200,
+            },
+        )
+
+        regex_case = db.get(TestCaseModel, "format_02")
+        assert regex_case is not None
+        regex_score, regex_labels = score_result(
+            channel,
+            regex_case,
+            {
+                "raw_response": {"type": "message"},
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "provider_message_id": "msg_test",
+                "tool_calls": [],
+                "stop_reason": "end_turn",
+                "stream_events": ["message_stop"],
+                "content_text": "ticket=TK-2026-0507;priority=P2;owner=ops\n说明：已处理",
                 "status_code": 200,
             },
         )
@@ -458,8 +542,16 @@ def test_score_result_supports_optimized_rules() -> None:
     assert score < 100
     assert "tool_name_mismatch" in labels
     assert "tool_input_mismatch" in labels
+    assert "tool_schema_invalid" in labels
+    assert message_score < 100
+    assert "message_id_family_mismatch" in message_labels
+    assert "protocol_mismatch" in message_labels
     assert json_score < 100
     assert "json_missing:evidence" in json_labels
+    assert "json_schema_invalid" in json_labels
+    assert regex_score < 100
+    assert "regex_keypoint_missing" in regex_labels
+    assert "forbidden_pattern_hit" in regex_labels
     assert stop_score < 100
     assert "stop_sequence_not_enforced" in stop_labels
     assert "stop_sequence_leaked" in stop_labels
@@ -1093,6 +1185,116 @@ def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypa
     assert report.evidence["signature_interop"]["status"] == "fail"
     assert "signature_interop_failed" in report.evidence["labels"]
     assert "Thinking Signature 互通" in (report.markdown or "")
+
+
+def test_scheduled_alert_policy_uses_grade_score_and_red_flag_settings(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(
+            client,
+            alert_grade_threshold="E",
+            alert_score_threshold=85,
+            alert_red_flags_enabled=False,
+        )
+
+    red_flag_run_id = create_report_for_schedule(schedule, grade="B", score=90, labels=["identity_mismatch"])
+    score_run_id = create_report_for_schedule(schedule, grade="B", score=80)
+    grade_run_id = create_report_for_schedule(schedule, grade="E", score=95)
+
+    asyncio.run(create_alerts_for_run(SessionLocal, red_flag_run_id, schedule["id"]))
+    asyncio.run(create_alerts_for_run(SessionLocal, score_run_id, schedule["id"]))
+    asyncio.run(create_alerts_for_run(SessionLocal, grade_run_id, schedule["id"]))
+
+    with TestClient(app) as client:
+        alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    assert {alert["run_id"] for alert in alerts} == {score_run_id, grade_run_id}
+
+
+def test_scheduled_alert_policy_supports_c_grade_threshold(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, alert_grade_threshold="C")
+
+    run_id = create_report_for_schedule(schedule, grade="C", score=78)
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with TestClient(app) as client:
+        alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    assert len(alerts) == 1
+    assert alerts[0]["run_id"] == run_id
+
+
+def test_scheduled_alert_quiet_window_skips_duplicate_pending_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample", quiet_minutes=360)
+
+    first_run_id = create_report_for_schedule(schedule, grade="E", score=20)
+    second_run_id = create_report_for_schedule(schedule, grade="E", score=25)
+    asyncio.run(create_alerts_for_run(SessionLocal, first_run_id, schedule["id"]))
+    asyncio.run(create_alerts_for_run(SessionLocal, second_run_id, schedule["id"]))
+
+    with TestClient(app) as client:
+        alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    assert len(alerts) == 1
+    assert alerts[0]["run_id"] == first_run_id
+
+
+def test_scheduled_channel_test_retries_failed_runs(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    sleep_calls: list[int] = []
+    attempts = 0
+
+    async def fake_execute_run(session_factory, run_id, runtime_credentials=None, use_mock=True, benchmark_config=None, arena_config=None):  # noqa: ANN001, ARG001
+        nonlocal attempts
+        attempts += 1
+        with session_factory() as db:
+            run = db.get(Run, run_id)
+            assert run is not None
+            run.status = "failed" if attempts == 1 else "completed"
+            run.finished_at = run.finished_at or None
+            db.add(
+                Report(
+                    id=f"rep_retry_{attempts}",
+                    run_id=run.id,
+                    channel_id="third_party_demo",
+                    final_score=100,
+                    grade="A",
+                    summary="retry report",
+                    evidence={"labels": []},
+                    markdown="# retry report",
+                )
+            )
+            db.commit()
+
+    async def fake_sleep(seconds):  # noqa: ANN001
+        sleep_calls.append(seconds)
+
+    async def fake_attach_signature(session_factory, run_id, scheduled_id):  # noqa: ANN001, ARG001
+        return None
+
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, max_retries=1, retry_interval_minutes=1)
+
+    monkeypatch.setattr("app.services.execute_run", fake_execute_run)
+    monkeypatch.setattr("app.services.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("app.services.attach_signature_interop_to_scheduled_run", fake_attach_signature)
+    asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+
+    with SessionLocal() as db:
+        updated_schedule = db.get(ScheduledChannelTest, schedule["id"])
+
+    assert attempts == 2
+    assert sleep_calls == [60]
+    assert updated_schedule is not None
+    assert updated_schedule.last_status == "completed"
 
 
 def test_alert_review_updates_status_and_reviewer() -> None:

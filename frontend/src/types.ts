@@ -346,6 +346,12 @@ export type ScheduledChannelTest = {
   repeat_count: number;
   concurrency: number;
   use_mock: boolean;
+  alert_grade_threshold: 'C' | 'D' | 'E';
+  alert_score_threshold?: number | null;
+  alert_red_flags_enabled: boolean;
+  quiet_minutes: number;
+  max_retries: number;
+  retry_interval_minutes: number;
   next_run_at?: string | null;
   last_run_id?: string | null;
   last_status?: string | null;

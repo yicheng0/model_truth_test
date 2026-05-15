@@ -100,6 +100,18 @@ def _ensure_run_baseline_columns() -> None:
     with engine.begin() as connection:
         if "test_scope" not in scheduled_columns:
             connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN test_scope VARCHAR(30) NOT NULL DEFAULT 'full'"))
+        if "alert_grade_threshold" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN alert_grade_threshold VARCHAR(2) NOT NULL DEFAULT 'D'"))
+        if "alert_score_threshold" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN alert_score_threshold FLOAT"))
+        if "alert_red_flags_enabled" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN alert_red_flags_enabled BOOLEAN NOT NULL DEFAULT 1"))
+        if "quiet_minutes" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN quiet_minutes INTEGER NOT NULL DEFAULT 0"))
+        if "max_retries" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0"))
+        if "retry_interval_minutes" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN retry_interval_minutes INTEGER NOT NULL DEFAULT 5"))
 
 
 def get_db() -> Generator[Session, None, None]:
