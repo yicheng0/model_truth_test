@@ -69,6 +69,7 @@ from .services import (
     build_run_summary,
     build_smart_patrol_report,
     channel_taxonomy_setting_read,
+    channel_alert_read,
     create_alerts_for_run,
     create_baseline_build,
     create_case,
@@ -726,7 +727,7 @@ def delete_scheduled_test(scheduled_id: str, db: Session = Depends(get_db)) -> d
 
 
 @app.post("/api/scheduled-tests/{scheduled_id}/run-now", response_model=ScheduledChannelTestRead)
-def run_scheduled_test_now(scheduled_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> ScheduledChannelTest:
+async def run_scheduled_test_now(scheduled_id: str, db: Session = Depends(get_db)) -> ScheduledChannelTestRead:
     scheduled = get_scheduled_test(scheduled_id, db)
     try:
         validate_scheduled_channel_test(db, scheduled)
@@ -736,8 +737,12 @@ def run_scheduled_test_now(scheduled_id: str, background_tasks: BackgroundTasks,
     scheduled.last_error = None
     db.commit()
     db.refresh(scheduled)
-    background_tasks.add_task(execute_scheduled_channel_test, SessionLocal, scheduled.id)
-    return scheduled
+    await execute_scheduled_channel_test(SessionLocal, scheduled.id)
+    with SessionLocal() as read_db:
+        refreshed = read_db.get(ScheduledChannelTest, scheduled.id)
+        if not refreshed:
+            raise HTTPException(status_code=404, detail="Scheduled test not found")
+        return ScheduledChannelTestRead.model_validate(refreshed)
 
 
 @app.get("/api/alerts", response_model=list[ChannelAlertRead])
@@ -745,26 +750,28 @@ def list_alerts(
     status: str | None = Query(default=None),
     channel_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
-) -> list[ChannelAlert]:
+) -> list[dict[str, object]]:
     stmt = select(ChannelAlert).order_by(ChannelAlert.created_at.desc())
     if status:
         stmt = stmt.where(ChannelAlert.status == status)
     if channel_id:
         stmt = stmt.where(ChannelAlert.channel_id == channel_id)
-    return list(db.scalars(stmt).all())
+    return [channel_alert_read(db, alert) for alert in db.scalars(stmt).all()]
 
 
 @app.get("/api/alerts/{alert_id}", response_model=ChannelAlertRead)
-def get_alert(alert_id: str, db: Session = Depends(get_db)) -> ChannelAlert:
+def get_alert(alert_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
     alert = db.get(ChannelAlert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
-    return alert
+    return channel_alert_read(db, alert)
 
 
 @app.patch("/api/alerts/{alert_id}/review", response_model=ChannelAlertRead)
-def review_alert(alert_id: str, data: ChannelAlertReviewUpdate, db: Session = Depends(get_db)) -> ChannelAlert:
-    alert = get_alert(alert_id, db)
+def review_alert(alert_id: str, data: ChannelAlertReviewUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    alert = db.get(ChannelAlert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
     if data.status not in {"confirmed_issue", "false_positive", "resolved"}:
         raise HTTPException(status_code=400, detail="Unsupported review status")
     alert.status = data.status
@@ -773,16 +780,17 @@ def review_alert(alert_id: str, data: ChannelAlertReviewUpdate, db: Session = De
     alert.reviewed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(alert)
-    return alert
+    return channel_alert_read(db, alert)
 
 
 @app.post("/api/alerts/{alert_id}/resend-notification", response_model=ChannelAlertRead)
-async def resend_alert_notification(alert_id: str, db: Session = Depends(get_db)) -> ChannelAlert:
-    get_alert(alert_id, db)
+async def resend_alert_notification(alert_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    if not db.get(ChannelAlert, alert_id):
+        raise HTTPException(status_code=404, detail="Alert not found")
     alert = await send_alert_notification(SessionLocal, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
-    return alert
+    return channel_alert_read(db, alert)
 
 
 @app.get("/api/eval-runs/{run_id}", response_model=RunRead)

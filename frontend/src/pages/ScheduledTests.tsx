@@ -6,24 +6,13 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
-import type { BaselineSnapshot, Channel, ChannelAlert, ChannelAlertStatus, FeishuBroadcastUpdate, ScheduledChannelTest, TestSuite } from '../types';
+import type { Channel, ChannelAlert, ChannelAlertStatus, FeishuBroadcastUpdate, ScheduledChannelTest } from '../types';
 
 type ScheduleFormValues = {
   name: string;
   channel_id: string;
-  suite_id: string;
-  baseline_snapshot_id: string;
   interval_minutes: number;
-  repeat_count: number;
-  concurrency: number;
   enabled: boolean;
-  use_mock: boolean;
-  alert_grade_threshold: 'C' | 'D' | 'E';
-  alert_score_threshold?: number | null;
-  alert_red_flags_enabled: boolean;
-  quiet_minutes: number;
-  max_retries: number;
-  retry_interval_minutes: number;
 };
 
 type ReviewFormValues = {
@@ -67,19 +56,47 @@ const scheduleStatusColor: Record<string, string> = {
   canceled: 'default',
 };
 
+const patrolGuideSteps = [
+  { title: '准备渠道', description: '先在渠道管理里建好候选渠道，确认模型、Base URL 和 Key 能正常请求。' },
+  { title: '新建巡检计划', description: '只选择待测渠道和执行间隔，系统固定跑 Signature 互通和真实模型请求。' },
+  { title: '查看判断依据', description: '告警会返回 run、report、result、message id 和 source/relay 响应 ID。' },
+  { title: '复审处理', description: '根据疑似 AWS、逆向或 Signature 不互通等标签确认问题，必要时重发飞书通知。' },
+];
+
+const patrolParameterFaq = [
+  {
+    key: 'interval',
+    label: '执行间隔怎么填？',
+    children: '填两次自动巡检之间的分钟数。日常建议 1440 分钟；刚接入或排查问题时用 60 分钟；最小 5 分钟。',
+  },
+  {
+    key: 'signature',
+    label: 'Signature 互通检测看什么？',
+    children: 'source 渠道先生成带 signature 的 thinking block，再让待测渠道复用。失败会标记 signature_interop_failed。',
+  },
+  {
+    key: 'model_request',
+    label: '真实模型请求看什么？',
+    children: '系统发送 thinking temperature 探针，记录 message id、协议、endpoint 和 result id，用于判断 AWS/Bedrock、Claude/Anthropic 或中间层改写。',
+  },
+  {
+    key: 'alert_ids',
+    label: '告警里的 ID 有什么用？',
+    children: 'run_id 和 report_id 用来查看完整报告；model_request_result_id 对应原始请求/响应；message id 和 source/relay id 用来判断响应来源特征。',
+  },
+];
+
 function intervalText(minutes: number) {
   if (minutes % 1440 === 0) return `${minutes / 1440} 天`;
   if (minutes % 60 === 0) return `${minutes / 60} 小时`;
   return `${minutes} 分钟`;
 }
 
-function schedulePolicyText(schedule: ScheduledChannelTest) {
-  const grade = schedule.alert_grade_threshold ?? 'D';
-  const score = schedule.alert_score_threshold === null || schedule.alert_score_threshold === undefined ? '' : ` / <=${schedule.alert_score_threshold}分`;
-  const redFlags = schedule.alert_red_flags_enabled ? ' + 红旗' : '';
-  const quiet = schedule.quiet_minutes ? ` · 静默 ${intervalText(schedule.quiet_minutes)}` : '';
-  const retry = schedule.max_retries ? ` · 重试 ${schedule.max_retries} 次` : '';
-  return `${grade}级及以下${score}${redFlags}${quiet}${retry}`;
+function evidenceText(alert: ChannelAlert) {
+  const evidence = alert.evidence_summary ?? {};
+  const hint = evidence.detected_provider_hint ? String(evidence.detected_provider_hint) : '';
+  const messageId = evidence.model_request_message_id ? ` · ${String(evidence.model_request_message_id)}` : '';
+  return hint ? `${hint}${messageId}` : messageId || '-';
 }
 
 function reportRangeToDates(range: string) {
@@ -122,8 +139,6 @@ export default function ScheduledTests() {
   });
   const channels = useQuery<Channel[]>({ queryKey: ['channels'], queryFn: api.channels, enabled: needsPlanData || needsAlertData });
   const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy, enabled: needsPlanData });
-  const suites = useQuery<TestSuite[]>({ queryKey: ['suites'], queryFn: api.suites, enabled: needsPlanData });
-  const baselines = useQuery<BaselineSnapshot[]>({ queryKey: ['baselines'], queryFn: () => api.baselines(), enabled: needsPlanData });
   const smartReport = useQuery({
     queryKey: ['smartPatrolReport', reportRange],
     queryFn: () => api.smartPatrolReport(reportDates.from, reportDates.to),
@@ -136,14 +151,7 @@ export default function ScheduledTests() {
   });
 
   const channelById = useMemo(() => new Map((channels.data ?? []).map((channel) => [channel.id, channel])), [channels.data]);
-  const suiteById = useMemo(() => new Map((suites.data ?? []).map((suite) => [suite.id, suite])), [suites.data]);
-  const baselineById = useMemo(() => new Map((baselines.data ?? []).map((baseline) => [baseline.id, baseline])), [baselines.data]);
   const candidateChannels = useMemo(() => (channels.data ?? []).filter(isCandidateChannel), [channels.data]);
-  const watchedSuiteId = Form.useWatch('suite_id', scheduleForm);
-  const readyBaselines = useMemo(
-    () => (baselines.data ?? []).filter((baseline) => baseline.status === 'ready' && (!watchedSuiteId || baseline.suite_id === watchedSuiteId)),
-    [baselines.data, watchedSuiteId],
-  );
 
   useEffect(() => {
     if (!feishuSetting.data) return;
@@ -250,17 +258,8 @@ export default function ScheduledTests() {
     setEditingSchedule(null);
     scheduleForm.resetFields();
     scheduleForm.setFieldsValue({
-      interval_minutes: 1440,
-      repeat_count: 1,
-      concurrency: 4,
       enabled: true,
-      use_mock: false,
-      alert_grade_threshold: 'D',
-      alert_score_threshold: null,
-      alert_red_flags_enabled: true,
-      quiet_minutes: 0,
-      max_retries: 0,
-      retry_interval_minutes: 5,
+      interval_minutes: 1440,
     });
     setScheduleModalOpen(true);
   }
@@ -270,25 +269,29 @@ export default function ScheduledTests() {
     scheduleForm.setFieldsValue({
       name: schedule.name,
       channel_id: schedule.channel_id,
-      suite_id: schedule.suite_id,
-      baseline_snapshot_id: schedule.baseline_snapshot_id,
       interval_minutes: schedule.interval_minutes,
-      repeat_count: schedule.repeat_count,
-      concurrency: schedule.concurrency,
       enabled: schedule.enabled,
-      use_mock: schedule.use_mock,
-      alert_grade_threshold: schedule.alert_grade_threshold ?? 'D',
-      alert_score_threshold: schedule.alert_score_threshold ?? null,
-      alert_red_flags_enabled: schedule.alert_red_flags_enabled ?? true,
-      quiet_minutes: schedule.quiet_minutes ?? 0,
-      max_retries: schedule.max_retries ?? 0,
-      retry_interval_minutes: schedule.retry_interval_minutes ?? 5,
     });
     setScheduleModalOpen(true);
   }
 
   async function submitSchedule(values: ScheduleFormValues) {
-    const payload = { ...values, alert_score_threshold: values.alert_score_threshold ?? null, test_scope: 'full' as const };
+    const payload = {
+      name: values.name,
+      channel_id: values.channel_id,
+      interval_minutes: values.interval_minutes,
+      enabled: values.enabled,
+      test_scope: 'scheduled_probe' as const,
+      repeat_count: 1,
+      concurrency: 1,
+      use_mock: false,
+      alert_grade_threshold: 'D' as const,
+      alert_score_threshold: null,
+      alert_red_flags_enabled: true,
+      quiet_minutes: 0,
+      max_retries: 0,
+      retry_interval_minutes: 5,
+    };
     if (editingSchedule) {
       updateSchedule.mutate({ id: editingSchedule.id, payload });
       return;
@@ -326,7 +329,7 @@ export default function ScheduledTests() {
     saveFeishu.mutate(payload);
   }
 
-  const planError = needsPlanData ? schedules.error ?? channels.error ?? suites.error ?? baselines.error : null;
+  const planError = needsPlanData ? schedules.error ?? channels.error : null;
   const alertError = needsAlertData ? alerts.error ?? channels.error : null;
   const reportError = activeTab === 'report' ? smartReport.error : null;
   const feishuError = activeTab === 'feishu' ? feishuSetting.error : null;
@@ -343,7 +346,7 @@ export default function ScheduledTests() {
           showIcon
           message="自动巡检数据加载失败"
           description={getErrorMessage(error)}
-          action={<Button onClick={() => Promise.all([schedules.refetch(), alerts.refetch(), channels.refetch(), suites.refetch(), baselines.refetch(), smartReport.refetch(), feishuSetting.refetch()])}>重试</Button>}
+          action={<Button onClick={() => Promise.all([schedules.refetch(), alerts.refetch(), channels.refetch(), smartReport.refetch(), feishuSetting.refetch()])}>重试</Button>}
         />
       ) : null}
 
@@ -355,91 +358,120 @@ export default function ScheduledTests() {
             key: 'plans',
             label: '巡检计划',
             children: (
-      <Card
-        title={<span className="card-title-with-icon"><CalendarClock size={18} />按渠道自动巡检</span>}
-        extra={<Button type="primary" size="large" onClick={openCreateSchedule}>新增计划</Button>}
-        bordered={false}
-      >
-        <Table
-          rowKey="id"
-          loading={schedules.isLoading || channels.isLoading || suites.isLoading || baselines.isLoading}
-          dataSource={schedules.data ?? []}
-          pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1380 }}
-          columns={[
-            {
-              title: '计划',
-              width: 230,
-              render: (_, schedule) => (
-                <Space direction="vertical" size={2}>
-                  <strong>{schedule.name}</strong>
-                  <Typography.Text type="secondary">{schedule.id}</Typography.Text>
-                </Space>
-              ),
-            },
-            {
-              title: '渠道',
-              width: 220,
-              render: (_, schedule) => channelById.get(schedule.channel_id)?.name ?? schedule.channel_id,
-            },
-            {
-              title: '渠道指纹 / 测试集',
-              width: 260,
-              render: (_, schedule) => (
-                <Space direction="vertical" size={2}>
-                  <span>{baselineById.get(schedule.baseline_snapshot_id)?.name ?? schedule.baseline_snapshot_id}</span>
-                  <Typography.Text type="secondary">{suiteById.get(schedule.suite_id)?.name ?? schedule.suite_id}</Typography.Text>
-                </Space>
-              ),
-            },
-            {
-              title: '频率',
-              width: 110,
-              render: (_, schedule) => intervalText(schedule.interval_minutes),
-            },
-            {
-              title: '策略',
-              width: 260,
-              render: (_, schedule) => (
-                <Tooltip title="评级阈值、分数阈值、红旗标签、静默窗口和失败重试设置">
-                  <Typography.Text>{schedulePolicyText(schedule)}</Typography.Text>
-                </Tooltip>
-              ),
-            },
-            {
-              title: '下次执行',
-              width: 180,
-              render: (_, schedule) => formatDateTime(schedule.next_run_at),
-            },
-            {
-              title: '状态',
-              width: 150,
-              render: (_, schedule) => (
-                <Space direction="vertical" size={4}>
-                  <Tag color={schedule.enabled ? 'green' : 'default'}>{schedule.enabled ? '启用' : '停用'}</Tag>
-                  <Tag color={scheduleStatusColor[schedule.last_status ?? 'idle'] ?? 'default'}>{schedule.last_status ?? 'idle'}</Tag>
-                </Space>
-              ),
-            },
-            {
-              title: '操作',
-              width: 250,
-              fixed: 'right',
-              render: (_, schedule) => (
-                <Space wrap>
-                  <Tooltip title="立即执行一次">
-                    <Button icon={<Play size={15} />} loading={runNow.isPending} onClick={() => runNow.mutate(schedule.id)}>执行</Button>
-                  </Tooltip>
-                  <Button icon={<Edit3 size={15} />} onClick={() => openEditSchedule(schedule)}>编辑</Button>
-                  <Popconfirm title="删除自动巡检计划" description="历史告警会保留，但不再关联该计划。" onConfirm={() => deleteSchedule.mutate(schedule.id)}>
-                    <Button danger icon={<Trash2 size={15} />} loading={deleteSchedule.isPending}>删除</Button>
-                  </Popconfirm>
-                </Space>
-              ),
-            },
-          ]}
-        />
-      </Card>
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <section className="patrol-guide-panel">
+                  <div className="patrol-guide-header">
+                    <div>
+                      <Typography.Title level={4}>自动巡检配置教程</Typography.Title>
+                      <Typography.Paragraph type="secondary">
+                        自动巡检只跑两项真实探针：Signature 互通检测和真实模型请求，用响应 ID 判断渠道来源特征。
+                      </Typography.Paragraph>
+                    </div>
+                    <Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>
+                  </div>
+                  <div className="patrol-guide-steps">
+                    {patrolGuideSteps.map((step, index) => (
+                      <div className="patrol-guide-step" key={step.title}>
+                        <span>{index + 1}</span>
+                        <strong>{step.title}</strong>
+                        <p>{step.description}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="patrol-guide-presets">
+                    <div className="patrol-preset-preview">
+                      <strong>SIGNATURE INTEROP</strong>
+                      <small>Thinking Signature 互通检测：source 生成 signature，待测渠道复用。</small>
+                    </div>
+                    <div className="patrol-preset-preview">
+                      <strong>MODEL REQUEST</strong>
+                      <small>真实模型请求：记录 message id、协议、endpoint、result id。</small>
+                    </div>
+                    <div className="patrol-preset-preview">
+                      <strong>告警证据</strong>
+                      <small>返回 run/report/result/message/source/relay 等定位 ID。</small>
+                    </div>
+                  </div>
+                </section>
+                <Card
+                  title={<span className="card-title-with-icon"><CalendarClock size={18} />按渠道自动巡检</span>}
+                  extra={<Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>}
+                  bordered={false}
+                >
+                  <Table
+                    rowKey="id"
+                    loading={schedules.isLoading || channels.isLoading}
+                    dataSource={schedules.data ?? []}
+                    pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
+                    scroll={{ x: 1380 }}
+                    columns={[
+                      {
+                        title: '计划',
+                        width: 230,
+                        render: (_, schedule) => (
+                          <Space direction="vertical" size={2}>
+                            <strong>{schedule.name}</strong>
+                            <Typography.Text type="secondary">{schedule.id}</Typography.Text>
+                          </Space>
+                        ),
+                      },
+                      {
+                        title: '渠道',
+                        width: 220,
+                        render: (_, schedule) => channelById.get(schedule.channel_id)?.name ?? schedule.channel_id,
+                      },
+                      {
+                        title: '巡检依据',
+                        width: 260,
+                        render: () => 'Signature 互通 + 真实模型请求',
+                      },
+                      {
+                        title: '频率',
+                        width: 110,
+                        render: (_, schedule) => intervalText(schedule.interval_minutes),
+                      },
+                      {
+                        title: '上次运行',
+                        width: 260,
+                        render: (_, schedule) => (
+                          schedule.last_run_id ? <Link to={`/runs/${schedule.last_run_id}`}>{schedule.last_run_id}</Link> : '-'
+                        ),
+                      },
+                      {
+                        title: '下次执行',
+                        width: 180,
+                        render: (_, schedule) => formatDateTime(schedule.next_run_at),
+                      },
+                      {
+                        title: '状态',
+                        width: 150,
+                        render: (_, schedule) => (
+                          <Space direction="vertical" size={4}>
+                            <Tag color={schedule.enabled ? 'green' : 'default'}>{schedule.enabled ? '启用' : '停用'}</Tag>
+                            <Tag color={scheduleStatusColor[schedule.last_status ?? 'idle'] ?? 'default'}>{schedule.last_status ?? 'idle'}</Tag>
+                          </Space>
+                        ),
+                      },
+                      {
+                        title: '操作',
+                        width: 250,
+                        fixed: 'right',
+                        render: (_, schedule) => (
+                          <Space wrap>
+                            <Tooltip title="立即执行一次">
+                              <Button icon={<Play size={15} />} loading={runNow.isPending} onClick={() => runNow.mutate(schedule.id)}>执行</Button>
+                            </Tooltip>
+                            <Button icon={<Edit3 size={15} />} onClick={() => openEditSchedule(schedule)}>编辑</Button>
+                            <Popconfirm title="删除自动巡检计划" description="历史告警会保留，但不再关联该计划。" onConfirm={() => deleteSchedule.mutate(schedule.id)}>
+                              <Button danger icon={<Trash2 size={15} />} loading={deleteSchedule.isPending}>删除</Button>
+                            </Popconfirm>
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                </Card>
+              </Space>
             ),
           },
           {
@@ -470,7 +502,7 @@ export default function ScheduledTests() {
           dataSource={alerts.data ?? []}
           rowClassName={(alert) => (alert.id === selectedAlertId ? 'highlight-table-row' : '')}
           pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1180 }}
+          scroll={{ x: 1480 }}
           columns={[
             {
               title: '告警',
@@ -499,12 +531,27 @@ export default function ScheduledTests() {
             },
             {
               title: '异常标签',
-              width: 260,
+              width: 230,
               render: (_, alert) => (
                 <Space wrap>
                   {(alert.trigger_labels?.length ? alert.trigger_labels : ['无']).map((label) => <Tag color={label === '无' ? 'default' : 'red'} key={label}>{label}</Tag>)}
                 </Space>
               ),
+            },
+            {
+              title: '判断依据',
+              width: 320,
+              render: (_, alert) => {
+                const evidence = alert.evidence_summary ?? {};
+                return (
+                  <Space direction="vertical" size={2}>
+                    <Typography.Text>{evidenceText(alert)}</Typography.Text>
+                    <Typography.Text type="secondary">
+                      result: {String(evidence.model_request_result_id ?? '-')} · relay: {String(evidence.signature_relay_message_id ?? '-')}
+                    </Typography.Text>
+                  </Space>
+                );
+              },
             },
             {
               title: '状态',
@@ -641,6 +688,13 @@ export default function ScheduledTests() {
                 }
                 bordered={false}
               >
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 18 }}
+                  message="飞书配置教程"
+                  description="Webhook 从飞书群机器人复制；签名密钥只有机器人开启签名校验时才填，不懂可以先留空；系统访问地址填写别人能打开的前端地址，用于告警和日报里的跳转链接。"
+                />
                 <Form form={feishuForm} layout="vertical" onFinish={submitFeishu} requiredMark={false}>
                   <Row gutter={18}>
                     <Col xs={24} md={12}>
@@ -656,11 +710,17 @@ export default function ScheduledTests() {
                     <Col xs={24}>
                       <Form.Item label="飞书机器人 Webhook" name="webhook_url">
                         <Input.Password placeholder={feishuSetting.data?.webhook_preview ?? 'https://open.feishu.cn/open-apis/bot/v2/hook/...'} />
+                        <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                          在飞书群添加自定义机器人后复制 Webhook；已配置过时留空会保留原值。
+                        </Typography.Text>
                       </Form.Item>
                     </Col>
                     <Col xs={24}>
                       <Form.Item label="签名密钥" name="webhook_secret">
                         <Input.Password placeholder={feishuSetting.data?.secret_configured ? '留空则保留现有密钥' : '可选'} />
+                        <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                          机器人没有开启签名校验时不用填；已配置过时留空会保留原值。
+                        </Typography.Text>
                       </Form.Item>
                     </Col>
                     <Col xs={24}>
@@ -671,6 +731,9 @@ export default function ScheduledTests() {
                     <Col xs={24} md={12}>
                       <Form.Item label="系统访问地址" name="app_base_url">
                         <Input placeholder="http://localhost:5174" />
+                        <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                          填前端页面地址，例如部署后的域名；本机调试可用 localhost。
+                        </Typography.Text>
                       </Form.Item>
                     </Col>
                     <Col xs={24} md={12}>
@@ -715,6 +778,13 @@ export default function ScheduledTests() {
         forceRender
       >
         <Form form={scheduleForm} layout="vertical" onFinish={submitSchedule} requiredMark={false}>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="固定巡检内容"
+            description="系统会自动执行 Thinking Signature 互通检测和真实模型请求探针，不需要再选择测试集、渠道指纹或评分阈值。"
+          />
           <Form.Item label="计划名称" name="name" rules={[{ required: true, message: '请输入计划名称' }]}>
             <Input placeholder="第三方 Sonnet 渠道每日巡检" />
           </Form.Item>
@@ -724,131 +794,15 @@ export default function ScheduledTests() {
               options={candidateChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)} / ${channel.model_name ?? '未配置模型'})` }))}
             />
           </Form.Item>
-          <Form.Item label="测试集" name="suite_id" rules={[{ required: true, message: '请选择测试集' }]}>
-            <Select
-              placeholder="选择测试集"
-              onChange={() => scheduleForm.setFieldValue('baseline_snapshot_id', undefined)}
-              options={(suites.data ?? []).map((suite) => ({ value: suite.id, label: `${suite.name} (${suite.version ?? '未标版'})` }))}
-            />
+          <Form.Item label="执行间隔（分钟）" name="interval_minutes" rules={[{ required: true }]}>
+            <InputNumber min={5} max={43200} style={{ width: 180 }} />
+            <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+              日常建议 1440 分钟；刚接入或排查时可用 60 分钟。
+            </Typography.Text>
           </Form.Item>
-          <Form.Item label="渠道指纹" name="baseline_snapshot_id" rules={[{ required: true, message: '请选择 ready 状态的渠道指纹' }]}>
-            <Select
-              placeholder={watchedSuiteId ? '选择可复用渠道指纹' : '请先选择测试集'}
-              options={readyBaselines.map((baseline) => ({ value: baseline.id, label: `${baseline.name} · ${formatDateTime(baseline.ready_at)}` }))}
-              notFoundContent={watchedSuiteId ? '当前测试集暂无 ready 状态渠道指纹，请先提取渠道指纹' : '请先选择测试集'}
-            />
-          </Form.Item>
-          <Space size="large" wrap>
-            <Form.Item label="执行间隔（分钟）" name="interval_minutes" rules={[{ required: true }]}>
-              <InputNumber min={5} max={43200} style={{ width: 160 }} />
-              <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                最小 5 分钟；日常巡检建议 60 或 1440，排查期可临时调短。
-              </Typography.Text>
-            </Form.Item>
-            <Form.Item label="重复次数" name="repeat_count" rules={[{ required: true }]}>
-              <InputNumber min={1} max={5} style={{ width: 120 }} />
-              <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                范围 1-5；次数越高越容易发现低概率混路，调用成本也越高。
-              </Typography.Text>
-            </Form.Item>
-            <Form.Item label="并发度" name="concurrency" rules={[{ required: true }]}>
-              <InputNumber min={1} max={16} style={{ width: 120 }} />
-              <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                范围 1-16；限流严格或不稳定渠道建议 1-4。
-              </Typography.Text>
-            </Form.Item>
-          </Space>
-          <Typography.Title level={5}>告警策略</Typography.Title>
-          <Typography.Paragraph type="secondary">
-            默认保持兼容：D/E 评级或红旗标签会创建告警。分数阈值留空时不按分数单独触发。
-          </Typography.Paragraph>
-          <Row gutter={16}>
-            <Col xs={24} md={8}>
-              <Tooltip title="当报告评级达到该等级或更差时触发告警。D 表示 D/E，C 表示 C/D/E。">
-                <Form.Item label="评级阈值" name="alert_grade_threshold" rules={[{ required: true }]}>
-                  <Select
-                    options={[
-                      { value: 'C', label: 'C 及以下' },
-                      { value: 'D', label: 'D 及以下' },
-                      { value: 'E', label: '仅 E' },
-                    ]}
-                  />
-                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                    默认 D 及以下；C 更敏感，E 更保守。
-                  </Typography.Text>
-                </Form.Item>
-              </Tooltip>
-            </Col>
-            <Col xs={24} md={8}>
-              <Tooltip title="可选。报告分数小于等于该值时触发告警，范围 0-100；留空表示不启用。">
-                <Form.Item label="分数阈值" name="alert_score_threshold">
-                  <InputNumber min={0} max={100} precision={1} style={{ width: '100%' }} placeholder="留空" />
-                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                    留空不启用；填写后低于或等于该分数会告警。
-                  </Typography.Text>
-                </Form.Item>
-              </Tooltip>
-            </Col>
-            <Col xs={24} md={8}>
-              <Tooltip title="开启后，身份错配、协议异常、请求失败、Signature 互通失败等红旗标签会触发告警。">
-                <Form.Item label="红旗标签告警" name="alert_red_flags_enabled" valuePropName="checked">
-                  <Switch checkedChildren="启用" unCheckedChildren="关闭" />
-                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                    覆盖身份错配、协议异常、请求失败、Signature 失败等高风险信号。
-                  </Typography.Text>
-                </Form.Item>
-              </Tooltip>
-            </Col>
-            <Col xs={24} md={8}>
-              <Tooltip title="同计划同渠道已有待复审告警时，静默期内不重复创建和发送告警。0 表示不静默。">
-                <Form.Item label="重复告警静默（分钟）" name="quiet_minutes" rules={[{ required: true }]}>
-                  <InputNumber min={0} max={10080} style={{ width: '100%' }} />
-                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                    0 表示不静默；建议 360，避免同一问题反复刷屏。
-                  </Typography.Text>
-                </Form.Item>
-              </Tooltip>
-            </Col>
-          </Row>
-          <Typography.Title level={5}>失败重试</Typography.Title>
-          <Typography.Paragraph type="secondary">
-            只在巡检任务执行失败时重试，不会因为低分或异常标签重试。默认不重试。
-          </Typography.Paragraph>
-          <Row gutter={16}>
-            <Col xs={24} md={8}>
-              <Tooltip title="巡检失败后的最大重试次数，范围 0-3。0 表示失败后不自动重试。">
-                <Form.Item label="最大重试次数" name="max_retries" rules={[{ required: true }]}>
-                  <InputNumber min={0} max={3} style={{ width: '100%' }} />
-                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                    只在任务执行失败时重试；低分或异常标签不会触发重试。
-                  </Typography.Text>
-                </Form.Item>
-              </Tooltip>
-            </Col>
-            <Col xs={24} md={8}>
-              <Tooltip title="两次失败重试之间等待的分钟数，范围 1-60。">
-                <Form.Item label="重试间隔（分钟）" name="retry_interval_minutes" rules={[{ required: true }]}>
-                  <InputNumber min={1} max={60} style={{ width: '100%' }} />
-                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-                    建议 5-10 分钟，给渠道短时波动留恢复时间。
-                  </Typography.Text>
-                </Form.Item>
-              </Tooltip>
-            </Col>
-          </Row>
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="参数配置建议"
-            description="日常巡检：1440 分钟 / 重复 1 / 并发 1-4 / D 及以下 / 静默 360 分钟 / 重试 1 次。排查期：60 分钟 / 重复 3 / 并发 1-2 / C 及以下 / 静默 60 分钟。"
-          />
           <Space size="large" wrap>
             <Form.Item name="enabled" valuePropName="checked">
               <Checkbox>启用计划</Checkbox>
-            </Form.Item>
-            <Form.Item name="use_mock" valuePropName="checked">
-              <Checkbox>使用 mock client</Checkbox>
             </Form.Item>
           </Space>
         </Form>

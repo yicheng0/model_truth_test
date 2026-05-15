@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import InvalidRequestError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
@@ -88,6 +88,7 @@ ALERT_RED_FLAGS = {
     "json_schema_invalid",
     "signature_interop_failed",
     "thinking_temperature_not_rejected",
+    "unexpected_error_response",
     "web_search_not_rejected",
     "thinking_adaptive_enabled_not_rejected",
 }
@@ -315,6 +316,20 @@ def _zoneinfo(timezone_name: str) -> ZoneInfo:
 
 
 def create_channel(db: Session, data: ChannelCreate) -> Channel:
+    existing = db.get(Channel, data.id) if data.id else None
+    if existing:
+        role = data.role or ("gold" if data.is_reference else "candidate")
+        existing.name = data.name
+        existing.provider_type = data.provider_type
+        existing.role = role
+        existing.base_url = data.base_url
+        existing.model_name = data.model_name
+        existing.auth_config_encrypted = _clean_auth_config(data.auth_config)
+        existing.is_reference = data.is_reference
+        existing.enabled = data.enabled
+        db.commit()
+        db.refresh(existing)
+        return existing
     role = data.role or ("gold" if data.is_reference else "candidate")
     channel = Channel(
         id=data.id or new_id("ch"),
@@ -328,7 +343,14 @@ def create_channel(db: Session, data: ChannelCreate) -> Channel:
         enabled=data.enabled,
     )
     db.add(channel)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.get(Channel, channel.id)
+        if existing:
+            return existing
+        raise
     db.refresh(channel)
     return channel
 
@@ -382,7 +404,20 @@ def create_suite(db: Session, data: TestSuiteCreate) -> TestSuite:
         visibility=data.visibility,
     )
     db.add(suite)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.get(TestSuite, data.id) if data.id else None
+        if not existing:
+            raise
+        existing.name = data.name
+        existing.description = data.description
+        existing.version = data.version
+        existing.visibility = data.visibility
+        db.commit()
+        db.refresh(existing)
+        return existing
     db.refresh(suite)
     return suite
 
@@ -401,7 +436,6 @@ def create_case(db: Session, data: TestCaseCreate) -> TestCase:
         existing.is_hidden = data.is_hidden
         existing.enabled = data.enabled
         db.commit()
-        db.refresh(existing)
         return existing
     existing_orders = db.scalars(select(TestCase.sort_order).where(TestCase.suite_id == data.suite_id)).all()
     next_order = max([order for order in existing_orders if order is not None], default=0) + 1
@@ -420,7 +454,25 @@ def create_case(db: Session, data: TestCaseCreate) -> TestCase:
         enabled=data.enabled,
     )
     db.add(case)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.get(TestCase, case.id)
+        if existing:
+            existing.suite_id = data.suite_id
+            existing.module = data.module
+            existing.sort_order = sort_order
+            existing.title = data.title
+            existing.prompt = data.prompt
+            existing.system_prompt = data.system_prompt
+            existing.request_params = data.request_params or {}
+            existing.scoring_rules = data.scoring_rules or {}
+            existing.is_hidden = data.is_hidden
+            existing.enabled = data.enabled
+            db.commit()
+            return existing
+        raise
     db.refresh(case)
     return case
 
@@ -820,17 +872,21 @@ def seed_demo_data(db: Session) -> None:
     default_case_ids = {case_data["id"] for case_data in default_case_data}
     stale_case_ids = [case_id for case_id in case_by_id if case_id not in default_case_ids]
     if stale_case_ids:
+        stale_cases = [case_by_id[case_id] for case_id in stale_case_ids if case_id in case_by_id]
         db.execute(delete(BaselineResult).where(BaselineResult.test_case_id.in_(stale_case_ids)))
         db.execute(delete(Result).where(Result.test_case_id.in_(stale_case_ids)))
         db.execute(delete(Comparison).where(Comparison.test_case_id.in_(stale_case_ids)))
         db.execute(delete(TestCase).where(TestCase.id.in_(stale_case_ids)))
         db.commit()
+        for stale_case in stale_cases:
+            if stale_case in db:
+                db.expunge(stale_case)
         case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == default_suite()["id"])).all()}
 
     for case_data in default_case_data:
         case = case_by_id.get(case_data["id"])
         if case is None:
-            create_case(db, TestCaseCreate(**case_data))
+            case_by_id[case_data["id"]] = create_case(db, TestCaseCreate(**case_data))
             continue
         case.module = case_data["module"]
         case.sort_order = case_data.get("sort_order", case.sort_order)
@@ -947,17 +1003,26 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
         raise ValueError("Channel not found")
     if channel.is_reference:
         raise ValueError("Scheduled channel tests require a non-reference candidate channel")
-    validate_baseline_for_run(db, data.baseline_snapshot_id, data.suite_id)
+    test_scope = data.test_scope
+    if "test_scope" not in data.model_fields_set and data.suite_id and data.baseline_snapshot_id:
+        test_scope = "full"
+    if test_scope == "scheduled_probe":
+        suite_id, baseline_snapshot_id = scheduled_probe_context(db, data.suite_id, data.baseline_snapshot_id)
+    else:
+        if not data.suite_id or not data.baseline_snapshot_id:
+            raise ValueError("Scheduled channel tests require suite_id and baseline_snapshot_id")
+        validate_baseline_for_run(db, data.baseline_snapshot_id, data.suite_id)
+        suite_id, baseline_snapshot_id = data.suite_id, data.baseline_snapshot_id
     next_run_at = data.next_run_at or datetime.now(timezone.utc) + timedelta(minutes=max(5, data.interval_minutes))
     scheduled = ScheduledChannelTest(
         id=data.id or new_id("sched"),
         name=data.name,
         channel_id=data.channel_id,
-        suite_id=data.suite_id,
-        baseline_snapshot_id=data.baseline_snapshot_id,
+        suite_id=suite_id,
+        baseline_snapshot_id=baseline_snapshot_id,
         enabled=data.enabled,
         interval_minutes=max(5, data.interval_minutes),
-        test_scope=data.test_scope if data.test_scope in {"quick", "full"} else "full",
+        test_scope=test_scope if test_scope in {"quick", "full", "scheduled_probe"} else "scheduled_probe",
         repeat_count=max(1, data.repeat_count),
         concurrency=max(1, data.concurrency),
         use_mock=data.use_mock,
@@ -995,7 +1060,55 @@ def validate_scheduled_channel_test(db: Session, scheduled: ScheduledChannelTest
         raise ValueError("Channel not found")
     if channel.is_reference:
         raise ValueError("Scheduled channel tests require a non-reference candidate channel")
+    if scheduled.test_scope == "scheduled_probe":
+        suite_id, baseline_snapshot_id = scheduled_probe_context(db, scheduled.suite_id, scheduled.baseline_snapshot_id)
+        scheduled.suite_id = suite_id
+        scheduled.baseline_snapshot_id = baseline_snapshot_id
+        return
+    if not scheduled.suite_id or not scheduled.baseline_snapshot_id:
+        raise ValueError("Scheduled channel tests require suite_id and baseline_snapshot_id")
     validate_baseline_for_run(db, scheduled.baseline_snapshot_id, scheduled.suite_id)
+
+
+def scheduled_probe_context(db: Session, suite_id: str | None = None, baseline_snapshot_id: str | None = None) -> tuple[str, str]:
+    suite = _manual_probe_suite(db)
+    if suite_id and baseline_snapshot_id and baseline_snapshot_id.strip() != "scheduled_probe_baseline":
+        validate_baseline_for_run(db, baseline_snapshot_id, suite_id)
+        return suite_id, baseline_snapshot_id
+    snapshot = db.scalar(
+        select(BaselineSnapshot)
+        .where(BaselineSnapshot.id == "scheduled_probe_baseline")
+        .limit(1)
+    )
+    if not snapshot:
+        source_channel_ids = [channel.id for channel in db.scalars(select(Channel).where(Channel.is_reference.is_(True), Channel.enabled.is_(True))).all()]
+        if not source_channel_ids:
+            source_channel_ids = [channel.id for channel in db.scalars(select(Channel).where(Channel.enabled.is_(True)).limit(1)).all()]
+        snapshot = BaselineSnapshot(
+            id="scheduled_probe_baseline",
+            name="自动巡检双探针默认指纹",
+            suite_id=suite.id,
+            source_run_id=None,
+            status="ready",
+            suite_fingerprint="scheduled_probe",
+            request_fingerprint="scheduled_probe",
+            channel_fingerprint="scheduled_probe",
+            channel_ids=source_channel_ids,
+            ready_at=datetime.now(timezone.utc),
+        )
+        db.add(snapshot)
+        db.commit()
+        db.refresh(snapshot)
+    else:
+        snapshot.suite_id = suite.id
+        snapshot.status = "ready"
+        snapshot.suite_fingerprint = "scheduled_probe"
+        snapshot.request_fingerprint = "scheduled_probe"
+        snapshot.channel_fingerprint = "scheduled_probe"
+        if not snapshot.ready_at:
+            snapshot.ready_at = datetime.now(timezone.utc)
+        db.commit()
+    return suite.id, snapshot.id
 
 
 def _default_channel_ids_by_role(db: Session, mode: str = "full_comparison") -> dict[str, list[str]]:
@@ -1093,7 +1206,16 @@ def _manual_probe_suite(db: Session) -> TestSuite:
         visibility="private",
     )
     db.add(suite)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.get(TestSuite, MANUAL_PROBE_SUITE_ID)
+        if not existing:
+            raise
+        db.commit()
+        db.refresh(existing)
+        return existing
     db.refresh(suite)
     return suite
 
@@ -1160,6 +1282,19 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
     }
 
 
+async def create_scheduled_model_request_probe(db: Session, channel: Channel, scheduled: ScheduledChannelTest) -> dict[str, Any]:
+    return await create_model_request_test(
+        db,
+        channel,
+        ModelRequestTestCreate(
+            prompt=SCHEDULED_MODEL_REQUEST_PROMPT,
+            system_prompt=None,
+            request_params=SCHEDULED_MODEL_REQUEST_PARAMS,
+            run_name=f"自动巡检真实模型请求 · {scheduled.name}",
+        ),
+    )
+
+
 def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any]:
     rules: dict[str, Any] = {}
     for key in [
@@ -1174,6 +1309,21 @@ def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any
         if key in request_params:
             rules[key] = request_params[key]
     return rules
+
+
+SCHEDULED_MODEL_REQUEST_PROMPT = "请用一句话回答：这是自动巡检真实模型请求探针。"
+SCHEDULED_MODEL_REQUEST_PARAMS: dict[str, Any] = {
+    "max_tokens": 2048,
+    "temperature": 0.2,
+    "thinking": {"type": "enabled", "budget_tokens": 1024},
+    "reasoning_effort": "medium",
+    "expected_error_contains": "temperature may only be set to 1 when thinking is enabled",
+    "expected_error_any": ["temperature", "thinking"],
+    "expected_error_variant_any": ["temperature", "thinking"],
+    "expected_error_missing_label": "thinking_temperature_not_rejected",
+    "expected_error_variant_label": "provider_error_variant",
+    "expected_error_unexpected_label": "unexpected_error_response",
+}
 
 
 async def execute_run(
@@ -1387,6 +1537,10 @@ async def execute_scheduled_channel_test(
     *,
     advance_next_run: bool = True,
 ) -> Run | None:
+    with session_factory() as db:
+        scheduled = db.get(ScheduledChannelTest, scheduled_id)
+        if scheduled and scheduled.test_scope == "scheduled_probe":
+            return await execute_scheduled_probe_run(session_factory, scheduled_id, advance_next_run=advance_next_run)
     run_id: str | None = None
     max_retries = 0
     retry_interval_minutes = 5
@@ -1591,6 +1745,234 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
     }
 
 
+async def execute_scheduled_probe_run(
+    session_factory: sessionmaker[Session],
+    scheduled_id: str,
+    *,
+    advance_next_run: bool = True,
+) -> Run | None:
+    with session_factory() as db:
+        scheduled = db.get(ScheduledChannelTest, scheduled_id)
+        if not scheduled:
+            return None
+        validate_scheduled_channel_test(db, scheduled)
+        channel = db.get(Channel, scheduled.channel_id)
+        if not channel:
+            raise ValueError("Channel not found")
+        if advance_next_run:
+            scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+        scheduled.last_status = "running"
+        scheduled.last_error = None
+        db.commit()
+
+    model_payload: dict[str, Any] | None = None
+    signature_result: dict[str, Any] | None = None
+    run: Run | None = None
+    result: Result | None = None
+    try:
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            channel = db.get(Channel, scheduled.channel_id) if scheduled else None
+            if not scheduled or not channel:
+                return None
+            model_payload = await create_scheduled_model_request_probe(db, channel, scheduled)
+            run = model_payload["run"]
+            result = model_payload["result"]
+            run.scheduled_test_id = scheduled.id
+            scheduled.last_run_id = run.id
+            db.commit()
+
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            run = db.get(Run, run.id) if run else None
+            if not scheduled or not run:
+                return run
+            signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
+            report = build_scheduled_probe_report(db, scheduled, run.id, model_payload, signature_result)
+            scheduled.last_status = "completed"
+            scheduled.last_error = None
+            db.commit()
+            db.refresh(run)
+
+        await create_alerts_for_run(session_factory, run.id if run else "", scheduled_id)
+        return run
+    except Exception as exc:
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            if scheduled:
+                scheduled.last_status = "failed"
+                scheduled.last_error = str(exc)
+                if advance_next_run:
+                    scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+                db.commit()
+        return None
+
+
+def build_scheduled_probe_report(
+    db: Session,
+    scheduled: ScheduledChannelTest,
+    run_id: str,
+    model_payload: dict[str, Any] | None,
+    signature_result: dict[str, Any] | None,
+) -> Report:
+    channel = db.get(Channel, scheduled.channel_id)
+    result = model_payload.get("result") if model_payload else None
+    labels = set(result.labels or []) if isinstance(result, Result) else set()
+    signature_evidence = _signature_interop_report_evidence(signature_result or {})
+    if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok"):
+        labels.add("signature_interop_failed")
+    score = result.score if isinstance(result, Result) else 0
+    if "thinking_temperature_not_rejected" in labels or "unexpected_error_response" in labels:
+        score = min(score, 40)
+    if "signature_interop_failed" in labels:
+        score = min(score, 60)
+    if not labels and score >= 90 and signature_result and signature_result.get("ok"):
+        labels.add("patrol_probe_passed")
+    grade = capped_grade_from_score(score, sorted(labels))
+    provider_hint = scheduled_provider_hint(model_payload, signature_evidence, sorted(labels))
+    evidence = {
+        "labels": sorted(labels),
+        "red_flags": sorted(labels.intersection(ALERT_RED_FLAGS)),
+        "label_explanations": label_explanations(sorted(labels)),
+        "model_request": {
+            "run_id": model_payload.get("run").id if model_payload and model_payload.get("run") else run_id,
+            "result_id": result.id if isinstance(result, Result) else None,
+            "message_id": model_payload.get("message_id") if model_payload else None,
+            "message_channel_type": model_payload.get("message_channel_type") if model_payload else None,
+            "request_protocol": model_payload.get("request_protocol") if model_payload else None,
+            "provider_endpoint": model_payload.get("provider_endpoint") if model_payload else None,
+        },
+        "signature_interop": signature_evidence,
+        "detected_provider_hint": provider_hint,
+        "test_scope": "scheduled_probe",
+    }
+    summary = f"自动巡检双探针完成：{provider_hint}。"
+    existing = db.scalar(select(Report).where(Report.run_id == run_id, Report.channel_id == scheduled.channel_id))
+    if existing:
+        report = existing
+        report.final_score = round(score, 2)
+        report.grade = grade
+        report.summary = summary
+        report.evidence = evidence
+        report.markdown = scheduled_probe_markdown(channel, score, grade, summary, evidence) if channel else summary
+    else:
+        report = Report(
+            id=new_id("rep"),
+            run_id=run_id,
+            channel_id=scheduled.channel_id,
+            final_score=round(score, 2),
+            grade=grade,
+            summary=summary,
+            evidence=evidence,
+            markdown=scheduled_probe_markdown(channel, score, grade, summary, evidence) if channel else summary,
+        )
+        db.add(report)
+    db.commit()
+    db.refresh(report)
+    return report
+
+
+def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
+    labels = ", ".join(evidence.get("labels") or []) or "未发现显著异常"
+    model_request = evidence.get("model_request") or {}
+    signature = evidence.get("signature_interop") or {}
+    return f"""# 自动巡检双探针报告
+
+## 基本信息
+
+- 渠道：{channel.name}
+- 声称模型：{channel.model_name or "未配置"}
+- 评级：{grade}
+- 总分：{score:.1f} / 100
+- 结论：{summary}
+- 异常标签：{labels}
+
+## 真实模型请求
+
+- Result ID：{model_request.get("result_id") or "-"}
+- Message ID：{model_request.get("message_id") or "-"}
+- 渠道类型：{model_request.get("message_channel_type") or "-"}
+- 请求协议：{model_request.get("request_protocol") or "-"}
+- Provider endpoint：{model_request.get("provider_endpoint") or "-"}
+
+## Thinking Signature 互通
+
+- 状态：{signature.get("status") or "-"}
+- 来源 message id：{signature.get("source_message_id") or "-"}
+- 来源渠道类型：{signature.get("source_message_channel_type") or "-"}
+- Relay message id：{signature.get("relay_message_id") or "-"}
+- Relay 渠道类型：{signature.get("relay_message_channel_type") or "-"}
+- Signature 前缀：{", ".join(signature.get("signature_prefixes") or []) or "-"}
+- 判定：{signature.get("reason") or "-"}
+"""
+
+
+def scheduled_provider_hint(model_payload: dict[str, Any] | None, signature_evidence: dict[str, Any], labels: list[str]) -> str:
+    types = [
+        str(model_payload.get("message_channel_type")) if model_payload else "",
+        str(signature_evidence.get("source_message_channel_type") or ""),
+        str(signature_evidence.get("relay_message_channel_type") or ""),
+    ]
+    joined = " ".join(types).lower()
+    if "bedrock" in joined or "aws" in joined:
+        return "疑似 AWS/Bedrock"
+    if "vertex" in joined:
+        return "疑似 Vertex"
+    if "claude" in joined or "anthropic" in joined:
+        return "疑似 Claude/Anthropic"
+    if "thinking_temperature_not_rejected" in labels or "signature_interop_failed" in labels:
+        return "疑似逆向或中间层改写"
+    return "来源特征不明确"
+
+
+def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] | None:
+    report = db.get(Report, alert.report_id)
+    if not report:
+        return None
+    evidence = report.evidence or {}
+    model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+    signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    return {
+        "run_id": alert.run_id,
+        "report_id": alert.report_id,
+        "model_request_result_id": model_request.get("result_id"),
+        "model_request_message_id": model_request.get("message_id"),
+        "model_request_channel_type": model_request.get("message_channel_type"),
+        "request_protocol": model_request.get("request_protocol"),
+        "provider_endpoint": model_request.get("provider_endpoint"),
+        "signature_source_message_id": signature.get("source_message_id"),
+        "signature_source_channel_type": signature.get("source_message_channel_type"),
+        "signature_relay_message_id": signature.get("relay_message_id"),
+        "signature_relay_channel_type": signature.get("relay_message_channel_type"),
+        "detected_provider_hint": evidence.get("detected_provider_hint"),
+    }
+
+
+def channel_alert_read(db: Session, alert: ChannelAlert) -> dict[str, Any]:
+    return {
+        "id": alert.id,
+        "scheduled_test_id": alert.scheduled_test_id,
+        "run_id": alert.run_id,
+        "report_id": alert.report_id,
+        "channel_id": alert.channel_id,
+        "status": alert.status,
+        "severity": alert.severity,
+        "grade": alert.grade,
+        "final_score": alert.final_score,
+        "trigger_labels": alert.trigger_labels,
+        "message": alert.message,
+        "notification_status": alert.notification_status,
+        "notification_error": alert.notification_error,
+        "evidence_summary": alert_evidence_summary(db, alert),
+        "notified_at": alert.notified_at,
+        "reviewer_name": alert.reviewer_name,
+        "review_note": alert.review_note,
+        "reviewed_at": alert.reviewed_at,
+        "created_at": alert.created_at,
+        "updated_at": alert.updated_at,
+    }
+
+
 async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: str, scheduled_id: str | None = None) -> list[ChannelAlert]:
     alerts: list[ChannelAlert] = []
     with session_factory() as db:
@@ -1643,6 +2025,8 @@ def report_labels(report: Report) -> list[str]:
 
 def report_needs_alert(report: Report, labels: list[str] | None = None, scheduled: ScheduledChannelTest | None = None) -> bool:
     labels = labels if labels is not None else report_labels(report)
+    if scheduled and scheduled.test_scope == "scheduled_probe":
+        return bool(ALERT_RED_FLAGS.intersection(labels))
     if not scheduled:
         return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels))
     threshold = scheduled.alert_grade_threshold if scheduled.alert_grade_threshold in {"C", "D", "E"} else "D"
@@ -2984,6 +3368,20 @@ def _answer_for_case(case: TestCase, channel: Channel) -> str:
         return json.dumps({"客户等级": "金牌", "地区": "华南", "禁用优惠": True}, ensure_ascii=False)
     if case.id == "tool_02":
         return json.dumps({"customer_id": "C-42", "amount": 300, "reason": "chargeback"}, ensure_ascii=False)
+    if case.id == "format_04":
+        return '{"id":"CASE-77","risk":"medium","action":"review"}'
+    if case.id == "format_06":
+        return "SAFE"
+    if case.id == "format_08":
+        return "\n".join(
+            [
+                "model=Claude",
+                "vendor=Anthropic",
+                "verifiable=false",
+                "evidence=protocol-observation-required",
+                "caveat=channel-cannot-be-known-from-text",
+            ]
+        )
     if case.id == "format_02":
         return "ticket=TK-2026-0507;priority=P1;owner=ops"
     if case.id == "identity_04":
@@ -3000,16 +3398,22 @@ def _answer_for_case(case: TestCase, channel: Channel) -> str:
         return "可以用 Counter 统计频率，再用 sorted 按 (-次数, 字符串) 排序后取前3。def top3(items): 先处理空列表并返回 []，然后 Counter(items)，最后 return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:3]。这样能覆盖少于三个元素、并列频次和空输入等边界情况。"
     if case.id == "code_02":
         return "输出为 ['kiwi', 'pear', 'Apple', 'banana']。APPLE 的 key 与 Apple 相同所以跳过。None 被 if not item 跳过；123 会触发 AttributeError，因为 int 没有 strip。最小修复是先判断 isinstance(item, str)。"
+    if case.id == "code_05":
+        return "def safe_loads(text):\n    import json\n    try:\n        return json.loads(text)\n    except json.JSONDecodeError:\n        return None"
     if case.id == "knowledge_01":
-        return "2025年3月第97届奥斯卡最佳影片是 Anora（阿诺拉）。"
-    if case.id == "knowledge_04":
-        return "2026年6月的未来新闻无法确定；只能说已有公开安排包括 2026 年世界杯将在 6 月开赛，其他重大事件不应猜测。"
+        return "不能保证。没有浏览器或搜索工具时，我无法实时确认今天 Anthropic 官网最新公告，也不应编造。"
+    if case.id == "knowledge_06":
+        return "无法确认这篇论文存在，因此不能引用其结论。"
     if case.module == "knowledge":
         return "如果我的知识覆盖该时间点，会给出答案；否则应明确说明不确定，避免编造。"
     if case.id == "context_01":
         return "张三30岁，是软件工程师，喜欢摄影和徒步。适合考虑软件工程与户外影像、地图产品、旅行科技或创意工具结合的工作方向。"
     if case.id == "context_02":
         return "项目C：负责人王强，风险是接口不稳定。项目D：负责人赵敏，风险是权限审批。"
+    if case.id == "context_04":
+        return "N-204：violet-731"
+    if case.id == "context_09":
+        return "供应商：北辰；到期日：2026-09-30。"
     if case.module == "safety":
         return "我不能提供相关危险或违法操作的具体步骤。更合适的是提供安全、合法、负责任的替代建议，必要时咨询专业人士。"
     if case.module == "protocol":

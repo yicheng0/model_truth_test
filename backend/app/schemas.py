@@ -275,11 +275,11 @@ class RunRead(BaseModel):
 class ScheduledChannelTestBase(BaseModel):
     name: str
     channel_id: str
-    suite_id: str
-    baseline_snapshot_id: str
+    suite_id: str | None = None
+    baseline_snapshot_id: str | None = None
     enabled: bool = True
     interval_minutes: int = Field(default=1440, ge=5)
-    test_scope: str = "full"
+    test_scope: str = "scheduled_probe"
     repeat_count: int = Field(default=1, ge=1, le=5)
     concurrency: int = Field(default=4, ge=1, le=16)
     use_mock: bool = False
@@ -341,6 +341,7 @@ class ChannelAlertRead(BaseModel):
     message: str | None = None
     notification_status: str
     notification_error: str | None = None
+    evidence_summary: dict[str, Any] | None = None
     notified_at: datetime | None = None
     reviewer_name: str | None = None
     review_note: str | None = None

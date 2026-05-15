@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 import asyncio
 import json
+import uuid
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_claude_eval.db")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 os.environ.setdefault("SKIP_BUILTIN_CHANNEL_CLEANUP", "1")
+os.environ.setdefault("AUTO_SCHEDULER_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 import httpx
@@ -15,16 +17,17 @@ from sqlalchemy import delete, func, select
 from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
-from app.schemas import ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, classify_claude_message_id, create_alerts_for_run, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, invoke_channel, score_result, seed_demo_data
+from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, finalize_baseline_from_run, invoke_channel, request_fingerprint, score_result, seed_demo_data, suite_fingerprint
 
 
 def reset_database() -> None:
     init_db()
     with SessionLocal() as db:
-        for model in [ChannelTaxonomySetting, FeishuBroadcastSetting, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
+        for model in [ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel, ChannelTaxonomySetting, FeishuBroadcastSetting]:
             db.execute(delete(model))
         db.commit()
+        db.expunge_all()
         seed_demo_data(db)
         seed_test_channels(db)
 
@@ -36,16 +39,78 @@ def seed_test_channels(db) -> None:  # noqa: ANN001
 
 
 def create_ready_baseline(client: TestClient, name: str = "managed baseline") -> tuple[str, dict, dict]:
-    suite_id = client.get("/api/suites").json()[0]["id"]
-    run = client.post(
-        "/api/baselines/build",
-        json={"name": name, "suite_id": suite_id, "channel_ids": {"gold": ["anthropic_official"]}, "use_mock": True},
-    ).json()
-    snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == run["id"])
-    return suite_id, run, snapshot
+    suite_id = "claude_full_35"
+    suffix = uuid.uuid4().hex[:12]
+    with SessionLocal() as db:
+        case_ids = list(db.scalars(select(TestCaseModel.id).where(TestCaseModel.suite_id == suite_id).order_by(TestCaseModel.sort_order)).all())
+        run = Run(
+            id=f"run_baseline_{suffix}",
+            suite_id=suite_id,
+            name=name,
+            mode="baseline_build",
+            test_scope="full",
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=1,
+            completed_jobs=1,
+        )
+        snapshot = BaselineSnapshot(
+            id=f"base_{suffix}",
+            name=name,
+            suite_id=suite_id,
+            source_run_id=run.id,
+            status="ready",
+            suite_fingerprint=suite_fingerprint(db, suite_id),
+            request_fingerprint=request_fingerprint(db, suite_id),
+            channel_fingerprint=channel_fingerprint(db, ["anthropic_official"]),
+            channel_ids=["anthropic_official"],
+        )
+        run.baseline_snapshot_id = snapshot.id
+        db.add(run)
+        db.add(snapshot)
+        for case_id in case_ids:
+            db.add(
+                BaselineResult(
+                    id=f"bres_{suffix}_{case_id}",
+                    baseline_snapshot_id=snapshot.id,
+                    test_case_id=case_id,
+                    channel_id="anthropic_official",
+                    role_in_baseline="reference",
+                    attempt_index=1,
+                    normalized_response={"text": "baseline"},
+                    raw_request={},
+                    raw_response={},
+                    metrics={},
+                    score=100,
+                    labels=[],
+                )
+            )
+        db.commit()
+        run_payload = {"id": run.id}
+        snapshot_payload = {
+            "id": snapshot.id,
+            "source_run_id": snapshot.source_run_id,
+            "suite_id": snapshot.suite_id,
+            "status": snapshot.status,
+        }
+    return suite_id, run_payload, snapshot_payload
 
 
 def create_patrol_schedule(client: TestClient, **overrides) -> dict:  # noqa: ANN001
+    payload = {
+        "name": "policy patrol",
+        "channel_id": "third_party_demo",
+        "interval_minutes": 60,
+        "enabled": True,
+        **overrides,
+    }
+    response = client.post("/api/scheduled-tests", json=payload)
+    assert response.status_code == 200
+    return response.json()
+
+
+def create_legacy_patrol_schedule(client: TestClient, **overrides) -> dict:  # noqa: ANN001
     suite_id, _run, snapshot = create_ready_baseline(client, overrides.pop("baseline_name", "patrol policy baseline"))
     payload = {
         "name": "policy patrol",
@@ -56,6 +121,8 @@ def create_patrol_schedule(client: TestClient, **overrides) -> dict:  # noqa: AN
         "repeat_count": 1,
         "concurrency": 1,
         "use_mock": True,
+        "test_scope": "full",
+        "quiet_minutes": 0,
         **overrides,
     }
     response = client.post("/api/scheduled-tests", json=payload)
@@ -64,9 +131,10 @@ def create_patrol_schedule(client: TestClient, **overrides) -> dict:  # noqa: AN
 
 
 def create_report_for_schedule(schedule: dict, *, grade: str, score: float, labels: list[str] | None = None) -> str:
+    suffix = uuid.uuid4().hex[:12]
     with SessionLocal() as db:
         run = Run(
-            id=f"run_policy_{grade}_{len(labels or [])}_{int(score)}",
+            id=f"run_policy_{suffix}",
             suite_id=schedule["suite_id"],
             name="policy run",
             mode="candidate_eval",
@@ -80,7 +148,7 @@ def create_report_for_schedule(schedule: dict, *, grade: str, score: float, labe
             completed_jobs=1,
         )
         report = Report(
-            id=f"rep_policy_{grade}_{len(labels or [])}_{int(score)}",
+            id=f"rep_policy_{suffix}",
             run_id=run.id,
             channel_id=schedule["channel_id"],
             final_score=score,
@@ -217,6 +285,7 @@ def test_mock_run_generates_results_comparisons_and_reports() -> None:
             json={
                 "name": "pytest mock run",
                 "suite_id": suite_id,
+                "test_scope": "full",
                 "channel_ids": {
                     "gold": ["anthropic_official"],
                     "candidate": ["third_party_demo"],
@@ -333,10 +402,9 @@ def test_report_compare_rejects_mixed_modes() -> None:
     assert "modes must match" in response.json()["detail"]
 
 
-def test_default_suite_is_discriminative_32_and_removes_stale_default_cases() -> None:
+def test_default_suite_is_representative_32_and_removes_stale_default_cases() -> None:
     reset_database()
     with SessionLocal() as db:
-        suite = db.get(TestSuiteModel, "claude_full_35")
         create_case(
             db,
             TestCaseCreate(
@@ -349,14 +417,16 @@ def test_default_suite_is_discriminative_32_and_removes_stale_default_cases() ->
             ),
         )
         seed_demo_data(db)
+        suite = db.get(TestSuiteModel, "claude_full_35")
         case_ids = list(db.scalars(select(TestCaseModel.id).where(TestCaseModel.suite_id == "claude_full_35").order_by(TestCaseModel.sort_order)).all())
 
     assert suite is not None
-    assert suite.version == "2026.05-discriminative-32"
+    assert suite.version == "2026.05-representative-32"
     assert len(case_ids) == 32
     assert case_ids[:5] == ["websearch_01", "protocol_01", "protocol_02", "protocol_03", "protocol_04"]
     assert "protocol_09" in case_ids
     assert "tool_01" in case_ids
+    assert {"format_08", "tool_08", "context_09", "knowledge_06", "code_05"}.issubset(case_ids)
     with SessionLocal() as db:
         quick_count = sum(
             1
@@ -364,6 +434,17 @@ def test_default_suite_is_discriminative_32_and_removes_stale_default_cases() ->
             if (case.scoring_rules or {}).get("quick") is True
         )
     assert quick_count == 12
+
+
+def test_default_suite_has_evalscope_inspired_coverage_tags() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        coverage = client.get("/api/test-suites/claude_full_35/coverage")
+
+    assert coverage.status_code == 200
+    tags = coverage.json()["coverage_tags"]
+    for tag in ["instruction_following", "function_call", "long_context", "hallucination", "reasoning", "code"]:
+        assert tags[tag] > 0
 
 
 def test_quick_run_uses_only_quick_cases() -> None:
@@ -1018,6 +1099,7 @@ def test_delete_baseline_snapshot_rejects_scheduled_test_reference() -> None:
                 "suite_id": suite_id,
                 "baseline_snapshot_id": snapshot["id"],
                 "interval_minutes": 60,
+                "test_scope": "full",
             },
         )
         delete_response = client.delete(f"/api/baselines/{snapshot['id']}")
@@ -1069,17 +1151,7 @@ def test_candidate_eval_requires_valid_baseline() -> None:
 def test_candidate_eval_rejects_stale_baseline_after_case_change() -> None:
     reset_database()
     with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        baseline_run = client.post(
-            "/api/baselines/build",
-            json={
-                "name": "stale baseline",
-                "suite_id": suite_id,
-                "channel_ids": {"gold": ["anthropic_official"]},
-                "use_mock": True,
-            },
-        ).json()
-        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
+        suite_id, _baseline_run, snapshot = create_ready_baseline(client, "stale baseline")
         case_id = client.get("/api/test-cases", params={"suite_id": suite_id}).json()[0]["id"]
         patch_response = client.patch(f"/api/test-cases/{case_id}", json={"prompt": "changed prompt invalidates the baseline"})
         assert patch_response.status_code == 200
@@ -1173,28 +1245,13 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
     monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
     reset_database()
     with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        baseline_run = client.post(
-            "/api/baselines/build",
-            json={
-                "name": "scheduled baseline",
-                "suite_id": suite_id,
-                "channel_ids": {"gold": ["anthropic_official"], "official_cloud": ["aws_bedrock"]},
-                "use_mock": True,
-            },
-        ).json()
-        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
         schedule_response = client.post(
             "/api/scheduled-tests",
             json={
                 "name": "negative sample patrol",
                 "channel_id": "negative_sample",
-                "suite_id": suite_id,
-                "baseline_snapshot_id": snapshot["id"],
                 "interval_minutes": 60,
-                "repeat_count": 1,
-                "concurrency": 4,
-                "use_mock": True,
+                "enabled": True,
             },
         )
         assert schedule_response.status_code == 200
@@ -1202,6 +1259,13 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
 
         run_now = client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
         assert run_now.status_code == 200
+        run_now_payload = run_now.json()
+
+    assert run_now_payload["last_status"] in {"queued", "completed"}
+    if run_now_payload["last_status"] == "queued":
+        asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+
+    with TestClient(app) as client:
         updated_schedule = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
         alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
 
@@ -1216,7 +1280,28 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
 
     assert report is not None
     assert report.evidence["signature_interop"]["ok"] is True
-    assert report.evidence["signature_interop"]["status"] == "skipped"
+    assert report.evidence["signature_interop"]["status"] == "pass"
+    assert report.evidence["model_request"]["result_id"]
+
+
+def test_scheduled_channel_test_supports_simplified_probe_create() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "simple probe patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 1440,
+                "enabled": True,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["suite_id"] == "manual_model_request_probe"
+    assert payload["baseline_snapshot_id"] == "scheduled_probe_baseline"
+    assert payload["test_scope"] == "scheduled_probe"
 
 
 def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypatch) -> None:
@@ -1242,28 +1327,13 @@ def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypa
     monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
     reset_database()
     with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        baseline_run = client.post(
-            "/api/baselines/build",
-            json={
-                "name": "signature patrol baseline",
-                "suite_id": suite_id,
-                "channel_ids": {"gold": ["anthropic_official"], "official_cloud": ["aws_bedrock"]},
-                "use_mock": True,
-            },
-        ).json()
-        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
         schedule = client.post(
             "/api/scheduled-tests",
             json={
                 "name": "signature patrol",
                 "channel_id": "third_party_demo",
-                "suite_id": suite_id,
-                "baseline_snapshot_id": snapshot["id"],
                 "interval_minutes": 60,
-                "repeat_count": 1,
-                "concurrency": 4,
-                "use_mock": False,
+                "enabled": True,
             },
         ).json()
 
@@ -1284,13 +1354,15 @@ def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypa
     assert report.evidence["signature_interop"]["status"] == "fail"
     assert "signature_interop_failed" in report.evidence["labels"]
     assert "Thinking Signature 互通" in (report.markdown or "")
+    assert signature_alerts[0]["evidence_summary"]["signature_source_message_id"] == "msg_bdrk_01source"
+    assert signature_alerts[0]["evidence_summary"]["signature_relay_channel_type"] == "unknown"
 
 
 def test_scheduled_alert_policy_uses_grade_score_and_red_flag_settings(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
     with TestClient(app) as client:
-        schedule = create_patrol_schedule(
+        schedule = create_legacy_patrol_schedule(
             client,
             alert_grade_threshold="E",
             alert_score_threshold=85,
@@ -1315,7 +1387,7 @@ def test_scheduled_alert_policy_supports_c_grade_threshold(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
     with TestClient(app) as client:
-        schedule = create_patrol_schedule(client, alert_grade_threshold="C")
+        schedule = create_legacy_patrol_schedule(client, alert_grade_threshold="C")
 
     run_id = create_report_for_schedule(schedule, grade="C", score=78)
     asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
@@ -1331,7 +1403,7 @@ def test_scheduled_alert_quiet_window_skips_duplicate_pending_alert(monkeypatch)
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
     with TestClient(app) as client:
-        schedule = create_patrol_schedule(client, channel_id="negative_sample", quiet_minutes=360)
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample", quiet_minutes=360)
 
     first_run_id = create_report_for_schedule(schedule, grade="E", score=20)
     second_run_id = create_report_for_schedule(schedule, grade="E", score=25)
@@ -1380,7 +1452,7 @@ def test_scheduled_channel_test_retries_failed_runs(monkeypatch) -> None:
 
     reset_database()
     with TestClient(app) as client:
-        schedule = create_patrol_schedule(client, max_retries=1, retry_interval_minutes=1)
+        schedule = create_legacy_patrol_schedule(client, max_retries=1, retry_interval_minutes=1)
 
     monkeypatch.setattr("app.services.execute_run", fake_execute_run)
     monkeypatch.setattr("app.services.asyncio.sleep", fake_sleep)
@@ -1399,27 +1471,10 @@ def test_scheduled_channel_test_retries_failed_runs(monkeypatch) -> None:
 def test_alert_review_updates_status_and_reviewer() -> None:
     reset_database()
     with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        baseline_run = client.post(
-            "/api/baselines/build",
-            json={"name": "review baseline", "suite_id": suite_id, "channel_ids": {"gold": ["anthropic_official"]}, "use_mock": True},
-        ).json()
-        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
-        run = client.post(
-            "/api/runs",
-            json={
-                "name": "review risky run",
-                "suite_id": suite_id,
-                "mode": "candidate_eval",
-                "baseline_snapshot_id": snapshot["id"],
-                "channel_ids": {"negative": ["negative_sample"]},
-                "use_mock": True,
-            },
-        ).json()
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
 
-    import asyncio
-
-    asyncio.run(create_alerts_for_run(SessionLocal, run["id"]))
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
 
     with TestClient(app) as client:
         alert = client.get("/api/alerts", params={"status": "pending_review"}).json()[0]
@@ -1438,19 +1493,11 @@ def test_alert_review_updates_status_and_reviewer() -> None:
 def test_scheduled_test_rejects_reference_channel() -> None:
     reset_database()
     with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        baseline_run = client.post(
-            "/api/baselines/build",
-            json={"name": "reject baseline", "suite_id": suite_id, "channel_ids": {"gold": ["anthropic_official"]}, "use_mock": True},
-        ).json()
-        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
         response = client.post(
             "/api/scheduled-tests",
             json={
                 "name": "bad patrol",
                 "channel_id": "anthropic_official",
-                "suite_id": suite_id,
-                "baseline_snapshot_id": snapshot["id"],
                 "interval_minutes": 60,
             },
         )
@@ -1656,7 +1703,7 @@ def test_live_call_uses_anthropic_messages_for_custom_provider_key(monkeypatch) 
         )
         db.add(channel)
         db.commit()
-        case = db.get(TestCaseModel, "identity_01")
+        case = db.get(TestCaseModel, "identity_02")
         assert case is not None
         raw_request = build_raw_request(channel, case)
         response = asyncio.run(_live_call(channel, case, raw_request, {}))
@@ -1684,7 +1731,7 @@ def test_live_call_dispatches_openai_compatible_provider(monkeypatch) -> None:
 
     with SessionLocal() as db:
         channel = db.get(Channel, "openai_compat_demo")
-        case = db.get(TestCaseModel, "identity_01")
+        case = db.get(TestCaseModel, "identity_02")
         assert channel is not None and case is not None
         raw_request = build_raw_request(channel, case)
         response = asyncio.run(_live_call(channel, case, raw_request, {"api_key": "test-key"}))
@@ -1714,12 +1761,12 @@ def test_live_call_dispatches_aws_bedrock_provider(monkeypatch) -> None:
 
     with SessionLocal() as db:
         channel = db.get(Channel, "aws_bedrock")
-        case = db.get(TestCaseModel, "identity_01")
+        case = db.get(TestCaseModel, "identity_02")
         assert channel is not None and case is not None
         raw_request = build_raw_request(channel, case)
         response = asyncio.run(_live_call(channel, case, raw_request, {"region": "us-west-2"}))
 
-    assert called == {"provider_type": "aws_bedrock", "case_id": "identity_01", "region": "us-west-2"}
+    assert called == {"provider_type": "aws_bedrock", "case_id": "identity_02", "region": "us-west-2"}
     assert response["type"] == "message"
 
 
@@ -1727,7 +1774,7 @@ def test_live_run_without_api_key_records_error_instead_of_mock() -> None:
     reset_database()
     with SessionLocal() as db:
         channel = db.get(Channel, "anthropic_official")
-        case = db.get(TestCaseModel, "identity_01")
+        case = db.get(TestCaseModel, "identity_02")
         assert channel is not None and case is not None
         normalized = asyncio.run(invoke_channel(channel, case, 1, {}, use_mock=False))
 
@@ -1762,7 +1809,7 @@ def test_openai_http_error_preserves_upstream_message(monkeypatch) -> None:
 
     with SessionLocal() as db:
         channel = db.get(Channel, "openai_compat_demo")
-        case = db.get(TestCaseModel, "identity_01")
+        case = db.get(TestCaseModel, "identity_02")
         assert channel is not None and case is not None
         channel.model_name = "claude-bad"
         raw_request = build_raw_request(channel, case)
@@ -2259,7 +2306,7 @@ def test_auto_protocol_falls_back_to_openai_compatible(monkeypatch) -> None:
         )
         db.add(channel)
         db.commit()
-        case = db.get(TestCaseModel, "identity_01")
+        case = db.get(TestCaseModel, "identity_02")
         assert case is not None
         normalized = asyncio.run(invoke_channel(channel, case, 1, {"api_key": "test-key"}, use_mock=False))
 
@@ -2641,24 +2688,17 @@ def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
     with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        baseline_run = client.post(
-            "/api/baselines/build",
-            json={"name": "report baseline", "suite_id": suite_id, "channel_ids": {"gold": ["anthropic_official"]}, "use_mock": True},
-        ).json()
-        snapshot = next(item for item in client.get("/api/baselines", params={"suite_id": suite_id}).json() if item["source_run_id"] == baseline_run["id"])
         schedule = client.post(
             "/api/scheduled-tests",
             json={
                 "name": "report patrol",
                 "channel_id": "negative_sample",
-                "suite_id": suite_id,
-                "baseline_snapshot_id": snapshot["id"],
                 "interval_minutes": 60,
-                "use_mock": True,
+                "enabled": True,
             },
         ).json()
         client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
+        asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
         report = client.get("/api/scheduled-tests/report").json()
         markdown = client.get("/api/scheduled-tests/report.md")
 

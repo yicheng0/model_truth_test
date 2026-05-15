@@ -105,7 +105,7 @@ export type Run = {
 };
 
 export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe' | 'performance_benchmark' | 'arena_comparison';
-export type TestScope = 'quick' | 'full';
+export type TestScope = 'quick' | 'full' | 'scheduled_probe';
 
 export type RunChannel = {
   id: string;
@@ -364,8 +364,8 @@ export type ScheduledChannelTest = {
   id: string;
   name: string;
   channel_id: string;
-  suite_id: string;
-  baseline_snapshot_id: string;
+  suite_id?: string | null;
+  baseline_snapshot_id?: string | null;
   enabled: boolean;
   interval_minutes: number;
   test_scope: TestScope;
@@ -402,6 +402,7 @@ export type ChannelAlert = {
   message?: string | null;
   notification_status: 'pending' | 'sent' | 'failed' | 'skipped' | string;
   notification_error?: string | null;
+  evidence_summary?: Record<string, any> | null;
   notified_at?: string | null;
   reviewer_name?: string | null;
   review_note?: string | null;

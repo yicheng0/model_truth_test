@@ -222,7 +222,7 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
-  it('can send both combo purity probes through the existing model request endpoint', async () => {
+  it('can send all three combo purity probes through the existing model request endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(
         new Response(
@@ -249,18 +249,32 @@ describe('api request handling', () => {
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
         ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            run: { id: 'run_adaptive', suite_id: 'manual_model_request_probe', name: 'adaptive', mode: 'manual_probe', test_scope: 'quick', status: 'completed', repeat_count: 1, concurrency: 1, total_jobs: 1, completed_jobs: 1 },
+            result: { id: 'res_adaptive', run_id: 'run_adaptive', test_case_id: 'case_3', channel_id: 'ch_1', attempt_index: 1, score: 100 },
+            message_id: null,
+            message_channel_type: 'Unknown',
+            request_protocol: 'anthropic_messages',
+            provider_endpoint: 'https://api.example/v1/messages',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
       );
 
     await api.modelRequestTest('ch_1', {
       prompt: '请用一句话回答：这是 thinking temperature 纯度探针。',
       system_prompt: null,
-      run_name: '组合纯度检测 · thinking',
+      run_name: '组合纯度检测 · thinking_temperature',
       request_params: {
         max_tokens: 2048,
         temperature: 0.2,
         thinking: { type: 'enabled', budget_tokens: 1024 },
         reasoning_effort: 'medium',
         expected_error_contains: 'temperature may only be set to 1 when thinking is enabled',
+        expected_error_missing_label: 'thinking_temperature_not_rejected',
       },
     });
     await api.modelRequestTest('ch_1', {
@@ -276,14 +290,32 @@ describe('api request handling', () => {
         expected_error_missing_label: 'web_search_not_rejected',
       },
     });
+    await api.modelRequestTest('ch_1', {
+      prompt: '回复OK',
+      system_prompt: null,
+      run_name: '组合纯度检测 · thinking_adaptive_enabled',
+      request_params: {
+        max_tokens: 2000,
+        temperature: 0,
+        thinking: {
+          type: 'enabled',
+          adaptive: { enabled: true },
+          budget_tokens: 8000,
+          max_tokens: 2000,
+        },
+        expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
+        expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
+        expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
+      },
+    });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/channels/ch_1/model-request-test',
       expect.objectContaining({
         method: 'POST',
-        body: expect.stringContaining('组合纯度检测 · thinking'),
+        body: expect.stringContaining('组合纯度检测 · thinking_temperature'),
       }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -294,6 +326,23 @@ describe('api request handling', () => {
         body: expect.stringContaining('web_search_20260209'),
       }),
     );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/channels/ch_1/model-request-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('thinking_adaptive_enabled'),
+      }),
+    );
+    const thinkingBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    const webSearchBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+    const adaptiveBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body));
+    expect(thinkingBody.request_params.thinking).toEqual({ type: 'enabled', budget_tokens: 1024 });
+    expect(thinkingBody.request_params.tools).toBeUndefined();
+    expect(webSearchBody.request_params.tools[0].type).toBe('web_search_20260209');
+    expect(webSearchBody.request_params.thinking).toBeUndefined();
+    expect(adaptiveBody.request_params.thinking.adaptive).toEqual({ enabled: true });
+    expect(adaptiveBody.request_params.tools).toBeUndefined();
     fetchMock.mockRestore();
   });
 
@@ -315,7 +364,7 @@ describe('api request handling', () => {
     await api.modelRequestTest('ch_1', {
       prompt: '回复OK',
       system_prompt: null,
-      run_name: 'thinking.adaptive.enabled 纯度检测',
+      run_name: '纯度检测 · thinking_adaptive_enabled',
       request_params: {
         max_tokens: 2000,
         temperature: 0,
@@ -338,7 +387,7 @@ describe('api request handling', () => {
         body: JSON.stringify({
           prompt: '回复OK',
           system_prompt: null,
-          run_name: 'thinking.adaptive.enabled 纯度检测',
+          run_name: '纯度检测 · thinking_adaptive_enabled',
           request_params: {
             max_tokens: 2000,
             temperature: 0,
@@ -352,6 +401,74 @@ describe('api request handling', () => {
             expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
             expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
           },
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('creates simplified scheduled patrol tests with fixed probe settings', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: 'sched_1',
+          name: 'daily patrol',
+          channel_id: 'ch_1',
+          suite_id: 'manual_model_request_probe',
+          baseline_snapshot_id: 'scheduled_probe_baseline',
+          enabled: true,
+          interval_minutes: 1440,
+          test_scope: 'scheduled_probe',
+          repeat_count: 1,
+          concurrency: 1,
+          use_mock: false,
+          alert_grade_threshold: 'D',
+          alert_score_threshold: null,
+          alert_red_flags_enabled: true,
+          quiet_minutes: 0,
+          max_retries: 0,
+          retry_interval_minutes: 5,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.createScheduledTest({
+      name: 'daily patrol',
+      channel_id: 'ch_1',
+      interval_minutes: 1440,
+      enabled: true,
+      test_scope: 'scheduled_probe',
+      repeat_count: 1,
+      concurrency: 1,
+      use_mock: false,
+      alert_grade_threshold: 'D',
+      alert_score_threshold: null,
+      alert_red_flags_enabled: true,
+      quiet_minutes: 0,
+      max_retries: 0,
+      retry_interval_minutes: 5,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/scheduled-tests',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'daily patrol',
+          channel_id: 'ch_1',
+          interval_minutes: 1440,
+          enabled: true,
+          test_scope: 'scheduled_probe',
+          repeat_count: 1,
+          concurrency: 1,
+          use_mock: false,
+          alert_grade_threshold: 'D',
+          alert_score_threshold: null,
+          alert_red_flags_enabled: true,
+          quiet_minutes: 0,
+          max_retries: 0,
+          retry_interval_minutes: 5,
         }),
       }),
     );
