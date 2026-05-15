@@ -20,7 +20,6 @@ import type {
   RunSummary,
   ScheduledChannelTest,
   SignatureInteropResult,
-  SimulatedMessageResponse,
   SmartPatrolReport,
   SamplePlan,
   TestCase,
@@ -117,8 +116,6 @@ export const api = {
   healthCheck: (id: string) => request<Record<string, unknown>>(`/api/channels/${id}/health-check`, { method: 'POST' }),
   signatureInteropTest: (payload: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) =>
     request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),
-  simulateMessageResponse: (payload: { provider?: string }) =>
-    request<SimulatedMessageResponse>('/api/channels/simulate-message-response', { method: 'POST', body: JSON.stringify(payload) }),
   modelRequestTest: (channelId: string, payload: { prompt: string; system_prompt?: string | null; request_params?: Record<string, unknown>; run_name?: string | null }) =>
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
   channelModels: (id: string) => request<string[]>(`/api/channels/${id}/models`),

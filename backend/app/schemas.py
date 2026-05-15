@@ -72,19 +72,6 @@ class SignatureInteropTestRead(BaseModel):
     steps: list[SignatureInteropStepRead]
 
 
-class SimulatedMessageResponseCreate(BaseModel):
-    provider: str = "aws"
-
-
-class SimulatedMessageResponseRead(BaseModel):
-    provider: str
-    message_id: str
-    message_channel_type: str
-    raw_request: dict[str, Any]
-    raw_response: dict[str, Any]
-    fallback_note: str
-
-
 class ModelRequestTestCreate(BaseModel):
     prompt: str = Field(min_length=1, max_length=20000)
     system_prompt: str | None = Field(default=None, max_length=8000)

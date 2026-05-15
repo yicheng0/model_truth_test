@@ -54,8 +54,6 @@ from .schemas import (
     ScheduledChannelTestCreate,
     ScheduledChannelTestRead,
     ScheduledChannelTestUpdate,
-    SimulatedMessageResponseCreate,
-    SimulatedMessageResponseRead,
     SmartPatrolReportRead,
     TestCaseCreate,
     TestCaseRead,
@@ -101,7 +99,6 @@ from .services import (
     send_daily_patrol_report,
     send_feishu_test_message,
     seed_demo_data,
-    simulate_message_response,
     smart_patrol_report_markdown,
     suite_diff,
     suite_coverage,
@@ -253,14 +250,6 @@ async def channel_signature_interop_test(data: SignatureInteropTestCreate, db: S
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@app.post("/api/channels/simulate-message-response", response_model=SimulatedMessageResponseRead)
-def channel_simulate_message_response(data: SimulatedMessageResponseCreate) -> dict[str, object]:
-    try:
-        return simulate_message_response(data.provider)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/channels/{channel_id}/model-request-test", response_model=ModelRequestTestRead)

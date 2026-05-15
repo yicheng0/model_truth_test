@@ -2788,52 +2788,6 @@ def classify_claude_message_id(message_id: str | None) -> str:
     return "未知"
 
 
-def simulate_message_response(provider: str = "aws") -> dict[str, Any]:
-    normalized_provider = (provider or "aws").strip().lower()
-    prefixes = {
-        "aws": "msg_bdrk_01",
-        "vertex": "msg_vrtx_01",
-        "anthropic": "msg_01",
-    }
-    if normalized_provider not in prefixes:
-        raise ValueError("Unsupported simulated provider")
-    message_id = f"{prefixes[normalized_provider]}{uuid.uuid4().hex[:18]}"
-    model_by_provider = {
-        "aws": "anthropic.claude-sonnet-4-5-v1:0",
-        "vertex": "claude-sonnet-4-5@20250929",
-        "anthropic": "claude-sonnet-4-5",
-    }
-    raw_request = {
-        "model": model_by_provider[normalized_provider],
-        "max_tokens": 256,
-        "temperature": 0,
-        "messages": [{"role": "user", "content": "请用一句话返回当前渠道的 Claude message id 特征。"}],
-    }
-    raw_response = {
-        "id": message_id,
-        "type": "message",
-        "role": "assistant",
-        "model": model_by_provider[normalized_provider],
-        "content": [
-            {
-                "type": "text",
-                "text": f"这是 {classify_claude_message_id(message_id)} 渠道风格的模拟 Claude Messages 响应。",
-            }
-        ],
-        "stop_reason": "end_turn",
-        "stop_sequence": None,
-        "usage": {"input_tokens": 24, "output_tokens": 18},
-    }
-    return {
-        "provider": normalized_provider,
-        "message_id": message_id,
-        "message_channel_type": classify_claude_message_id(message_id),
-        "raw_request": raw_request,
-        "raw_response": raw_response,
-        "fallback_note": SIGNATURE_FALLBACK_NOTE,
-    }
-
-
 async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
     base_url = (credentials.get("base_url") or channel.base_url or "").rstrip("/")
     url = _openai_chat_completions_url(base_url)

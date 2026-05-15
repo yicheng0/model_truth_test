@@ -13,6 +13,7 @@ export type ChannelAuthFormValues = {
 
 export const accountTypeOptions = [
   { value: 'reverse', label: '逆向' },
+  { value: 'kiro.claudecode', label: 'Kiro Claude Code' },
   { value: 'aws', label: 'AWS' },
   { value: 'claude_code', label: 'Claude Code' },
   { value: 'claude', label: 'Claude' },
@@ -29,6 +30,8 @@ export function accountTypeLabel(value?: unknown) {
 
 export function accountTypeSlug(value?: string) {
   switch (value) {
+    case 'kiro.claudecode':
+      return 'kiro-claudecode';
     case 'aws':
       return 'aws';
     case 'claude_code':
@@ -47,6 +50,8 @@ export function accountTypeSlug(value?: string) {
 
 export function providerTypeForAccountType(value?: string) {
   switch (value) {
+    case 'kiro.claudecode':
+      return 'kiro_claudecode';
     case 'aws':
       return 'aws_bedrock';
     case 'claude_code':

@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Form, Select, Space, Steps, Switch, Tag, Typography, message } from 'antd';
-import { Play, Send, ShieldCheck } from 'lucide-react';
+import { Alert, Button, Card, Descriptions, Form, Select, Space, Steps, Switch, Table, Tag, Typography, message } from 'antd';
+import { Play, ShieldCheck } from 'lucide-react';
 import { api } from '../api';
-import type { Channel, SignatureInteropResult, SimulatedMessageResponse } from '../types';
+import type { Channel, SignatureInteropResult } from '../types';
 
 type DisplayStep = SignatureInteropResult['steps'][number];
 
@@ -12,6 +12,39 @@ const defaultSteps: DisplayStep[] = [
   { name: 'Signature 校验', status: 'wait', detail: '等待 source 返回 thinking block 后校验 signature', excerpt: null },
   { name: '步骤 B：发送 Relay 复用请求', status: 'wait', detail: '等待发送包含 source assistant content 的 relay 请求', excerpt: null },
   { name: '最终判定', status: 'wait', detail: '等待 relay 响应后判断是否互通', excerpt: null },
+];
+
+const builtinChannelIds = [
+  {
+    account_type: 'kiro.claudecode',
+    provider_type: 'kiro_claudecode',
+    message_id_shape: 'msg_01{随机后缀}',
+    identification: 'Anthropic-compatible；不能仅靠前缀和 claude / azure 区分',
+  },
+  {
+    account_type: 'aws',
+    provider_type: 'aws_bedrock',
+    message_id_shape: 'msg_bdrk_01{随机后缀}',
+    identification: 'AWS Bedrock 专属前缀，后端分类为 AWS Bedrock',
+  },
+  {
+    account_type: 'claude',
+    provider_type: 'anthropic',
+    message_id_shape: 'msg_01{随机后缀}',
+    identification: 'Anthropic 官方前缀，后端分类为 Anthropic',
+  },
+  {
+    account_type: 'vertex',
+    provider_type: 'vertex_ai',
+    message_id_shape: 'msg_vrtx_01{随机后缀}',
+    identification: 'Vertex 专属前缀，后端分类为 Vertex',
+  },
+  {
+    account_type: 'azure',
+    provider_type: 'azure_foundry',
+    message_id_shape: 'msg_01{随机后缀}',
+    identification: 'Anthropic-compatible；不能仅靠前缀和 claude / kiro.claudecode 区分',
+  },
 ];
 
 function channelApiKey(channel: Channel) {
@@ -35,8 +68,6 @@ export default function SignatureInterop() {
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<SignatureInteropResult | null>(null);
   const [displaySteps, setDisplaySteps] = useState<DisplayStep[]>(defaultSteps);
-  const [simulateProvider, setSimulateProvider] = useState('aws');
-  const [simulatedResult, setSimulatedResult] = useState<SimulatedMessageResponse | null>(null);
 
   const availableChannels = useMemo(
     () => (channels.data ?? []).filter((channel) => channel.enabled && channel.base_url && channelApiKey(channel)),
@@ -71,17 +102,6 @@ export default function SignatureInterop() {
     },
   });
 
-  const simulateMessage = useMutation({
-    mutationFn: api.simulateMessageResponse,
-    onSuccess: (payload) => {
-      setSimulatedResult(payload);
-      message.success(`已生成 ${payload.message_channel_type} 模拟响应`);
-    },
-    onError: (error) => {
-      message.error(error instanceof Error ? error.message : '模拟请求失败');
-    },
-  });
-
   function submit(values: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) {
     setResult(null);
     setDisplaySteps([
@@ -99,10 +119,6 @@ export default function SignatureInterop() {
       relay_channel_id: availableChannels.find((channel) => !channel.is_reference)?.id ?? availableChannels[1]?.id ?? availableChannels[0]?.id,
       stream: false,
     });
-  }
-
-  function runSimulation() {
-    simulateMessage.mutate({ provider: simulateProvider });
   }
 
   return (
@@ -155,53 +171,27 @@ export default function SignatureInterop() {
         </Space>
       </Card>
 
-      <Card title={<span className="card-title-with-icon"><Send size={18} />模拟请求</span>} bordered={false}>
+      <Card title="内置渠道 ID 对照" bordered={false}>
         <Space direction="vertical" size={16} className="full-width">
           <Alert
             type="info"
             showIcon
-            message="独立模拟 Claude Messages 响应"
-            description="点击按钮后生成一份本地模拟响应，直接展示 AWS / Vertex / Anthropic 对应的 message id 前缀，不调用真实外部 API。"
+            message="渠道 ID 与响应 ID 是两套标识"
+            description="响应前缀目前只能稳定区分 AWS Bedrock、Vertex、Anthropic-compatible 三类；kiro.claudecode、claude、azure 都可能落在 msg_01 家族，不能只靠 message.id 前缀互相区分。"
           />
-          <Space wrap>
-            <Select
-              value={simulateProvider}
-              onChange={(value) => {
-                setSimulateProvider(value);
-                setSimulatedResult(null);
-              }}
-              style={{ width: 180 }}
-              options={[
-                { value: 'aws', label: 'AWS' },
-                { value: 'vertex', label: 'Vertex' },
-                { value: 'anthropic', label: 'Anthropic' },
-              ]}
-            />
-            <Button type="primary" htmlType="button" loading={simulateMessage.isPending} onClick={runSimulation} icon={<Send size={16} />}>
-              模拟请求
-            </Button>
-          </Space>
-          {simulatedResult ? (
-            <Space direction="vertical" size={16} className="full-width">
-              <Descriptions bordered size="small" column={2}>
-                <Descriptions.Item label="Message ID">{simulatedResult.message_id}</Descriptions.Item>
-                <Descriptions.Item label="渠道特征">{simulatedResult.message_channel_type}</Descriptions.Item>
-                <Descriptions.Item label="Provider">{simulatedResult.provider}</Descriptions.Item>
-                <Descriptions.Item label="响应类型">{String(simulatedResult.raw_response.type ?? '-')}</Descriptions.Item>
-              </Descriptions>
-              <div className="signature-sim-grid">
-                <Card title="模拟请求" bordered={false}>
-                  <pre className="signature-step-excerpt">{JSON.stringify(simulatedResult.raw_request, null, 2)}</pre>
-                </Card>
-                <Card title="模拟响应" bordered={false}>
-                  <pre className="signature-step-excerpt">{JSON.stringify(simulatedResult.raw_response, null, 2)}</pre>
-                </Card>
-              </div>
-              <Card title="兜底渠道说明" bordered={false}>
-                <pre className="signature-note">{simulatedResult.fallback_note}</pre>
-              </Card>
-            </Space>
-          ) : null}
+          <Table
+            rowKey="account_type"
+            dataSource={builtinChannelIds}
+            pagination={false}
+            size="small"
+            columns={[
+              { title: '内置账号类型', dataIndex: 'account_type', width: 180 },
+              { title: 'provider_type', dataIndex: 'provider_type', width: 180 },
+              { title: '响应 message.id 形态', dataIndex: 'message_id_shape', width: 220 },
+              { title: '识别结论', dataIndex: 'identification', width: 360 },
+            ]}
+            scroll={{ x: 940 }}
+          />
         </Space>
       </Card>
 

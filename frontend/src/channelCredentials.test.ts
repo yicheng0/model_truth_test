@@ -79,13 +79,16 @@ describe('channel credential helpers', () => {
       request_protocol: 'aws_bedrock',
     });
     expect(accountTypeLabel('vertex')).toBe('Vertex');
+    expect(accountTypeLabel('kiro.claudecode')).toBe('Kiro Claude Code');
     expect(providerTypeForAccountType('aws')).toBe('aws_bedrock');
+    expect(providerTypeForAccountType('kiro.claudecode')).toBe('kiro_claudecode');
     expect(providerTypeForAccountType('claude')).toBe('anthropic');
     expect(providerTypeForAccountType('vertex')).toBe('vertex_ai');
   });
 
   it('builds tokenflow channel ids and API keys from the channel number', () => {
     expect(buildTokenflowChannelId(' 9333 ', 'aws')).toBe('9333-tokenflow-aws');
+    expect(buildTokenflowChannelId('9333', 'kiro.claudecode')).toBe('9333-tokenflow-kiro-claudecode');
     expect(buildTokenflowChannelId('9333', 'claude_code')).toBe('9333-tokenflow-claude-code');
     expect(buildTokenflowApiKey(' 9333 ')).toBe('sk--9333');
     expect(parseTokenflowChannelNumber('9333-tokenflow-aws')).toBe('9333');
