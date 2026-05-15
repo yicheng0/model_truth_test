@@ -4,7 +4,14 @@ import { FormEvent, useState } from "react";
 import { api } from "../api";
 import { Badge } from "../components/Badge";
 import { Section } from "../components/Section";
-import { accountTypeLabel, accountTypeOptions, defaultAccountType, providerTypeForAccountType } from "../channelCredentials";
+import {
+  accountTypeLabel,
+  accountTypeOptions,
+  buildTokenflowApiKey,
+  buildTokenflowChannelId,
+  defaultAccountType,
+  providerTypeForAccountType,
+} from "../channelCredentials";
 import type { ChannelRole } from "../types";
 
 const roleTone = {
@@ -18,7 +25,7 @@ export function ChannelsPage() {
   const queryClient = useQueryClient();
   const channels = useQuery({ queryKey: ["channels"], queryFn: api.channels });
   const [health, setHealth] = useState<Record<string, string>>({});
-  const emptyForm = { name: "", account_type: defaultAccountType, role: "candidate" as ChannelRole, base_url: "", model_name: "" };
+  const emptyForm = { name: "", channel_number: "", account_type: defaultAccountType, role: "candidate" as ChannelRole };
   const [form, setForm] = useState(emptyForm);
   const create = useMutation({
     mutationFn: api.createChannel,
@@ -33,8 +40,9 @@ export function ChannelsPage() {
     const { account_type, ...values } = form;
     create.mutate({
       ...values,
+      id: buildTokenflowChannelId(values.channel_number, account_type),
       provider_type: providerTypeForAccountType(account_type),
-      auth_config: { account_type },
+      auth_config: { account_type, api_key: buildTokenflowApiKey(values.channel_number), request_protocol: "auto" },
       enabled: true,
     });
   }
@@ -60,6 +68,10 @@ export function ChannelsPage() {
             <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
           </label>
           <label>
+            渠道编号
+            <input value={form.channel_number} onChange={(event) => setForm({ ...form, channel_number: event.target.value })} placeholder="9333" required />
+          </label>
+          <label>
             账号类型
             <select value={form.account_type} onChange={(event) => setForm({ ...form, account_type: event.target.value })}>
               {accountTypeOptions.map((option) => (
@@ -76,18 +88,6 @@ export function ChannelsPage() {
               <option value="negative">negative</option>
             </select>
           </label>
-          <label>
-            Endpoint
-            <input
-              value={form.base_url}
-              onChange={(event) => setForm({ ...form, base_url: event.target.value })}
-              placeholder="可只填根地址，系统自动补 /v1/messages"
-            />
-          </label>
-          <label>
-            模型名
-            <input value={form.model_name} onChange={(event) => setForm({ ...form, model_name: event.target.value })} />
-          </label>
           <button className="primary-button" type="submit" disabled={create.isPending}>
             <Plus size={16} />新增
           </button>
@@ -102,8 +102,7 @@ export function ChannelsPage() {
                 <th>渠道</th>
                 <th>账号类型</th>
                 <th>角色</th>
-                <th>模型</th>
-                <th>Endpoint</th>
+                <th>API Key</th>
                 <th>健康检查</th>
               </tr>
             </thead>
@@ -113,8 +112,7 @@ export function ChannelsPage() {
                   <td><strong>{channel.name}</strong></td>
                   <td>{accountTypeLabel(channel.auth_config?.account_type)}</td>
                   <td><Badge tone={roleTone[channel.role as keyof typeof roleTone] ?? "purple"}>{channel.role}</Badge></td>
-                  <td>{channel.model_name}</td>
-                  <td className="truncate">{channel.base_url}</td>
+                  <td>{channel.auth_config?.api_key ? "自动生成" : "未配置"}</td>
                   <td>
                     <button className="icon-button" type="button" aria-label="健康检查" onClick={() => check(channel.id)}>
                       {health[channel.id] === "ok" ? <CheckCircle2 size={16} /> : <RefreshCw size={16} />}

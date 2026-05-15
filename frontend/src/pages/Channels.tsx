@@ -1,14 +1,25 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
+import { Button, Card, Collapse, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import { Edit3, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api';
-import { accountTypeLabel, accountTypeOptions, buildChannelAuthConfig, defaultAccountType, providerTypeForAccountType } from '../channelCredentials';
+import {
+  accountTypeLabel,
+  accountTypeOptions,
+  buildChannelAuthConfig,
+  buildTokenflowApiKey,
+  buildTokenflowChannelId,
+  defaultAccountType,
+  isValidChannelNumber,
+  parseTokenflowChannelNumber,
+  providerTypeForAccountType,
+} from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
 import type { Channel } from '../types';
 
 type ChannelFormValues = {
   name: string;
+  channel_number?: string;
   model_name?: string | string[];
   base_url?: string;
   api_key?: string;
@@ -36,6 +47,12 @@ function channelRequestProtocol(channel: Channel) {
 function channelAccountType(channel: Channel) {
   const value = channel.auth_config?.account_type;
   return typeof value === 'string' && value.trim() ? value : defaultAccountType;
+}
+
+function channelApiKeyMode(channel: Channel) {
+  const channelNumber = parseTokenflowChannelNumber(channel.id);
+  const automaticKey = buildTokenflowApiKey(channelNumber);
+  return automaticKey && channelApiKey(channel) === automaticKey ? '自动生成' : channelApiKey(channel) ? '已覆盖' : '未配置';
 }
 
 function preferredFetchedModel(models: string[]) {
@@ -145,9 +162,10 @@ export default function Channels() {
     setFetchedModels([]);
     editForm.setFieldsValue({
       name: channel.name,
+      channel_number: parseTokenflowChannelNumber(channel.id),
       model_name: channel.model_name ? [channel.model_name] : [],
       base_url: channel.base_url ?? '',
-      api_key: channelApiKey(channel),
+      api_key: '',
       account_type: channelAccountType(channel),
       request_protocol: channelRequestProtocol(channel),
       is_reference: channel.is_reference,
@@ -157,9 +175,12 @@ export default function Channels() {
 
   function channelPayload(values: ChannelFormValues, existing?: Channel | null): Partial<Channel> {
     const modelName = firstSelectValue(values.model_name);
+    const accountType = values.account_type || defaultAccountType;
+    const channelNumber = values.channel_number?.trim();
     return {
+      ...(existing || !channelNumber ? {} : { id: buildTokenflowChannelId(channelNumber, accountType) }),
       name: values.name.trim(),
-      ...(existing ? {} : { provider_type: providerTypeForAccountType(values.account_type) }),
+      provider_type: providerTypeForAccountType(accountType),
       is_reference: values.is_reference ?? false,
       enabled: values.enabled,
       model_name: modelName || null,
@@ -192,7 +213,7 @@ export default function Channels() {
           <Typography.Text className="section-kicker">CHANNELS</Typography.Text>
           <Typography.Title level={2}>渠道管理</Typography.Title>
           <Typography.Paragraph>
-            内部渠道配置只保留必要信息。配置名称、账号类型、请求协议、Base URL 和 API Key 后即可用于测评。
+            主流程只需要配置渠道名称、渠道编号和账号类型；系统会自动生成渠道 ID 和 API Key。
           </Typography.Paragraph>
         </div>
         <Space wrap>
@@ -208,25 +229,49 @@ export default function Channels() {
             <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入渠道名称' }]}>
               <Input size="large" placeholder="例如：APIPro 生产中转" />
             </Form.Item>
-            <Form.Item name="model_name" label="模型名">
-              <Select size="large" mode="tags" maxCount={1} options={channelModelOptions} placeholder="输入模型名，保存后下次可直接选择" />
+            <Form.Item
+              name="channel_number"
+              label="渠道编号"
+              rules={[
+                { required: true, message: '请输入渠道编号，例如 9333' },
+                { validator: (_, value) => (isValidChannelNumber(value) ? Promise.resolve() : Promise.reject(new Error('只允许字母、数字、下划线和短横线'))) },
+              ]}
+              extra="保存后渠道 ID 会按“编号-tokenflow-类型”生成，例如 9333-tokenflow-aws。"
+            >
+              <Input size="large" placeholder="9333" />
             </Form.Item>
             <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
               <Select size="large" options={accountTypeOptions} />
             </Form.Item>
-            <Form.Item name="request_protocol" label="请求协议" initialValue="auto">
-              <Select size="large" options={requestProtocolOptions} />
-            </Form.Item>
-            <Form.Item name="base_url" label="Base URL" help="自动探测会先试 Anthropic Messages，再试 OpenAI Chat Completions；也可以显式选择协议。">
-              <Input size="large" placeholder="https://api.example.com 或 https://api.example.com/v1" />
-            </Form.Item>
-            <Form.Item name="api_key" label="API Key">
-              <Input size="large" autoComplete="off" placeholder="sk-ant-..." />
-            </Form.Item>
-            <Form.Item name="is_reference" label="指纹源渠道" valuePropName="checked" initialValue={false}>
-              <Switch checkedChildren="指纹源" unCheckedChildren="待测" />
-            </Form.Item>
           </div>
+          <Collapse
+            className="channel-advanced"
+            items={[
+              {
+                key: 'advanced',
+                label: '高级配置',
+                children: (
+                  <div className="form-grid">
+                    <Form.Item name="model_name" label="模型名">
+                      <Select size="large" mode="tags" maxCount={1} options={channelModelOptions} placeholder="输入模型名，保存后下次可直接选择" />
+                    </Form.Item>
+                    <Form.Item name="request_protocol" label="请求协议" initialValue="auto">
+                      <Select size="large" options={requestProtocolOptions} />
+                    </Form.Item>
+                    <Form.Item name="base_url" label="Base URL" help="自动探测会先试 Anthropic Messages，再试 OpenAI Chat Completions；也可以显式选择协议。">
+                      <Input size="large" placeholder="https://api.example.com 或 https://api.example.com/v1" />
+                    </Form.Item>
+                    <Form.Item name="api_key" label="API Key 覆盖" extra="留空时自动使用 sk--渠道编号。">
+                      <Input size="large" autoComplete="off" placeholder="默认自动生成" />
+                    </Form.Item>
+                    <Form.Item name="is_reference" label="指纹源渠道" valuePropName="checked" initialValue={false}>
+                      <Switch checkedChildren="指纹源" unCheckedChildren="待测" />
+                    </Form.Item>
+                  </div>
+                ),
+              },
+            ]}
+          />
           <Button type="primary" size="large" htmlType="submit" loading={create.isPending} icon={<Plus size={16} />}>
             保存渠道
           </Button>
@@ -298,7 +343,10 @@ export default function Channels() {
               title: 'API Key',
               dataIndex: 'auth_config',
               width: 120,
-              render: (_: unknown, channel) => (channelApiKey(channel) ? <Tag color="green">已配置</Tag> : <Tag>未配置</Tag>),
+              render: (_: unknown, channel) => {
+                const mode = channelApiKeyMode(channel);
+                return <Tag color={mode === '自动生成' ? 'blue' : mode === '已覆盖' ? 'green' : undefined}>{mode}</Tag>;
+              },
             },
             {
               title: '复审',
@@ -351,36 +399,52 @@ export default function Channels() {
           <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入渠道名称' }]}>
             <Input placeholder="例如：APIPro 生产中转" />
           </Form.Item>
-          <Form.Item name="model_name" label="模型名">
-            <Select mode="tags" maxCount={1} options={channelModelOptions} placeholder="输入模型名，保存后下次可直接选择" />
+          <Form.Item name="channel_number" label="渠道编号" extra="已有渠道不会修改 ID；修改编号只会用于重新生成默认 API Key。">
+            <Input placeholder="9333" />
           </Form.Item>
           <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
             <Select options={accountTypeOptions} />
           </Form.Item>
-          <Button
-            type="default"
-            loading={loadModels.isPending}
-            disabled={!editing}
-            onClick={() => editing && loadModels.mutate(editing)}
-            style={{ marginTop: -12, marginBottom: 12 }}
-          >
-            拉取模型
-          </Button>
-          <Form.Item name="request_protocol" label="请求协议" initialValue="auto">
-            <Select options={requestProtocolOptions} />
-          </Form.Item>
-          <Form.Item name="base_url" label="Base URL" help="自动探测会先试 Anthropic Messages，再试 OpenAI Chat Completions；也可以显式选择协议。">
-            <Input placeholder="https://api.example.com 或 https://api.example.com/v1" />
-          </Form.Item>
-          <Form.Item name="api_key" label="API Key">
-            <Input autoComplete="off" placeholder="sk-ant-..." />
-          </Form.Item>
-          <Form.Item name="enabled" label="状态" valuePropName="checked">
-            <Switch checkedChildren="启用" unCheckedChildren="停用" />
-          </Form.Item>
-          <Form.Item name="is_reference" label="指纹源渠道" valuePropName="checked">
-            <Switch checkedChildren="指纹源" unCheckedChildren="待测" />
-          </Form.Item>
+          <Collapse
+            className="channel-advanced"
+            items={[
+              {
+                key: 'advanced',
+                label: '高级配置',
+                children: (
+                  <>
+                    <Form.Item name="model_name" label="模型名">
+                      <Select mode="tags" maxCount={1} options={channelModelOptions} placeholder="输入模型名，保存后下次可直接选择" />
+                    </Form.Item>
+                    <Button
+                      type="default"
+                      loading={loadModels.isPending}
+                      disabled={!editing}
+                      onClick={() => editing && loadModels.mutate(editing)}
+                      style={{ marginTop: -12, marginBottom: 12 }}
+                    >
+                      拉取模型
+                    </Button>
+                    <Form.Item name="request_protocol" label="请求协议" initialValue="auto">
+                      <Select options={requestProtocolOptions} />
+                    </Form.Item>
+                    <Form.Item name="base_url" label="Base URL" help="自动探测会先试 Anthropic Messages，再试 OpenAI Chat Completions；也可以显式选择协议。">
+                      <Input placeholder="https://api.example.com 或 https://api.example.com/v1" />
+                    </Form.Item>
+                    <Form.Item name="api_key" label="API Key 覆盖" extra="留空时自动使用 sk--渠道编号。">
+                      <Input autoComplete="off" placeholder="默认自动生成" />
+                    </Form.Item>
+                    <Form.Item name="enabled" label="状态" valuePropName="checked">
+                      <Switch checkedChildren="启用" unCheckedChildren="停用" />
+                    </Form.Item>
+                    <Form.Item name="is_reference" label="指纹源渠道" valuePropName="checked">
+                      <Switch checkedChildren="指纹源" unCheckedChildren="待测" />
+                    </Form.Item>
+                  </>
+                ),
+              },
+            ]}
+          />
         </Form>
       </Modal>
     </Space>

@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { accountTypeLabel, buildChannelAuthConfig, buildRuntimeCredentials, hasStoredApiKey, providerTypeForAccountType } from './channelCredentials';
+import {
+  accountTypeLabel,
+  buildChannelAuthConfig,
+  buildRuntimeCredentials,
+  buildTokenflowApiKey,
+  buildTokenflowChannelId,
+  hasStoredApiKey,
+  isValidChannelNumber,
+  parseTokenflowChannelNumber,
+  providerTypeForAccountType,
+} from './channelCredentials';
 import type { Channel } from './types';
 
 function channel(id: string, auth_config?: Record<string, unknown>): Pick<Channel, 'id' | 'auth_config'> {
@@ -32,12 +42,12 @@ describe('channel credential helpers', () => {
 
   it('keeps an existing channel API key when the edit form key is blank', () => {
     const authConfig = buildChannelAuthConfig(
-      { api_key: '   ', request_protocol: 'openai_chat_completions' },
+      { api_key: '   ', channel_number: '9333', request_protocol: 'openai_chat_completions' },
       { api_key: 'saved-key', region: 'us-east-1', request_protocol: 'auto' },
     );
 
     expect(authConfig).toEqual({
-      api_key: 'saved-key',
+      api_key: 'sk--9333',
       account_type: 'reverse',
       region: 'us-east-1',
       request_protocol: 'openai_chat_completions',
@@ -72,5 +82,14 @@ describe('channel credential helpers', () => {
     expect(providerTypeForAccountType('aws')).toBe('aws_bedrock');
     expect(providerTypeForAccountType('claude')).toBe('anthropic');
     expect(providerTypeForAccountType('vertex')).toBe('vertex_ai');
+  });
+
+  it('builds tokenflow channel ids and API keys from the channel number', () => {
+    expect(buildTokenflowChannelId(' 9333 ', 'aws')).toBe('9333-tokenflow-aws');
+    expect(buildTokenflowChannelId('9333', 'claude_code')).toBe('9333-tokenflow-claude-code');
+    expect(buildTokenflowApiKey(' 9333 ')).toBe('sk--9333');
+    expect(parseTokenflowChannelNumber('9333-tokenflow-aws')).toBe('9333');
+    expect(isValidChannelNumber('9333_ab-c')).toBe(true);
+    expect(isValidChannelNumber('9333 token')).toBe(false);
   });
 });

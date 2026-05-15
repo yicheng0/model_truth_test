@@ -1115,6 +1115,17 @@ textarea:focus-visible,
   gap: 16px;
 }
 
+.channel-advanced {
+  margin: 0 0 18px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.channel-advanced .ant-collapse-item {
+  border-bottom: 0 !important;
+}
+
 .case-filter-grid,
 .case-form-grid,
 .case-json-grid {

@@ -8,6 +8,7 @@ export type ChannelAuthFormValues = {
   api_key?: string;
   request_protocol?: string;
   account_type?: string;
+  channel_number?: string;
 };
 
 export const accountTypeOptions = [
@@ -26,6 +27,24 @@ export function accountTypeLabel(value?: unknown) {
   return accountTypeOptions.find((option) => option.value === text)?.label ?? text;
 }
 
+export function accountTypeSlug(value?: string) {
+  switch (value) {
+    case 'aws':
+      return 'aws';
+    case 'claude_code':
+      return 'claude-code';
+    case 'claude':
+      return 'claude';
+    case 'azure':
+      return 'azure';
+    case 'vertex':
+      return 'vertex';
+    case 'reverse':
+    default:
+      return 'reverse';
+  }
+}
+
 export function providerTypeForAccountType(value?: string) {
   switch (value) {
     case 'aws':
@@ -42,6 +61,29 @@ export function providerTypeForAccountType(value?: string) {
     default:
       return 'custom_provider';
   }
+}
+
+export function normalizeChannelNumber(value?: string) {
+  return (value ?? '').trim();
+}
+
+export function isValidChannelNumber(value?: string) {
+  return /^[A-Za-z0-9_-]+$/.test(normalizeChannelNumber(value));
+}
+
+export function buildTokenflowChannelId(channelNumber?: string, accountType?: string) {
+  const normalized = normalizeChannelNumber(channelNumber);
+  return normalized ? `${normalized}-tokenflow-${accountTypeSlug(accountType)}` : '';
+}
+
+export function buildTokenflowApiKey(channelNumber?: string) {
+  const normalized = normalizeChannelNumber(channelNumber);
+  return normalized ? `sk--${normalized}` : '';
+}
+
+export function parseTokenflowChannelNumber(channelId?: string) {
+  const match = (channelId ?? '').match(/^(.+)-tokenflow-[A-Za-z0-9-]+$/);
+  return match?.[1] ?? '';
 }
 
 export function trimmedValue(value?: string) {
@@ -72,7 +114,7 @@ export function buildChannelAuthConfig(
   existingAuthConfig?: Record<string, unknown>,
 ) {
   const authConfig: Record<string, unknown> = { ...(existingAuthConfig ?? {}) };
-  const apiKey = trimmedValue(values.api_key);
+  const apiKey = trimmedValue(values.api_key) ?? buildTokenflowApiKey(values.channel_number);
   if (apiKey) {
     authConfig.api_key = apiKey;
   }
