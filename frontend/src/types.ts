@@ -107,6 +107,20 @@ export type Run = {
 export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe' | 'performance_benchmark' | 'arena_comparison';
 export type TestScope = 'quick' | 'full' | 'scheduled_probe';
 
+export type ScheduledProbeModelRequest = {
+  key?: string | null;
+  title?: string | null;
+  status?: 'ok' | 'error' | string;
+  result_id?: string | null;
+  message_id?: string | null;
+  message_channel_type?: string | null;
+  request_protocol?: string | null;
+  provider_endpoint?: string | null;
+  labels?: string[];
+  score?: number | null;
+  error?: string | null;
+};
+
 export type RunChannel = {
   id: string;
   run_id: string;
@@ -384,6 +398,27 @@ export type ScheduledChannelTest = {
   last_run_id?: string | null;
   last_status?: string | null;
   last_error?: string | null;
+  latest_report_id?: string | null;
+  latest_grade?: Report['grade'] | null;
+  latest_score?: number | null;
+  latest_probe_summary?: {
+    model_requests?: ScheduledProbeModelRequest[];
+    model_request?: ScheduledProbeModelRequest;
+    signature_interop?: {
+      status?: 'pass' | 'fail' | 'skipped' | string;
+      reason?: string | null;
+      source_channel_id?: string | null;
+      relay_channel_id?: string | null;
+      source_message_id?: string | null;
+      source_message_channel_type?: string | null;
+      relay_message_id?: string | null;
+      relay_message_channel_type?: string | null;
+      signature_prefixes?: string[];
+    };
+    labels?: string[];
+    label_explanations?: Record<string, string>;
+    detected_provider_hint?: string | null;
+  } | null;
   created_at?: string | null;
   updated_at?: string | null;
 };

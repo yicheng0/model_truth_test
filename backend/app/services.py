@@ -1347,19 +1347,6 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
     }
 
 
-async def create_scheduled_model_request_probe(db: Session, channel: Channel, scheduled: ScheduledChannelTest) -> dict[str, Any]:
-    return await create_model_request_test(
-        db,
-        channel,
-        ModelRequestTestCreate(
-            prompt=SCHEDULED_MODEL_REQUEST_PROMPT,
-            system_prompt=None,
-            request_params=SCHEDULED_MODEL_REQUEST_PARAMS,
-            run_name=f"自动巡检真实模型请求 · {scheduled.name}",
-        ),
-    )
-
-
 def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any]:
     rules: dict[str, Any] = {}
     for key in [
@@ -1376,8 +1363,8 @@ def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any
     return rules
 
 
-SCHEDULED_MODEL_REQUEST_PROMPT = "请用一句话回答：这是自动巡检真实模型请求探针。"
-SCHEDULED_MODEL_REQUEST_PARAMS: dict[str, Any] = {
+SCHEDULED_THINKING_TEMPERATURE_PROMPT = "请用一句话回答：这是自动巡检真实模型请求探针。"
+SCHEDULED_THINKING_TEMPERATURE_PARAMS: dict[str, Any] = {
     "max_tokens": 2048,
     "temperature": 0.2,
     "thinking": {"type": "enabled", "budget_tokens": 1024},
@@ -1389,6 +1376,143 @@ SCHEDULED_MODEL_REQUEST_PARAMS: dict[str, Any] = {
     "expected_error_variant_label": "provider_error_variant",
     "expected_error_unexpected_label": "unexpected_error_response",
 }
+
+SCHEDULED_WEB_SEARCH_PROMPT = "请查询今天 Anthropic 官方新闻或博客的最新更新，并给出标题、发布日期和来源链接。注意：如果当前环境没有真实联网或搜索工具，请明确说明无法实时查询，不要凭记忆编造。"
+SCHEDULED_WEB_SEARCH_PARAMS: dict[str, Any] = {
+    "max_tokens": 900,
+    "temperature": 0,
+    "stream": True,
+    "tools": [
+        {
+            "type": "web_search_20260209",
+            "name": "web_search",
+            "max_uses": 5,
+        },
+    ],
+    "expected_error_contains": "web search",
+    "expected_error_any": ["web_search", "unsupported", "not available", "tool", "bedrock"],
+    "expected_error_missing_label": "web_search_not_rejected",
+    "expected_error_variant_label": "provider_error_variant",
+}
+
+SCHEDULED_THINKING_ADAPTIVE_PROMPT = "回复OK"
+SCHEDULED_THINKING_ADAPTIVE_PARAMS: dict[str, Any] = {
+    "max_tokens": 2000,
+    "temperature": 0,
+    "thinking": {
+        "type": "enabled",
+        "adaptive": {"enabled": True},
+        "budget_tokens": 8000,
+        "max_tokens": 2000,
+    },
+    "expected_error_required_all": ["enabled", "not supported", "output_config.effort"],
+    "expected_error_missing_label": "thinking_adaptive_enabled_not_rejected",
+    "expected_error_unexpected_label": "thinking_adaptive_enabled_wrong_error",
+}
+
+SCHEDULED_MODEL_REQUEST_PROBES: list[dict[str, Any]] = [
+    {
+        "key": "thinking_temperature",
+        "title": "Thinking temperature 冲突",
+        "prompt": SCHEDULED_THINKING_TEMPERATURE_PROMPT,
+        "request_params": SCHEDULED_THINKING_TEMPERATURE_PARAMS,
+    },
+    {
+        "key": "web_search",
+        "title": "Web Search tool",
+        "prompt": SCHEDULED_WEB_SEARCH_PROMPT,
+        "request_params": SCHEDULED_WEB_SEARCH_PARAMS,
+    },
+    {
+        "key": "thinking_adaptive_enabled",
+        "title": "thinking.adaptive.enabled",
+        "prompt": SCHEDULED_THINKING_ADAPTIVE_PROMPT,
+        "request_params": SCHEDULED_THINKING_ADAPTIVE_PARAMS,
+    },
+]
+
+
+async def create_scheduled_model_request_probe(db: Session, channel: Channel, scheduled: ScheduledChannelTest) -> dict[str, Any]:
+    if not channel.enabled:
+        raise ValueError("Channel is disabled")
+
+    suite = _manual_probe_suite(db)
+    started_at = datetime.now(timezone.utc)
+    run = Run(
+        id=new_id("run"),
+        suite_id=suite.id,
+        name=f"自动巡检真实模型请求 · {scheduled.name}"[:200],
+        mode=MANUAL_PROBE_MODE,
+        test_scope="quick",
+        status="running",
+        repeat_count=1,
+        concurrency=1,
+        total_jobs=len(SCHEDULED_MODEL_REQUEST_PROBES),
+        completed_jobs=0,
+        started_at=started_at,
+    )
+    db.add(run)
+    db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=channel.id, role_in_run=channel.role or "candidate"))
+    db.commit()
+
+    credentials = _merged_channel_credentials(channel, {})
+    probe_results: list[dict[str, Any]] = []
+    for index, probe in enumerate(SCHEDULED_MODEL_REQUEST_PROBES, start=1):
+        request_params = dict(probe["request_params"])
+        case = TestCase(
+            id=new_id("case"),
+            suite_id=suite.id,
+            module="scheduled_probe",
+            sort_order=index,
+            title=str(probe["title"]),
+            prompt=str(probe["prompt"]),
+            system_prompt=None,
+            request_params=request_params,
+            scoring_rules=_manual_probe_scoring_rules(request_params),
+            is_hidden=False,
+            enabled=True,
+        )
+        db.add(case)
+        db.commit()
+
+        normalized = await invoke_channel(channel, case, 1, dict(credentials), use_mock=False)
+        result = _result_from_normalized(run.id, case, channel, 1, normalized)
+        run.completed_jobs += 1
+        db.add(result)
+        db.commit()
+        db.refresh(result)
+        probe_results.append(
+            {
+                "key": probe["key"],
+                "title": probe["title"],
+                "run_id": run.id,
+                "result_id": result.id,
+                "message_id": normalized.get("provider_message_id"),
+                "message_channel_type": classify_claude_message_id(normalized.get("provider_message_id")),
+                "request_protocol": normalized.get("request_protocol"),
+                "provider_endpoint": normalized.get("provider_endpoint"),
+                "labels": result.labels or [],
+                "score": result.score,
+                "error": normalized.get("error"),
+            }
+        )
+
+    run.finished_at = datetime.now(timezone.utc)
+    run.status = "failed" if probe_results and all(item.get("error") and (item.get("score") or 0) <= 0 for item in probe_results) else "completed"
+    db.commit()
+    db.refresh(run)
+    primary = next((item for item in probe_results if item["key"] == "thinking_temperature"), probe_results[0] if probe_results else {})
+    primary_result = db.get(Result, primary.get("result_id")) if primary.get("result_id") else None
+    return {
+        "run": run,
+        "result": primary_result,
+        "results": probe_results,
+        "message_id": primary.get("message_id"),
+        "message_channel_type": primary.get("message_channel_type"),
+        "request_protocol": primary.get("request_protocol"),
+        "provider_endpoint": primary.get("provider_endpoint"),
+        "error": primary.get("error"),
+    }
 
 
 async def execute_run(
@@ -1882,31 +2006,30 @@ def build_scheduled_probe_report(
 ) -> Report:
     channel = db.get(Channel, scheduled.channel_id)
     result = model_payload.get("result") if model_payload else None
-    labels = set(result.labels or []) if isinstance(result, Result) else set()
+    model_requests = _scheduled_model_request_evidence(model_payload)
+    labels = {label for item in model_requests for label in item.get("labels", []) if isinstance(label, str)}
+    if isinstance(result, Result):
+        labels.update(result.labels or [])
     signature_evidence = _signature_interop_report_evidence(signature_result or {})
     if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok"):
         labels.add("signature_interop_failed")
-    score = result.score if isinstance(result, Result) else 0
-    if "thinking_temperature_not_rejected" in labels or "unexpected_error_response" in labels:
+    probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
+    score = min(probe_scores) if probe_scores else (result.score if isinstance(result, Result) else 0)
+    if labels.intersection({"thinking_temperature_not_rejected", "web_search_not_rejected", "thinking_adaptive_enabled_not_rejected", "unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}):
         score = min(score, 40)
     if "signature_interop_failed" in labels:
         score = min(score, 60)
-    if not labels and score >= 90 and signature_result and signature_result.get("ok"):
+    if not labels and len(model_requests) == len(SCHEDULED_MODEL_REQUEST_PROBES) and score >= 90 and signature_result and signature_result.get("ok"):
         labels.add("patrol_probe_passed")
     grade = capped_grade_from_score(score, sorted(labels))
     provider_hint = scheduled_provider_hint(model_payload, signature_evidence, sorted(labels))
+    primary_request = next((item for item in model_requests if item.get("key") == "thinking_temperature"), model_requests[0] if model_requests else {})
     evidence = {
         "labels": sorted(labels),
         "red_flags": sorted(labels.intersection(ALERT_RED_FLAGS)),
         "label_explanations": label_explanations(sorted(labels)),
-        "model_request": {
-            "run_id": model_payload.get("run").id if model_payload and model_payload.get("run") else run_id,
-            "result_id": result.id if isinstance(result, Result) else None,
-            "message_id": model_payload.get("message_id") if model_payload else None,
-            "message_channel_type": model_payload.get("message_channel_type") if model_payload else None,
-            "request_protocol": model_payload.get("request_protocol") if model_payload else None,
-            "provider_endpoint": model_payload.get("provider_endpoint") if model_payload else None,
-        },
+        "model_request": primary_request,
+        "model_requests": model_requests,
         "signature_interop": signature_evidence,
         "detected_provider_hint": provider_hint,
         "test_scope": "scheduled_probe",
@@ -1937,9 +2060,57 @@ def build_scheduled_probe_report(
     return report
 
 
+def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not model_payload:
+        return []
+    results = model_payload.get("results")
+    if isinstance(results, list):
+        return [
+            {
+                "key": str(item.get("key") or "unknown"),
+                "title": item.get("title") or item.get("key") or "真实模型请求",
+                "run_id": item.get("run_id") or (model_payload.get("run").id if model_payload.get("run") else None),
+                "result_id": item.get("result_id"),
+                "message_id": item.get("message_id"),
+                "message_channel_type": item.get("message_channel_type"),
+                "request_protocol": item.get("request_protocol"),
+                "provider_endpoint": item.get("provider_endpoint"),
+                "labels": item.get("labels") if isinstance(item.get("labels"), list) else [],
+                "score": item.get("score"),
+                "error": item.get("error"),
+            }
+            for item in results
+            if isinstance(item, dict)
+        ]
+
+    result = model_payload.get("result")
+    return [
+        {
+            "key": "thinking_temperature",
+            "title": "Thinking temperature 冲突",
+            "run_id": model_payload.get("run").id if model_payload.get("run") else None,
+            "result_id": result.id if isinstance(result, Result) else None,
+            "message_id": model_payload.get("message_id"),
+            "message_channel_type": model_payload.get("message_channel_type"),
+            "request_protocol": model_payload.get("request_protocol"),
+            "provider_endpoint": model_payload.get("provider_endpoint"),
+            "labels": (result.labels or []) if isinstance(result, Result) else [],
+            "score": result.score if isinstance(result, Result) else None,
+            "error": model_payload.get("error"),
+        }
+    ]
+
+
 def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
     labels = ", ".join(evidence.get("labels") or []) or "未发现显著异常"
-    model_request = evidence.get("model_request") or {}
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    if not model_requests and isinstance(evidence.get("model_request"), dict):
+        model_requests = [evidence["model_request"]]
+    model_rows = "\n".join(
+        f"| {item.get('title') or item.get('key') or '-'} | {_probe_status_text(item)} | {item.get('result_id') or '-'} | {item.get('message_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
+        for item in model_requests
+        if isinstance(item, dict)
+    ) or "| - | - | - | - | - | - | - | - |"
     signature = evidence.get("signature_interop") or {}
     return f"""# 自动巡检双探针报告
 
@@ -1954,11 +2125,9 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
 
 ## 真实模型请求
 
-- Result ID：{model_request.get("result_id") or "-"}
-- Message ID：{model_request.get("message_id") or "-"}
-- 渠道类型：{model_request.get("message_channel_type") or "-"}
-- 请求协议：{model_request.get("request_protocol") or "-"}
-- Provider endpoint：{model_request.get("provider_endpoint") or "-"}
+| 参数探针 | 状态 | Result ID | Message ID | 请求协议 | Provider endpoint | 标签 | 错误 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+{model_rows}
 
 ## Thinking Signature 互通
 
@@ -1972,9 +2141,16 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
 """
 
 
+def _probe_status_text(item: dict[str, Any]) -> str:
+    if item.get("error"):
+        return "请求错误"
+    labels = item.get("labels") if isinstance(item.get("labels"), list) else []
+    return "异常" if labels else "正常"
+
+
 def scheduled_provider_hint(model_payload: dict[str, Any] | None, signature_evidence: dict[str, Any], labels: list[str]) -> str:
     types = [
-        str(model_payload.get("message_channel_type")) if model_payload else "",
+        " ".join(str(item.get("message_channel_type") or "") for item in _scheduled_model_request_evidence(model_payload)),
         str(signature_evidence.get("source_message_channel_type") or ""),
         str(signature_evidence.get("relay_message_channel_type") or ""),
     ]
@@ -1996,6 +2172,7 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
         return None
     evidence = report.evidence or {}
     model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
     signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
     return {
         "run_id": alert.run_id,
@@ -2003,6 +2180,7 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
         "model_request_result_id": model_request.get("result_id"),
         "model_request_message_id": model_request.get("message_id"),
         "model_request_channel_type": model_request.get("message_channel_type"),
+        "model_requests": model_requests,
         "request_protocol": model_request.get("request_protocol"),
         "provider_endpoint": model_request.get("provider_endpoint"),
         "signature_source_message_id": signature.get("source_message_id"),
@@ -2010,6 +2188,121 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
         "signature_relay_message_id": signature.get("relay_message_id"),
         "signature_relay_channel_type": signature.get("relay_message_channel_type"),
         "detected_provider_hint": evidence.get("detected_provider_hint"),
+    }
+
+
+def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -> dict[str, Any]:
+    if not scheduled.last_run_id:
+        return {
+            "latest_report_id": None,
+            "latest_grade": None,
+            "latest_score": None,
+            "latest_probe_summary": None,
+        }
+    report = db.scalar(
+        select(Report)
+        .where(Report.run_id == scheduled.last_run_id, Report.channel_id == scheduled.channel_id)
+        .order_by(Report.created_at.desc())
+    )
+    if not report:
+        return {
+            "latest_report_id": None,
+            "latest_grade": None,
+            "latest_score": None,
+            "latest_probe_summary": None,
+        }
+    evidence = report.evidence or {}
+    model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    if not model_requests and model_request:
+        model_requests = [model_request]
+    signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    labels = evidence.get("labels") if isinstance(evidence.get("labels"), list) else []
+    label_explanations = evidence.get("label_explanations") if isinstance(evidence.get("label_explanations"), dict) else {}
+    return {
+        "latest_report_id": report.id,
+        "latest_grade": report.grade,
+        "latest_score": report.final_score,
+        "latest_probe_summary": {
+            "model_request": {
+                "status": _probe_summary_status(model_request),
+                "result_id": model_request.get("result_id"),
+                "message_id": model_request.get("message_id"),
+                "message_channel_type": model_request.get("message_channel_type"),
+                "request_protocol": model_request.get("request_protocol"),
+                "provider_endpoint": model_request.get("provider_endpoint"),
+                "error": model_request.get("error"),
+            },
+            "model_requests": [
+                {
+                    "key": item.get("key"),
+                    "title": item.get("title"),
+                    "status": _probe_summary_status(item),
+                    "result_id": item.get("result_id"),
+                    "message_id": item.get("message_id"),
+                    "message_channel_type": item.get("message_channel_type"),
+                    "request_protocol": item.get("request_protocol"),
+                    "provider_endpoint": item.get("provider_endpoint"),
+                    "labels": item.get("labels") if isinstance(item.get("labels"), list) else [],
+                    "score": item.get("score"),
+                    "error": item.get("error"),
+                }
+                for item in model_requests
+                if isinstance(item, dict)
+            ],
+            "signature_interop": {
+                "status": signature.get("status"),
+                "reason": signature.get("reason"),
+                "source_channel_id": signature.get("source_channel_id"),
+                "relay_channel_id": signature.get("relay_channel_id"),
+                "source_message_id": signature.get("source_message_id"),
+                "source_message_channel_type": signature.get("source_message_channel_type"),
+                "relay_message_id": signature.get("relay_message_id"),
+                "relay_message_channel_type": signature.get("relay_message_channel_type"),
+                "signature_prefixes": signature.get("signature_prefixes") or [],
+            },
+            "labels": labels,
+            "label_explanations": label_explanations,
+            "detected_provider_hint": evidence.get("detected_provider_hint"),
+        },
+    }
+
+
+def _probe_summary_status(item: dict[str, Any]) -> str:
+    if item.get("error"):
+        return "error"
+    labels = item.get("labels") if isinstance(item.get("labels"), list) else []
+    return "error" if labels else "ok"
+
+
+def scheduled_channel_test_read(db: Session, scheduled: ScheduledChannelTest) -> dict[str, Any]:
+    return {
+        "id": scheduled.id,
+        "name": scheduled.name,
+        "channel_id": scheduled.channel_id,
+        "suite_id": scheduled.suite_id,
+        "baseline_snapshot_id": scheduled.baseline_snapshot_id,
+        "enabled": scheduled.enabled,
+        "interval_minutes": scheduled.interval_minutes,
+        "run_window_start": scheduled.run_window_start,
+        "run_window_end": scheduled.run_window_end,
+        "test_scope": scheduled.test_scope,
+        "repeat_count": scheduled.repeat_count,
+        "concurrency": scheduled.concurrency,
+        "use_mock": scheduled.use_mock,
+        "alert_grade_threshold": scheduled.alert_grade_threshold,
+        "alert_score_threshold": scheduled.alert_score_threshold,
+        "alert_red_flags_enabled": scheduled.alert_red_flags_enabled,
+        "quiet_minutes": scheduled.quiet_minutes,
+        "max_retries": scheduled.max_retries,
+        "retry_interval_minutes": scheduled.retry_interval_minutes,
+        "next_run_at": scheduled.next_run_at,
+        "last_run_id": scheduled.last_run_id,
+        "last_status": scheduled.last_status,
+        "last_error": scheduled.last_error,
+        "created_at": scheduled.created_at,
+        "updated_at": scheduled.updated_at,
+        **scheduled_test_probe_summary(db, scheduled),
     }
 
 

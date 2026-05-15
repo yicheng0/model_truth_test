@@ -537,9 +537,12 @@ def test_arena_run_generates_rankings_and_reports() -> None:
         summary = client.get(f"/api/runs/{run['id']}/summary").json()
 
     assert payload["run"]["mode"] == "arena_comparison"
+    assert {item["channel_id"] for item in payload["run_channels"]} == {"third_party_demo", "negative_sample"}
+    assert all(item["role_in_run"] == "candidate" for item in payload["run_channels"])
     assert payload["reports"]
     assert summary["arena_rankings"]
     assert {item["channel_id"] for item in summary["arena_rankings"]} == {"third_party_demo", "negative_sample"}
+    assert "anthropic_official" not in {item["channel_id"] for item in summary["arena_rankings"]}
     assert payload["reports"][0]["evidence"]["arena_matrix"]
     assert payload["reports"][0]["evidence"]["judge_evidence"]["judge_channel_id"] == "anthropic_official"
 
@@ -2776,6 +2779,105 @@ def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None
     assert report["channel_summaries"]
     assert markdown.status_code == 200
     assert "智能巡检汇总报告" in markdown.text
+
+
+def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "summary patrol",
+                "channel_id": "negative_sample",
+                "interval_minutes": 60,
+                "enabled": True,
+            },
+        ).json()
+        client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
+        asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+        schedules = client.get("/api/scheduled-tests").json()
+
+    payload = next(item for item in schedules if item["id"] == schedule["id"])
+    summary = payload["latest_probe_summary"]
+    assert payload["latest_report_id"]
+    assert payload["latest_grade"]
+    assert payload["latest_score"] is not None
+    assert {item["key"] for item in summary["model_requests"]} == {"thinking_temperature", "web_search", "thinking_adaptive_enabled"}
+    for item in summary["model_requests"]:
+        assert item["result_id"]
+        assert "message_id" in item
+        assert "status" in item
+    assert summary["model_request"]["result_id"]
+    assert "message_id" in summary["model_request"]
+    assert "status" in summary["signature_interop"]
+    assert summary["signature_interop"]["source_channel_id"]
+    assert summary["signature_interop"]["relay_channel_id"] == "negative_sample"
+    assert "source_message_id" in summary["signature_interop"]
+    assert "relay_message_id" in summary["signature_interop"]
+    assert summary["labels"]
+
+    with TestClient(app) as client:
+        markdown = client.get(f"/api/reports/{payload['latest_report_id']}/markdown").text
+    assert "Thinking temperature 冲突" in markdown
+    assert "Web Search tool" in markdown
+    assert "thinking.adaptive.enabled" in markdown
+    assert "Result ID" in markdown
+    assert "Message ID" in markdown
+    assert "Thinking Signature 互通" in markdown
+
+
+def test_scheduled_signature_source_uses_fingerprint_source_channel(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    captured: dict[str, str] = {}
+
+    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
+        captured["source_id"] = source.id
+        captured["relay_id"] = relay.id
+        return {
+            "ok": True,
+            "status": "pass",
+            "reason": "兼容：relay 成功接受 source 的 thinking block signature",
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "source_message_id": "msg_bdrk_01source",
+            "source_message_channel_type": "AWS Bedrock",
+            "relay_message_id": "msg_01relay",
+            "relay_message_channel_type": "Claude/Anthropic",
+            "thinking_block_count": 1,
+            "signature_prefixes": ["sig-source"],
+            "fallback_note": "fallback note",
+            "steps": [{"name": "最终判定", "status": "ok", "detail": "兼容", "excerpt": None}],
+        }
+
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "fingerprint source patrol",
+                "channel_id": "negative_sample",
+                "interval_minutes": 60,
+                "enabled": True,
+            },
+        ).json()
+    with SessionLocal() as db:
+        snapshot = db.get(BaselineSnapshot, "scheduled_probe_baseline")
+        assert snapshot is not None
+        snapshot.channel_ids = ["aws_bedrock"]
+        db.commit()
+
+    with TestClient(app) as client:
+        client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
+        payload = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+
+    signature = payload["latest_probe_summary"]["signature_interop"]
+    assert captured == {"source_id": "aws_bedrock", "relay_id": "negative_sample"}
+    assert signature["source_channel_id"] == "aws_bedrock"
+    assert signature["relay_channel_id"] == "negative_sample"
+    assert signature["source_message_id"] == "msg_bdrk_01source"
+    assert signature["relay_message_id"] == "msg_01relay"
 
 
 def test_running_run_must_be_canceled_before_delete() -> None:

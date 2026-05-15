@@ -49,6 +49,16 @@ function arrayValue(value: unknown) {
   return Array.isArray(value) ? value : [];
 }
 
+function stringValue(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value : '-';
+}
+
+function compactId(value: unknown) {
+  const text = stringValue(value);
+  if (text === '-' || text.length <= 22) return text;
+  return `${text.slice(0, 11)}...${text.slice(-7)}`;
+}
+
 function modeLabel(mode: RunMode) {
   if (mode === 'performance_benchmark') return '性能诊断报告';
   if (mode === 'arena_comparison') return 'Arena 排名报告';
@@ -112,6 +122,12 @@ export default function ReportDetailPage() {
   const arenaMatrix = arrayValue(evidence.arena_matrix) as Array<Record<string, unknown>>;
   const judgeEvidence = (evidence.judge_evidence ?? {}) as Record<string, unknown>;
   const topEvidence = arrayValue(evidence.top_evidence) as Array<Record<string, unknown>>;
+  const isScheduledProbeReport = evidence.test_scope === 'scheduled_probe';
+  const legacyModelRequest = evidence.model_request && typeof evidence.model_request === 'object' ? evidence.model_request as Record<string, unknown> : null;
+  const modelRequests = (arrayValue(evidence.model_requests) as Array<Record<string, unknown>>).length
+    ? arrayValue(evidence.model_requests) as Array<Record<string, unknown>>
+    : legacyModelRequest ? [legacyModelRequest] : [];
+  const signatureInterop = evidence.signature_interop && typeof evidence.signature_interop === 'object' ? evidence.signature_interop as Record<string, unknown> : {};
   const arenaRank = typeof arena.rank === 'number' ? arena.rank : undefined;
   const dimensionEntries = Object.entries(dimensions);
   const sampleLabel = isPerformanceReport ? '诊断样本' : isArenaReport ? '分歧样本' : '预测样本';
@@ -190,6 +206,53 @@ export default function ReportDetailPage() {
               </div>
             ) : null}
             <Typography.Paragraph className="report-summary-text">{report.summary}</Typography.Paragraph>
+            {isScheduledProbeReport ? (
+              <div className="patrol-report-matrix">
+                <div className="patrol-report-matrix-head">
+                  <Typography.Text className="section-kicker">PATROL PROBES</Typography.Text>
+                  <Typography.Title level={4}>自动巡检探针结果</Typography.Title>
+                </div>
+                <Table
+                  rowKey={(row, index) => String(row.key ?? row.result_id ?? index)}
+                  dataSource={modelRequests}
+                  pagination={false}
+                  size="small"
+                  scroll={{ x: 980 }}
+                  columns={[
+                    { title: '参数探针', width: 210, render: (_, row) => <strong>{stringValue(row.title ?? row.key)}</strong> },
+                    {
+                      title: '状态',
+                      width: 100,
+                      render: (_, row) => {
+                        const hasError = Boolean(row.error) || arrayValue(row.labels).length > 0;
+                        return <Tag color={hasError ? 'red' : 'green'}>{hasError ? '异常' : '正常'}</Tag>;
+                      },
+                    },
+                    { title: 'Result ID', width: 190, render: (_, row) => compactId(row.result_id) },
+                    { title: 'Message ID', width: 190, render: (_, row) => compactId(row.message_id) },
+                    { title: '协议', width: 130, render: (_, row) => stringValue(row.request_protocol) },
+                    { title: 'Endpoint', width: 230, render: (_, row) => compactId(row.provider_endpoint) },
+                    {
+                      title: '标签/错误',
+                      width: 240,
+                      render: (_, row) => arrayValue(row.labels).length ? (
+                        <Space wrap size={4}>{arrayValue(row.labels).map((label) => <Tag key={String(label)} color="orange">{String(label)}</Tag>)}</Space>
+                      ) : stringValue(row.error),
+                    },
+                  ]}
+                />
+                <div className="patrol-signature-panel">
+                  <div>
+                    <span>Signature 状态</span>
+                    <strong><Tag color={signatureInterop.status === 'pass' ? 'green' : signatureInterop.status === 'fail' ? 'red' : 'default'}>{stringValue(signatureInterop.status)}</Tag></strong>
+                  </div>
+                  <div><span>Source ID</span><strong>{compactId(signatureInterop.source_message_id)}</strong></div>
+                  <div><span>Relay ID</span><strong>{compactId(signatureInterop.relay_message_id)}</strong></div>
+                  <div><span>Signature 前缀</span><strong>{arrayValue(signatureInterop.signature_prefixes).join(', ') || '-'}</strong></div>
+                </div>
+                {signatureInterop.reason ? <Typography.Text type="secondary">{String(signatureInterop.reason)}</Typography.Text> : null}
+              </div>
+            ) : null}
             {isArenaReport ? (
               <div className="arena-report-explain">
                 <div><span>排名解读</span><strong>{arenaRank ? `第 ${arenaRank} 名` : '查看任务详情中的总排名'}</strong></div>

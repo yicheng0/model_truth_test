@@ -6,6 +6,7 @@ import { useParams } from 'react-router-dom';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
 import { api, getErrorMessage } from '../api';
 import { roleColor } from '../channelTaxonomy';
+import { extractPatrolEvidence, type PatrolEvidence } from '../runsUtils';
 import type { BaselineResult, Channel, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
 
 type DisplayResult = Result | BaselineResult;
@@ -193,6 +194,67 @@ function runModeLabel(mode?: RunMode | string) {
   return '真实性对比';
 }
 
+function evidenceStatusColor(status?: string | null) {
+  if (status === 'ok' || status === 'pass') return 'green';
+  if (status === 'error' || status === 'fail') return 'red';
+  if (status === 'skipped') return 'default';
+  return 'gold';
+}
+
+function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
+  if (!evidence) {
+    return <Empty description="暂无巡检证据" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+  }
+  const signature = evidence.signature;
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <div className="channel-pair-grid">
+        <div className="monitor-stat-card"><span>巡检评级</span><strong><Tag color={evidence.grade === 'E' ? 'red' : evidence.grade === 'D' ? 'orange' : 'green'}>{evidence.grade}</Tag></strong></div>
+        <div className="monitor-stat-card"><span>巡检分</span><strong>{evidence.score.toFixed(1)}</strong></div>
+        <div className="monitor-stat-card"><span>真实请求探针</span><strong>{evidence.modelRequests.length}</strong></div>
+        <div className="monitor-stat-card"><span>Signature</span><strong><Tag color={evidenceStatusColor(signature?.status)}>{signature?.status ?? '待确认'}</Tag></strong></div>
+      </div>
+      {evidence.detectedProviderHint ? <Typography.Paragraph className="report-summary-text">{evidence.detectedProviderHint}</Typography.Paragraph> : null}
+      <Table
+        rowKey={(item) => item.key ?? item.title ?? item.resultId ?? item.messageId ?? 'model-request'}
+        dataSource={evidence.modelRequests}
+        pagination={false}
+        scroll={{ x: 980 }}
+        columns={[
+          { title: '参数探针', width: 220, render: (_, item) => <strong>{item.title ?? item.key ?? '真实模型请求'}</strong> },
+          { title: '状态', width: 110, render: (_, item) => <Tag color={evidenceStatusColor(item.status)}>{item.status}</Tag> },
+          { title: 'Result ID', dataIndex: 'resultId', width: 190, render: (value) => value ?? '-' },
+          { title: 'Message ID', dataIndex: 'messageId', width: 190, render: (value) => value ?? '-' },
+          { title: '渠道类型', dataIndex: 'messageChannelType', width: 180, render: (value) => value ?? '-' },
+          { title: '协议', dataIndex: 'requestProtocol', width: 150, render: (value) => value ?? '-' },
+          {
+            title: '标签/错误',
+            width: 260,
+            render: (_, item) => item.labels.length ? (
+              <Space wrap size={4}>{item.labels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space>
+            ) : item.error ?? '-',
+          },
+        ]}
+      />
+      {signature ? (
+        <div className="patrol-signature-panel">
+          <div><span>Source</span><strong>{signature.sourceChannelId ?? '-'} / {signature.sourceMessageId ?? '-'}</strong></div>
+          <div><span>Relay</span><strong>{signature.relayChannelId ?? '-'} / {signature.relayMessageId ?? '-'}</strong></div>
+          <div><span>Source 类型</span><strong>{signature.sourceMessageChannelType ?? '-'}</strong></div>
+          <div><span>Relay 类型</span><strong>{signature.relayMessageChannelType ?? '-'}</strong></div>
+        </div>
+      ) : null}
+      {signature?.signaturePrefixes.length ? (
+        <Typography.Text type="secondary">Signature 前缀：{signature.signaturePrefixes.join(', ')}</Typography.Text>
+      ) : null}
+      {signature?.reason ? <Typography.Text>{signature.reason}</Typography.Text> : null}
+      {evidence.labels.length ? (
+        <Space wrap>{evidence.labels.map((label) => <Tag key={label} color={label === 'patrol_probe_passed' ? 'green' : 'red'}>{evidence.labelExplanations[label] ?? label}</Tag>)}</Space>
+      ) : null}
+    </Space>
+  );
+}
+
 export default function RunDetail() {
   const { runId = '' } = useParams();
   const [selectedOfficialId, setSelectedOfficialId] = useState('');
@@ -229,10 +291,12 @@ export default function RunDetail() {
   const summary = runSummary.data ?? null;
   const channels = channelsQuery.data ?? [];
   const cases = casesQuery.data ?? [];
-  const isSamplingRun = data?.run.mode === 'baseline_build';
-  const isPerformanceRun = data?.run.mode === 'performance_benchmark';
-  const isArenaRun = data?.run.mode === 'arena_comparison';
-  const isAuthenticityRun = data?.run.mode === 'candidate_eval' || data?.run.mode === 'full_comparison';
+  const isPatrolRun = Boolean(data?.run.scheduled_test_id) || data?.run.test_scope === 'scheduled_probe';
+  const patrolEvidence = useMemo(() => data ? extractPatrolEvidence(data) : null, [data]);
+  const isSamplingRun = !isPatrolRun && data?.run.mode === 'baseline_build';
+  const isPerformanceRun = !isPatrolRun && data?.run.mode === 'performance_benchmark';
+  const isArenaRun = !isPatrolRun && data?.run.mode === 'arena_comparison';
+  const isAuthenticityRun = !isPatrolRun && (data?.run.mode === 'candidate_eval' || data?.run.mode === 'full_comparison');
 
   const channelById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels]);
   const caseById = useMemo(() => new Map(cases.map((caseItem) => [caseItem.id, caseItem])), [cases]);
@@ -481,13 +545,15 @@ export default function RunDetail() {
             </Tag>
           </Descriptions.Item>
           <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
-          <Descriptions.Item label="运行模式">{runModeLabel(data.run.mode)}</Descriptions.Item>
-          <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
+          <Descriptions.Item label="运行模式">{isPatrolRun ? '自动巡检' : runModeLabel(data.run.mode)}</Descriptions.Item>
+          <Descriptions.Item label="检测范围">{isPatrolRun ? '巡检探针' : data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
           <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>
             {data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}
           </Descriptions.Item>
           <Descriptions.Item label="已返回题目">{returnedRows} / {rows.length}</Descriptions.Item>
-          {isSamplingRun ? (
+          {isPatrolRun ? (
+            <Descriptions.Item label="巡检计划">{data.run.scheduled_test_id ?? '-'}</Descriptions.Item>
+          ) : isSamplingRun ? (
             <Descriptions.Item label="指纹源渠道">{sampleChannels.length}</Descriptions.Item>
           ) : (
             <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
@@ -496,7 +562,21 @@ export default function RunDetail() {
         <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
       </Card>
 
-      {summary ? (
+      {isPatrolRun ? (
+        <Card bordered={false} className="live-monitor-card">
+          <div className="live-monitor-header">
+            <div>
+              <Typography.Text className="brand-kicker">SCHEDULED PATROL</Typography.Text>
+              <Typography.Title level={2}>自动巡检日志</Typography.Title>
+              <Typography.Paragraph>
+                这里只展示自动巡检的真实模型请求参数探针和 Thinking Signature 互通结果，不混入性能诊断或 Arena 排名视图。
+              </Typography.Paragraph>
+            </div>
+            <Tag color={data.run.status === 'running' ? 'processing' : 'default'}>{data.run.status}</Tag>
+          </div>
+          <PatrolDetailPanel evidence={patrolEvidence} />
+        </Card>
+      ) : summary ? (
         <Card bordered={false}>
           <Tabs
             items={[

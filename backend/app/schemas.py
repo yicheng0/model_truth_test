@@ -356,6 +356,10 @@ class ScheduledChannelTestRead(ScheduledChannelTestBase):
     last_run_id: str | None = None
     last_status: str | None = None
     last_error: str | None = None
+    latest_report_id: str | None = None
+    latest_grade: str | None = None
+    latest_score: float | None = None
+    latest_probe_summary: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

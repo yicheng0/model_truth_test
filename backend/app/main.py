@@ -97,6 +97,7 @@ from .services import (
     import_evalscope_jsonl,
     next_run_for_scheduled_test,
     scheduled_test_loop,
+    scheduled_channel_test_read,
     send_alert_notification,
     send_daily_patrol_report,
     send_feishu_test_message,
@@ -628,13 +629,13 @@ def list_scheduled_tests(
     channel_id: str | None = Query(default=None),
     enabled: bool | None = Query(default=None),
     db: Session = Depends(get_db),
-) -> list[ScheduledChannelTest]:
+) -> list[dict[str, object]]:
     stmt = select(ScheduledChannelTest).order_by(ScheduledChannelTest.enabled.desc(), ScheduledChannelTest.next_run_at)
     if channel_id:
         stmt = stmt.where(ScheduledChannelTest.channel_id == channel_id)
     if enabled is not None:
         stmt = stmt.where(ScheduledChannelTest.enabled.is_(enabled))
-    return list(db.scalars(stmt).all())
+    return [scheduled_channel_test_read(db, scheduled) for scheduled in db.scalars(stmt).all()]
 
 
 @app.post("/api/scheduled-tests", response_model=ScheduledChannelTestRead)
@@ -678,11 +679,11 @@ async def send_smart_patrol_daily_report() -> dict[str, object]:
 
 
 @app.get("/api/scheduled-tests/{scheduled_id}", response_model=ScheduledChannelTestRead)
-def get_scheduled_test(scheduled_id: str, db: Session = Depends(get_db)) -> ScheduledChannelTest:
+def get_scheduled_test(scheduled_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
     scheduled = db.get(ScheduledChannelTest, scheduled_id)
     if not scheduled:
         raise HTTPException(status_code=404, detail="Scheduled test not found")
-    return scheduled
+    return scheduled_channel_test_read(db, scheduled)
 
 
 @app.patch("/api/scheduled-tests/{scheduled_id}", response_model=ScheduledChannelTestRead)
@@ -732,7 +733,9 @@ def delete_scheduled_test(scheduled_id: str, db: Session = Depends(get_db)) -> d
 
 @app.post("/api/scheduled-tests/{scheduled_id}/run-now", response_model=ScheduledChannelTestRead)
 async def run_scheduled_test_now(scheduled_id: str, db: Session = Depends(get_db)) -> ScheduledChannelTestRead:
-    scheduled = get_scheduled_test(scheduled_id, db)
+    scheduled = db.get(ScheduledChannelTest, scheduled_id)
+    if not scheduled:
+        raise HTTPException(status_code=404, detail="Scheduled test not found")
     try:
         validate_scheduled_channel_test(db, scheduled)
     except ValueError as exc:
@@ -746,7 +749,7 @@ async def run_scheduled_test_now(scheduled_id: str, db: Session = Depends(get_db
         refreshed = read_db.get(ScheduledChannelTest, scheduled.id)
         if not refreshed:
             raise HTTPException(status_code=404, detail="Scheduled test not found")
-        return ScheduledChannelTestRead.model_validate(refreshed)
+        return ScheduledChannelTestRead.model_validate(scheduled_channel_test_read(read_db, refreshed))
 
 
 @app.get("/api/alerts", response_model=list[ChannelAlertRead])
