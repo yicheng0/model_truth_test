@@ -2329,9 +2329,9 @@ def list_channel_alerts(
     if channel_id:
         stmt = stmt.where(ChannelAlert.channel_id == channel_id)
     if created_from:
-        stmt = stmt.where(ChannelAlert.created_at >= created_from)
+        stmt = stmt.where(ChannelAlert.created_at >= _as_utc(created_from).replace(tzinfo=None))
     if created_to:
-        stmt = stmt.where(ChannelAlert.created_at <= created_to)
+        stmt = stmt.where(ChannelAlert.created_at <= _as_utc(created_to).replace(tzinfo=None))
     alerts = list(db.scalars(stmt).all())
     query = (id_query or "").strip()
     if not query:
