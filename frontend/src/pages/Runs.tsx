@@ -58,6 +58,12 @@ function compactId(value?: string | null) {
   return `${value.slice(0, 9)}...${value.slice(-6)}`;
 }
 
+function compactText(value?: string | null, limit = 360) {
+  const text = value?.replace(/\s+/g, ' ').trim();
+  if (!text) return '-';
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
 function PatrolEvidenceCell({ run }: { run: Run }) {
   const runResults = useQuery({
     queryKey: ['runResults', run.id],
@@ -152,7 +158,7 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
         size="small"
         pagination={false}
         dataSource={evidence.modelRequests}
-        scroll={{ x: 960 }}
+        scroll={{ x: 1320 }}
         columns={[
           { title: '真实请求探针', width: 190, render: (_, item) => item.title ?? item.key ?? '真实模型请求' },
           { title: '状态', width: 110, render: (_, item) => <Tag color={evidenceStatusColor(item.status)}>{item.status}</Tag> },
@@ -160,6 +166,15 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
           { title: 'Message ID', dataIndex: 'messageId', width: 190, render: (value) => value ?? '-' },
           { title: '渠道类型', dataIndex: 'messageChannelType', width: 180, render: (value) => value ?? '-' },
           { title: '协议', dataIndex: 'requestProtocol', width: 160, render: (value) => value ?? '-' },
+          {
+            title: '响应/错误内容',
+            width: 360,
+            render: (_, item) => (
+              <Tooltip title={item.responseText || item.rawResponseText || undefined}>
+                <Typography.Text>{compactText(item.responseText ?? item.rawResponseText)}</Typography.Text>
+              </Tooltip>
+            ),
+          },
           {
             title: '标签',
             width: 220,

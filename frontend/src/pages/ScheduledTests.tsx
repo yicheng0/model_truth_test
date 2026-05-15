@@ -59,12 +59,6 @@ const scheduleStatusColor: Record<string, string> = {
   canceled: 'default',
 };
 
-const probeTitleByKey: Record<string, string> = {
-  thinking_temperature: 'Thinking temperature',
-  web_search: 'Web Search',
-  thinking_adaptive_enabled: 'adaptive.enabled',
-};
-
 const patrolGuideSteps = [
   { title: '准备渠道', description: '先在渠道管理里建好候选渠道，确认模型、Base URL 和 Key 能正常请求。' },
   { title: '新建巡检计划', description: '只选择待测渠道和执行间隔，系统固定跑 Signature 互通和真实模型请求。' },
@@ -116,76 +110,31 @@ function evidenceText(alert: ChannelAlert) {
   return hint ? `${hint}${messageId}` : messageId || '-';
 }
 
-function probeStatusTag(kind: 'model' | 'signature', status?: string) {
-  if (kind === 'model') {
-    const isError = status === 'error';
-    return <Tag color={isError ? 'red' : 'green'}>{isError ? '真实请求异常' : '真实请求正常'}</Tag>;
-  }
-  if (status === 'pass') return <Tag color="green">Signature 通过</Tag>;
-  if (status === 'fail') return <Tag color="red">Signature 失败</Tag>;
-  if (status === 'skipped') return <Tag color="default">Signature 跳过</Tag>;
-  return <Tag color="default">Signature 待确认</Tag>;
-}
-
-function compactId(value?: string | null) {
-  if (!value) return '-';
-  if (value.length <= 18) return value;
-  return `${value.slice(0, 9)}...${value.slice(-6)}`;
-}
-
 function probeSummary(schedule: ScheduledChannelTest) {
   const summary = schedule.latest_probe_summary;
   if (!summary) {
-    return (
-      <Space direction="vertical" size={2}>
-        <Typography.Text type="secondary">尚无巡检日志</Typography.Text>
-        <Typography.Text type="secondary">执行后会显示请求 ID、Signature ID 和参数异常。</Typography.Text>
-      </Space>
-    );
+    return <Tag color="default">未巡检</Tag>;
   }
   const modelRequests = summary.model_requests?.length ? summary.model_requests : summary.model_request ? [summary.model_request] : [];
-  const model = summary.model_request ?? modelRequests[0] ?? {};
   const signature = summary.signature_interop ?? {};
   const labels = summary.labels ?? [];
   const explanations = summary.label_explanations ?? {};
+  const blockingLabels = labels.filter((label) => label !== 'patrol_probe_passed');
+  const hasModelError = modelRequests.some((item) => item.status === 'error' || Boolean(item.error));
+  const hasSignatureError = signature.status === 'fail';
+  const hasBadGrade = schedule.latest_grade === 'D' || schedule.latest_grade === 'E';
+  const isFailed = schedule.last_status === 'failed' || hasModelError || hasSignatureError || hasBadGrade || blockingLabels.length > 0;
+  const tooltip = [
+    schedule.latest_grade ? `评级 ${schedule.latest_grade}${schedule.latest_score === null || schedule.latest_score === undefined ? '' : ` ${schedule.latest_score.toFixed(1)}`}` : null,
+    blockingLabels.length ? blockingLabels.map((label) => explanations[label] ?? label).join('；') : null,
+    hasModelError ? '真实请求探针异常' : null,
+    hasSignatureError ? 'Signature 互通失败' : null,
+    schedule.last_run_id ? '具体响应请到任务列表的自动巡检日志查看' : null,
+  ].filter(Boolean).join('；');
   return (
-    <Space direction="vertical" size={4}>
-      <Space wrap>
-        {probeStatusTag('model', model.status)}
-        {probeStatusTag('signature', signature.status)}
-        {schedule.latest_grade ? <Tag color={schedule.latest_grade === 'E' ? 'red' : schedule.latest_grade === 'D' ? 'orange' : 'green'}>{schedule.latest_grade} {schedule.latest_score?.toFixed(1) ?? ''}</Tag> : null}
-      </Space>
-      <div className="patrol-probe-mini-grid">
-        {modelRequests.map((item, index) => {
-          const key = item.key ?? `probe_${index}`;
-          const hasError = item.status === 'error' || Boolean(item.error);
-          return (
-            <div className="patrol-probe-mini" key={key}>
-              <span>{probeTitleByKey[String(item.key)] ?? item.title ?? key}</span>
-              <Tag color={hasError ? 'red' : 'green'}>{hasError ? '异常' : '正常'}</Tag>
-              <small>result {compactId(item.result_id)}</small>
-              <small>msg {compactId(item.message_id)}</small>
-            </div>
-          );
-        })}
-      </div>
-      <Typography.Text type="secondary">
-        source: {signature.source_channel_id ?? '-'} / {signature.source_message_id ?? '-'}
-      </Typography.Text>
-      <Typography.Text type="secondary">
-        relay: {signature.relay_channel_id ?? '-'} / {signature.relay_message_id ?? '-'}
-      </Typography.Text>
-      {summary.detected_provider_hint ? <Typography.Text>{summary.detected_provider_hint}</Typography.Text> : null}
-      {labels.length ? (
-        <Tooltip title={labels.map((label) => explanations[label] ?? label).join('；')}>
-          <Space wrap>
-            {labels.map((label) => <Tag color={label === 'patrol_probe_passed' ? 'green' : 'red'} key={label}>{label}</Tag>)}
-          </Space>
-        </Tooltip>
-      ) : null}
-      {model.error ? <Typography.Text type="danger">{model.error}</Typography.Text> : null}
-      {signature.reason ? <Typography.Text type="secondary">{signature.reason}</Typography.Text> : null}
-    </Space>
+    <Tooltip title={tooltip || undefined}>
+      <Tag color={isFailed ? 'red' : 'green'}>{isFailed ? '异常' : '通过'}</Tag>
+    </Tooltip>
   );
 }
 
@@ -520,8 +469,8 @@ export default function ScheduledTests() {
                         render: (_, schedule) => channelById.get(schedule.channel_id)?.name ?? schedule.channel_id,
                       },
                       {
-                        title: '最近探针',
-                        width: 420,
+                        title: '巡检结果',
+                        width: 120,
                         render: (_, schedule) => probeSummary(schedule),
                       },
                       {

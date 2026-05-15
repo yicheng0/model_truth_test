@@ -1,4 +1,4 @@
-import type { Run, RunResults } from './types';
+import type { Result, Run, RunResults } from './types';
 
 export type PatrolModelRequestEvidence = {
   key?: string | null;
@@ -12,6 +12,8 @@ export type PatrolModelRequestEvidence = {
   labels: string[];
   score?: number | null;
   error?: string | null;
+  responseText?: string | null;
+  rawResponseText?: string | null;
 };
 
 export type PatrolSignatureEvidence = {
@@ -63,6 +65,8 @@ export function extractPatrolEvidence(results: RunResults): PatrolEvidence | nul
     const normalized = normalizeModelRequest(modelRequest);
     if (normalized) modelRequests.push(normalized);
   }
+  const resultById = new Map(results.results.map((item) => [item.id, item]));
+  const hydratedModelRequests = modelRequests.map((item) => hydrateModelRequest(item, resultById.get(item.resultId ?? '')));
 
   return {
     reportId: report.id,
@@ -72,9 +76,38 @@ export function extractPatrolEvidence(results: RunResults): PatrolEvidence | nul
     labels: asStringArray(evidence.labels),
     labelExplanations: asStringRecord(evidence.label_explanations),
     detectedProviderHint: asNullableString(evidence.detected_provider_hint),
-    modelRequests,
+    modelRequests: hydratedModelRequests,
     signature: normalizeSignature(asRecord(evidence.signature_interop)),
   };
+}
+
+function hydrateModelRequest(item: PatrolModelRequestEvidence, result?: Result): PatrolModelRequestEvidence {
+  if (!result) return item;
+  return {
+    ...item,
+    responseText: modelResponseText(result) ?? item.error ?? null,
+    rawResponseText: stringifyJson(result.raw_response),
+  };
+}
+
+function modelResponseText(result: Result): string | null {
+  const normalized = asRecord(result.normalized_response);
+  const error = asNullableString(normalized?.error);
+  if (error) return error;
+  const contentText = asNullableString(normalized?.content_text);
+  if (contentText) return contentText;
+  const rawError = asNullableString(asRecord(result.raw_response)?.error);
+  if (rawError) return rawError;
+  return stringifyJson(result.raw_response);
+}
+
+function stringifyJson(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function normalizeModelRequest(value: unknown): PatrolModelRequestEvidence | null {

@@ -127,4 +127,70 @@ describe('runs utilities', () => {
       signaturePrefixes: ['sig-abc'],
     });
   });
+
+  it('attaches saved result response text to patrol model request evidence', () => {
+    const results: RunResults = {
+      run: run('patrol_1', 'sched_1'),
+      run_channels: [],
+      comparisons: [],
+      baseline_results: [],
+      results: [
+        {
+          id: 'res_1',
+          run_id: 'patrol_1',
+          test_case_id: 'case_1',
+          channel_id: 'ch_1',
+          attempt_index: 1,
+          normalized_response: { content_text: '真实响应正文' },
+          raw_request: {},
+          raw_response: { content: [{ type: 'text', text: '真实响应正文' }] },
+          metrics: {},
+          score: 100,
+          labels: [],
+        },
+        {
+          id: 'res_2',
+          run_id: 'patrol_1',
+          test_case_id: 'case_2',
+          channel_id: 'ch_1',
+          attempt_index: 1,
+          normalized_response: { error: '上游返回参数错误' },
+          raw_request: {},
+          raw_response: { error: 'raw error' },
+          metrics: {},
+          score: 40,
+          labels: ['web_search_not_rejected'],
+        },
+      ],
+      reports: [
+        {
+          id: 'rep_1',
+          run_id: 'patrol_1',
+          channel_id: 'ch_1',
+          final_score: 40,
+          grade: 'E',
+          evidence: {
+            test_scope: 'scheduled_probe',
+            labels: ['web_search_not_rejected'],
+            model_requests: [
+              { key: 'thinking_temperature', result_id: 'res_1', labels: [], score: 100 },
+              { key: 'web_search', result_id: 'res_2', labels: ['web_search_not_rejected'], score: 40 },
+            ],
+          },
+        },
+      ],
+    };
+
+    const evidence = extractPatrolEvidence(results);
+
+    expect(evidence?.modelRequests[0]).toMatchObject({
+      resultId: 'res_1',
+      responseText: '真实响应正文',
+    });
+    expect(evidence?.modelRequests[1]).toMatchObject({
+      resultId: 'res_2',
+      responseText: '上游返回参数错误',
+    });
+    expect(evidence?.modelRequests[1].rawResponseText).toContain('raw error');
+  });
 });
