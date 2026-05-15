@@ -232,6 +232,7 @@ export default function CreateRun() {
                 channels={referenceChannels}
                 placeholder="选择指纹源渠道"
                 tag={{ color: 'blue', label: '提取指纹' }}
+                showCredentialStatus
               />
             </Form.Item>
           ) : null}
@@ -241,11 +242,16 @@ export default function CreateRun() {
                 loading={channels.isLoading}
                 channels={candidateChannels}
                 placeholder="选择待测渠道"
+                showCredentialStatus
                 notFoundContent="暂无待测渠道，请先在渠道管理中新增候选渠道。"
               />
             </Form.Item>
           ) : null}
-          <RuntimeCredentialsFields channels={credentialChannels} />
+          <RuntimeCredentialsFields
+            channels={credentialChannels}
+            onlyMissing
+            configuredMessage="已选择渠道均会使用渠道管理中保存的 API Key，无需重复填写。"
+          />
           <Button type="primary" size="large" htmlType="submit" loading={loading} style={{ height: '44px', fontWeight: 600 }}>
             {selectedMode === 'baseline_build' ? '提取渠道指纹' : '启动真实性对比'}
           </Button>

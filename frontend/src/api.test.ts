@@ -53,7 +53,7 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
-  it('creates channels with a custom provider type', async () => {
+  it('creates channels without exposing provider type', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -70,7 +70,6 @@ describe('api request handling', () => {
 
     await api.createChannel({
       name: 'Custom Gateway',
-      provider_type: 'customer_gateway',
       enabled: true,
     });
 
@@ -80,7 +79,6 @@ describe('api request handling', () => {
         method: 'POST',
         body: JSON.stringify({
           name: 'Custom Gateway',
-          provider_type: 'customer_gateway',
           enabled: true,
         }),
       }),

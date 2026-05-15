@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ChannelBase(BaseModel):
     name: str
-    provider_type: str
+    provider_type: str = "custom_provider"
     role: str | None = None
     base_url: str | None = None
     model_name: str | None = None

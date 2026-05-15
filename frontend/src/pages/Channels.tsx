@@ -3,16 +3,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import { Edit3, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api';
-import { buildChannelAuthConfig } from '../channelCredentials';
+import { accountTypeLabel, accountTypeOptions, buildChannelAuthConfig, defaultAccountType, providerTypeForAccountType } from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
 import type { Channel } from '../types';
 
 type ChannelFormValues = {
   name: string;
-  provider_type: string;
   model_name?: string | string[];
   base_url?: string;
   api_key?: string;
+  account_type?: string;
   request_protocol?: string;
   is_reference?: boolean;
   enabled?: boolean;
@@ -31,6 +31,11 @@ function channelApiKey(channel: Channel) {
 function channelRequestProtocol(channel: Channel) {
   const value = channel.auth_config?.request_protocol;
   return typeof value === 'string' && value.trim() ? value : 'auto';
+}
+
+function channelAccountType(channel: Channel) {
+  const value = channel.auth_config?.account_type;
+  return typeof value === 'string' && value.trim() ? value : defaultAccountType;
 }
 
 function preferredFetchedModel(models: string[]) {
@@ -140,10 +145,10 @@ export default function Channels() {
     setFetchedModels([]);
     editForm.setFieldsValue({
       name: channel.name,
-      provider_type: channel.provider_type,
       model_name: channel.model_name ? [channel.model_name] : [],
       base_url: channel.base_url ?? '',
       api_key: channelApiKey(channel),
+      account_type: channelAccountType(channel),
       request_protocol: channelRequestProtocol(channel),
       is_reference: channel.is_reference,
       enabled: channel.enabled,
@@ -154,7 +159,7 @@ export default function Channels() {
     const modelName = firstSelectValue(values.model_name);
     return {
       name: values.name.trim(),
-      provider_type: values.provider_type.trim(),
+      ...(existing ? {} : { provider_type: providerTypeForAccountType(values.account_type) }),
       is_reference: values.is_reference ?? false,
       enabled: values.enabled,
       model_name: modelName || null,
@@ -187,7 +192,7 @@ export default function Channels() {
           <Typography.Text className="section-kicker">CHANNELS</Typography.Text>
           <Typography.Title level={2}>渠道管理</Typography.Title>
           <Typography.Paragraph>
-            内部渠道配置只保留必要信息。Provider Type 可填写你们内部类型名，请用请求协议决定真实检测时的上游接口格式。
+            内部渠道配置只保留必要信息。配置名称、账号类型、请求协议、Base URL 和 API Key 后即可用于测评。
           </Typography.Paragraph>
         </div>
         <Space wrap>
@@ -203,11 +208,11 @@ export default function Channels() {
             <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入渠道名称' }]}>
               <Input size="large" placeholder="例如：APIPro 生产中转" />
             </Form.Item>
-            <Form.Item name="provider_type" label="Provider Type" rules={[{ required: true, message: '请输入 Provider Type' }]}>
-              <Input size="large" placeholder="例如：apipro-relay、official-api、customer-proxy" />
-            </Form.Item>
             <Form.Item name="model_name" label="模型名">
               <Select size="large" mode="tags" maxCount={1} options={channelModelOptions} placeholder="输入模型名，保存后下次可直接选择" />
+            </Form.Item>
+            <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
+              <Select size="large" options={accountTypeOptions} />
             </Form.Item>
             <Form.Item name="request_protocol" label="请求协议" initialValue="auto">
               <Select size="large" options={requestProtocolOptions} />
@@ -277,7 +282,11 @@ export default function Channels() {
                 />
               ),
             },
-            { title: 'Provider Type', dataIndex: 'provider_type', width: 220 },
+            {
+              title: '账号类型',
+              width: 130,
+              render: (_, channel) => accountTypeLabel(channel.auth_config?.account_type),
+            },
             {
               title: '请求协议',
               width: 180,
@@ -342,11 +351,11 @@ export default function Channels() {
           <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入渠道名称' }]}>
             <Input placeholder="例如：APIPro 生产中转" />
           </Form.Item>
-          <Form.Item name="provider_type" label="Provider Type" rules={[{ required: true, message: '请输入 Provider Type' }]}>
-            <Input placeholder="例如：apipro-relay、official-api、customer-proxy" />
-          </Form.Item>
           <Form.Item name="model_name" label="模型名">
             <Select mode="tags" maxCount={1} options={channelModelOptions} placeholder="输入模型名，保存后下次可直接选择" />
+          </Form.Item>
+          <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
+            <Select options={accountTypeOptions} />
           </Form.Item>
           <Button
             type="default"

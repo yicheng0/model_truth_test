@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildChannelAuthConfig, buildRuntimeCredentials, hasStoredApiKey } from './channelCredentials';
+import { accountTypeLabel, buildChannelAuthConfig, buildRuntimeCredentials, hasStoredApiKey, providerTypeForAccountType } from './channelCredentials';
 import type { Channel } from './types';
 
 function channel(id: string, auth_config?: Record<string, unknown>): Pick<Channel, 'id' | 'auth_config'> {
@@ -38,6 +38,7 @@ describe('channel credential helpers', () => {
 
     expect(authConfig).toEqual({
       api_key: 'saved-key',
+      account_type: 'reverse',
       region: 'us-east-1',
       request_protocol: 'openai_chat_completions',
     });
@@ -51,7 +52,25 @@ describe('channel credential helpers', () => {
 
     expect(authConfig).toEqual({
       api_key: 'new-key',
+      account_type: 'reverse',
       request_protocol: 'anthropic_messages',
     });
+  });
+
+  it('stores account type and maps it to the internal provider type', () => {
+    const authConfig = buildChannelAuthConfig(
+      { api_key: 'aws-key', account_type: 'aws', request_protocol: 'aws_bedrock' },
+      {},
+    );
+
+    expect(authConfig).toEqual({
+      api_key: 'aws-key',
+      account_type: 'aws',
+      request_protocol: 'aws_bedrock',
+    });
+    expect(accountTypeLabel('vertex')).toBe('Vertex');
+    expect(providerTypeForAccountType('aws')).toBe('aws_bedrock');
+    expect(providerTypeForAccountType('claude')).toBe('anthropic');
+    expect(providerTypeForAccountType('vertex')).toBe('vertex_ai');
   });
 });

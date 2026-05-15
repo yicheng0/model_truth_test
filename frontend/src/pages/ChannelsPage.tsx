@@ -4,6 +4,7 @@ import { FormEvent, useState } from "react";
 import { api } from "../api";
 import { Badge } from "../components/Badge";
 import { Section } from "../components/Section";
+import { accountTypeLabel, accountTypeOptions, defaultAccountType, providerTypeForAccountType } from "../channelCredentials";
 import type { ChannelRole } from "../types";
 
 const roleTone = {
@@ -17,7 +18,7 @@ export function ChannelsPage() {
   const queryClient = useQueryClient();
   const channels = useQuery({ queryKey: ["channels"], queryFn: api.channels });
   const [health, setHealth] = useState<Record<string, string>>({});
-  const emptyForm = { name: "", provider_type: "", role: "candidate" as ChannelRole, base_url: "", model_name: "" };
+  const emptyForm = { name: "", account_type: defaultAccountType, role: "candidate" as ChannelRole, base_url: "", model_name: "" };
   const [form, setForm] = useState(emptyForm);
   const create = useMutation({
     mutationFn: api.createChannel,
@@ -29,7 +30,13 @@ export function ChannelsPage() {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    create.mutate({ ...form, enabled: true });
+    const { account_type, ...values } = form;
+    create.mutate({
+      ...values,
+      provider_type: providerTypeForAccountType(account_type),
+      auth_config: { account_type },
+      enabled: true,
+    });
   }
 
   async function check(id: string) {
@@ -53,8 +60,12 @@ export function ChannelsPage() {
             <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
           </label>
           <label>
-            Provider
-            <input value={form.provider_type} onChange={(event) => setForm({ ...form, provider_type: event.target.value })} required />
+            账号类型
+            <select value={form.account_type} onChange={(event) => setForm({ ...form, account_type: event.target.value })}>
+              {accountTypeOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
           </label>
           <label>
             角色
@@ -89,7 +100,7 @@ export function ChannelsPage() {
             <thead>
               <tr>
                 <th>渠道</th>
-                <th>类型</th>
+                <th>账号类型</th>
                 <th>角色</th>
                 <th>模型</th>
                 <th>Endpoint</th>
@@ -100,7 +111,7 @@ export function ChannelsPage() {
               {(channels.data ?? []).map((channel) => (
                 <tr key={channel.id}>
                   <td><strong>{channel.name}</strong></td>
-                  <td>{channel.provider_type}</td>
+                  <td>{accountTypeLabel(channel.auth_config?.account_type)}</td>
                   <td><Badge tone={roleTone[channel.role as keyof typeof roleTone] ?? "purple"}>{channel.role}</Badge></td>
                   <td>{channel.model_name}</td>
                   <td className="truncate">{channel.base_url}</td>

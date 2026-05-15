@@ -333,6 +333,24 @@ def create_channel(db: Session, data: ChannelCreate) -> Channel:
     return channel
 
 
+def default_channel_templates() -> list[ChannelCreate]:
+    return [
+        ChannelCreate(id="anthropic_official", name="Anthropic Official", provider_type="anthropic", role="gold", base_url="https://api.anthropic.com", model_name="claude-sonnet-4-5", is_reference=True),
+        ChannelCreate(id="aws_bedrock", name="AWS Bedrock Claude", provider_type="aws_bedrock", role="official_cloud", base_url="bedrock-runtime", model_name="anthropic.claude-sonnet-4-5-v1:0", is_reference=True),
+        ChannelCreate(id="azure_foundry", name="Azure AI Foundry Claude", provider_type="azure_foundry", role="official_cloud", base_url="https://example.services.ai.azure.com", model_name="claude-sonnet-4-5", is_reference=True),
+        ChannelCreate(id="third_party_demo", name="Third-party Relay Demo", provider_type="third_party_anthropic", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-5"),
+        ChannelCreate(id="openai_compat_demo", name="OpenAI-compatible Relay Demo", provider_type="third_party_openai_compatible", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-5"),
+        ChannelCreate(id="negative_sample", name="Negative Sample", provider_type="third_party_openai_compatible", role="negative", base_url="https://non-claude.example/v1", model_name="gpt-like-model"),
+    ]
+
+
+def seed_default_channels_if_empty(db: Session) -> None:
+    if db.scalar(select(func.count()).select_from(Channel)):
+        return
+    for template in default_channel_templates():
+        create_channel(db, template)
+
+
 def _clean_auth_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
     cleaned: dict[str, Any] = {}
     for key, value in (config or {}).items():
@@ -787,6 +805,7 @@ def _case_sample_group(case: TestCase, group_by: str) -> str:
 
 
 def seed_demo_data(db: Session) -> None:
+    seed_default_channels_if_empty(db)
     if not db.scalar(select(TestSuite).where(TestSuite.id == default_suite()["id"])):
         create_suite(db, TestSuiteCreate(**default_suite()))
     else:

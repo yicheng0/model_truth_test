@@ -16,7 +16,7 @@ from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, classify_claude_message_id, create_alerts_for_run, create_case, create_channel, create_run, execute_run, execute_scheduled_channel_test, invoke_channel, score_result, seed_demo_data
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, classify_claude_message_id, create_alerts_for_run, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, invoke_channel, score_result, seed_demo_data
 
 
 def reset_database() -> None:
@@ -30,16 +30,9 @@ def reset_database() -> None:
 
 
 def seed_test_channels(db) -> None:  # noqa: ANN001
-    channels = [
-        ChannelCreate(id="anthropic_official", name="Anthropic Official", provider_type="anthropic", role="gold", base_url="https://api.anthropic.com", model_name="claude-sonnet-4-5", is_reference=True),
-        ChannelCreate(id="aws_bedrock", name="AWS Bedrock Claude", provider_type="aws_bedrock", role="official_cloud", base_url="bedrock-runtime", model_name="anthropic.claude-sonnet-4-5-v1:0", is_reference=True),
-        ChannelCreate(id="azure_foundry", name="Azure AI Foundry Claude", provider_type="azure_foundry", role="official_cloud", base_url="https://example.services.ai.azure.com", model_name="claude-sonnet-4-5", is_reference=True),
-        ChannelCreate(id="third_party_demo", name="Third-party Relay Demo", provider_type="third_party_anthropic", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-5"),
-        ChannelCreate(id="openai_compat_demo", name="OpenAI-compatible Relay Demo", provider_type="third_party_openai_compatible", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-5"),
-        ChannelCreate(id="negative_sample", name="Negative Sample", provider_type="third_party_openai_compatible", role="negative", base_url="https://non-claude.example/v1", model_name="gpt-like-model"),
-    ]
-    for channel in channels:
-        create_channel(db, channel)
+    for channel in default_channel_templates():
+        if not db.get(Channel, channel.id):
+            create_channel(db, channel)
 
 
 def create_ready_baseline(client: TestClient, name: str = "managed baseline") -> tuple[str, dict, dict]:
@@ -162,6 +155,57 @@ def test_health_check_reports_database_ok() -> None:
         response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "database": "ok"}
+
+
+def test_seed_demo_data_restores_default_channels_only_when_empty() -> None:
+    init_db()
+    with SessionLocal() as db:
+        for model in [ChannelTaxonomySetting, FeishuBroadcastSetting, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
+            db.execute(delete(model))
+        db.commit()
+        seed_demo_data(db)
+        channels = db.scalars(select(Channel).order_by(Channel.id)).all()
+
+    assert {channel.id for channel in channels} >= {"anthropic_official", "aws_bedrock", "third_party_demo", "negative_sample"}
+    assert all(not (channel.auth_config_encrypted or {}) for channel in channels)
+
+    with SessionLocal() as db:
+        db.execute(delete(Channel))
+        db.commit()
+        create_channel(
+            db,
+            ChannelCreate(
+                id="custom_channel",
+                name="Custom Channel",
+                provider_type="third_party_anthropic",
+                role="candidate",
+                base_url="https://custom.example/v1",
+                model_name="claude-custom",
+                auth_config={"api_key": "keep-me"},
+            ),
+        )
+        seed_demo_data(db)
+        channels = db.scalars(select(Channel).order_by(Channel.id)).all()
+
+    assert [channel.id for channel in channels] == ["custom_channel"]
+    assert channels[0].auth_config == {"api_key": "keep-me"}
+
+
+def test_init_db_does_not_delete_existing_builtin_channel() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "anthropic_official")
+        assert channel is not None
+        channel.auth_config = {"api_key": "keep-me"}
+        db.commit()
+
+    init_db()
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "anthropic_official")
+
+    assert channel is not None
+    assert channel.auth_config == {"api_key": "keep-me"}
 
 
 def test_mock_run_generates_results_comparisons_and_reports() -> None:
@@ -1503,13 +1547,21 @@ def test_channel_taxonomy_allows_custom_keys_and_run_uses_reference_semantics() 
     assert payload["reports"]
 
 
-def test_channel_create_accepts_custom_provider_type_and_defaults_role() -> None:
+def test_channel_create_defaults_provider_type_and_role() -> None:
     reset_database()
     with TestClient(app) as client:
         created = client.post(
             "/api/channels",
             json={
                 "name": "Custom Internal Channel",
+                "model_name": "claude-via-gateway",
+                "enabled": True,
+            },
+        )
+        custom_provider = client.post(
+            "/api/channels",
+            json={
+                "name": "Custom Provider Channel",
                 "provider_type": "customer_gateway",
                 "model_name": "claude-via-gateway",
                 "enabled": True,
@@ -1519,7 +1571,6 @@ def test_channel_create_accepts_custom_provider_type_and_defaults_role() -> None
             "/api/channels",
             json={
                 "name": "Custom Reference Channel",
-                "provider_type": "official-internal",
                 "model_name": "claude-reference",
                 "is_reference": True,
                 "enabled": True,
@@ -1527,10 +1578,13 @@ def test_channel_create_accepts_custom_provider_type_and_defaults_role() -> None
         )
 
     assert created.status_code == 200
-    assert created.json()["provider_type"] == "customer_gateway"
+    assert created.json()["provider_type"] == "custom_provider"
     assert created.json()["role"] == "candidate"
     assert "protocol_type" not in created.json()
+    assert custom_provider.status_code == 200
+    assert custom_provider.json()["provider_type"] == "customer_gateway"
     assert reference.status_code == 200
+    assert reference.json()["provider_type"] == "custom_provider"
     assert reference.json()["role"] == "gold"
 
 
