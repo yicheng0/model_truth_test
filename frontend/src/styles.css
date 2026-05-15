@@ -1007,6 +1007,18 @@ textarea:focus-visible,
   margin: 4px 0 24px;
 }
 
+.runtime-credentials-compact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 4px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid #d8eadf;
+  border-radius: 8px;
+  background: #f7fcf8;
+}
+
 .credential-heading {
   display: flex;
   flex-wrap: wrap;
@@ -1133,6 +1145,116 @@ textarea:focus-visible,
 .channel-select-option small {
   color: #64748b;
   font-size: 12px;
+}
+
+.arena-explain-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.arena-explain-panel,
+.arena-formula-panel,
+.arena-advanced,
+.arena-report-explain,
+.arena-estimate-strip {
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.arena-explain-panel {
+  padding: 18px;
+}
+
+.arena-explain-panel h4.ant-typography {
+  margin: 6px 0 8px;
+  color: #211d1b;
+  font-weight: 850;
+}
+
+.arena-explain-panel .ant-typography {
+  margin-bottom: 0;
+  color: #64748b;
+  line-height: 1.65;
+}
+
+.arena-formula-panel {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  background: #f6faff;
+}
+
+.arena-formula-panel strong {
+  color: #172033;
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.arena-formula-panel span {
+  color: #64748b;
+  line-height: 1.6;
+}
+
+.arena-estimate-strip,
+.arena-report-explain {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  margin-bottom: 18px;
+  overflow: hidden;
+}
+
+.arena-report-explain {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0 0 16px;
+}
+
+.arena-estimate-strip div,
+.arena-report-explain div {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border-right: 1px solid #e2e8f0;
+}
+
+.arena-estimate-strip div:last-child,
+.arena-report-explain div:last-child {
+  border-right: 0;
+}
+
+.arena-estimate-strip span,
+.arena-report-explain span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.arena-estimate-strip strong,
+.arena-report-explain strong {
+  color: #172033;
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.arena-advanced {
+  margin-bottom: 18px;
+  overflow: hidden;
+}
+
+.arena-advanced.ant-collapse {
+  background: #f8fafc;
+}
+
+.arena-next-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 18px;
 }
 
 .run-channel-option {
@@ -2070,6 +2192,23 @@ textarea:focus-visible,
 
   .run-channel-option .ant-space {
     grid-column: 2;
+  }
+
+  .arena-explain-grid,
+  .arena-estimate-strip,
+  .arena-report-explain {
+    grid-template-columns: 1fr;
+  }
+
+  .arena-estimate-strip div,
+  .arena-report-explain div {
+    border-right: 0;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .arena-estimate-strip div:last-child,
+  .arena-report-explain div:last-child {
+    border-bottom: 0;
   }
 
   .task-mode-actions .ant-btn {

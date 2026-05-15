@@ -41,6 +41,14 @@ function copyText(text: string) {
   void navigator.clipboard?.writeText(text);
 }
 
+function numberValue(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function arrayValue(value: unknown) {
+  return Array.isArray(value) ? value : [];
+}
+
 function modeLabel(mode: RunMode) {
   if (mode === 'performance_benchmark') return '性能诊断报告';
   if (mode === 'arena_comparison') return 'Arena 排名报告';
@@ -101,8 +109,12 @@ export default function ReportDetailPage() {
   const labels = Array.isArray(evidence.labels) ? evidence.labels : [];
   const performance = data.performance_summary;
   const arena = (evidence.arena ?? {}) as Record<string, number | string | null | undefined>;
+  const arenaMatrix = arrayValue(evidence.arena_matrix) as Array<Record<string, unknown>>;
+  const judgeEvidence = (evidence.judge_evidence ?? {}) as Record<string, unknown>;
+  const topEvidence = arrayValue(evidence.top_evidence) as Array<Record<string, unknown>>;
+  const arenaRank = typeof arena.rank === 'number' ? arena.rank : undefined;
   const dimensionEntries = Object.entries(dimensions);
-  const sampleLabel = isPerformanceReport ? '诊断样本' : isArenaReport ? 'Arena 样本' : '预测样本';
+  const sampleLabel = isPerformanceReport ? '诊断样本' : isArenaReport ? '分歧样本' : '预测样本';
   const lowSampleLabel = isPerformanceReport ? '性能异常样本' : isArenaReport ? '低排名样本' : '低分样本';
   const overviewTitle = isPerformanceReport ? '性能诊断结论' : isArenaReport ? 'Arena 排名结论' : '维度分与关键证据';
 
@@ -147,6 +159,12 @@ export default function ReportDetailPage() {
             </Descriptions>
           </Card>
           <Card title={overviewTitle} bordered={false}>
+            {isArenaReport ? (
+              <div className="arena-formula-panel">
+                <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
+                <span>这份报告只解释当前渠道在候选渠道横向排名中的表现，不代表它接近官方渠道。</span>
+              </div>
+            ) : null}
             {dimensionEntries.length ? (
               <div className="dimension-grid">
                 {dimensionEntries.map(([key, value]) => (
@@ -172,6 +190,13 @@ export default function ReportDetailPage() {
               </div>
             ) : null}
             <Typography.Paragraph className="report-summary-text">{report.summary}</Typography.Paragraph>
+            {isArenaReport ? (
+              <div className="arena-report-explain">
+                <div><span>排名解读</span><strong>{arenaRank ? `第 ${arenaRank} 名` : '查看任务详情中的总排名'}</strong></div>
+                <div><span>胜场/对战</span><strong>{`${fmt(numberValue(arena.wins))} / ${String(arena.pair_count ?? '-')}`}</strong></div>
+                <div><span>平均题目分</span><strong>{fmt(numberValue(arena.avg_case_score))}</strong></div>
+              </div>
+            ) : null}
             <Space wrap>
               {(labels.length ? labels : ['no_labels']).map((item: string) => (
                 <Tag key={item} color={item === 'no_labels' ? 'green' : 'orange'}>{item}</Tag>
@@ -189,6 +214,15 @@ export default function ReportDetailPage() {
           bordered={false}
           title={<span className="card-title-with-icon"><ListFilter size={18} />样本浏览</span>}
         >
+          {isArenaReport ? (
+            <Alert
+              type="info"
+              showIcon
+              message="这里按题目查看当前渠道的样本表现"
+              description="分数低、带异常标签或请求错误的样本，通常就是该渠道在 Arena 中输分的主要来源。若要看它输给了谁，请查看下方“评分依据”。"
+              style={{ marginBottom: 16 }}
+            />
+          ) : null}
           <div className="report-filter-grid">
             <Input allowClear placeholder="搜索题目、输出或标签" value={search} onChange={(event) => setSearch(event.target.value)} />
             <Select value={moduleFilter} onChange={setModuleFilter} options={[{ value: 'all', label: '全部模块' }, ...modules.map((item) => ({ value: item, label: item }))]} />
@@ -222,7 +256,7 @@ export default function ReportDetailPage() {
                 ),
               },
               { title: '模块', dataIndex: 'module', width: 130, render: (value: string) => <Tag>{value}</Tag> },
-              { title: isPerformanceReport ? '诊断分' : isArenaReport ? '样本分' : '分数', dataIndex: 'score', width: 100, render: (value: number | null) => <strong>{fmt(value)}</strong>, sorter: (a, b) => (a.score ?? 0) - (b.score ?? 0) },
+              { title: isPerformanceReport ? '诊断分' : isArenaReport ? '本渠道样本分' : '分数', dataIndex: 'score', width: isArenaReport ? 140 : 100, render: (value: number | null) => <strong>{fmt(value)}</strong>, sorter: (a, b) => (a.score ?? 0) - (b.score ?? 0) },
               { title: '延迟', dataIndex: 'latency_ms', width: 100, render: (value: number | null) => fmt(value, ' ms') },
               {
                 title: '输出摘要',
@@ -272,9 +306,50 @@ export default function ReportDetailPage() {
       ),
     } : {
       key: 'raw',
-      label: isPerformanceReport ? '原始指标' : '原始结果',
+      label: isPerformanceReport ? '原始指标' : isArenaReport ? '评分依据' : '原始结果',
       children: (
         <Card bordered={false} title={<span className="card-title-with-icon"><FileJson size={18} />运行字段</span>}>
+          {isArenaReport ? (
+            <Space direction="vertical" size={16} className="full-width">
+              <div className="arena-formula-panel">
+                <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
+                <span>当前 Judge 模式：{String(judgeEvidence.judge_mode ?? '-')}；评分标准：{String(judgeEvidence.rubric ?? '默认答案质量、指令遵循、安全性和协议忠实度。')}</span>
+              </div>
+              <div className="dimension-grid">
+                <div className="dimension-tile"><span>Judge 渠道</span><strong>{String(judgeEvidence.judge_channel_id ?? '本地自动评分')}</strong></div>
+                <div className="dimension-tile"><span>自动评分</span><strong>{judgeEvidence.automated === false ? '否' : '是'}</strong></div>
+                <div className="dimension-tile"><span>平均 Judge 分</span><strong>{fmt(numberValue(judgeEvidence.avg_judge_score))}</strong></div>
+                <div className="dimension-tile"><span>低置信样本</span><strong>{arrayValue(judgeEvidence.low_confidence_samples).length}</strong></div>
+              </div>
+              <Table
+                rowKey={(row, index) => `${String(row.test_case_id ?? '-')}:${index}`}
+                dataSource={topEvidence}
+                pagination={false}
+                locale={{ emptyText: <Empty description="暂无关键败因样本" /> }}
+                scroll={{ x: 940 }}
+                columns={[
+                  { title: '题目', dataIndex: 'test_case_id', width: 220 },
+                  { title: '胜方', dataIndex: 'winner_channel_id', width: 180, render: (value: string) => <Tag color="green">{value}</Tag> },
+                  { title: '败方', dataIndex: 'loser_channel_id', width: 180, render: (value: string) => <Tag color="red">{value}</Tag> },
+                  { title: '分差', dataIndex: 'margin', width: 100, render: (value: number | null) => fmt(value) },
+                  { title: '胜方分', dataIndex: 'winner_score', width: 100, render: (value: number | null) => fmt(value) },
+                  { title: '败方分', dataIndex: 'loser_score', width: 100, render: (value: number | null) => fmt(value) },
+                  {
+                    title: '标签',
+                    width: 220,
+                    render: (_, row) => (
+                      <Space wrap size={4}>
+                        {arrayValue(row.labels).length ? arrayValue(row.labels).map((label) => <Tag key={String(label)}>{String(label)}</Tag>) : <Tag>无标签</Tag>}
+                      </Space>
+                    ),
+                  },
+                ]}
+              />
+              {arenaMatrix.length ? (
+                <pre className="json-block">{jsonText({ arena_matrix: arenaMatrix })}</pre>
+              ) : null}
+            </Space>
+          ) : (
           <Table
             rowKey="id"
             dataSource={data.results}
@@ -289,6 +364,7 @@ export default function ReportDetailPage() {
               { title: 'error', width: 220, render: (_, result) => result.normalized_response?.error ?? '-' },
             ]}
           />
+          )}
         </Card>
       ),
     },

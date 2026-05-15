@@ -26,7 +26,7 @@ export function selectedChannels(channels: Channel[] | undefined, selectedIds: s
   return selectedIds.map((id) => channelById.get(id)).filter((channel): channel is Channel => Boolean(channel));
 }
 
-export function channelSelectOptions(channels: Channel[] = [], tag?: { color: string; label: string }) {
+export function channelSelectOptions(channels: Channel[] = [], tag?: { color: string; label: string }, showCredentialStatus = false) {
   return channels.map((channel) => ({
     value: channel.id,
     disabled: !channel.enabled,
@@ -38,6 +38,9 @@ export function channelSelectOptions(channels: Channel[] = [], tag?: { color: st
           <small>{channel.model_name || '未配置模型'}</small>
         </span>
         {tag ? <Tag color={tag.color}>{tag.label}</Tag> : null}
+        {showCredentialStatus ? (
+          hasStoredApiKey(channel) ? <Tag color="green">已配置</Tag> : <Tag color="gold">需补 Key</Tag>
+        ) : null}
         {!channel.enabled ? <Tag>已停用</Tag> : null}
       </span>
     ),
@@ -57,10 +60,11 @@ type ChannelSelectProps = {
   placeholder: string;
   channels: Channel[];
   tag?: { color: string; label: string };
+  showCredentialStatus?: boolean;
   notFoundContent?: string;
 };
 
-export function ChannelMultiSelect({ loading, placeholder, channels, tag, notFoundContent }: ChannelSelectProps) {
+export function ChannelMultiSelect({ loading, placeholder, channels, tag, showCredentialStatus, notFoundContent }: ChannelSelectProps) {
   return (
     <Select
       mode="multiple"
@@ -71,7 +75,7 @@ export function ChannelMultiSelect({ loading, placeholder, channels, tag, notFou
       loading={loading}
       placeholder={placeholder}
       optionFilterProp="searchLabel"
-      options={channelSelectOptions(channels, tag)}
+      options={channelSelectOptions(channels, tag, showCredentialStatus)}
       notFoundContent={notFoundContent}
     />
   );
@@ -79,18 +83,33 @@ export function ChannelMultiSelect({ loading, placeholder, channels, tag, notFou
 
 type RuntimeCredentialsFieldsProps = {
   channels: Channel[];
+  onlyMissing?: boolean;
+  configuredMessage?: string;
 };
 
-export function RuntimeCredentialsFields({ channels }: RuntimeCredentialsFieldsProps) {
+export function RuntimeCredentialsFields({ channels, onlyMissing = false, configuredMessage }: RuntimeCredentialsFieldsProps) {
   if (!channels.length) return null;
+  const missingChannels = channels.filter((channel) => !hasStoredApiKey(channel));
+  const displayChannels = onlyMissing ? missingChannels : channels;
+
+  if (!displayChannels.length) {
+    return configuredMessage ? (
+      <div className="runtime-credentials-compact">
+        <Tag color="green">已配置</Tag>
+        <Typography.Text type="secondary">{configuredMessage}</Typography.Text>
+      </div>
+    ) : null;
+  }
 
   return (
     <div className="runtime-credentials">
       <div className="credential-heading">
         <Typography.Text strong>运行时凭据</Typography.Text>
-        <Typography.Text type="secondary">已配置渠道会自动使用渠道管理中的 API Key；未配置渠道需为本次任务补充。</Typography.Text>
+        <Typography.Text type="secondary">
+          {onlyMissing ? '只显示未在渠道管理中配置 API Key 的渠道。' : '已配置渠道会自动使用渠道管理中的 API Key；未配置渠道需为本次任务补充。'}
+        </Typography.Text>
       </div>
-      {channels.map((channel) => (
+      {displayChannels.map((channel) => (
         <div className="credential-row" key={channel.id}>
           <div className="credential-channel">
             <strong>{channel.name}</strong>

@@ -33,6 +33,34 @@ type OutputDrawerState = {
   result?: DisplayResult;
 };
 
+type ArenaRankingRow = {
+  key: string;
+  rank: number;
+  channelId: string;
+  name: string;
+  score: number;
+  winRate: number;
+  avgCaseScore: number;
+  wins: number;
+  pairCount: number;
+  caseCount: number;
+  labels: string[];
+};
+
+type ArenaEvidenceRow = {
+  key: string;
+  testCaseId: string;
+  caseTitle: string;
+  winnerChannelId: string;
+  loserChannelId: string;
+  winnerName: string;
+  loserName: string;
+  winnerScore: number;
+  loserScore: number;
+  margin: number;
+  labels: string[];
+};
+
 function latestResult(results?: DisplayResult[]) {
   if (!results?.length) return undefined;
   return [...results].sort((a, b) => {
@@ -69,6 +97,14 @@ function prettyJson(value: unknown) {
 
 function metricValue(value?: number) {
   return value === undefined || Number.isNaN(value) ? '-' : value.toFixed(1);
+}
+
+function numberValue(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function arrayValue(value: unknown) {
+  return Array.isArray(value) ? value : [];
 }
 
 function riskTone(score?: number) {
@@ -199,6 +235,7 @@ export default function RunDetail() {
   const isAuthenticityRun = data?.run.mode === 'candidate_eval' || data?.run.mode === 'full_comparison';
 
   const channelById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels]);
+  const caseById = useMemo(() => new Map(cases.map((caseItem) => [caseItem.id, caseItem])), [cases]);
   const runChannelIds = useMemo(() => new Set((data?.run_channels ?? []).map((item) => item.channel_id)), [data?.run_channels]);
   const baselineChannelIds = useMemo(() => new Set((data?.baseline_results ?? []).map((item) => item.channel_id)), [data?.baseline_results]);
   const runRoleByChannel = useMemo(() => new Map((data?.run_channels ?? []).map((item) => [item.channel_id, item.role_in_run])), [data?.run_channels]);
@@ -350,12 +387,55 @@ export default function RunDetail() {
     tps: Number(item.avg_tokens_per_second ?? 0),
     success: Number(item.success_rate ?? 0),
   }));
-  const arenaChartData = (summary?.arena_rankings ?? []).map((item) => ({
-    name: String(channelById.get(String(item.channel_id))?.name ?? item.channel_id ?? '-'),
-    score: Number(item.score ?? 0),
-    winRate: Number(item.win_rate ?? 0),
-    avgCaseScore: Number(item.avg_case_score ?? 0),
-  }));
+  const arenaChartData: ArenaRankingRow[] = (summary?.arena_rankings ?? []).map((item, index) => {
+    const channelId = String(item.channel_id ?? '');
+    return {
+      key: channelId || String(index),
+      rank: index + 1,
+      channelId,
+      name: String(channelById.get(channelId)?.name ?? item.channel_id ?? '-'),
+      score: numberValue(item.score),
+      winRate: numberValue(item.win_rate),
+      avgCaseScore: numberValue(item.avg_case_score),
+      wins: numberValue(item.wins),
+      pairCount: numberValue(item.pair_count),
+      caseCount: numberValue(item.case_count),
+      labels: arrayValue(item.labels).map(String),
+    };
+  });
+  const arenaLeader = arenaChartData[0];
+  const arenaRunnerUp = arenaChartData[1];
+  const arenaLeadMargin = arenaLeader && arenaRunnerUp ? arenaLeader.score - arenaRunnerUp.score : null;
+  const arenaMatrixSource = arrayValue(data?.reports.find((report) => Array.isArray(report.evidence?.arena_matrix))?.evidence?.arena_matrix) as Array<Record<string, unknown>>;
+  const arenaMatrixChannelIds = arenaChartData.map((item) => item.channelId).filter(Boolean);
+  const arenaMatrixRows = arenaMatrixSource.map((row) => {
+    const channelId = String(row.channel_id ?? '');
+    return {
+      ...row,
+      key: channelId,
+      channelId,
+      channelName: String(channelById.get(channelId)?.name ?? channelId),
+    };
+  });
+  const arenaEvidenceRows: ArenaEvidenceRow[] = arrayValue(summary?.top_evidence).map((item, index) => {
+    const row = item as Record<string, unknown>;
+    const testCaseId = String(row.test_case_id ?? '');
+    const winnerChannelId = String(row.winner_channel_id ?? '');
+    const loserChannelId = String(row.loser_channel_id ?? '');
+    return {
+      key: `${testCaseId}:${loserChannelId}:${index}`,
+      testCaseId,
+      caseTitle: caseById.get(testCaseId)?.title ?? testCaseId,
+      winnerChannelId,
+      loserChannelId,
+      winnerName: channelById.get(winnerChannelId)?.name ?? winnerChannelId,
+      loserName: channelById.get(loserChannelId)?.name ?? loserChannelId,
+      winnerScore: numberValue(row.winner_score),
+      loserScore: numberValue(row.loser_score),
+      margin: numberValue(row.margin),
+      labels: arrayValue(row.labels).map(String),
+    };
+  });
   const labelRows = Object.entries(summary?.label_distribution ?? {}).map(([label, count]) => ({ label, count }));
 
   if (runResults.isError || channelsQuery.isError || casesQuery.isError || runSummary.isError) {
@@ -482,6 +562,10 @@ export default function RunDetail() {
                 label: 'Arena 排名',
                 children: arenaChartData.length ? (
                   <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                    <div className="arena-formula-panel">
+                      <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
+                      <span>胜率来自同题两两比较；平均题目分来自每个渠道自身的答案质量、规则匹配和性能惩罚。</span>
+                    </div>
                     <div style={{ height: 300 }}>
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart data={arenaChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
@@ -491,6 +575,7 @@ export default function RunDetail() {
                           <ChartTooltip />
                           <Bar dataKey="score" name="Arena 总分" fill="#2563EB" />
                           <Bar dataKey="winRate" name="胜率(%)" fill="#16A34A" />
+                          <Bar dataKey="avgCaseScore" name="平均题目分" fill="#F97316" />
                         </BarChart>
                       </ResponsiveContainer>
                     </div>
@@ -500,10 +585,12 @@ export default function RunDetail() {
                       dataSource={arenaChartData}
                       pagination={false}
                       columns={[
+                        { title: '排名', dataIndex: 'rank', width: 80, render: (rank: number) => <Tag color={rank === 1 ? 'purple' : 'default'}>#{rank}</Tag> },
                         { title: '渠道', dataIndex: 'name' },
                         { title: 'Arena 总分', dataIndex: 'score', width: 120, render: (value: number) => value.toFixed(1) },
                         { title: '胜率', dataIndex: 'winRate', width: 110, render: (value: number) => `${value.toFixed(1)}%` },
                         { title: '平均题目分', dataIndex: 'avgCaseScore', width: 130, render: (value: number) => value.toFixed(1) },
+                        { title: '胜场/对战', width: 130, render: (_, row) => `${row.wins.toFixed(1)} / ${row.pairCount}` },
                       ]}
                     />
                   </Space>
@@ -579,6 +666,27 @@ export default function RunDetail() {
           </div>
           {arenaChartData.length ? (
             <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <div className="arena-explain-grid">
+                <section className="arena-explain-panel">
+                  <Typography.Text className="section-kicker">LEADER</Typography.Text>
+                  <Typography.Title level={4}>{arenaLeader?.name ?? '-'}</Typography.Title>
+                  <Typography.Paragraph>
+                    当前第一名 Arena 总分 {arenaLeader ? arenaLeader.score.toFixed(1) : '-'}，胜率 {arenaLeader ? arenaLeader.winRate.toFixed(1) : '-'}%。
+                    {arenaLeadMargin !== null ? ` 领先第二名 ${arenaLeadMargin.toFixed(1)} 分。` : ''}
+                  </Typography.Paragraph>
+                </section>
+                <section className="arena-explain-panel">
+                  <Typography.Text className="section-kicker">HOW TO READ</Typography.Text>
+                  <Typography.Title level={4}>先看总分，再看分歧样本</Typography.Title>
+                  <Typography.Paragraph>
+                    总分说明整体排名；胜率说明同题对战赢面；关键分歧样本解释低排名渠道主要输在哪些题上。
+                  </Typography.Paragraph>
+                </section>
+              </div>
+              <div className="arena-formula-panel">
+                <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
+                <span>胜率来自候选渠道之间的同题两两比较，不代表接近官方渠道；平均题目分会受到答案质量、标签和延迟惩罚影响。</span>
+              </div>
               <div style={{ height: 320 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={arenaChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
@@ -588,20 +696,95 @@ export default function RunDetail() {
                     <ChartTooltip />
                     <Bar dataKey="score" name="Arena 总分" fill="#2563EB" />
                     <Bar dataKey="winRate" name="胜率(%)" fill="#16A34A" />
+                    <Bar dataKey="avgCaseScore" name="平均题目分" fill="#F97316" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
               <Table
-                rowKey="name"
+                rowKey="key"
                 dataSource={arenaChartData}
                 pagination={false}
+                scroll={{ x: 980 }}
                 columns={[
-                  { title: '渠道', dataIndex: 'name' },
+                  { title: '排名', dataIndex: 'rank', width: 80, render: (rank: number) => <Tag color={rank === 1 ? 'purple' : 'default'}>#{rank}</Tag> },
+                  { title: '渠道', dataIndex: 'name', width: 220 },
                   { title: 'Arena 总分', dataIndex: 'score', width: 120, render: (value: number) => value.toFixed(1) },
                   { title: '胜率', dataIndex: 'winRate', width: 110, render: (value: number) => `${value.toFixed(1)}%` },
                   { title: '平均题目分', dataIndex: 'avgCaseScore', width: 130, render: (value: number) => value.toFixed(1) },
+                  { title: '胜场/对战', width: 130, render: (_, row) => `${row.wins.toFixed(1)} / ${row.pairCount}` },
+                  { title: '样本数', dataIndex: 'caseCount', width: 100 },
+                  {
+                    title: '主要标签',
+                    width: 240,
+                    render: (_, row) => (
+                      <Space wrap size={4}>
+                        {(row.labels.length ? row.labels : ['无明显异常']).slice(0, 3).map((label) => (
+                          <Tag key={label} color={label === '无明显异常' ? 'green' : 'orange'}>{label}</Tag>
+                        ))}
+                      </Space>
+                    ),
+                  },
                 ]}
               />
+              {arenaMatrixRows.length ? (
+                <Card bordered={false} title="胜负矩阵">
+                  <Typography.Paragraph type="secondary">
+                    单元格表示“行渠道 Arena 总分 - 列渠道 Arena 总分”。正数表示行渠道领先，负数表示行渠道落后。
+                  </Typography.Paragraph>
+                  <Table
+                    rowKey="key"
+                    size="small"
+                    dataSource={arenaMatrixRows}
+                    pagination={false}
+                    scroll={{ x: Math.max(720, arenaMatrixChannelIds.length * 150) }}
+                    columns={[
+                      { title: '渠道', dataIndex: 'channelName', fixed: 'left', width: 220 },
+                      ...arenaMatrixChannelIds.map((channelId) => ({
+                        title: channelById.get(channelId)?.name ?? channelId,
+                        dataIndex: channelId,
+                        width: 150,
+                        render: (value: number | null | undefined) =>
+                          value === null || value === undefined ? '-' : <Tag color={value >= 0 ? 'green' : 'red'}>{value > 0 ? '+' : ''}{Number(value).toFixed(1)}</Tag>,
+                      })),
+                    ]}
+                  />
+                </Card>
+              ) : null}
+              <Card bordered={false} title="关键分歧样本">
+                <Table
+                  rowKey="key"
+                  dataSource={arenaEvidenceRows}
+                  pagination={{ pageSize: 5, hideOnSinglePage: true }}
+                  locale={{ emptyText: <Empty description="暂无关键分歧样本" /> }}
+                  scroll={{ x: 960 }}
+                  columns={[
+                    {
+                      title: '题目',
+                      dataIndex: 'caseTitle',
+                      width: 260,
+                      render: (value: string, row) => (
+                        <Space direction="vertical" size={2}>
+                          <strong>{value}</strong>
+                          <Typography.Text type="secondary">{row.testCaseId}</Typography.Text>
+                        </Space>
+                      ),
+                    },
+                    { title: '胜方', dataIndex: 'winnerName', width: 180, render: (value: string) => <Tag color="green">{value}</Tag> },
+                    { title: '败方', dataIndex: 'loserName', width: 180, render: (value: string) => <Tag color="red">{value}</Tag> },
+                    { title: '分差', dataIndex: 'margin', width: 100, render: (value: number) => value.toFixed(1) },
+                    { title: '样本分', width: 150, render: (_, row) => `${row.winnerScore.toFixed(1)} / ${row.loserScore.toFixed(1)}` },
+                    {
+                      title: '标签',
+                      width: 220,
+                      render: (_, row) => (
+                        <Space wrap size={4}>
+                          {(row.labels.length ? row.labels : ['无标签']).map((label) => <Tag key={label}>{label}</Tag>)}
+                        </Space>
+                      ),
+                    },
+                  ]}
+                />
+              </Card>
             </Space>
           ) : <Empty description="暂无 Arena 排名数据" />}
         </Card>
