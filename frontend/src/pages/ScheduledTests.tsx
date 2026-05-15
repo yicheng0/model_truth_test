@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
 import { BarChart3, Bell, CalendarClock, Edit3, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -36,6 +36,8 @@ type FeishuFormValues = {
   daily_report_time: Dayjs | null;
   timezone: string;
 };
+
+type AlertTimeRange = [Dayjs | null, Dayjs | null] | null;
 
 const alertStatusLabel: Record<string, string> = {
   pending_review: '待复审',
@@ -147,6 +149,13 @@ function reportRangeToDates(range: string) {
   return { from: from.toISOString(), to: to.toISOString() };
 }
 
+function alertRangeToDates(range: AlertTimeRange) {
+  return {
+    created_from: range?.[0]?.toISOString(),
+    created_to: range?.[1]?.toISOString(),
+  };
+}
+
 export default function ScheduledTests() {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
@@ -159,10 +168,14 @@ export default function ScheduledTests() {
   const [reviewingAlert, setReviewingAlert] = useState<ChannelAlert | null>(null);
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
   const [alertStatus, setAlertStatus] = useState<string>('pending_review');
+  const [alertIdQuery, setAlertIdQuery] = useState('');
+  const [alertTimeRange, setAlertTimeRange] = useState<AlertTimeRange>(null);
   const [activeTab, setActiveTab] = useState(initialTab);
   const [reportRange, setReportRange] = useState('7d');
   const runWindowEnabled = Form.useWatch('run_window_enabled', scheduleForm);
   const reportDates = useMemo(() => reportRangeToDates(reportRange), [reportRange]);
+  const alertDates = useMemo(() => alertRangeToDates(alertTimeRange), [alertTimeRange]);
+  const trimmedAlertIdQuery = alertIdQuery.trim();
   const needsPlanData = activeTab === 'plans';
   const needsAlertData = activeTab === 'alerts';
 
@@ -173,10 +186,15 @@ export default function ScheduledTests() {
     refetchInterval: activeTab === 'plans' ? 5000 : false,
   });
   const alerts = useQuery({
-    queryKey: ['alerts', alertStatus],
-    queryFn: () => api.alerts(alertStatus === 'all' ? undefined : alertStatus),
+    queryKey: ['alerts', alertStatus, trimmedAlertIdQuery, alertDates.created_from, alertDates.created_to],
+    queryFn: () => api.alerts({
+      status: alertStatus === 'all' ? undefined : alertStatus,
+      id_query: trimmedAlertIdQuery || undefined,
+      created_from: alertDates.created_from,
+      created_to: alertDates.created_to,
+    }),
     enabled: needsAlertData,
-    refetchInterval: activeTab === 'alerts' && alertStatus === 'pending_review' ? 5000 : false,
+    refetchInterval: activeTab === 'alerts' && alertStatus === 'pending_review' && !trimmedAlertIdQuery && !alertTimeRange ? 5000 : false,
   });
   const channels = useQuery<Channel[]>({ queryKey: ['channels'], queryFn: api.channels, enabled: needsPlanData || needsAlertData });
   const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy, enabled: needsPlanData });
@@ -378,6 +396,11 @@ export default function ScheduledTests() {
     saveFeishu.mutate(payload);
   }
 
+  function clearAlertFilters() {
+    setAlertIdQuery('');
+    setAlertTimeRange(null);
+  }
+
   const planError = needsPlanData ? schedules.error ?? channels.error : null;
   const alertError = needsAlertData ? alerts.error ?? channels.error : null;
   const reportError = activeTab === 'report' ? smartReport.error : null;
@@ -550,6 +573,24 @@ export default function ScheduledTests() {
         }
         bordered={false}
       >
+        <Space wrap style={{ width: '100%', marginBottom: 16 }}>
+          <Input.Search
+            allowClear
+            value={alertIdQuery}
+            onChange={(event) => setAlertIdQuery(event.target.value)}
+            onSearch={(value) => setAlertIdQuery(value)}
+            placeholder="输入 request_id / message_id / result_id / run_id / report_id"
+            style={{ width: 420, maxWidth: '100%' }}
+          />
+          <DatePicker.RangePicker
+            showTime
+            value={alertTimeRange}
+            onChange={(range) => setAlertTimeRange(range)}
+            allowClear
+            style={{ width: 380, maxWidth: '100%' }}
+          />
+          <Button onClick={clearAlertFilters}>清空</Button>
+        </Space>
         <Table
           rowKey="id"
           loading={alerts.isLoading || channels.isLoading}

@@ -89,6 +89,7 @@ from .services import (
     feishu_setting_read,
     get_or_create_feishu_setting,
     get_report_detail,
+    list_channel_alerts,
     list_report_summaries,
     MANUAL_PROBE_MODE,
     MANUAL_PROBE_SUITE_ID,
@@ -756,14 +757,20 @@ async def run_scheduled_test_now(scheduled_id: str, db: Session = Depends(get_db
 def list_alerts(
     status: str | None = Query(default=None),
     channel_id: str | None = Query(default=None),
+    id_query: str | None = Query(default=None),
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
-    stmt = select(ChannelAlert).order_by(ChannelAlert.created_at.desc())
-    if status:
-        stmt = stmt.where(ChannelAlert.status == status)
-    if channel_id:
-        stmt = stmt.where(ChannelAlert.channel_id == channel_id)
-    return [channel_alert_read(db, alert) for alert in db.scalars(stmt).all()]
+    alerts = list_channel_alerts(
+        db,
+        status=status,
+        channel_id=channel_id,
+        id_query=id_query,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    return [channel_alert_read(db, alert) for alert in alerts]
 
 
 @app.get("/api/alerts/{alert_id}", response_model=ChannelAlertRead)

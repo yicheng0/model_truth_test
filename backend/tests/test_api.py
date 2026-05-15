@@ -4,7 +4,7 @@ import os
 import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_claude_eval.db")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
@@ -1559,6 +1559,77 @@ def test_alert_review_updates_status_and_reviewer() -> None:
     assert payload["status"] == "confirmed_issue"
     assert payload["reviewer_name"] == "admin"
     assert payload["reviewed_at"]
+
+
+def test_list_alerts_filters_by_any_locator_id_and_time_range() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        assert alert is not None
+        report = db.get(Report, alert.report_id)
+        assert report is not None
+        result = Result(
+            id="res_locator_probe",
+            run_id=run_id,
+            test_case_id="manual_thinking_temperature_probe",
+            channel_id=schedule["channel_id"],
+            attempt_index=1,
+            normalized_response={"provider_message_id": "msg_01locator"},
+            raw_request={"headers": {"x-client-request-id": "client_req_locator"}},
+            raw_response={"type": "error", "error": {"request_id": "req_locator_123", "message": "blocked"}},
+            metrics={},
+            score=0,
+            labels=["request_failed"],
+        )
+        report.evidence = {
+            "labels": ["identity_mismatch"],
+            "red_flags": ["identity_mismatch"],
+            "model_request": {
+                "result_id": result.id,
+                "message_id": "msg_01locator",
+            },
+            "model_requests": [
+                {
+                    "result_id": result.id,
+                    "message_id": "msg_01locator",
+                }
+            ],
+            "signature_interop": {
+                "source_message_id": "msg_bdrk_locator",
+                "relay_message_id": "msg_relay_locator",
+            },
+        }
+        db.add(result)
+        db.commit()
+        alert_created_at = alert.created_at or datetime.now(timezone.utc)
+
+    created_from = (alert_created_at - timedelta(minutes=1)).isoformat()
+    created_to = (alert_created_at + timedelta(minutes=1)).isoformat()
+    outside_from = (alert_created_at + timedelta(days=1)).isoformat()
+    outside_to = (alert_created_at + timedelta(days=1, minutes=5)).isoformat()
+
+    with TestClient(app) as client:
+        for locator in [run_id, "res_locator_probe", "msg_01locator", "msg_bdrk_locator", "req_locator_123", "client_req_locator"]:
+            response = client.get(
+                "/api/alerts",
+                params={"status": "pending_review", "id_query": locator, "created_from": created_from, "created_to": created_to},
+            )
+            assert response.status_code == 200
+            assert [item["id"] for item in response.json()] == [alert.id]
+
+        response = client.get(
+            "/api/alerts",
+            params={"status": "pending_review", "id_query": "req_locator_123", "created_from": outside_from, "created_to": outside_to},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def test_scheduled_test_rejects_reference_channel() -> None:

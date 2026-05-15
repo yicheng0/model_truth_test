@@ -70,6 +70,24 @@ type ArenaRunCreatePayload = {
 
 type ChannelWritePayload = Partial<Omit<Channel, 'auth_config'>> & { auth_config?: Record<string, unknown> | null };
 
+type AlertFilters = {
+  status?: string;
+  channel_id?: string;
+  id_query?: string;
+  created_from?: string;
+  created_to?: string;
+};
+
+function queryString(params: Record<string, string | undefined | null>) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    const trimmed = value?.trim();
+    if (trimmed) search.set(key, trimmed);
+  }
+  const query = search.toString();
+  return query ? `?${query}` : '';
+}
+
 export class ApiError extends Error {
   status: number;
 
@@ -152,7 +170,12 @@ export const api = {
     request<ScheduledChannelTest>(`/api/scheduled-tests/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteScheduledTest: (id: string) => request<{ deleted: boolean }>(`/api/scheduled-tests/${id}`, { method: 'DELETE' }),
   runScheduledTestNow: (id: string) => request<ScheduledChannelTest>(`/api/scheduled-tests/${id}/run-now`, { method: 'POST' }),
-  alerts: (status?: string) => request<ChannelAlert[]>(status ? `/api/alerts?status=${encodeURIComponent(status)}` : '/api/alerts'),
+  alerts: (filters?: string | AlertFilters) => {
+    if (typeof filters === 'string') {
+      return request<ChannelAlert[]>(`/api/alerts${queryString({ status: filters })}`);
+    }
+    return request<ChannelAlert[]>(`/api/alerts${queryString(filters ?? {})}`);
+  },
   reviewAlert: (id: string, payload: { status: string; reviewer_name: string; review_note?: string }) =>
     request<ChannelAlert>(`/api/alerts/${id}/review`, { method: 'PATCH', body: JSON.stringify(payload) }),
   resendAlertNotification: (id: string) => request<ChannelAlert>(`/api/alerts/${id}/resend-notification`, { method: 'POST' }),

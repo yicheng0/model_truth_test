@@ -549,4 +549,23 @@ describe('api request handling', () => {
     );
     fetchMock.mockRestore();
   });
+
+  it('lists alerts with locator id and time range filters', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.alerts({
+      status: 'pending_review',
+      id_query: 'req_locator_123',
+      created_from: '2026-05-15T00:00:00.000Z',
+      created_to: '2026-05-16T00:00:00.000Z',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/alerts?status=pending_review&id_query=req_locator_123&created_from=2026-05-15T00%3A00%3A00.000Z&created_to=2026-05-16T00%3A00%3A00.000Z',
+      expect.any(Object),
+    );
+    fetchMock.mockRestore();
+  });
 });

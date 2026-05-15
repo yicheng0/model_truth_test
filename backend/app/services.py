@@ -2191,6 +2191,94 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
     }
 
 
+def list_channel_alerts(
+    db: Session,
+    *,
+    status: str | None = None,
+    channel_id: str | None = None,
+    id_query: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+) -> list[ChannelAlert]:
+    stmt = select(ChannelAlert).order_by(ChannelAlert.created_at.desc())
+    if status:
+        stmt = stmt.where(ChannelAlert.status == status)
+    if channel_id:
+        stmt = stmt.where(ChannelAlert.channel_id == channel_id)
+    if created_from:
+        stmt = stmt.where(ChannelAlert.created_at >= created_from)
+    if created_to:
+        stmt = stmt.where(ChannelAlert.created_at <= created_to)
+    alerts = list(db.scalars(stmt).all())
+    query = (id_query or "").strip()
+    if not query:
+        return alerts
+    return [alert for alert in alerts if channel_alert_matches_id_query(db, alert, query)]
+
+
+def channel_alert_matches_id_query(db: Session, alert: ChannelAlert, query: str) -> bool:
+    normalized_query = query.strip().lower()
+    if not normalized_query:
+        return True
+    direct_values = [alert.id, alert.run_id, alert.report_id, alert.channel_id, alert.scheduled_test_id]
+    if any(_value_contains_query(value, normalized_query) for value in direct_values):
+        return True
+
+    report = db.get(Report, alert.report_id)
+    evidence = report.evidence if report and isinstance(report.evidence, dict) else {}
+    if _json_contains_query(evidence, normalized_query):
+        return True
+
+    result_ids = _alert_evidence_result_ids(evidence)
+    results: list[Result] = []
+    if result_ids:
+        results.extend(db.scalars(select(Result).where(Result.id.in_(result_ids))).all())
+    if not results and alert.run_id:
+        results.extend(db.scalars(select(Result).where(Result.run_id == alert.run_id)).all())
+    for result in results:
+        if _value_contains_query(result.id, normalized_query):
+            return True
+        if _json_contains_query(result.raw_request, normalized_query):
+            return True
+        if _json_contains_query(result.raw_response, normalized_query):
+            return True
+        if _json_contains_query(result.normalized_response, normalized_query):
+            return True
+        if _json_contains_query(result.metrics, normalized_query):
+            return True
+    return False
+
+
+def _alert_evidence_result_ids(evidence: dict[str, Any]) -> set[str]:
+    result_ids: set[str] = set()
+    model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    for item in [model_request, *[entry for entry in model_requests if isinstance(entry, dict)]]:
+        result_id = item.get("result_id")
+        if result_id:
+            result_ids.add(str(result_id))
+    return result_ids
+
+
+def _value_contains_query(value: Any, normalized_query: str) -> bool:
+    if value is None:
+        return False
+    return normalized_query in str(value).lower()
+
+
+def _json_contains_query(value: Any, normalized_query: str) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return any(
+            _value_contains_query(key, normalized_query) or _json_contains_query(child, normalized_query)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_json_contains_query(item, normalized_query) for item in value)
+    return _value_contains_query(value, normalized_query)
+
+
 def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -> dict[str, Any]:
     if not scheduled.last_run_id:
         return {
