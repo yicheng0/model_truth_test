@@ -827,7 +827,7 @@ textarea:focus-visible,
 
 .credential-row {
   display: grid;
-  grid-template-columns: 220px repeat(4, minmax(0, 1fr));
+  grid-template-columns: 220px minmax(0, 1fr);
   gap: 12px;
   align-items: start;
   padding: 16px;
@@ -869,6 +869,15 @@ textarea:focus-visible,
 
 .credential-row .ant-form-item {
   margin-bottom: 0;
+}
+
+.credential-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  padding-top: 28px;
 }
 
 .full-width {

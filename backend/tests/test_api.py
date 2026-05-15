@@ -2345,3 +2345,18 @@ def test_baseline_build_rejects_out_of_range_repeat_count_and_concurrency() -> N
 def test_cors_origins_are_read_from_environment() -> None:
     os.environ["CORS_ORIGINS"] = "http://localhost:5173, https://example.com "
     assert cors_origins() == ["http://localhost:5173", "https://example.com"]
+
+
+def test_merged_channel_credentials_uses_stored_key_and_allows_runtime_override() -> None:
+    channel = Channel(
+        id="credential_merge",
+        name="Credential Merge",
+        provider_type="third_party_anthropic",
+        role="candidate",
+        auth_config_encrypted={"api_key": "stored-key", "request_protocol": "auto"},
+        is_reference=False,
+        enabled=True,
+    )
+
+    assert _merged_channel_credentials(channel, {}) == {"api_key": "stored-key", "request_protocol": "auto"}
+    assert _merged_channel_credentials(channel, {"api_key": "runtime-key"}) == {"api_key": "runtime-key", "request_protocol": "auto"}

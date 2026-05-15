@@ -4,6 +4,7 @@ import { Alert, Button, Card, Checkbox, Form, Input, Select, Space, Tag, Typogra
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
+import { buildRuntimeCredentials, hasStoredApiKey } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { BaselineSnapshot, Channel, TestSuite } from '../types';
 
@@ -29,15 +30,6 @@ function getErrorMessage(error: unknown) {
   return '请求失败，请稍后重试';
 }
 
-function trimmedValue(value?: string) {
-  const trimmed = value?.trim();
-  return trimmed || undefined;
-}
-
-function hasStoredApiKey(channel: Channel) {
-  const value = channel.auth_config?.api_key;
-  return typeof value === 'string' && value.trim().length > 0;
-}
 
 export default function CreateRun() {
   const [form] = Form.useForm<CreateRunValues>();
@@ -122,13 +114,7 @@ export default function CreateRun() {
         reference: mode === 'baseline_build' ? values.reference_channel_ids ?? [] : [],
         candidate: mode === 'candidate_eval' ? values.candidate_channel_ids ?? [] : [],
       };
-      const runtimeCredentials: Record<string, Record<string, string>> = {};
-      for (const channel of credentialChannels) {
-        const credentials = values.runtime_credentials?.[channel.id] ?? {};
-        const apiKey = trimmedValue(credentials.api_key);
-        if (!apiKey) continue;
-        runtimeCredentials[channel.id] = { api_key: apiKey };
-      }
+      const runtimeCredentials = buildRuntimeCredentials(credentialChannels, values.runtime_credentials);
       const payload = {
         name: values.name,
         suite_id: suiteId,
@@ -285,7 +271,7 @@ export default function CreateRun() {
             <div className="runtime-credentials">
               <div className="credential-heading">
                 <Typography.Text strong>运行时凭据</Typography.Text>
-                <Typography.Text type="secondary">密钥仅随本次任务提交，系统不会写入渠道配置或报告。</Typography.Text>
+                <Typography.Text type="secondary">已配置渠道会自动使用渠道管理中的 API Key；未配置渠道需为本次任务补充。</Typography.Text>
               </div>
               {credentialChannels.map((channel) => (
                 <div className="credential-row" key={channel.id}>
@@ -293,20 +279,25 @@ export default function CreateRun() {
                     <strong>{channel.name}</strong>
                     <small>{channel.model_name || '未配置模型'}</small>
                   </div>
-                  <Form.Item
-                    label="API Key"
-                    name={['runtime_credentials', channel.id, 'api_key']}
-                    rules={[
-                      {
-                        validator: (_, value: string | undefined) =>
-                          trimmedValue(value) || hasStoredApiKey(channel)
-                            ? Promise.resolve()
-                            : Promise.reject(new Error('请输入该渠道的 API Key')),
-                      },
-                    ]}
-                  >
-                    <Input autoComplete="off" placeholder={hasStoredApiKey(channel) ? '使用渠道管理中的 API Key' : 'sk-ant-...'} />
-                  </Form.Item>
+                  {hasStoredApiKey(channel) ? (
+                    <div className="credential-status">
+                      <Tag color="green">已配置</Tag>
+                      <Typography.Text type="secondary">使用渠道管理中的 API Key</Typography.Text>
+                    </div>
+                  ) : (
+                    <Form.Item
+                      label="API Key"
+                      name={['runtime_credentials', channel.id, 'api_key']}
+                      rules={[
+                        {
+                          validator: (_, value: string | undefined) =>
+                            value?.trim() ? Promise.resolve() : Promise.reject(new Error('请输入该渠道的 API Key')),
+                        },
+                      ]}
+                    >
+                      <Input autoComplete="off" placeholder="sk-ant-..." />
+                    </Form.Item>
+                  )}
                 </div>
               ))}
             </div>

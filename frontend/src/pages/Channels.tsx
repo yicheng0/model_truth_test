@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import { Edit3, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api';
+import { buildChannelAuthConfig } from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
 import type { Channel } from '../types';
 
@@ -149,7 +150,7 @@ export default function Channels() {
     });
   }
 
-  function channelPayload(values: ChannelFormValues): Partial<Channel> {
+  function channelPayload(values: ChannelFormValues, existing?: Channel | null): Partial<Channel> {
     const modelName = firstSelectValue(values.model_name);
     return {
       name: values.name.trim(),
@@ -158,10 +159,7 @@ export default function Channels() {
       enabled: values.enabled,
       model_name: modelName || null,
       base_url: values.base_url?.trim() || null,
-      auth_config: {
-        ...(values.api_key?.trim() ? { api_key: values.api_key.trim() } : {}),
-        request_protocol: values.request_protocol || 'auto',
-      },
+      auth_config: buildChannelAuthConfig(values, existing?.auth_config),
     };
   }
 
@@ -171,7 +169,7 @@ export default function Channels() {
 
   function submitEdit(values: ChannelFormValues) {
     if (!editing) return;
-    update.mutate({ id: editing.id, values: channelPayload(values) });
+    update.mutate({ id: editing.id, values: channelPayload(values, editing) });
   }
 
   function toggleEnabled(channel: Channel, enabled: boolean) {
