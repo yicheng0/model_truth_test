@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import os
 import asyncio
+import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Response
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .database import SessionLocal, get_db, init_db
+from .database import DATABASE_URL, SessionLocal, get_db, init_db
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .schemas import (
     BaselineBuildCreate,
@@ -22,6 +24,7 @@ from .schemas import (
     ChannelAlertReviewUpdate,
     ChannelCreate,
     ChannelRead,
+    BulkDeleteRequest,
     SignatureInteropTestCreate,
     SignatureInteropTestRead,
     ChannelTaxonomySettingRead,
@@ -40,6 +43,7 @@ from .schemas import (
     ReportDetailRead,
     ReportSummaryRead,
     ResultRead,
+    RunLogCleanupRead,
     RunChannelRead,
     RunCreate,
     RunRead,
@@ -55,6 +59,7 @@ from .schemas import (
     ScheduledChannelTestRead,
     ScheduledChannelTestUpdate,
     SmartPatrolReportRead,
+    SystemUsageRead,
     TestCaseCreate,
     TestCaseRead,
     TestCaseUpdate,
@@ -75,6 +80,7 @@ from .services import (
     create_case,
     create_channel,
     create_model_request_test,
+    create_signature_interop_test,
     create_run,
     create_scheduled_channel_test,
     create_suite,
@@ -106,7 +112,6 @@ from .services import (
     smart_patrol_report_markdown,
     suite_diff,
     suite_coverage,
-    test_signature_interop,
     update_channel_taxonomy_setting,
     update_feishu_setting,
     validate_baseline_for_run,
@@ -164,6 +169,92 @@ app.add_middleware(
 )
 
 
+TERMINAL_RUN_STATUSES = {"completed", "failed", "canceled", "interrupted"}
+ACTIVE_RUN_STATUSES = {"pending", "running"}
+
+
+def _database_file_path() -> Path | None:
+    if not DATABASE_URL.startswith("sqlite:///"):
+        return None
+    raw_path = DATABASE_URL.removeprefix("sqlite:///")
+    return Path(raw_path).resolve()
+
+
+def _database_size_bytes() -> int | None:
+    path = _database_file_path()
+    if not path or not path.exists():
+        return None
+    return path.stat().st_size
+
+
+def _memory_usage() -> dict[str, int | float | None]:
+    meminfo = Path("/proc/meminfo")
+    if not meminfo.exists():
+        return {
+            "memory_total_bytes": None,
+            "memory_available_bytes": None,
+            "memory_used_bytes": None,
+            "memory_used_percent": None,
+        }
+    values: dict[str, int] = {}
+    for line in meminfo.read_text(encoding="utf-8").splitlines():
+        key, _, rest = line.partition(":")
+        parts = rest.strip().split()
+        if not parts:
+            continue
+        try:
+            values[key] = int(parts[0]) * 1024
+        except ValueError:
+            continue
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    used = total - available if total is not None and available is not None else None
+    used_percent = round((used / total) * 100, 2) if total and used is not None else None
+    return {
+        "memory_total_bytes": total,
+        "memory_available_bytes": available,
+        "memory_used_bytes": used,
+        "memory_used_percent": used_percent,
+    }
+
+
+def _cleanup_candidate_run_ids(db: Session) -> tuple[list[str], int, int]:
+    terminal_run_ids = list(db.scalars(select(Run.id).where(Run.status.in_(TERMINAL_RUN_STATUSES))).all())
+    if not terminal_run_ids:
+        return [], 0, int(db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0)
+    baseline_run_ids = set(db.scalars(select(BaselineSnapshot.source_run_id).where(BaselineSnapshot.source_run_id.in_(terminal_run_ids))).all())
+    candidate_ids = [run_id for run_id in terminal_run_ids if run_id not in baseline_run_ids]
+    active_count = int(db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0)
+    return candidate_ids, len(baseline_run_ids), active_count
+
+
+def run_read(db: Session, run: Run) -> RunRead:
+    payload = RunRead.model_validate(run)
+    run_channels = db.scalars(select(RunChannel).where(RunChannel.run_id == run.id).order_by(RunChannel.role_in_run, RunChannel.channel_id)).all()
+    channel_by_id = {channel.id: channel for channel in db.scalars(select(Channel).where(Channel.id.in_([item.channel_id for item in run_channels]))).all()} if run_channels else {}
+    payload.channels = [
+        {
+            "channel_id": item.channel_id,
+            "channel_name": channel_by_id[item.channel_id].name if item.channel_id in channel_by_id else None,
+            "role_in_run": item.role_in_run,
+        }
+        for item in run_channels
+    ]
+    patrol_channel: Channel | None = None
+    if run.scheduled_test_id:
+        scheduled = db.get(ScheduledChannelTest, run.scheduled_test_id)
+        if scheduled:
+            patrol_channel = db.get(Channel, scheduled.channel_id)
+    if not patrol_channel and (run.scheduled_test_id or run.test_scope == "scheduled_probe"):
+        report = db.scalar(select(Report).where(Report.run_id == run.id).order_by(Report.created_at.desc()))
+        if report:
+            patrol_channel = db.get(Channel, report.channel_id)
+    if patrol_channel:
+        payload.patrol_channel_id = patrol_channel.id
+        payload.patrol_channel_name = patrol_channel.name
+    return payload
+
+
 def _baseline_reference_conflict(db: Session, baseline_id: str, source_run_id: str | None = None) -> str | None:
     run_stmt = select(Run).where(Run.baseline_snapshot_id == baseline_id)
     if source_run_id:
@@ -179,6 +270,72 @@ def _baseline_reference_conflict(db: Session, baseline_id: str, source_run_id: s
 def health(db: Session = Depends(get_db)) -> dict[str, str]:
     db.scalar(select(TestSuite).limit(1))
     return {"status": "ok", "database": "ok"}
+
+
+@app.get("/api/system/usage", response_model=SystemUsageRead)
+def system_usage(db: Session = Depends(get_db)) -> SystemUsageRead:
+    disk_path = Path.cwd()
+    disk = shutil.disk_usage(disk_path)
+    candidate_run_ids, skipped_baseline_runs, active_runs = _cleanup_candidate_run_ids(db)
+    database_path = _database_file_path()
+    return SystemUsageRead(
+        disk_path=str(disk_path),
+        disk_total_bytes=disk.total,
+        disk_used_bytes=disk.used,
+        disk_free_bytes=disk.free,
+        disk_used_percent=round((disk.used / disk.total) * 100, 2) if disk.total else 0,
+        database_path=str(database_path) if database_path else None,
+        database_size_bytes=_database_size_bytes(),
+        run_count=int(db.scalar(select(func.count()).select_from(Run)) or 0),
+        result_count=int(db.scalar(select(func.count()).select_from(Result)) or 0),
+        comparison_count=int(db.scalar(select(func.count()).select_from(Comparison)) or 0),
+        report_count=int(db.scalar(select(func.count()).select_from(Report)) or 0),
+        alert_count=int(db.scalar(select(func.count()).select_from(ChannelAlert)) or 0),
+        cleanup_candidate_run_count=len(candidate_run_ids),
+        cleanup_skipped_baseline_run_count=skipped_baseline_runs + active_runs,
+        **_memory_usage(),
+    )
+
+
+@app.post("/api/system/cleanup-run-logs", response_model=RunLogCleanupRead)
+def cleanup_run_logs(dry_run: bool = Query(False), db: Session = Depends(get_db)) -> RunLogCleanupRead:
+    candidate_run_ids, skipped_baseline_runs, active_runs = _cleanup_candidate_run_ids(db)
+    if not candidate_run_ids:
+        return RunLogCleanupRead(
+            dry_run=dry_run,
+            skipped_running_runs=active_runs,
+            skipped_baseline_runs=skipped_baseline_runs,
+        )
+
+    def count_for(model: type, field) -> int:  # noqa: ANN001
+        return int(db.scalar(select(func.count()).select_from(model).where(field.in_(candidate_run_ids))) or 0)
+
+    scheduled_refs = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(candidate_run_ids))).all())
+    payload = RunLogCleanupRead(
+        dry_run=dry_run,
+        deleted_runs=len(candidate_run_ids),
+        deleted_run_channels=count_for(RunChannel, RunChannel.run_id),
+        deleted_results=count_for(Result, Result.run_id),
+        deleted_comparisons=count_for(Comparison, Comparison.run_id),
+        deleted_reports=count_for(Report, Report.run_id),
+        deleted_alerts=count_for(ChannelAlert, ChannelAlert.run_id),
+        cleared_scheduled_last_run_refs=len(scheduled_refs),
+        skipped_running_runs=active_runs,
+        skipped_baseline_runs=skipped_baseline_runs,
+    )
+    if dry_run:
+        return payload
+
+    for scheduled in scheduled_refs:
+        scheduled.last_run_id = None
+    db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(candidate_run_ids)))
+    db.execute(delete(RunChannel).where(RunChannel.run_id.in_(candidate_run_ids)))
+    db.execute(delete(Result).where(Result.run_id.in_(candidate_run_ids)))
+    db.execute(delete(Comparison).where(Comparison.run_id.in_(candidate_run_ids)))
+    db.execute(delete(Report).where(Report.run_id.in_(candidate_run_ids)))
+    db.execute(delete(Run).where(Run.id.in_(candidate_run_ids)))
+    db.commit()
+    return payload
 
 
 @app.get("/api/channels", response_model=list[ChannelRead])
@@ -248,12 +405,10 @@ async def channel_signature_interop_test(data: SignatureInteropTestCreate, db: S
         raise HTTPException(status_code=404, detail="Source channel not found")
     if not relay:
         raise HTTPException(status_code=404, detail="Relay channel not found")
-    try:
-        return await test_signature_interop(source, relay, data.stream)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    payload = await create_signature_interop_test(db, source, relay, data.stream)
+    if isinstance(payload.get("run"), Run):
+        payload["run"] = run_read(db, payload["run"])
+    return payload
 
 
 @app.post("/api/channels/{channel_id}/model-request-test", response_model=ModelRequestTestRead)
@@ -424,7 +579,7 @@ def remove_test_case_alias(case_id: str, db: Session = Depends(get_db)) -> dict[
 
 
 @app.post("/api/eval-runs", response_model=RunRead)
-def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Run:
+def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> RunRead:
     try:
         run = create_run(db, data)
     except ValueError as exc:
@@ -437,21 +592,21 @@ def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = 
         data.use_mock,
         benchmark_config=data.benchmark_config.model_dump() if data.benchmark_config else None,
     )
-    return run
+    return run_read(db, run)
 
 
 @app.get("/api/eval-runs", response_model=list[RunRead])
-def list_runs(db: Session = Depends(get_db)) -> list[Run]:
-    return list(db.scalars(select(Run).order_by(Run.created_at.desc())).all())
+def list_runs(db: Session = Depends(get_db)) -> list[RunRead]:
+    return [run_read(db, run) for run in db.scalars(select(Run).order_by(Run.created_at.desc())).all()]
 
 
 @app.get("/api/runs", response_model=list[RunRead])
-def list_runs_alias(db: Session = Depends(get_db)) -> list[Run]:
+def list_runs_alias(db: Session = Depends(get_db)) -> list[RunRead]:
     return list_runs(db)
 
 
 @app.post("/api/runs", response_model=RunRead)
-def start_run_alias(data: RunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Run:
+def start_run_alias(data: RunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> RunRead:
     return start_run(data, background_tasks, db)
 
 
@@ -464,7 +619,7 @@ def preview_run_sample_plan(data: SamplePlanCreate, db: Session = Depends(get_db
 
 
 @app.post("/api/runs/arena", response_model=RunRead)
-def start_arena_run(data: ArenaRunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Run:
+def start_arena_run(data: ArenaRunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> RunRead:
     channel_ids = {"candidate": data.candidate_channel_ids}
     if data.judge_channel_id and not db.get(Channel, data.judge_channel_id):
         raise HTTPException(status_code=404, detail="Judge channel not found")
@@ -494,7 +649,7 @@ def start_arena_run(data: ArenaRunCreate, background_tasks: BackgroundTasks, db:
         data.use_mock,
         arena_config={"judge_channel_id": data.judge_channel_id, "judge_mode": data.judge_mode, "judge_rubric": data.judge_rubric},
     )
-    return run
+    return run_read(db, run)
 
 
 @app.get("/api/baselines", response_model=list[BaselineSnapshotRead])
@@ -733,7 +888,11 @@ def delete_scheduled_test(scheduled_id: str, db: Session = Depends(get_db)) -> d
 
 
 @app.post("/api/scheduled-tests/{scheduled_id}/run-now", response_model=ScheduledChannelTestRead)
-async def run_scheduled_test_now(scheduled_id: str, db: Session = Depends(get_db)) -> ScheduledChannelTestRead:
+async def run_scheduled_test_now(
+    scheduled_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ScheduledChannelTestRead:
     scheduled = db.get(ScheduledChannelTest, scheduled_id)
     if not scheduled:
         raise HTTPException(status_code=404, detail="Scheduled test not found")
@@ -745,12 +904,8 @@ async def run_scheduled_test_now(scheduled_id: str, db: Session = Depends(get_db
     scheduled.last_error = None
     db.commit()
     db.refresh(scheduled)
-    await execute_scheduled_channel_test(SessionLocal, scheduled.id)
-    with SessionLocal() as read_db:
-        refreshed = read_db.get(ScheduledChannelTest, scheduled.id)
-        if not refreshed:
-            raise HTTPException(status_code=404, detail="Scheduled test not found")
-        return ScheduledChannelTestRead.model_validate(scheduled_channel_test_read(read_db, refreshed))
+    background_tasks.add_task(execute_scheduled_channel_test, SessionLocal, scheduled.id)
+    return ScheduledChannelTestRead.model_validate(scheduled_channel_test_read(db, scheduled))
 
 
 @app.get("/api/alerts", response_model=list[ChannelAlertRead])
@@ -781,6 +936,28 @@ def get_alert(alert_id: str, db: Session = Depends(get_db)) -> dict[str, object]
     return channel_alert_read(db, alert)
 
 
+@app.delete("/api/alerts/{alert_id}")
+def delete_alert(alert_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+    alert = db.get(ChannelAlert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    db.delete(alert)
+    db.commit()
+    return {"deleted": True}
+
+
+@app.post("/api/alerts/bulk-delete")
+def bulk_delete_alerts(data: BulkDeleteRequest, db: Session = Depends(get_db)) -> dict[str, object]:
+    if not data.ids:
+        return {"deleted": 0, "missing": []}
+    existing_ids = set(db.scalars(select(ChannelAlert.id).where(ChannelAlert.id.in_(data.ids))).all())
+    missing = [alert_id for alert_id in data.ids if alert_id not in existing_ids]
+    if existing_ids:
+        db.execute(delete(ChannelAlert).where(ChannelAlert.id.in_(existing_ids)))
+        db.commit()
+    return {"deleted": len(existing_ids), "missing": missing}
+
+
 @app.patch("/api/alerts/{alert_id}/review", response_model=ChannelAlertRead)
 def review_alert(alert_id: str, data: ChannelAlertReviewUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     alert = db.get(ChannelAlert, alert_id)
@@ -808,7 +985,14 @@ async def resend_alert_notification(alert_id: str, db: Session = Depends(get_db)
 
 
 @app.get("/api/eval-runs/{run_id}", response_model=RunRead)
-def get_run(run_id: str, db: Session = Depends(get_db)) -> Run:
+def get_run(run_id: str, db: Session = Depends(get_db)) -> RunRead:
+    run = db.get(Run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run_read(db, run)
+
+
+def require_run(db: Session, run_id: str) -> Run:
     run = db.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -816,13 +1000,15 @@ def get_run(run_id: str, db: Session = Depends(get_db)) -> Run:
 
 
 @app.get("/api/runs/{run_id}", response_model=RunRead)
-def get_run_alias(run_id: str, db: Session = Depends(get_db)) -> Run:
+def get_run_alias(run_id: str, db: Session = Depends(get_db)) -> RunRead:
     return get_run(run_id, db)
 
 
 @app.get("/api/runs/{run_id}/progress")
 def run_progress_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
-    run = get_run(run_id, db)
+    run = db.get(Run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
     percent = 100 if run.total_jobs == 0 else round(run.completed_jobs / run.total_jobs * 100, 1)
     return {"run_id": run.id, "status": run.status, "completed_jobs": run.completed_jobs, "total_jobs": run.total_jobs, "percent": percent}
 
@@ -856,7 +1042,7 @@ def get_run_results(run_id: str, db: Session = Depends(get_db)) -> RunResultsRea
             ).all()
         )
     return RunResultsRead(
-        run=run,
+        run=run_read(db, run),
         run_channels=list(run_channels),
         results=list(results),
         comparisons=list(comparisons),
@@ -873,25 +1059,25 @@ def get_run_results_alias(run_id: str, db: Session = Depends(get_db)) -> RunResu
 
 @app.get("/api/runs/{run_id}/raw-results", response_model=list[ResultRead])
 def get_run_raw_results_alias(run_id: str, db: Session = Depends(get_db)) -> list[Result]:
-    get_run(run_id, db)
+    require_run(db, run_id)
     return list(db.scalars(select(Result).where(Result.run_id == run_id).order_by(Result.test_case_id, Result.channel_id)).all())
 
 
 @app.get("/api/runs/{run_id}/comparisons", response_model=list[ComparisonRead])
 def get_run_comparisons_alias(run_id: str, db: Session = Depends(get_db)) -> list[Comparison]:
-    get_run(run_id, db)
+    require_run(db, run_id)
     return list(db.scalars(select(Comparison).where(Comparison.run_id == run_id).order_by(Comparison.test_case_id)).all())
 
 
 @app.get("/api/runs/{run_id}/comparisons/{test_case_id}", response_model=list[ComparisonRead])
 def get_run_case_comparisons_alias(run_id: str, test_case_id: str, db: Session = Depends(get_db)) -> list[Comparison]:
-    get_run(run_id, db)
+    require_run(db, run_id)
     return list(db.scalars(select(Comparison).where(Comparison.run_id == run_id, Comparison.test_case_id == test_case_id)).all())
 
 
 @app.post("/api/runs/{run_id}/cancel")
 def cancel_run_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
-    run = get_run(run_id, db)
+    run = require_run(db, run_id)
     if run.status in {"pending", "running"}:
         run.status = "canceled"
         run.finished_at = datetime.now(timezone.utc)
@@ -925,7 +1111,7 @@ def delete_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
 
 @app.post("/api/runs/{run_id}/generate-report", response_model=list[ReportRead])
 def generate_report_alias(run_id: str, db: Session = Depends(get_db)) -> list[Report]:
-    run = get_run(run_id, db)
+    run = require_run(db, run_id)
     build_comparisons(db, run_id, run.baseline_snapshot_id)
     build_reports(db, run_id)
     return list(db.scalars(select(Report).where(Report.run_id == run_id).order_by(Report.final_score.desc())).all())
@@ -981,6 +1167,42 @@ def download_report_alias(run_id: str, db: Session = Depends(get_db)) -> Respons
 @app.get("/api/reports", response_model=list[ReportRead])
 def list_reports_alias(db: Session = Depends(get_db)) -> list[Report]:
     return list(db.scalars(select(Report).order_by(Report.created_at.desc())).all())
+
+
+def _delete_report_by_id(db: Session, report_id: str) -> bool:
+    report = db.get(Report, report_id)
+    if not report:
+        return False
+    db.execute(delete(ChannelAlert).where(ChannelAlert.report_id == report_id))
+    db.delete(report)
+    return True
+
+
+@app.post("/api/reports/bulk-delete")
+def bulk_delete_reports(
+    payload: dict[str, list[str]] = Body(...),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    report_ids = [str(item).strip() for item in payload.get("ids", []) if str(item).strip()]
+    if not report_ids:
+        raise HTTPException(status_code=400, detail="Select at least one report")
+    deleted = 0
+    missing: list[str] = []
+    for report_id in dict.fromkeys(report_ids):
+        if _delete_report_by_id(db, report_id):
+            deleted += 1
+        else:
+            missing.append(report_id)
+    db.commit()
+    return {"deleted": deleted, "missing": missing}
+
+
+@app.delete("/api/reports/{report_id}")
+def delete_report_alias(report_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+    if not _delete_report_by_id(db, report_id):
+        raise HTTPException(status_code=404, detail="Report not found")
+    db.commit()
+    return {"deleted": True}
 
 
 @app.get("/api/reports/summary", response_model=list[ReportSummaryRead])

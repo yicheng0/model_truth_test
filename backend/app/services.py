@@ -149,6 +149,8 @@ ALERT_RED_FLAGS = {
     "unexpected_error_response",
     "web_search_not_rejected",
     "thinking_adaptive_enabled_not_rejected",
+    "thinking_adaptive_enabled_wrong_error",
+    "signature_source_missing",
 }
 
 REQUEST_PROTOCOL_AUTO = "auto"
@@ -327,7 +329,9 @@ def update_feishu_setting(db: Session, data: FeishuBroadcastSettingUpdate) -> Fe
         if key in values:
             setattr(setting, key, values[key])
     if "webhook_url" in values:
-        setting.webhook_url = (values["webhook_url"] or "").strip() or None
+        webhook_url = (values["webhook_url"] or "").strip()
+        if webhook_url:
+            setting.webhook_url = webhook_url
     if data.clear_webhook_secret:
         setting.webhook_secret = None
     elif "webhook_secret" in values:
@@ -342,6 +346,8 @@ def update_feishu_setting(db: Session, data: FeishuBroadcastSettingUpdate) -> Fe
     if "timezone" in values and values["timezone"]:
         _zoneinfo(values["timezone"])
         setting.timezone = values["timezone"]
+    if setting.enabled and not setting.webhook_url:
+        raise ValueError("飞书 Webhook 未配置，请先保存 Webhook")
     db.commit()
     db.refresh(setting)
     return setting
@@ -1151,7 +1157,7 @@ def scheduled_probe_context(db: Session, suite_id: str | None = None, baseline_s
             source_channel_ids = [channel.id for channel in db.scalars(select(Channel).where(Channel.enabled.is_(True)).limit(1)).all()]
         snapshot = BaselineSnapshot(
             id="scheduled_probe_baseline",
-            name="自动巡检双探针默认指纹",
+            name="自动巡检默认指纹",
             suite_id=suite.id,
             source_run_id=None,
             status="ready",
@@ -1259,6 +1265,33 @@ def metrics_from_normalized(normalized: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _manual_probe_case(
+    db: Session,
+    *,
+    title: str,
+    prompt: str,
+    system_prompt: str | None,
+    request_params: dict[str, Any],
+    scoring_rules: dict[str, Any] | None = None,
+) -> TestCase:
+    suite = _manual_probe_suite(db)
+    case = TestCase(
+        id=new_id("case"),
+        suite_id=suite.id,
+        module="manual_probe",
+        sort_order=1,
+        title=title,
+        prompt=prompt,
+        system_prompt=system_prompt.strip() if system_prompt else None,
+        request_params=request_params,
+        scoring_rules=scoring_rules or {},
+        is_hidden=False,
+        enabled=True,
+    )
+    db.add(case)
+    return case
+
+
 def _manual_probe_suite(db: Session) -> TestSuite:
     suite = db.get(TestSuite, MANUAL_PROBE_SUITE_ID)
     if suite:
@@ -1292,26 +1325,20 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
     if not channel.enabled:
         raise ValueError("Channel is disabled")
 
-    suite = _manual_probe_suite(db)
     request_params = data.request_params or {}
     scoring_rules = _manual_probe_scoring_rules(request_params)
-    case = TestCase(
-        id=new_id("case"),
-        suite_id=suite.id,
-        module="manual_probe",
-        sort_order=1,
+    case = _manual_probe_case(
+        db,
         title="手动真实模型请求",
         prompt=prompt,
-        system_prompt=data.system_prompt.strip() if data.system_prompt else None,
+        system_prompt=data.system_prompt,
         request_params=request_params,
         scoring_rules=scoring_rules,
-        is_hidden=False,
-        enabled=True,
     )
     started_at = datetime.now(timezone.utc)
     run = Run(
         id=new_id("run"),
-        suite_id=suite.id,
+        suite_id=case.suite_id,
         name=(data.run_name or f"手动模型请求 · {channel.name}")[:200],
         mode=MANUAL_PROBE_MODE,
         test_scope="quick",
@@ -1322,7 +1349,6 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
         completed_jobs=0,
         started_at=started_at,
     )
-    db.add(case)
     db.add(run)
     db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=channel.id, role_in_run=channel.role or "candidate"))
     db.commit()
@@ -1406,7 +1432,9 @@ SCHEDULED_THINKING_ADAPTIVE_PARAMS: dict[str, Any] = {
         "max_tokens": 2000,
     },
     "expected_error_required_all": ["enabled", "not supported", "output_config.effort"],
+    "expected_error_variant_any": ["temperature may only be set to 1 when thinking is enabled", "temperature", "thinking"],
     "expected_error_missing_label": "thinking_adaptive_enabled_not_rejected",
+    "expected_error_variant_label": "provider_error_variant",
     "expected_error_unexpected_label": "thinking_adaptive_enabled_wrong_error",
 }
 
@@ -1441,7 +1469,7 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
     run = Run(
         id=new_id("run"),
         suite_id=suite.id,
-        name=f"自动巡检真实模型请求 · {scheduled.name}"[:200],
+        name=f"{channel.name} - 自动巡检资源"[:200],
         mode=MANUAL_PROBE_MODE,
         test_scope="quick",
         status="running",
@@ -1481,6 +1509,7 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
         db.add(result)
         db.commit()
         db.refresh(result)
+        completed_at = result.created_at or datetime.now(timezone.utc)
         probe_results.append(
             {
                 "key": probe["key"],
@@ -1489,8 +1518,11 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
                 "result_id": result.id,
                 "message_id": normalized.get("provider_message_id"),
                 "message_channel_type": classify_claude_message_id(normalized.get("provider_message_id")),
+                "request_id": request_id_from_normalized(normalized),
                 "request_protocol": normalized.get("request_protocol"),
                 "provider_endpoint": normalized.get("provider_endpoint"),
+                "created_at": completed_at.isoformat(),
+                "completed_at": completed_at.isoformat(),
                 "labels": result.labels or [],
                 "score": result.score,
                 "error": normalized.get("error"),
@@ -1509,8 +1541,11 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
         "results": probe_results,
         "message_id": primary.get("message_id"),
         "message_channel_type": primary.get("message_channel_type"),
+        "request_id": primary.get("request_id"),
         "request_protocol": primary.get("request_protocol"),
         "provider_endpoint": primary.get("provider_endpoint"),
+        "created_at": primary.get("created_at"),
+        "completed_at": primary.get("completed_at"),
         "error": primary.get("error"),
     }
 
@@ -1748,7 +1783,7 @@ async def execute_scheduled_channel_test(
                 max_retries = max(0, scheduled.max_retries)
                 retry_interval_minutes = max(1, scheduled.retry_interval_minutes)
                 use_mock = scheduled.use_mock
-                run_name = f"自动巡检 - {scheduled.name}"
+                run_name = f"{channel.name} - 资源检测 - {scheduled.name}"
                 if attempt_index:
                     run_name = f"{run_name}（重试 {attempt_index}/{max_retries}）"
                 run = create_run(
@@ -1834,7 +1869,9 @@ async def attach_signature_interop_to_scheduled_run(
                 "status": "skipped",
                 "reason": "mock 巡检未发起 Thinking Signature 互通检测",
                 "source_channel_id": source.id,
+                "source_channel_name": source.name,
                 "relay_channel_id": relay.id,
+                "relay_channel_name": relay.name,
                 "fallback_note": SIGNATURE_FALLBACK_NOTE,
                 "steps": [
                     {
@@ -1891,6 +1928,7 @@ def _attach_signature_interop_result_to_reports(
     for report in reports:
         evidence = dict(report.evidence or {})
         labels = sorted({str(label) for label in evidence.get("labels", []) if isinstance(label, str)})
+        labels = sorted(set(labels).union(str(label) for label in signature_result.get("labels", []) if isinstance(label, str)))
         if signature_result.get("status") != "skipped" and not signature_result.get("ok") and "signature_interop_failed" not in labels:
             labels.append("signature_interop_failed")
         evidence["labels"] = sorted(labels)
@@ -1922,16 +1960,32 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "status": result.get("status"),
         "reason": result.get("reason"),
         "source_channel_id": result.get("source_channel_id"),
+        "source_channel_name": result.get("source_channel_name"),
         "relay_channel_id": result.get("relay_channel_id"),
+        "relay_channel_name": result.get("relay_channel_name"),
         "source_message_id": result.get("source_message_id"),
         "source_message_channel_type": result.get("source_message_channel_type"),
+        "source_request_id": result.get("source_request_id"),
         "relay_message_id": result.get("relay_message_id"),
         "relay_message_channel_type": result.get("relay_message_channel_type"),
+        "relay_request_id": result.get("relay_request_id"),
         "thinking_block_count": result.get("thinking_block_count"),
         "signature_prefixes": result.get("signature_prefixes") or [],
         "fallback_note": result.get("fallback_note") or SIGNATURE_FALLBACK_NOTE,
         "steps": result.get("steps") or [],
     }
+
+
+def _hydrate_signature_channel_names(db: Session, signature: dict[str, Any]) -> dict[str, Any]:
+    source_id = signature.get("source_channel_id")
+    relay_id = signature.get("relay_channel_id")
+    if source_id and not signature.get("source_channel_name"):
+        source = db.get(Channel, source_id)
+        signature["source_channel_name"] = source.name if source else None
+    if relay_id and not signature.get("relay_channel_name"):
+        relay = db.get(Channel, relay_id)
+        signature["relay_channel_name"] = relay.name if relay else None
+    return signature
 
 
 async def execute_scheduled_probe_run(
@@ -2007,10 +2061,15 @@ def build_scheduled_probe_report(
     channel = db.get(Channel, scheduled.channel_id)
     result = model_payload.get("result") if model_payload else None
     model_requests = _scheduled_model_request_evidence(model_payload)
+    for item in model_requests:
+        item["channel_id"] = channel.id if channel else scheduled.channel_id
+        item["channel_name"] = channel.name if channel else None
     labels = {label for item in model_requests for label in item.get("labels", []) if isinstance(label, str)}
     if isinstance(result, Result):
         labels.update(result.labels or [])
     signature_evidence = _signature_interop_report_evidence(signature_result or {})
+    _hydrate_signature_channel_names(db, signature_evidence)
+    labels.update(label for label in (signature_result or {}).get("labels", []) if isinstance(label, str))
     if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok"):
         labels.add("signature_interop_failed")
     probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
@@ -2034,7 +2093,7 @@ def build_scheduled_probe_report(
         "detected_provider_hint": provider_hint,
         "test_scope": "scheduled_probe",
     }
-    summary = f"自动巡检双探针完成：{provider_hint}。"
+    summary = f"自动巡检完成：{provider_hint}。"
     existing = db.scalar(select(Report).where(Report.run_id == run_id, Report.channel_id == scheduled.channel_id))
     if existing:
         report = existing
@@ -2070,11 +2129,16 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
                 "key": str(item.get("key") or "unknown"),
                 "title": item.get("title") or item.get("key") or "真实模型请求",
                 "run_id": item.get("run_id") or (model_payload.get("run").id if model_payload.get("run") else None),
+                "channel_id": item.get("channel_id"),
+                "channel_name": item.get("channel_name"),
                 "result_id": item.get("result_id"),
                 "message_id": item.get("message_id"),
                 "message_channel_type": item.get("message_channel_type"),
+                "request_id": item.get("request_id"),
                 "request_protocol": item.get("request_protocol"),
                 "provider_endpoint": item.get("provider_endpoint"),
+                "created_at": item.get("created_at"),
+                "completed_at": item.get("completed_at"),
                 "labels": item.get("labels") if isinstance(item.get("labels"), list) else [],
                 "score": item.get("score"),
                 "error": item.get("error"),
@@ -2089,11 +2153,16 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
             "key": "thinking_temperature",
             "title": "Thinking temperature 冲突",
             "run_id": model_payload.get("run").id if model_payload.get("run") else None,
+            "channel_id": model_payload.get("channel_id"),
+            "channel_name": model_payload.get("channel_name"),
             "result_id": result.id if isinstance(result, Result) else None,
             "message_id": model_payload.get("message_id"),
             "message_channel_type": model_payload.get("message_channel_type"),
+            "request_id": model_payload.get("request_id"),
             "request_protocol": model_payload.get("request_protocol"),
             "provider_endpoint": model_payload.get("provider_endpoint"),
+            "created_at": model_payload.get("created_at") or (result.created_at.isoformat() if isinstance(result, Result) and result.created_at else None),
+            "completed_at": model_payload.get("completed_at") or (result.created_at.isoformat() if isinstance(result, Result) and result.created_at else None),
             "labels": (result.labels or []) if isinstance(result, Result) else [],
             "score": result.score if isinstance(result, Result) else None,
             "error": model_payload.get("error"),
@@ -2107,16 +2176,17 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
     if not model_requests and isinstance(evidence.get("model_request"), dict):
         model_requests = [evidence["model_request"]]
     model_rows = "\n".join(
-        f"| {item.get('title') or item.get('key') or '-'} | {_probe_status_text(item)} | {item.get('result_id') or '-'} | {item.get('message_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
+        f"| {item.get('title') or item.get('key') or '-'} | {item.get('channel_name') or '-'} ({item.get('channel_id') or '-'}) | {_probe_status_text(item)} | {item.get('completed_at') or item.get('created_at') or '-'} | {item.get('result_id') or '-'} | {item.get('message_id') or '-'} | {item.get('request_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
         for item in model_requests
         if isinstance(item, dict)
-    ) or "| - | - | - | - | - | - | - | - |"
+    ) or "| - | - | - | - | - | - | - | - | - | - | - |"
     signature = evidence.get("signature_interop") or {}
-    return f"""# 自动巡检双探针报告
+    return f"""# {channel.name} - 自动巡检资源报告
 
 ## 基本信息
 
 - 渠道：{channel.name}
+- 渠道 ID：{channel.id}
 - 声称模型：{channel.model_name or "未配置"}
 - 评级：{grade}
 - 总分：{score:.1f} / 100
@@ -2125,16 +2195,20 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
 
 ## 真实模型请求
 
-| 参数探针 | 状态 | Result ID | Message ID | 请求协议 | Provider endpoint | 标签 | 错误 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
+| 参数探针 | 渠道 | 状态 | 时间 | Result ID | Message ID | Request ID | 请求协议 | Provider endpoint | 标签 | 错误 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 {model_rows}
 
 ## Thinking Signature 互通
 
 - 状态：{signature.get("status") or "-"}
+- Source 渠道：{signature.get("source_channel_name") or "-"} ({signature.get("source_channel_id") or "-"})
 - 来源 message id：{signature.get("source_message_id") or "-"}
+- 来源 request id：{signature.get("source_request_id") or "-"}
 - 来源渠道类型：{signature.get("source_message_channel_type") or "-"}
+- Relay 渠道：{signature.get("relay_channel_name") or "-"} ({signature.get("relay_channel_id") or "-"})
 - Relay message id：{signature.get("relay_message_id") or "-"}
+- Relay request id：{signature.get("relay_request_id") or "-"}
 - Relay 渠道类型：{signature.get("relay_message_channel_type") or "-"}
 - Signature 前缀：{", ".join(signature.get("signature_prefixes") or []) or "-"}
 - 判定：{signature.get("reason") or "-"}
@@ -2170,23 +2244,43 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
     report = db.get(Report, alert.report_id)
     if not report:
         return None
+    channel = db.get(Channel, alert.channel_id)
+    run = db.get(Run, alert.run_id)
     evidence = report.evidence or {}
     model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
     model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
     signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    labels = report_labels(report)
+    label_descriptions = [
+        item["description"]
+        for item in label_explanations(labels)
+        if isinstance(item, dict) and item.get("description")
+    ]
+    error_message = alert_error_message(evidence, labels, alert.message)
     return {
         "run_id": alert.run_id,
+        "run_name": run.name if run else None,
         "report_id": alert.report_id,
+        "channel_id": alert.channel_id,
+        "channel_name": channel.name if channel else alert.channel_id,
+        "channel_provider_type": channel.provider_type if channel else None,
+        "channel_model_name": channel.model_name if channel else None,
+        "error_message": error_message,
         "model_request_result_id": model_request.get("result_id"),
         "model_request_message_id": model_request.get("message_id"),
+        "model_request_request_id": model_request.get("request_id"),
         "model_request_channel_type": model_request.get("message_channel_type"),
         "model_requests": model_requests,
         "request_protocol": model_request.get("request_protocol"),
         "provider_endpoint": model_request.get("provider_endpoint"),
+        "signature_reason": signature.get("reason"),
         "signature_source_message_id": signature.get("source_message_id"),
+        "signature_source_request_id": signature.get("source_request_id"),
         "signature_source_channel_type": signature.get("source_message_channel_type"),
         "signature_relay_message_id": signature.get("relay_message_id"),
+        "signature_relay_request_id": signature.get("relay_request_id"),
         "signature_relay_channel_type": signature.get("relay_message_channel_type"),
+        "label_explanations": label_descriptions,
         "detected_provider_hint": evidence.get("detected_provider_hint"),
     }
 
@@ -2279,6 +2373,40 @@ def _json_contains_query(value: Any, normalized_query: str) -> bool:
     return _value_contains_query(value, normalized_query)
 
 
+def alert_error_message(evidence: dict[str, Any], labels: list[str] | None = None, fallback: str | None = None) -> str:
+    model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    for item in [model_request, *[entry for entry in model_requests if isinstance(entry, dict)]]:
+        error = item.get("error")
+        if error:
+            title = item.get("title") or item.get("key")
+            return f"{title}：{error}" if title else str(error)
+    signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    if signature.get("status") == "fail" or signature.get("reason"):
+        return str(signature.get("reason") or "Thinking Signature 互通检测未通过")
+    descriptions = [
+        item["description"]
+        for item in label_explanations(labels or [])
+        if isinstance(item, dict) and item.get("description")
+    ]
+    if descriptions:
+        return "；".join(descriptions[:2])
+    if fallback:
+        return scoreless_alert_message(fallback)
+    return "渠道自动巡检异常"
+
+
+def scoreless_alert_message(value: str | None) -> str:
+    text = (value or "").strip()
+    if not text:
+        return "渠道自动巡检异常"
+    text = re.sub(r"：评级\s*[A-E]，得分\s*\d+(?:\.\d+)?", "：自动巡检异常", text)
+    text = re.sub(r"评级\s*[A-E][，,]?\s*", "", text)
+    text = re.sub(r"得分\s*\d+(?:\.\d+)?", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" ，,")
+    return text or "渠道自动巡检异常"
+
+
 def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -> dict[str, Any]:
     if not scheduled.last_run_id:
         return {
@@ -2305,8 +2433,12 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
     if not model_requests and model_request:
         model_requests = [model_request]
     signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    _hydrate_signature_channel_names(db, signature)
+    channel = db.get(Channel, scheduled.channel_id)
+    model_channel_id = channel.id if channel else scheduled.channel_id
+    model_channel_name = channel.name if channel else None
     labels = evidence.get("labels") if isinstance(evidence.get("labels"), list) else []
-    label_explanations = evidence.get("label_explanations") if isinstance(evidence.get("label_explanations"), dict) else {}
+    label_explanations = evidence.get("label_explanations") if isinstance(evidence.get("label_explanations"), list) else []
     return {
         "latest_report_id": report.id,
         "latest_grade": report.grade,
@@ -2314,11 +2446,16 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
         "latest_probe_summary": {
             "model_request": {
                 "status": _probe_summary_status(model_request),
+                "channel_id": model_request.get("channel_id") or model_channel_id,
+                "channel_name": model_request.get("channel_name") or model_channel_name,
                 "result_id": model_request.get("result_id"),
                 "message_id": model_request.get("message_id"),
                 "message_channel_type": model_request.get("message_channel_type"),
+                "request_id": model_request.get("request_id"),
                 "request_protocol": model_request.get("request_protocol"),
                 "provider_endpoint": model_request.get("provider_endpoint"),
+                "created_at": model_request.get("created_at"),
+                "completed_at": model_request.get("completed_at"),
                 "error": model_request.get("error"),
             },
             "model_requests": [
@@ -2326,11 +2463,16 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
                     "key": item.get("key"),
                     "title": item.get("title"),
                     "status": _probe_summary_status(item),
+                    "channel_id": item.get("channel_id") or model_channel_id,
+                    "channel_name": item.get("channel_name") or model_channel_name,
                     "result_id": item.get("result_id"),
                     "message_id": item.get("message_id"),
                     "message_channel_type": item.get("message_channel_type"),
+                    "request_id": item.get("request_id"),
                     "request_protocol": item.get("request_protocol"),
                     "provider_endpoint": item.get("provider_endpoint"),
+                    "created_at": item.get("created_at"),
+                    "completed_at": item.get("completed_at"),
                     "labels": item.get("labels") if isinstance(item.get("labels"), list) else [],
                     "score": item.get("score"),
                     "error": item.get("error"),
@@ -2342,11 +2484,15 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
                 "status": signature.get("status"),
                 "reason": signature.get("reason"),
                 "source_channel_id": signature.get("source_channel_id"),
+                "source_channel_name": signature.get("source_channel_name"),
                 "relay_channel_id": signature.get("relay_channel_id"),
+                "relay_channel_name": signature.get("relay_channel_name"),
                 "source_message_id": signature.get("source_message_id"),
                 "source_message_channel_type": signature.get("source_message_channel_type"),
+                "source_request_id": signature.get("source_request_id"),
                 "relay_message_id": signature.get("relay_message_id"),
                 "relay_message_channel_type": signature.get("relay_message_channel_type"),
+                "relay_request_id": signature.get("relay_request_id"),
                 "signature_prefixes": signature.get("signature_prefixes") or [],
             },
             "labels": labels,
@@ -2436,7 +2582,7 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
                 continue
             channel = db.get(Channel, report.channel_id)
             severity = "critical" if report.grade == "E" or ALERT_RED_FLAGS.intersection(labels) else "high"
-            message = f"{channel.name if channel else report.channel_id} 自动巡检异常：评级 {report.grade}，得分 {report.final_score:.1f}"
+            message = f"{channel.name if channel else report.channel_id} 自动巡检异常：{alert_error_message(report.evidence or {}, labels)}"
             alert = ChannelAlert(
                 id=new_id("alert"),
                 scheduled_test_id=scheduled_id,
@@ -2472,7 +2618,7 @@ def report_labels(report: Report) -> list[str]:
 def report_needs_alert(report: Report, labels: list[str] | None = None, scheduled: ScheduledChannelTest | None = None) -> bool:
     labels = labels if labels is not None else report_labels(report)
     if scheduled and scheduled.test_scope == "scheduled_probe":
-        return bool(ALERT_RED_FLAGS.intersection(labels))
+        return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels)) or (report.final_score < 90 and bool(labels))
     if not scheduled:
         return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels))
     threshold = scheduled.alert_grade_threshold if scheduled.alert_grade_threshold in {"C", "D", "E"} else "D"
@@ -2554,12 +2700,8 @@ async def send_feishu_test_message(db: Session) -> dict[str, Any]:
     if not setting.enabled:
         return {"ok": False, "status": "skipped", "message": "飞书播报未启用"}
     if not setting.webhook_url:
-        return {"ok": False, "status": "skipped", "message": "飞书 Webhook 未配置"}
-    payload = feishu_signed_payload(
-        "Claude 渠道自动巡检测试消息\n"
-        "如果你收到这条消息，说明飞书机器人配置可用。",
-        setting.webhook_secret,
-    )
+        return {"ok": False, "status": "skipped", "message": "飞书 Webhook 未配置，请先保存 Webhook"}
+    payload = feishu_signed_payload("哈喽", setting.webhook_secret)
     try:
         await post_feishu_payload(setting.webhook_url, payload)
     except Exception as exc:
@@ -2574,13 +2716,21 @@ def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadca
     run_link = f"{app_base_url}/runs/{alert.run_id}" if app_base_url else f"/runs/{alert.run_id}"
     review_link = f"{app_base_url}/scheduled-tests?alert={alert.id}" if app_base_url else f"/scheduled-tests?alert={alert.id}"
     labels = ", ".join(alert.trigger_labels or []) or "无"
+    evidence = alert_evidence_summary(db, alert) or {}
+    message_id = evidence.get("model_request_message_id") or evidence.get("signature_relay_message_id") or evidence.get("signature_source_message_id")
+    request_id = evidence.get("model_request_request_id") or evidence.get("signature_relay_request_id") or evidence.get("signature_source_request_id")
+    result_id = evidence.get("model_request_result_id")
+    detail = evidence.get("error_message") or scoreless_alert_message(alert.message)
     text = (
         "Claude 渠道自动巡检发现异常\n"
-        f"渠道：{channel.name if channel else alert.channel_id}\n"
+        f"渠道：{channel.name if channel else alert.channel_id}（{alert.channel_id}）\n"
+        f"模型：{channel.model_name if channel else '-'}\n"
         f"任务：{run.name if run else alert.run_id}\n"
-        f"评级：{alert.grade}\n"
-        f"得分：{alert.final_score:.1f}\n"
+        f"错误：{detail}\n"
         f"异常标签：{labels}\n"
+        f"Result ID：{result_id or '-'}\n"
+        f"消息ID：{message_id or '-'}\n"
+        f"Request ID：{request_id or '-'}\n"
         f"报告：{run_link}\n"
         f"复审：{review_link}"
     )
@@ -2702,14 +2852,12 @@ def _date_key(value: datetime) -> str:
 
 
 def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
-    avg_score = "-" if report["avg_score"] is None else f"{report['avg_score']:.1f}"
-    grade_line = "、".join(f"{grade}:{count}" for grade, count in report["grade_distribution"].items())
     channel_lines = "\n".join(
-        f"- {item['channel_name']}：巡检 {item['run_count']} 次，异常 {item['alert_count']} 次，待复审 {item['pending_review_count']}，均分 {item['avg_score'] if item['avg_score'] is not None else '-'}"
+        f"- {item['channel_name']}：巡检 {item['run_count']} 次，异常 {item['alert_count']} 次，待复审 {item['pending_review_count']}"
         for item in report["channel_summaries"][:8]
     ) or "- 暂无渠道巡检数据"
     alert_lines = "\n".join(
-        f"- {alert.message or alert.channel_id}（{alert.grade}/{alert.final_score:.1f}，{alert.status}）"
+        f"- {alert.message or alert.channel_id}"
         for alert in report["recent_alerts"][:8]
     ) or "- 暂无异常告警"
     return f"""# 智能巡检汇总报告
@@ -2726,8 +2874,6 @@ def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
 - 完成 / 失败：{report['completed_run_count']} / {report['failed_run_count']}
 - 异常告警：{report['alert_count']}
 - 待复审：{report['pending_review_count']}
-- 平均分：{avg_score}
-- 评级分布：{grade_line}
 
 ## 渠道风险排行
 
@@ -2788,16 +2934,14 @@ def smart_patrol_daily_text(report: dict[str, Any], setting: FeishuBroadcastSett
     report_link = f"{app_base_url}/scheduled-tests?tab=report" if app_base_url else "/scheduled-tests?tab=report"
     top_channels = report["channel_summaries"][:5]
     channel_lines = "\n".join(
-        f"{index + 1}. {item['channel_name']}：异常 {item['alert_count']}，待复审 {item['pending_review_count']}，均分 {item['avg_score'] if item['avg_score'] is not None else '-'}"
+        f"{index + 1}. {item['channel_name']}：异常 {item['alert_count']}，待复审 {item['pending_review_count']}"
         for index, item in enumerate(top_channels)
     ) or "暂无渠道巡检数据"
-    avg_score = "-" if report["avg_score"] is None else f"{report['avg_score']:.1f}"
     return (
         "Claude 渠道智能巡检日报\n"
         f"时间范围：{report['from_at'].isoformat()} ~ {report['to_at'].isoformat()}\n"
-        f"巡检任务：{report['run_count']} 次，完成 {report['completed_run_count']}，失败 {report['failed_run_count']}\n"
+        f"自动巡检：{report['run_count']} 次，完成 {report['completed_run_count']}，失败 {report['failed_run_count']}\n"
         f"异常告警：{report['alert_count']}，待复审 {report['pending_review_count']}\n"
-        f"平均分：{avg_score}\n"
         "渠道风险排行：\n"
         f"{channel_lines}\n"
         f"报告：{report_link}"
@@ -3339,6 +3483,76 @@ def _response_error_detail(response: httpx.Response) -> str:
     return text[:1000]
 
 
+REQUEST_ID_HEADER_NAMES = (
+    "request-id",
+    "x-request-id",
+    "x-amzn-requestid",
+    "x-amzn-request-id",
+    "x-amz-request-id",
+    "anthropic-request-id",
+    "openai-request-id",
+    "cf-ray",
+)
+
+
+def request_id_from_headers(headers: Any) -> str | None:
+    if not headers:
+        return None
+    for name in REQUEST_ID_HEADER_NAMES:
+        value = headers.get(name) if hasattr(headers, "get") else None
+        if value:
+            return str(value)
+    return None
+
+
+def request_id_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    direct = payload.get("request_id") or payload.get("requestId")
+    if direct:
+        return str(direct)
+    error = payload.get("error")
+    if isinstance(error, dict):
+        nested = error.get("request_id") or error.get("requestId")
+        if nested:
+            return str(nested)
+    meta = payload.get("_response_metadata") if isinstance(payload.get("_response_metadata"), dict) else {}
+    header_id = meta.get("request_id") or request_id_from_headers(meta.get("headers"))
+    if header_id:
+        return str(header_id)
+    cloud_wrapper = payload.get("cloud_wrapper")
+    if isinstance(cloud_wrapper, dict):
+        wrapper_id = cloud_wrapper.get("request_id") or cloud_wrapper.get("requestId")
+        if wrapper_id:
+            return str(wrapper_id)
+    response_metadata = payload.get("ResponseMetadata")
+    if isinstance(response_metadata, dict):
+        aws_id = response_metadata.get("RequestId") or response_metadata.get("RequestID")
+        if aws_id:
+            return str(aws_id)
+    return None
+
+
+def request_id_from_normalized(normalized: dict[str, Any]) -> str | None:
+    request_id = request_id_from_payload(normalized.get("raw_response"))
+    if request_id:
+        return request_id
+    return request_id_from_payload(normalized)
+
+
+def attach_response_metadata(payload: Any, response: httpx.Response) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    request_id = request_id_from_headers(getattr(response, "headers", None))
+    if not request_id:
+        return payload
+    metadata = payload.get("_response_metadata") if isinstance(payload.get("_response_metadata"), dict) else {}
+    metadata = dict(metadata)
+    metadata["request_id"] = request_id
+    payload["_response_metadata"] = metadata
+    return payload
+
+
 async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
     url = _anthropic_messages_url(credentials.get("base_url") or channel.base_url)
     headers = {
@@ -3370,7 +3584,7 @@ async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, An
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(url, headers=headers, json=body)
         _raise_for_status_with_body(response)
-        return response.json()
+        return attach_response_metadata(response.json(), response)
 
 
 async def test_signature_interop(source: Channel, relay: Channel, stream: bool = False) -> dict[str, Any]:
@@ -3509,6 +3723,125 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     )
 
 
+async def create_signature_interop_test(db: Session, source: Channel, relay: Channel, stream: bool = False) -> dict[str, Any]:
+    started_at = datetime.now(timezone.utc)
+    case = _manual_probe_case(
+        db,
+        title="Thinking Signature 互通检测",
+        prompt=SIGNATURE_TEST_PROMPT_A,
+        system_prompt=None,
+        request_params={
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "stream": stream,
+            "test_type": "signature_interop",
+        },
+    )
+    run = Run(
+        id=new_id("run"),
+        suite_id=case.suite_id,
+        name=f"Signature 互通检测 · {source.name} -> {relay.name}"[:200],
+        mode=MANUAL_PROBE_MODE,
+        test_scope="quick",
+        status="running",
+        repeat_count=1,
+        concurrency=1,
+        total_jobs=1,
+        completed_jobs=0,
+        started_at=started_at,
+    )
+    db.add(run)
+    db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=source.id, role_in_run="source"))
+    db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=relay.id, role_in_run="relay"))
+    db.commit()
+
+    result_payload: dict[str, Any] | None = None
+    error: str | None = None
+    try:
+        result_payload = await test_signature_interop(source, relay, stream)
+    except Exception as exc:  # Persist failed probes so the operator can delete the generated log.
+        error = str(exc)
+        result_payload = _signature_interop_error_result(source, relay, stream, error)
+
+    finished_at = datetime.now(timezone.utc)
+    normalized = {
+        "content_text": result_payload.get("reason"),
+        "error": None if result_payload.get("ok") else result_payload.get("reason"),
+        "provider_message_id": result_payload.get("relay_message_id") or result_payload.get("source_message_id"),
+        "request_protocol": "anthropic_messages",
+        "provider_endpoint": result_payload.get("relay_endpoint"),
+        "provider_model": result_payload.get("model"),
+        "signature_interop": result_payload,
+    }
+    result = Result(
+        id=new_id("res"),
+        run_id=run.id,
+        test_case_id=case.id,
+        channel_id=relay.id,
+        attempt_index=1,
+        normalized_response=normalized,
+        raw_request={
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "stream": stream,
+            "created_at": started_at.isoformat(),
+        },
+        raw_response=result_payload,
+        metrics={"status_code": 200 if result_payload.get("ok") else 500, "error_type": "signature_interop" if error else None},
+        score=100 if result_payload.get("ok") else 0,
+        labels=[] if result_payload.get("ok") else ["signature_interop_failed"],
+    )
+    run.completed_jobs = 1
+    run.finished_at = finished_at
+    run.status = "completed" if result_payload.get("ok") else "failed"
+    db.add(result)
+    db.commit()
+    db.refresh(run)
+    db.refresh(result)
+    return {
+        **result_payload,
+        "run": run,
+        "result": result,
+        "created_at": started_at,
+        "completed_at": finished_at,
+    }
+
+
+def _signature_interop_error_result(source: Channel, relay: Channel, stream: bool, error: str) -> dict[str, Any]:
+    source_endpoint = _anthropic_messages_url(source.base_url)
+    relay_endpoint = _anthropic_messages_url(relay.base_url)
+    return {
+        "ok": False,
+        "status": "fail",
+        "reason": error,
+        "source_channel_id": source.id,
+        "source_channel_name": source.name,
+        "relay_channel_id": relay.id,
+        "relay_channel_name": relay.name,
+        "source_endpoint": source_endpoint,
+        "relay_endpoint": relay_endpoint,
+        "model": relay.model_name or source.model_name or "claude-opus-4-6",
+        "thinking_block_count": 0,
+        "signature_prefixes": [],
+        "source_message_id": None,
+        "source_message_channel_type": "未知",
+        "source_request_id": None,
+        "relay_message_id": None,
+        "relay_message_channel_type": "未知",
+        "relay_request_id": None,
+        "relay_raw_excerpt": error,
+        "fallback_note": SIGNATURE_FALLBACK_NOTE,
+        "steps": [
+            {
+                "name": "Thinking Signature 互通检测",
+                "status": "fail",
+                "detail": error,
+                "excerpt": f"stream={stream}",
+            }
+        ],
+    }
+
+
 def _validate_signature_test_channel(channel: Channel, credentials: dict[str, Any], label: str) -> None:
     if not credentials.get("api_key"):
         raise ValueError(f"{label} 渠道缺少 API Key，无法检测 thinking signature")
@@ -3575,7 +3908,9 @@ def _signature_interop_result(
         "status": "pass" if ok else "fail",
         "reason": reason,
         "source_channel_id": source.id,
+        "source_channel_name": source.name,
         "relay_channel_id": relay.id,
+        "relay_channel_name": relay.name,
         "source_endpoint": source_endpoint,
         "relay_endpoint": relay_endpoint,
         "model": model,
@@ -3583,8 +3918,10 @@ def _signature_interop_result(
         "signature_prefixes": [str(block.get("signature") or "")[:50] for block in thinking_blocks],
         "source_message_id": source_message_id,
         "source_message_channel_type": classify_claude_message_id(source_message_id),
+        "source_request_id": request_id_from_payload(response_a),
         "relay_message_id": relay_message_id,
         "relay_message_channel_type": classify_claude_message_id(relay_message_id),
+        "relay_request_id": request_id_from_payload(response_b),
         "relay_raw_excerpt": relay_raw_excerpt,
         "fallback_note": SIGNATURE_FALLBACK_NOTE,
         "steps": steps,
@@ -3642,7 +3979,7 @@ async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any],
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         response = await client.post(url, headers=headers, json=body)
         _raise_for_status_with_body(response)
-        return response.json()
+        return attach_response_metadata(response.json(), response)
 
 
 async def fetch_channel_models(channel: Channel) -> list[str]:
@@ -3697,7 +4034,7 @@ def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, A
         "content": [{"type": "text", "text": text}],
         "stop_reason": response.get("stopReason"),
         "usage": response.get("usage"),
-        "cloud_wrapper": {"provider": "aws_bedrock", "region": region},
+        "cloud_wrapper": {"provider": "aws_bedrock", "region": region, "request_id": response.get("ResponseMetadata", {}).get("RequestId")},
     }
 
 
@@ -3726,7 +4063,14 @@ def _aws_bedrock_messages_call(client: Any, channel: Channel, case: TestCase, cr
         raw_text = str(raw_body or "{}")
     payload = json.loads(raw_text or "{}")
     if isinstance(payload, dict):
-        payload.setdefault("cloud_wrapper", {"provider": "aws_bedrock", "region": credentials.get("region") or "us-east-1"})
+        payload.setdefault(
+            "cloud_wrapper",
+            {
+                "provider": "aws_bedrock",
+                "region": credentials.get("region") or "us-east-1",
+                "request_id": response.get("ResponseMetadata", {}).get("RequestId"),
+            },
+        )
     return payload
 
 
@@ -3782,6 +4126,7 @@ def simulate_raw_response(channel: Channel, case: TestCase, attempt: int) -> dic
             "model": channel.model_name,
             "choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": finish_reason}],
             "usage": usage if channel.role != "candidate" else None,
+            "cloud_wrapper": {"provider": channel.provider_type, "request_id": f"req_{attempt}_{channel.id}"},
         }
 
     raw = {
@@ -4048,7 +4393,6 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
             lowered_error = _lower_text(error_text)
             if all(item in lowered_error for item in required_all):
                 return 100.0, []
-            return 0.0, [unexpected_label]
         expected_exact = _lower_text(rules.get("expected_error_contains"))
         if expected_exact and expected_exact in _lower_text(error_text):
             return 100.0, []
@@ -5235,7 +5579,8 @@ LABEL_EXPLANATIONS = {
     "thinking_temperature_not_rejected": "启用 thinking 时携带非 1 temperature 未被上游拒绝，疑似中间层改写或非原生协议。",
     "thinking_adaptive_enabled_not_rejected": "thinking.adaptive.enabled 未被上游拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。",
     "thinking_adaptive_enabled_wrong_error": "上游返回了错误，但错误内容不是 thinking.adaptive.enabled 目标参数的原生拒绝。",
-    "provider_error_variant": "上游返回了等价的 thinking/temperature 约束错误，但文案与主参考不同。",
+    "signature_source_missing": "未找到可用的参考 source 渠道，无法执行 Thinking Signature 互通检测。",
+    "provider_error_variant": "上游返回了等价的 thinking/temperature 原生约束错误，视为通过但保留差异标签。",
     "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
 }
 

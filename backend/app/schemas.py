@@ -72,6 +72,10 @@ class SignatureInteropTestRead(BaseModel):
     ok: bool
     status: str
     reason: str
+    run: "RunRead | None" = None
+    result: "ResultRead | None" = None
+    created_at: datetime | None = None
+    completed_at: datetime | None = None
     source_channel_id: str
     relay_channel_id: str
     source_endpoint: str
@@ -278,6 +282,9 @@ class RunRead(BaseModel):
     test_scope: str = "full"
     baseline_snapshot_id: str | None = None
     scheduled_test_id: str | None = None
+    patrol_channel_id: str | None = None
+    patrol_channel_name: str | None = None
+    channels: list[dict[str, str | None]] = Field(default_factory=list)
     status: str
     repeat_count: int
     concurrency: int
@@ -286,6 +293,40 @@ class RunRead(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime | None = None
+
+
+class SystemUsageRead(BaseModel):
+    disk_path: str
+    disk_total_bytes: int
+    disk_used_bytes: int
+    disk_free_bytes: int
+    disk_used_percent: float
+    memory_total_bytes: int | None = None
+    memory_available_bytes: int | None = None
+    memory_used_bytes: int | None = None
+    memory_used_percent: float | None = None
+    database_path: str | None = None
+    database_size_bytes: int | None = None
+    run_count: int
+    result_count: int
+    comparison_count: int
+    report_count: int
+    alert_count: int
+    cleanup_candidate_run_count: int
+    cleanup_skipped_baseline_run_count: int
+
+
+class RunLogCleanupRead(BaseModel):
+    dry_run: bool = False
+    deleted_runs: int = 0
+    deleted_run_channels: int = 0
+    deleted_results: int = 0
+    deleted_comparisons: int = 0
+    deleted_reports: int = 0
+    deleted_alerts: int = 0
+    cleared_scheduled_last_run_refs: int = 0
+    skipped_running_runs: int = 0
+    skipped_baseline_runs: int = 0
 
 
 class ScheduledChannelTestBase(BaseModel):
@@ -392,6 +433,10 @@ class ChannelAlertReviewUpdate(BaseModel):
     status: str
     reviewer_name: str
     review_note: str | None = None
+
+
+class BulkDeleteRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list)
 
 
 class FeishuBroadcastSettingRead(BaseModel):

@@ -45,23 +45,26 @@ describe('runs utilities', () => {
           channel_id: 'ch_1',
           final_score: 78,
           grade: 'C',
-          summary: '自动巡检双探针完成',
+          summary: '自动巡检完成',
           evidence: {
             test_scope: 'scheduled_probe',
             labels: ['signature_interop_failed'],
-            label_explanations: { signature_interop_failed: 'Signature 互通失败。' },
+            label_explanations: [{ label: 'signature_interop_failed', description: 'Signature 互通失败。' }],
             detected_provider_hint: '疑似逆向或中间层改写',
             model_requests: [
               {
                 key: 'thinking_temperature',
                 title: 'Thinking temperature 冲突',
+                channel_id: 'ch_1',
+                channel_name: 'Relay Channel',
                 result_id: 'res_1',
                 message_id: 'msg_01abc',
+                request_id: 'req_evidence_1',
                 message_channel_type: 'Claude/Anthropic',
                 request_protocol: 'anthropic_messages',
                 provider_endpoint: 'https://example.test/v1/messages',
+                completed_at: '2026-05-16T01:02:03Z',
                 labels: [],
-                score: 100,
               },
               {
                 key: 'web_search',
@@ -72,7 +75,6 @@ describe('runs utilities', () => {
                 request_protocol: 'anthropic_messages',
                 provider_endpoint: 'https://example.test/v1/messages',
                 labels: ['web_search_not_rejected'],
-                score: 40,
               },
               {
                 key: 'thinking_adaptive_enabled',
@@ -83,17 +85,20 @@ describe('runs utilities', () => {
                 request_protocol: 'anthropic_messages',
                 provider_endpoint: 'https://example.test/v1/messages',
                 labels: [],
-                score: 100,
               },
             ],
             signature_interop: {
               status: 'fail',
               reason: 'relay 未接受 signature',
               source_channel_id: 'source_1',
+              source_channel_name: 'AWS Bedrock Claude',
               source_message_id: 'msg_source',
+              source_request_id: 'req_source',
               source_message_channel_type: 'AWS Bedrock',
               relay_channel_id: 'ch_1',
+              relay_channel_name: 'Relay Channel',
               relay_message_id: 'msg_relay',
+              relay_request_id: 'req_relay',
               relay_message_channel_type: 'Claude/Anthropic',
               signature_prefixes: ['sig-abc'],
             },
@@ -109,8 +114,12 @@ describe('runs utilities', () => {
     expect(evidence?.detectedProviderHint).toBe('疑似逆向或中间层改写');
     expect(evidence?.modelRequests[0]).toMatchObject({
       title: 'Thinking temperature 冲突',
+      channelId: 'ch_1',
+      channelName: 'Relay Channel',
       resultId: 'res_1',
       messageId: 'msg_01abc',
+      requestId: 'req_evidence_1',
+      completedAt: '2026-05-16T01:02:03Z',
       status: 'ok',
     });
     expect(evidence?.modelRequests.map((item) => item.key)).toEqual(['thinking_temperature', 'web_search', 'thinking_adaptive_enabled']);
@@ -122,8 +131,12 @@ describe('runs utilities', () => {
     });
     expect(evidence?.signature).toMatchObject({
       status: 'fail',
+      sourceChannelName: 'AWS Bedrock Claude',
       sourceMessageId: 'msg_source',
+      sourceRequestId: 'req_source',
+      relayChannelName: 'Relay Channel',
       relayMessageId: 'msg_relay',
+      relayRequestId: 'req_relay',
       signaturePrefixes: ['sig-abc'],
     });
   });
@@ -143,10 +156,11 @@ describe('runs utilities', () => {
           attempt_index: 1,
           normalized_response: { content_text: '真实响应正文' },
           raw_request: {},
-          raw_response: { content: [{ type: 'text', text: '真实响应正文' }] },
+          raw_response: { content: [{ type: 'text', text: '真实响应正文' }], _response_metadata: { request_id: 'req_from_header' } },
           metrics: {},
           score: 100,
           labels: [],
+          created_at: '2026-05-16T02:03:04Z',
         },
         {
           id: 'res_2',
@@ -156,10 +170,11 @@ describe('runs utilities', () => {
           attempt_index: 1,
           normalized_response: { error: '上游返回参数错误' },
           raw_request: {},
-          raw_response: { error: 'raw error' },
+          raw_response: { error: { message: 'raw error', request_id: 'req_from_error' } },
           metrics: {},
           score: 40,
           labels: ['web_search_not_rejected'],
+          created_at: '2026-05-16T02:04:05Z',
         },
       ],
       reports: [
@@ -173,8 +188,8 @@ describe('runs utilities', () => {
             test_scope: 'scheduled_probe',
             labels: ['web_search_not_rejected'],
             model_requests: [
-              { key: 'thinking_temperature', result_id: 'res_1', labels: [], score: 100 },
-              { key: 'web_search', result_id: 'res_2', labels: ['web_search_not_rejected'], score: 40 },
+              { key: 'thinking_temperature', result_id: 'res_1', labels: [] },
+              { key: 'web_search', result_id: 'res_2', labels: ['web_search_not_rejected'] },
             ],
           },
         },
@@ -186,11 +201,139 @@ describe('runs utilities', () => {
     expect(evidence?.modelRequests[0]).toMatchObject({
       resultId: 'res_1',
       responseText: '真实响应正文',
+      requestId: 'req_from_header',
+      completedAt: '2026-05-16T02:03:04Z',
     });
     expect(evidence?.modelRequests[1]).toMatchObject({
       resultId: 'res_2',
       responseText: '上游返回参数错误',
+      requestId: 'req_from_error',
+      completedAt: '2026-05-16T02:04:05Z',
     });
     expect(evidence?.modelRequests[1].rawResponseText).toContain('raw error');
+  });
+
+  it('treats patrol request state as response and error evidence only', () => {
+    const results: RunResults = {
+      run: run('patrol_1', 'sched_1'),
+      run_channels: [],
+      comparisons: [],
+      baseline_results: [],
+      results: [
+        {
+          id: 'res_ok',
+          run_id: 'patrol_1',
+          test_case_id: 'case_ok',
+          channel_id: 'ch_1',
+          attempt_index: 1,
+          normalized_response: { content_text: 'OK' },
+          raw_request: {},
+          raw_response: { content: [{ type: 'text', text: 'OK' }] },
+          metrics: {},
+          score: 100,
+          labels: [],
+        },
+        {
+          id: 'res_err',
+          run_id: 'patrol_1',
+          test_case_id: 'case_err',
+          channel_id: 'ch_1',
+          attempt_index: 1,
+          normalized_response: { error: '请求失败' },
+          raw_request: {},
+          raw_response: { error: 'raw error' },
+          metrics: {},
+          score: 0,
+          labels: ['request_failed'],
+        },
+      ],
+      reports: [
+        {
+          id: 'rep_1',
+          run_id: 'patrol_1',
+          channel_id: 'ch_1',
+          final_score: 0,
+          grade: 'E',
+          summary: '自动巡检完成',
+          evidence: {
+            test_scope: 'scheduled_probe',
+            labels: ['request_failed'],
+            label_explanations: [{ label: 'request_failed', description: '请求失败。' }],
+            model_requests: [
+              { key: 'thinking_temperature', result_id: 'res_ok', labels: [] },
+              { key: 'web_search', result_id: 'res_err', labels: ['request_failed'], error: '请求失败' },
+            ],
+          },
+        },
+      ],
+    };
+
+    const evidence = extractPatrolEvidence(results);
+
+    expect(evidence?.modelRequests[0]).toMatchObject({
+      resultId: 'res_ok',
+      responseText: 'OK',
+      status: 'ok',
+    });
+    expect(evidence?.modelRequests[1]).toMatchObject({
+      resultId: 'res_err',
+      responseText: '请求失败',
+      error: '请求失败',
+      status: 'error',
+    });
+    expect(evidence?.signature).toBeNull();
+  });
+
+  it('keeps patrol evidence usable without score-heavy rendering', () => {
+    const results: RunResults = {
+      run: run('patrol_2', 'sched_2'),
+      run_channels: [],
+      comparisons: [],
+      baseline_results: [],
+      results: [],
+      reports: [
+        {
+          id: 'rep_2',
+          run_id: 'patrol_2',
+          channel_id: 'ch_2',
+          final_score: 92,
+          grade: 'A',
+          summary: '自动巡检完成',
+          evidence: {
+            test_scope: 'scheduled_probe',
+            labels: ['patrol_probe_passed'],
+            label_explanations: [{ label: 'patrol_probe_passed', description: '巡检通过。' }],
+            detected_provider_hint: '疑似 Claude/Anthropic',
+            model_requests: [
+              {
+                key: 'thinking_temperature',
+                title: 'Thinking temperature 冲突',
+                channel_id: 'ch_2',
+                channel_name: 'Patrol Channel',
+                result_id: 'res_1',
+                message_id: 'msg_1',
+                message_channel_type: 'Claude/Anthropic',
+                request_protocol: 'anthropic_messages',
+                provider_endpoint: 'https://example.test/v1/messages',
+                labels: [],
+                error: null,
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const evidence = extractPatrolEvidence(results);
+
+    expect(evidence?.modelRequests[0]).toMatchObject({
+      title: 'Thinking temperature 冲突',
+      status: 'ok',
+      resultId: 'res_1',
+      messageId: 'msg_1',
+      channelName: 'Patrol Channel',
+    });
+    expect(evidence?.labels).toEqual(['patrol_probe_passed']);
+    expect(evidence?.detectedProviderHint).toBe('疑似 Claude/Anthropic');
   });
 });

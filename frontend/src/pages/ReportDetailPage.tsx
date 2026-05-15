@@ -59,6 +59,13 @@ function compactId(value: unknown) {
   return `${text.slice(0, 11)}...${text.slice(-7)}`;
 }
 
+function channelLabel(name: unknown, id: unknown) {
+  const channelName = stringValue(name);
+  const channelId = stringValue(id);
+  if (channelName !== '-' && channelId !== '-') return `${channelName} (${channelId})`;
+  return channelName !== '-' ? channelName : channelId;
+}
+
 function modeLabel(mode: RunMode) {
   if (mode === 'performance_benchmark') return '性能诊断报告';
   if (mode === 'arena_comparison') return 'Arena 排名报告';
@@ -220,6 +227,7 @@ export default function ReportDetailPage() {
                   scroll={{ x: 980 }}
                   columns={[
                     { title: '参数探针', width: 210, render: (_, row) => <strong>{stringValue(row.title ?? row.key)}</strong> },
+                    { title: '渠道', width: 220, render: (_, row) => channelLabel(row.channel_name, row.channel_id) },
                     {
                       title: '状态',
                       width: 100,
@@ -246,7 +254,9 @@ export default function ReportDetailPage() {
                     <span>Signature 状态</span>
                     <strong><Tag color={signatureInterop.status === 'pass' ? 'green' : signatureInterop.status === 'fail' ? 'red' : 'default'}>{stringValue(signatureInterop.status)}</Tag></strong>
                   </div>
+                  <div><span>Source 渠道</span><strong>{channelLabel(signatureInterop.source_channel_name, signatureInterop.source_channel_id)}</strong></div>
                   <div><span>Source ID</span><strong>{compactId(signatureInterop.source_message_id)}</strong></div>
+                  <div><span>Relay 渠道</span><strong>{channelLabel(signatureInterop.relay_channel_name, signatureInterop.relay_channel_id)}</strong></div>
                   <div><span>Relay ID</span><strong>{compactId(signatureInterop.relay_message_id)}</strong></div>
                   <div><span>Signature 前缀</span><strong>{arrayValue(signatureInterop.signature_prefixes).join(', ') || '-'}</strong></div>
                 </div>

@@ -4,13 +4,17 @@ export type PatrolModelRequestEvidence = {
   key?: string | null;
   title?: string | null;
   status: string;
+  channelId?: string | null;
+  channelName?: string | null;
   resultId?: string | null;
   messageId?: string | null;
+  requestId?: string | null;
   messageChannelType?: string | null;
   requestProtocol?: string | null;
   providerEndpoint?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
   labels: string[];
-  score?: number | null;
   error?: string | null;
   responseText?: string | null;
   rawResponseText?: string | null;
@@ -20,18 +24,20 @@ export type PatrolSignatureEvidence = {
   status?: string | null;
   reason?: string | null;
   sourceChannelId?: string | null;
+  sourceChannelName?: string | null;
   sourceMessageId?: string | null;
+  sourceRequestId?: string | null;
   sourceMessageChannelType?: string | null;
   relayChannelId?: string | null;
+  relayChannelName?: string | null;
   relayMessageId?: string | null;
+  relayRequestId?: string | null;
   relayMessageChannelType?: string | null;
   signaturePrefixes: string[];
 };
 
 export type PatrolEvidence = {
   reportId: string;
-  grade: string;
-  score: number;
   summary?: string | null;
   labels: string[];
   labelExplanations: Record<string, string>;
@@ -70,11 +76,9 @@ export function extractPatrolEvidence(results: RunResults): PatrolEvidence | nul
 
   return {
     reportId: report.id,
-    grade: report.grade,
-    score: report.final_score,
     summary: report.summary,
     labels: asStringArray(evidence.labels),
-    labelExplanations: asStringRecord(evidence.label_explanations),
+    labelExplanations: asLabelExplanationRecord(evidence.label_explanations),
     detectedProviderHint: asNullableString(evidence.detected_provider_hint),
     modelRequests: hydratedModelRequests,
     signature: normalizeSignature(asRecord(evidence.signature_interop)),
@@ -85,6 +89,9 @@ function hydrateModelRequest(item: PatrolModelRequestEvidence, result?: Result):
   if (!result) return item;
   return {
     ...item,
+    requestId: item.requestId ?? requestIdFromPayload(result.raw_response) ?? requestIdFromPayload(result.normalized_response),
+    createdAt: item.createdAt ?? result.created_at ?? null,
+    completedAt: item.completedAt ?? result.created_at ?? null,
     responseText: modelResponseText(result) ?? item.error ?? null,
     rawResponseText: stringifyJson(result.raw_response),
   };
@@ -119,13 +126,17 @@ function normalizeModelRequest(value: unknown): PatrolModelRequestEvidence | nul
     key: asNullableString(item.key),
     title: asNullableString(item.title),
     status: asNullableString(item.status) ?? (error ? 'error' : labels.length ? 'error' : 'ok'),
+    channelId: asNullableString(item.channel_id),
+    channelName: asNullableString(item.channel_name),
     resultId: asNullableString(item.result_id),
     messageId: asNullableString(item.message_id),
+    requestId: asNullableString(item.request_id),
     messageChannelType: asNullableString(item.message_channel_type),
     requestProtocol: asNullableString(item.request_protocol),
     providerEndpoint: asNullableString(item.provider_endpoint),
+    createdAt: asNullableString(item.created_at),
+    completedAt: asNullableString(item.completed_at),
     labels,
-    score: asNullableNumber(item.score),
     error,
   };
 }
@@ -136,13 +147,35 @@ function normalizeSignature(item: Record<string, unknown> | null): PatrolSignatu
     status: asNullableString(item.status),
     reason: asNullableString(item.reason),
     sourceChannelId: asNullableString(item.source_channel_id),
+    sourceChannelName: asNullableString(item.source_channel_name),
     sourceMessageId: asNullableString(item.source_message_id),
+    sourceRequestId: asNullableString(item.source_request_id),
     sourceMessageChannelType: asNullableString(item.source_message_channel_type),
     relayChannelId: asNullableString(item.relay_channel_id),
+    relayChannelName: asNullableString(item.relay_channel_name),
     relayMessageId: asNullableString(item.relay_message_id),
+    relayRequestId: asNullableString(item.relay_request_id),
     relayMessageChannelType: asNullableString(item.relay_message_channel_type),
     signaturePrefixes: asStringArray(item.signature_prefixes),
   };
+}
+
+function requestIdFromPayload(value: unknown): string | null {
+  const payload = asRecord(value);
+  if (!payload) return null;
+  const direct = asNullableString(payload.request_id) ?? asNullableString(payload.requestId);
+  if (direct) return direct;
+  const error = asRecord(payload.error);
+  const errorRequestId = asNullableString(error?.request_id) ?? asNullableString(error?.requestId);
+  if (errorRequestId) return errorRequestId;
+  const metadata = asRecord(payload._response_metadata);
+  const metadataRequestId = asNullableString(metadata?.request_id);
+  if (metadataRequestId) return metadataRequestId;
+  const cloudWrapper = asRecord(payload.cloud_wrapper);
+  const wrapperRequestId = asNullableString(cloudWrapper?.request_id) ?? asNullableString(cloudWrapper?.requestId);
+  if (wrapperRequestId) return wrapperRequestId;
+  const responseMetadata = asRecord(payload.ResponseMetadata);
+  return asNullableString(responseMetadata?.RequestId) ?? asNullableString(responseMetadata?.RequestID);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -153,10 +186,6 @@ function asNullableString(value: unknown): string | null {
   return typeof value === 'string' && value ? value : null;
 }
 
-function asNullableNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && Boolean(item)) : [];
 }
@@ -165,4 +194,17 @@ function asStringRecord(value: unknown): Record<string, string> {
   const record = asRecord(value);
   if (!record) return {};
   return Object.fromEntries(Object.entries(record).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+}
+
+function asLabelExplanationRecord(value: unknown): Record<string, string> {
+  if (Array.isArray(value)) {
+    return Object.fromEntries(
+      value
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => Boolean(item))
+        .map((item) => [asNullableString(item.label), asNullableString(item.description)] as const)
+        .filter((entry): entry is readonly [string, string] => Boolean(entry[0]) && Boolean(entry[1])),
+    );
+  }
+  return asStringRecord(value);
 }

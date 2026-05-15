@@ -19,7 +19,7 @@ from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, finalize_baseline_from_run, invoke_channel, next_scheduled_run_at, request_fingerprint, score_result, seed_demo_data, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, score_result, seed_demo_data, suite_fingerprint
 
 
 def reset_database() -> None:
@@ -210,7 +210,9 @@ def manual_thinking_adaptive_enabled_probe_case() -> TestCaseModel:
         },
         scoring_rules={
             "expected_error_required_all": ["enabled", "not supported", "output_config.effort"],
+            "expected_error_variant_any": ["temperature may only be set to 1 when thinking is enabled", "temperature", "thinking"],
             "expected_error_missing_label": "thinking_adaptive_enabled_not_rejected",
+            "expected_error_variant_label": "provider_error_variant",
             "expected_error_unexpected_label": "thinking_adaptive_enabled_wrong_error",
         },
         is_hidden=False,
@@ -302,12 +304,20 @@ def test_mock_run_generates_results_comparisons_and_reports() -> None:
         detail = client.get(f"/api/runs/{run['id']}/results")
         assert detail.status_code == 200
         payload = detail.json()
+        runs_response = client.get("/api/runs")
+        assert runs_response.status_code == 200
+        listed_run = next(item for item in runs_response.json() if item["id"] == run["id"])
 
     assert payload["run"]["status"] == "completed"
     assert payload["run"]["completed_jobs"] == payload["run"]["total_jobs"]
     assert len(payload["results"]) == payload["run"]["total_jobs"]
     assert payload["comparisons"]
     assert payload["reports"]
+    assert {(item["channel_id"], item["role_in_run"]) for item in listed_run["channels"]} == {
+        ("anthropic_official", "reference"),
+        ("third_party_demo", "candidate"),
+    }
+    assert all(item["channel_name"] for item in listed_run["channels"])
 
 
 def test_report_summary_detail_and_compare_endpoints() -> None:
@@ -360,6 +370,106 @@ def test_report_summary_detail_and_compare_endpoints() -> None:
 
         assert client.get("/api/reports/compare", params={"ids": report_ids[0]}).status_code == 400
         assert client.get("/api/reports/compare", params={"ids": f"{report_ids[0]},missing"}).status_code == 404
+
+
+def test_report_delete_removes_report_and_linked_alerts_only() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        result_count = db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id))
+        assert report is not None
+        report_id = report.id
+        assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.report_id == report_id)) == 1
+
+    with TestClient(app) as client:
+        deleted = client.delete(f"/api/reports/{report_id}")
+        missing = client.delete("/api/reports/missing_report")
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True}
+    assert missing.status_code == 404
+    with SessionLocal() as db:
+        assert db.get(Report, report_id) is None
+        assert db.get(Run, run_id) is not None
+        assert db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id)) == result_count
+        assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.report_id == report_id)) == 0
+
+
+def test_report_bulk_delete_returns_deleted_count_and_missing_ids() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    first_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    second_run_id = create_report_for_schedule(schedule, grade="D", score=60, labels=["protocol_drift"])
+    with SessionLocal() as db:
+        report_ids = list(db.scalars(select(Report.id).where(Report.run_id.in_([first_run_id, second_run_id]))).all())
+
+    with TestClient(app) as client:
+        response = client.post("/api/reports/bulk-delete", json={"ids": [*report_ids, "missing_report"]})
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == len(report_ids)
+    assert response.json()["missing"] == ["missing_report"]
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Report).where(Report.id.in_(report_ids))) == 0
+
+
+def test_alert_delete_removes_alert_only() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert alert is not None
+        assert report is not None
+        alert_id = alert.id
+        report_id = report.id
+
+    with TestClient(app) as client:
+        deleted = client.delete(f"/api/alerts/{alert_id}")
+        missing = client.delete("/api/alerts/missing_alert")
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True}
+    assert missing.status_code == 404
+    with SessionLocal() as db:
+        assert db.get(ChannelAlert, alert_id) is None
+        assert db.get(Run, run_id) is not None
+        assert db.get(Report, report_id) is not None
+
+
+def test_alert_bulk_delete_returns_deleted_count_and_missing_ids() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    first_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    second_run_id = create_report_for_schedule(schedule, grade="D", score=60, labels=["protocol_drift"])
+    asyncio.run(create_alerts_for_run(SessionLocal, first_run_id, schedule["id"]))
+    asyncio.run(create_alerts_for_run(SessionLocal, second_run_id, schedule["id"]))
+    with SessionLocal() as db:
+        alert_ids = list(db.scalars(select(ChannelAlert.id).where(ChannelAlert.run_id.in_([first_run_id, second_run_id]))).all())
+
+    with TestClient(app) as client:
+        response = client.post("/api/alerts/bulk-delete", json={"ids": [*alert_ids, "missing_alert"]})
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == len(alert_ids)
+    assert response.json()["missing"] == ["missing_alert"]
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.id.in_(alert_ids))) == 0
 
 
 def test_report_compare_rejects_mixed_modes() -> None:
@@ -812,12 +922,22 @@ def test_score_result_validates_thinking_adaptive_enabled_expected_error() -> No
                 "content_text": "",
             },
         )
-        wrong_error_score, wrong_error_labels = score_result(
+        variant_score, variant_labels = score_result(
             channel,
             case,
             {
                 "raw_response": {"error": {"message": "`temperature` may only be set to 1 when thinking is enabled"}},
                 "error": "`temperature` may only be set to 1 when thinking is enabled",
+                "status_code": 400,
+                "content_text": "",
+            },
+        )
+        wrong_error_score, wrong_error_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"error": {"message": "unrelated bad request"}},
+                "error": "unrelated bad request",
                 "status_code": 400,
                 "content_text": "",
             },
@@ -839,6 +959,8 @@ def test_score_result_validates_thinking_adaptive_enabled_expected_error() -> No
 
     assert exact_score == 100
     assert exact_labels == []
+    assert variant_score == 100
+    assert variant_labels == ["provider_error_variant"]
     assert wrong_error_score == 0
     assert wrong_error_labels == ["thinking_adaptive_enabled_wrong_error"]
     assert normal_score == 0
@@ -1271,10 +1393,15 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
 
     with TestClient(app) as client:
         updated_schedule = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+        run_payload = client.get(f"/api/runs/{updated_schedule['last_run_id']}").json()
         alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
 
     assert updated_schedule["last_run_id"]
     assert updated_schedule["last_status"] == "completed"
+    assert run_payload["patrol_channel_id"] == "negative_sample"
+    assert run_payload["patrol_channel_name"] == "Negative Sample"
+    assert run_payload["name"].startswith("Negative Sample - 自动巡检资源")
+    assert "自动巡检" not in run_payload["name"]
     assert alerts
     assert alerts[0]["channel_id"] == "negative_sample"
     assert alerts[0]["notification_status"] == "skipped"
@@ -1308,6 +1435,33 @@ def test_scheduled_channel_test_supports_simplified_probe_create() -> None:
     assert payload["test_scope"] == "scheduled_probe"
 
 
+def test_run_scheduled_test_now_returns_queued_before_background_execution(monkeypatch) -> None:
+    executed: list[str] = []
+
+    async def fake_execute_scheduled_channel_test(session_factory, scheduled_id, *, advance_next_run=True):  # noqa: ANN001, ARG001
+        executed.append(scheduled_id)
+
+    monkeypatch.setattr("app.main.execute_scheduled_channel_test", fake_execute_scheduled_channel_test)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "queued patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "enabled": True,
+            },
+        ).json()
+        response = client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["last_status"] == "queued"
+    assert payload["last_run_id"] is None
+    assert executed == [schedule["id"]]
+
+
 def test_scheduled_channel_test_supports_run_window() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -1327,6 +1481,47 @@ def test_scheduled_channel_test_supports_run_window() -> None:
     payload = response.json()
     assert payload["run_window_start"] == "09:00"
     assert payload["run_window_end"] == "18:00"
+
+
+def test_scheduled_channel_test_update_preserves_hidden_policy_fields() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "hidden policy patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "enabled": True,
+                "quiet_minutes": 360,
+                "max_retries": 2,
+                "retry_interval_minutes": 15,
+                "alert_grade_threshold": "C",
+                "alert_score_threshold": 80,
+                "alert_red_flags_enabled": False,
+            },
+        ).json()
+        response = client.patch(
+            f"/api/scheduled-tests/{schedule['id']}",
+            json={
+                "name": "renamed hidden policy patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 120,
+                "run_window_start": None,
+                "run_window_end": None,
+                "enabled": True,
+                "test_scope": "scheduled_probe",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["quiet_minutes"] == 360
+    assert payload["max_retries"] == 2
+    assert payload["retry_interval_minutes"] == 15
+    assert payload["alert_grade_threshold"] == "C"
+    assert payload["alert_score_threshold"] == 80
+    assert payload["alert_red_flags_enabled"] is False
 
 
 def test_scheduled_channel_test_rejects_invalid_run_window() -> None:
@@ -1452,6 +1647,28 @@ def test_scheduled_alert_policy_uses_grade_score_and_red_flag_settings(monkeypat
         alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
 
     assert {alert["run_id"] for alert in alerts} == {score_run_id, grade_run_id}
+
+
+def test_scheduled_probe_alert_policy_includes_failed_grade_without_red_flag(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="D", score=65, labels=["provider_error_variant"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {"labels": ["provider_error_variant"], "red_flags": [], "test_scope": "scheduled_probe"}
+        db.commit()
+
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with TestClient(app) as client:
+        alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    assert len(alerts) == 1
+    assert alerts[0]["run_id"] == run_id
 
 
 def test_scheduled_alert_policy_supports_c_grade_threshold(monkeypatch) -> None:
@@ -1651,6 +1868,10 @@ def test_scheduled_test_rejects_reference_channel() -> None:
 def test_feishu_broadcast_setting_masks_secret_and_preserves_existing_secret() -> None:
     reset_database()
     with TestClient(app) as client:
+        missing_webhook = client.patch("/api/settings/feishu-broadcast", json={"enabled": True})
+        assert missing_webhook.status_code == 400
+        assert "Webhook" in missing_webhook.json()["detail"]
+
         response = client.patch(
             "/api/settings/feishu-broadcast",
             json={
@@ -1672,9 +1893,15 @@ def test_feishu_broadcast_setting_masks_secret_and_preserves_existing_secret() -
         assert response.status_code == 200
         payload = response.json()
 
+        response = client.patch("/api/settings/feishu-broadcast", json={"webhook_url": "", "webhook_secret": ""})
+        assert response.status_code == 200
+        preserved = response.json()
+
     assert payload["enabled"] is False
     assert payload["secret_configured"] is True
     assert payload["app_base_url"] == "http://localhost:5174"
+    assert preserved["webhook_configured"] is True
+    assert preserved["secret_configured"] is True
 
 
 def test_channel_taxonomy_setting_returns_defaults_and_allows_label_updates() -> None:
@@ -2077,6 +2304,11 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert response.status_code == 200
     assert payload["ok"] is True
     assert payload["status"] == "pass"
+    assert payload["run"]["mode"] == "manual_probe"
+    assert payload["run"]["status"] == "completed"
+    assert payload["result"]["score"] == 100
+    assert payload["created_at"]
+    assert payload["completed_at"]
     assert payload["source_message_channel_type"] == "AWS Bedrock"
     assert payload["relay_message_channel_type"] == "Vertex"
     assert payload["signature_prefixes"] == ["sig-source-compatible"]
@@ -2090,6 +2322,9 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert calls[0]["url"] == "https://source.example/v1/messages"
     assert calls[1]["url"] == "https://relay.example/v1/messages"
     assert calls[1]["json"]["messages"][1]["content"][0]["signature"] == "sig-source-compatible"
+    with SessionLocal() as db:
+        assert db.get(Run, payload["run"]["id"]) is not None
+        assert db.get(Result, payload["result"]["id"]) is not None
 
 
 def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> None:
@@ -2161,6 +2396,11 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
     assert response.status_code == 200
     assert payload["ok"] is False
     assert payload["status"] == "fail"
+    assert payload["run"]["mode"] == "manual_probe"
+    assert payload["run"]["status"] == "failed"
+    assert payload["result"]["labels"] == ["signature_interop_failed"]
+    assert payload["created_at"]
+    assert payload["completed_at"]
     assert "signature 不兼容" in payload["reason"]
     assert "req_123" in payload["relay_raw_excerpt"]
     assert payload["source_message_channel_type"] == "Anthropic"
@@ -2219,8 +2459,21 @@ def test_signature_interop_rejects_source_without_signature(monkeypatch) -> None
             json={"source_channel_id": source_id, "relay_channel_id": relay_id},
         )
 
-    assert response.status_code == 400
-    assert "缺少 signature" in response.json()["detail"]
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["run"]["mode"] == "manual_probe"
+    assert payload["run"]["status"] == "failed"
+    assert payload["result"]["labels"] == ["signature_interop_failed"]
+    assert "缺少 signature" in payload["reason"]
+
+    with TestClient(app) as client:
+        delete_response = client.delete(f"/api/runs/{payload['run']['id']}")
+
+    assert delete_response.status_code == 200
+    with SessionLocal() as db:
+        assert db.get(Run, payload["run"]["id"]) is None
+        assert db.get(Result, payload["result"]["id"]) is None
 
 
 def test_classify_claude_message_id_prefixes() -> None:
@@ -2537,7 +2790,9 @@ def test_anthropic_request_passes_adaptive_enabled_thinking_probe(monkeypatch) -
         case.request_params = {
             **(case.request_params or {}),
             "expected_error_required_all": ["enabled", "not supported", "output_config.effort"],
+            "expected_error_variant_any": ["temperature may only be set to 1 when thinking is enabled", "temperature", "thinking"],
             "expected_error_missing_label": "thinking_adaptive_enabled_not_rejected",
+            "expected_error_variant_label": "provider_error_variant",
             "expected_error_unexpected_label": "thinking_adaptive_enabled_wrong_error",
         }
         asyncio.run(_anthropic_compatible_call(channel, build_raw_request(channel, case), {"api_key": "test-key"}))
@@ -2552,6 +2807,8 @@ def test_anthropic_request_passes_adaptive_enabled_thinking_probe(monkeypatch) -
     }
     assert "expected_error_missing_label" not in captured["json"]
     assert "expected_error_required_all" not in captured["json"]
+    assert "expected_error_variant_any" not in captured["json"]
+    assert "expected_error_variant_label" not in captured["json"]
     assert "expected_error_unexpected_label" not in captured["json"]
 
 
@@ -2685,7 +2942,9 @@ def test_aws_adaptive_enabled_probe_uses_raw_messages_body() -> None:
         params = {
             **(case.request_params or {}),
             "expected_error_required_all": ["enabled", "not supported", "output_config.effort"],
+            "expected_error_variant_any": ["temperature may only be set to 1 when thinking is enabled", "temperature", "thinking"],
             "expected_error_missing_label": "thinking_adaptive_enabled_not_rejected",
+            "expected_error_variant_label": "provider_error_variant",
             "expected_error_unexpected_label": "thinking_adaptive_enabled_wrong_error",
         }
         payload = _aws_bedrock_messages_call(FakeAwsClient(), channel, case, {}, params)
@@ -2702,6 +2961,8 @@ def test_aws_adaptive_enabled_probe_uses_raw_messages_body() -> None:
     }
     assert "expected_error_missing_label" not in body
     assert "expected_error_required_all" not in body
+    assert "expected_error_variant_any" not in body
+    assert "expected_error_variant_label" not in body
     assert "expected_error_unexpected_label" not in body
     assert payload["id"] == "msg_bdrk_01ok"
 
@@ -2850,6 +3111,35 @@ def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None
     assert report["channel_summaries"]
     assert markdown.status_code == 200
     assert "智能巡检汇总报告" in markdown.text
+    assert "平均分" not in markdown.text
+    assert "评级分布" not in markdown.text
+    assert "分数" not in markdown.text
+
+
+def test_scheduled_alert_notification_uses_error_message(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        setting = get_or_create_feishu_setting(db)
+        text = feishu_text_payload(alert, db, setting)["content"]["text"] if alert else ""
+
+    assert alert is not None
+    assert "评级" not in text
+    assert "得分" not in text
+    assert "错误：" in text
+    assert "异常标签：" in text
+    assert "渠道：Negative Sample（negative_sample）" in text
+    assert "模型：" in text
+    assert "Result ID：" in text
+    assert "Request ID：" in text
+    assert "消息ID：" in text
 
 
 def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
@@ -2876,25 +3166,44 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert payload["latest_score"] is not None
     assert {item["key"] for item in summary["model_requests"]} == {"thinking_temperature", "web_search", "thinking_adaptive_enabled"}
     for item in summary["model_requests"]:
+        assert item["channel_id"] == "negative_sample"
+        assert item["channel_name"] == "Negative Sample"
         assert item["result_id"]
+        assert item["completed_at"]
+        assert "request_id" in item
         assert "message_id" in item
         assert "status" in item
+    assert summary["model_request"]["channel_id"] == "negative_sample"
+    assert summary["model_request"]["channel_name"] == "Negative Sample"
     assert summary["model_request"]["result_id"]
+    assert summary["model_request"]["completed_at"]
+    assert "request_id" in summary["model_request"]
     assert "message_id" in summary["model_request"]
     assert "status" in summary["signature_interop"]
     assert summary["signature_interop"]["source_channel_id"]
     assert summary["signature_interop"]["relay_channel_id"] == "negative_sample"
+    assert summary["signature_interop"]["relay_channel_name"] == "Negative Sample"
     assert "source_message_id" in summary["signature_interop"]
     assert "relay_message_id" in summary["signature_interop"]
     assert summary["labels"]
 
     with TestClient(app) as client:
         markdown = client.get(f"/api/reports/{payload['latest_report_id']}/markdown").text
+        report_markdown = client.get(f"/api/runs/{payload['last_run_id']}/report.md").text
+        runs = client.get("/api/runs").json()
+    run_payload = next(item for item in runs if item["id"] == payload["last_run_id"])
+    assert run_payload["patrol_channel_id"] == "negative_sample"
+    assert run_payload["patrol_channel_name"] == "Negative Sample"
     assert "Thinking temperature 冲突" in markdown
     assert "Web Search tool" in markdown
     assert "thinking.adaptive.enabled" in markdown
     assert "Result ID" in markdown
     assert "Message ID" in markdown
+    assert "Request ID" in markdown
+    assert "时间" in markdown
+    assert "Negative Sample (negative_sample)" in markdown
+    assert "# Negative Sample - 自动巡检资源报告" in markdown
+    assert "# Negative Sample - 自动巡检资源报告" in report_markdown
     assert "Thinking Signature 互通" in markdown
 
 
@@ -2946,9 +3255,83 @@ def test_scheduled_signature_source_uses_fingerprint_source_channel(monkeypatch)
     signature = payload["latest_probe_summary"]["signature_interop"]
     assert captured == {"source_id": "aws_bedrock", "relay_id": "negative_sample"}
     assert signature["source_channel_id"] == "aws_bedrock"
+    assert signature["source_channel_name"] == "AWS Bedrock Claude"
     assert signature["relay_channel_id"] == "negative_sample"
+    assert signature["relay_channel_name"] == "Negative Sample"
     assert signature["source_message_id"] == "msg_bdrk_01source"
     assert signature["relay_message_id"] == "msg_01relay"
+
+
+def test_scheduled_signature_source_missing_creates_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with SessionLocal() as db:
+        for channel in db.scalars(select(Channel).where(Channel.is_reference.is_(True))).all():
+            channel.enabled = False
+        db.commit()
+
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "missing source patrol",
+                "channel_id": "negative_sample",
+                "interval_minutes": 60,
+                "enabled": True,
+            },
+        ).json()
+
+    asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+
+    with TestClient(app) as client:
+        payload = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+        alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    summary = payload["latest_probe_summary"]
+    assert summary["signature_interop"]["status"] == "fail"
+    assert "signature_source_missing" in summary["labels"]
+    assert any("signature_source_missing" in (alert.get("trigger_labels") or []) for alert in alerts)
+
+
+def test_scheduled_probe_request_id_and_time_are_saved_in_evidence() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "request locator patrol",
+                "channel_id": "negative_sample",
+                "interval_minutes": 60,
+                "enabled": True,
+            },
+        ).json()
+        asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+        payload = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+
+    with SessionLocal() as db:
+        report = db.get(Report, payload["latest_report_id"])
+        assert report is not None
+        evidence = report.evidence or {}
+        model_requests = evidence.get("model_requests")
+        assert isinstance(model_requests, list)
+        assert model_requests
+        for item in model_requests:
+            assert "request_id" in item
+            assert item["completed_at"]
+            datetime.fromisoformat(item["completed_at"])
+
+
+def test_mock_response_request_id_can_be_extracted() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "negative_sample")
+        case = manual_thinking_temperature_probe_case()
+        assert channel is not None
+        normalized = asyncio.run(invoke_channel(channel, case, 1, {}, use_mock=True))
+
+    assert normalized["raw_response"]["cloud_wrapper"]["request_id"] == "req_1_negative_sample"
+    assert normalized["request_mode"] == "mock"
+    assert normalized["request_attempted"] is False
 
 
 def test_running_run_must_be_canceled_before_delete() -> None:
@@ -3001,6 +3384,126 @@ def test_cancel_run_is_idempotent_and_does_not_reopen_terminal_runs() -> None:
     assert pending.finished_at is not None
     assert completed is not None
     assert completed.status == "completed"
+
+
+def test_system_usage_reports_cleanup_counts() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        completed = create_run(db, RunCreate(name="completed usage run", suite_id=suite_id, use_mock=True))
+        running = create_run(db, RunCreate(name="running usage run", suite_id=suite_id, use_mock=True))
+        completed.status = "completed"
+        running.status = "running"
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/system/usage")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["disk_total_bytes"] > 0
+    assert payload["disk_free_bytes"] >= 0
+    assert payload["run_count"] >= 2
+    assert payload["cleanup_candidate_run_count"] >= 1
+    assert "memory_total_bytes" in payload
+
+
+def test_cleanup_run_logs_dry_run_does_not_delete_data() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = create_run(db, RunCreate(name="dry cleanup run", suite_id=suite_id, use_mock=True))
+        run.status = "completed"
+        db.add(Result(id="dry_res", run_id=run.id, test_case_id="case_builtin_math_json", channel_id="third_party_demo", attempt_index=1, score=100))
+        db.commit()
+        run_id = run.id
+
+    with TestClient(app) as client:
+        response = client.post("/api/system/cleanup-run-logs?dry_run=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dry_run"] is True
+    assert payload["deleted_runs"] >= 1
+    with SessionLocal() as db:
+        assert db.get(Run, run_id) is not None
+        assert db.get(Result, "dry_res") is not None
+
+
+def test_cleanup_run_logs_removes_terminal_run_logs_and_keeps_configs() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = create_run(db, RunCreate(name="cleanup terminal run", suite_id=suite_id, use_mock=True))
+        run.status = "completed"
+        db.add(Result(id="cleanup_res", run_id=run.id, test_case_id="case_builtin_math_json", channel_id="third_party_demo", attempt_index=1, score=100))
+        db.add(Comparison(id="cleanup_cmp", run_id=run.id, test_case_id="case_builtin_math_json", candidate_channel_id="third_party_demo", final_score=80))
+        db.add(Report(id="cleanup_rep", run_id=run.id, channel_id="third_party_demo", final_score=80, grade="C"))
+        db.add(ChannelAlert(id="cleanup_alert", run_id=run.id, report_id="cleanup_rep", channel_id="third_party_demo", grade="C"))
+        schedule = ScheduledChannelTest(
+            id="cleanup_schedule",
+            channel_id="third_party_demo",
+            suite_id=suite_id,
+            baseline_snapshot_id="missing_baseline_for_cleanup_test",
+            name="cleanup schedule",
+            last_run_id=run.id,
+        )
+        db.add(schedule)
+        db.commit()
+        run_id = run.id
+
+    with TestClient(app) as client:
+        response = client.post("/api/system/cleanup-run-logs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["deleted_runs"] >= 1
+    assert payload["deleted_results"] >= 1
+    assert payload["deleted_reports"] >= 1
+    assert payload["deleted_alerts"] >= 1
+    assert payload["cleared_scheduled_last_run_refs"] >= 1
+    with SessionLocal() as db:
+        assert db.get(Run, run_id) is None
+        assert db.get(Result, "cleanup_res") is None
+        assert db.get(Report, "cleanup_rep") is None
+        schedule = db.get(ScheduledChannelTest, "cleanup_schedule")
+        assert schedule is not None
+        assert schedule.last_run_id is None
+        assert db.get(Channel, "third_party_demo") is not None
+
+
+def test_cleanup_run_logs_skips_running_and_baseline_source_runs() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        running = create_run(db, RunCreate(name="skip running run", suite_id=suite_id, use_mock=True))
+        baseline_source = create_run(db, RunCreate(name="skip baseline source", suite_id=suite_id, use_mock=True))
+        running.status = "running"
+        baseline_source.status = "completed"
+        db.add(
+            BaselineSnapshot(
+                id="cleanup_baseline",
+                name="cleanup baseline",
+                suite_id=suite_id,
+                source_run_id=baseline_source.id,
+                status="ready",
+            )
+        )
+        db.commit()
+        running_id = running.id
+        baseline_run_id = baseline_source.id
+
+    with TestClient(app) as client:
+        response = client.post("/api/system/cleanup-run-logs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["skipped_running_runs"] >= 1
+    assert payload["skipped_baseline_runs"] >= 1
+    with SessionLocal() as db:
+        assert db.get(Run, running_id) is not None
+        assert db.get(Run, baseline_run_id) is not None
+        assert db.get(BaselineSnapshot, "cleanup_baseline") is not None
 
 
 def test_execute_run_stops_remaining_jobs_when_canceled(monkeypatch) -> None:

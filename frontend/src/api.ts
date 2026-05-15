@@ -15,12 +15,14 @@ import type {
   ReportSummary,
   Result,
   Run,
+  RunLogCleanupResult,
   RunMode,
   RunResults,
   RunSummary,
   ScheduledChannelTest,
   SignatureInteropResult,
   SmartPatrolReport,
+  SystemUsage,
   SamplePlan,
   TestCase,
   TestScope,
@@ -126,6 +128,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<{ status: string }>('/api/health'),
+  systemUsage: () => request<SystemUsage>('/api/system/usage'),
+  cleanupRunLogs: (dryRun = false) => request<RunLogCleanupResult>(`/api/system/cleanup-run-logs${dryRun ? '?dry_run=true' : ''}`, { method: 'POST' }),
   channels: () => request<Channel[]>('/api/channels'),
   createChannel: (payload: ChannelWritePayload) => request<Channel>('/api/channels', { method: 'POST', body: JSON.stringify(payload) }),
   updateChannel: (id: string, payload: ChannelWritePayload) =>
@@ -178,6 +182,8 @@ export const api = {
   },
   reviewAlert: (id: string, payload: { status: string; reviewer_name: string; review_note?: string }) =>
     request<ChannelAlert>(`/api/alerts/${id}/review`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteAlert: (id: string) => request<{ deleted: boolean }>(`/api/alerts/${id}`, { method: 'DELETE' }),
+  deleteAlerts: (ids: string[]) => request<{ deleted: number; missing: string[] }>('/api/alerts/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   resendAlertNotification: (id: string) => request<ChannelAlert>(`/api/alerts/${id}/resend-notification`, { method: 'POST' }),
   feishuBroadcastSetting: () => request<FeishuBroadcastSetting>('/api/settings/feishu-broadcast'),
   updateFeishuBroadcastSetting: (payload: FeishuBroadcastUpdate) =>
@@ -211,6 +217,8 @@ export const api = {
   reports: () => request<Report[]>('/api/reports'),
   reportSummaries: () => request<ReportSummary[]>('/api/reports/summary'),
   reportDetail: (id: string) => request<ReportDetail>(`/api/reports/${id}/detail`),
+  deleteReport: (id: string) => request<{ deleted: boolean }>(`/api/reports/${id}`, { method: 'DELETE' }),
+  deleteReports: (ids: string[]) => request<{ deleted: number; missing: string[] }>('/api/reports/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   compareReports: (ids: string[]) => request<ReportCompare>(`/api/reports/compare?ids=${encodeURIComponent(ids.join(','))}`),
   finalize: (runId: string) => request<{ status: string }>(`/api/runs/${runId}/finalize`, { method: 'POST' }),
   reportUrl: (runId: string) => `${API_BASE}/api/runs/${runId}/report.md`,

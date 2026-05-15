@@ -34,6 +34,10 @@ export type SignatureInteropResult = {
   ok: boolean;
   status: 'pass' | 'fail' | string;
   reason: string;
+  run?: Run | null;
+  result?: Result | null;
+  created_at?: string | null;
+  completed_at?: string | null;
   source_channel_id: string;
   relay_channel_id: string;
   source_endpoint: string;
@@ -94,6 +98,9 @@ export type Run = {
   test_scope: TestScope;
   baseline_snapshot_id?: string | null;
   scheduled_test_id?: string | null;
+  patrol_channel_id?: string | null;
+  patrol_channel_name?: string | null;
+  channels?: Array<{ channel_id?: string | null; channel_name?: string | null; role_in_run?: string | null }>;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'interrupted' | 'canceled';
   repeat_count: number;
   concurrency: number;
@@ -104,6 +111,40 @@ export type Run = {
   created_at?: string | null;
 };
 
+export type SystemUsage = {
+  disk_path: string;
+  disk_total_bytes: number;
+  disk_used_bytes: number;
+  disk_free_bytes: number;
+  disk_used_percent: number;
+  memory_total_bytes?: number | null;
+  memory_available_bytes?: number | null;
+  memory_used_bytes?: number | null;
+  memory_used_percent?: number | null;
+  database_path?: string | null;
+  database_size_bytes?: number | null;
+  run_count: number;
+  result_count: number;
+  comparison_count: number;
+  report_count: number;
+  alert_count: number;
+  cleanup_candidate_run_count: number;
+  cleanup_skipped_baseline_run_count: number;
+};
+
+export type RunLogCleanupResult = {
+  dry_run: boolean;
+  deleted_runs: number;
+  deleted_run_channels: number;
+  deleted_results: number;
+  deleted_comparisons: number;
+  deleted_reports: number;
+  deleted_alerts: number;
+  cleared_scheduled_last_run_refs: number;
+  skipped_running_runs: number;
+  skipped_baseline_runs: number;
+};
+
 export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe' | 'performance_benchmark' | 'arena_comparison';
 export type TestScope = 'quick' | 'full' | 'scheduled_probe';
 
@@ -111,6 +152,8 @@ export type ScheduledProbeModelRequest = {
   key?: string | null;
   title?: string | null;
   status?: 'ok' | 'error' | string;
+  channel_id?: string | null;
+  channel_name?: string | null;
   result_id?: string | null;
   message_id?: string | null;
   message_channel_type?: string | null;
@@ -408,7 +451,9 @@ export type ScheduledChannelTest = {
       status?: 'pass' | 'fail' | 'skipped' | string;
       reason?: string | null;
       source_channel_id?: string | null;
+      source_channel_name?: string | null;
       relay_channel_id?: string | null;
+      relay_channel_name?: string | null;
       source_message_id?: string | null;
       source_message_channel_type?: string | null;
       relay_message_id?: string | null;
@@ -416,7 +461,7 @@ export type ScheduledChannelTest = {
       signature_prefixes?: string[];
     };
     labels?: string[];
-    label_explanations?: Record<string, string>;
+    label_explanations?: Array<{ label: string; description: string }>;
     detected_provider_hint?: string | null;
   } | null;
   created_at?: string | null;

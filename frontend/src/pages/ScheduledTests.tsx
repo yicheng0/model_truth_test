@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -109,8 +109,53 @@ function runWindowText(schedule: Pick<ScheduledChannelTest, 'run_window_start' |
 function evidenceText(alert: ChannelAlert) {
   const evidence = alert.evidence_summary ?? {};
   const hint = evidence.detected_provider_hint ? String(evidence.detected_provider_hint) : '';
-  const messageId = evidence.model_request_message_id ? ` · ${String(evidence.model_request_message_id)}` : '';
-  return hint ? `${hint}${messageId}` : messageId || '-';
+  const resultId = evidence.model_request_result_id ? `result ${String(evidence.model_request_result_id)}` : '';
+  const messageId = evidence.model_request_message_id || evidence.signature_relay_message_id ? `msg ${String(evidence.model_request_message_id ?? evidence.signature_relay_message_id)}` : '';
+  const requestId = evidence.model_request_request_id || evidence.signature_relay_request_id ? `req ${String(evidence.model_request_request_id ?? evidence.signature_relay_request_id)}` : '';
+  const ids = [resultId, messageId, requestId].filter(Boolean).join(' · ');
+  return [hint, ids].filter(Boolean).join(' · ') || '-';
+}
+
+function alertChannelText(alert: ChannelAlert, channelName?: string | null) {
+  const evidence = alert.evidence_summary ?? {};
+  const name = evidence.channel_name ? String(evidence.channel_name) : channelName;
+  const model = evidence.channel_model_name ? String(evidence.channel_model_name) : '';
+  return { label: channelLabel(name, alert.channel_id), model };
+}
+
+function alertErrorText(alert: ChannelAlert) {
+  const evidence = alert.evidence_summary ?? {};
+  if (evidence.error_message) return String(evidence.error_message);
+  const modelRequests = Array.isArray(evidence.model_requests) ? evidence.model_requests : [];
+  const modelError = modelRequests.find((item) => item && typeof item === 'object' && item.error)?.error;
+  if (modelError) return String(modelError);
+  if (evidence.signature_reason) return String(evidence.signature_reason);
+  const explanations = Array.isArray(evidence.label_explanations) ? evidence.label_explanations.filter(Boolean) : [];
+  if (explanations.length) {
+    return explanations
+      .map((item) => typeof item === 'string' ? item : item && typeof item === 'object' && 'description' in item ? String(item.description) : '')
+      .filter(Boolean)
+      .slice(0, 2)
+      .join('；');
+  }
+  return scorelessAlertMessage(alert.message);
+}
+
+function scorelessAlertMessage(value?: string | null) {
+  const text = (value ?? '').trim();
+  if (!text) return '渠道自动巡检异常';
+  return text
+    .replace(/：评级\s*[A-E]，得分\s*\d+(?:\.\d+)?/g, '：自动巡检异常')
+    .replace(/评级\s*[A-E][，,]?\s*/g, '')
+    .replace(/得分\s*\d+(?:\.\d+)?/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[ ，,]+$/g, '')
+    || '渠道自动巡检异常';
+}
+
+function channelLabel(name?: string | null, id?: string | null) {
+  if (name && id) return `${name} (${id})`;
+  return name || id || '-';
 }
 
 function probeSummary(schedule: ScheduledChannelTest) {
@@ -121,22 +166,14 @@ function probeSummary(schedule: ScheduledChannelTest) {
   const modelRequests = summary.model_requests?.length ? summary.model_requests : summary.model_request ? [summary.model_request] : [];
   const signature = summary.signature_interop ?? {};
   const labels = summary.labels ?? [];
-  const explanations = summary.label_explanations ?? {};
-  const blockingLabels = labels.filter((label) => label !== 'patrol_probe_passed');
-  const hasModelError = modelRequests.some((item) => item.status === 'error' || Boolean(item.error));
+  const blockingLabels = labels.filter((label) => label !== 'patrol_probe_passed' && label !== 'provider_error_variant');
+  const hasModelError = modelRequests.some((item) => item.status === 'error' || Boolean(item.error) || (item.labels ?? []).some((label) => label !== 'provider_error_variant'));
   const hasSignatureError = signature.status === 'fail';
-  const hasBadGrade = schedule.latest_grade === 'D' || schedule.latest_grade === 'E';
-  const isFailed = schedule.last_status === 'failed' || hasModelError || hasSignatureError || hasBadGrade || blockingLabels.length > 0;
-  const tooltip = [
-    schedule.latest_grade ? `评级 ${schedule.latest_grade}${schedule.latest_score === null || schedule.latest_score === undefined ? '' : ` ${schedule.latest_score.toFixed(1)}`}` : null,
-    blockingLabels.length ? blockingLabels.map((label) => explanations[label] ?? label).join('；') : null,
-    hasModelError ? '真实请求探针异常' : null,
-    hasSignatureError ? 'Signature 互通失败' : null,
-    schedule.last_run_id ? '具体响应请到任务列表的自动巡检日志查看' : null,
-  ].filter(Boolean).join('；');
+  const isFailed = schedule.last_status === 'failed' || hasModelError || hasSignatureError || blockingLabels.length > 0;
+  const tooltip = schedule.last_run_id ? '点开自动巡检日志查看探针详情' : undefined;
   return (
     <Tooltip title={tooltip || undefined}>
-      <Tag color={isFailed ? 'red' : 'green'}>{isFailed ? '异常' : '通过'}</Tag>
+      <Tag color={isFailed ? 'red' : 'green'}>{isFailed ? '异常' : '正确'}</Tag>
     </Tooltip>
   );
 }
@@ -149,7 +186,7 @@ function reportRangeToDates(range: string) {
   return { from: from.toISOString(), to: to.toISOString() };
 }
 
-function alertRangeToDates(range: AlertTimeRange) {
+function alertRangeToParams(range: AlertTimeRange) {
   return {
     created_from: range?.[0]?.toISOString(),
     created_to: range?.[1]?.toISOString(),
@@ -170,11 +207,15 @@ export default function ScheduledTests() {
   const [alertStatus, setAlertStatus] = useState<string>('pending_review');
   const [alertIdQuery, setAlertIdQuery] = useState('');
   const [alertTimeRange, setAlertTimeRange] = useState<AlertTimeRange>(null);
+  const [selectedAlertRowKeys, setSelectedAlertRowKeys] = useState<Key[]>([]);
+  const [deletingAlertId, setDeletingAlertId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(initialTab);
   const [reportRange, setReportRange] = useState('7d');
+  const [runningScheduleId, setRunningScheduleId] = useState<string | null>(null);
+  const [deletingScheduleId, setDeletingScheduleId] = useState<string | null>(null);
   const runWindowEnabled = Form.useWatch('run_window_enabled', scheduleForm);
   const reportDates = useMemo(() => reportRangeToDates(reportRange), [reportRange]);
-  const alertDates = useMemo(() => alertRangeToDates(alertTimeRange), [alertTimeRange]);
+  const alertDateFilters = useMemo(() => alertRangeToParams(alertTimeRange), [alertTimeRange]);
   const trimmedAlertIdQuery = alertIdQuery.trim();
   const needsPlanData = activeTab === 'plans';
   const needsAlertData = activeTab === 'alerts';
@@ -186,12 +227,12 @@ export default function ScheduledTests() {
     refetchInterval: activeTab === 'plans' ? 5000 : false,
   });
   const alerts = useQuery({
-    queryKey: ['alerts', alertStatus, trimmedAlertIdQuery, alertDates.created_from, alertDates.created_to],
+    queryKey: ['alerts', alertStatus, trimmedAlertIdQuery, alertDateFilters.created_from, alertDateFilters.created_to],
     queryFn: () => api.alerts({
       status: alertStatus === 'all' ? undefined : alertStatus,
       id_query: trimmedAlertIdQuery || undefined,
-      created_from: alertDates.created_from,
-      created_to: alertDates.created_to,
+      created_from: alertDateFilters.created_from,
+      created_to: alertDateFilters.created_to,
     }),
     enabled: needsAlertData,
     refetchInterval: activeTab === 'alerts' && alertStatus === 'pending_review' && !trimmedAlertIdQuery && !alertTimeRange ? 5000 : false,
@@ -255,6 +296,7 @@ export default function ScheduledTests() {
       await queryClient.invalidateQueries({ queryKey: ['scheduledTests'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: () => setDeletingScheduleId(null),
   });
 
   const runNow = useMutation({
@@ -265,6 +307,7 @@ export default function ScheduledTests() {
       await queryClient.invalidateQueries({ queryKey: ['runs'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: () => setRunningScheduleId(null),
   });
 
   const reviewAlert = useMutation({
@@ -273,6 +316,29 @@ export default function ScheduledTests() {
       message.success('复审结果已保存');
       setReviewingAlert(null);
       await queryClient.invalidateQueries({ queryKey: ['alerts'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
+
+  const deleteAlert = useMutation({
+    mutationFn: api.deleteAlert,
+    onSuccess: async (_, id) => {
+      message.success('告警已删除');
+      setSelectedAlertRowKeys((keys) => keys.filter((key) => key !== id));
+      await queryClient.invalidateQueries({ queryKey: ['alerts'] });
+      await queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: () => setDeletingAlertId(null),
+  });
+
+  const deleteAlerts = useMutation({
+    mutationFn: api.deleteAlerts,
+    onSuccess: async (result) => {
+      message.success(`已删除 ${result.deleted} 条告警`);
+      setSelectedAlertRowKeys([]);
+      await queryClient.invalidateQueries({ queryKey: ['alerts'] });
+      await queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });
@@ -288,8 +354,17 @@ export default function ScheduledTests() {
 
   const saveFeishu = useMutation({
     mutationFn: api.updateFeishuBroadcastSetting,
-    onSuccess: async () => {
+    onSuccess: async (result) => {
+      if (result.enabled && !result.webhook_configured) {
+        message.error('Webhook 未保存，请重新填写后保存');
+        return;
+      }
       message.success('飞书播报设置已保存');
+      feishuForm.setFieldsValue({
+        webhook_url: '',
+        webhook_secret: '',
+        clear_webhook_secret: false,
+      });
       await queryClient.invalidateQueries({ queryKey: ['feishuBroadcastSetting'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
@@ -341,7 +416,7 @@ export default function ScheduledTests() {
   }
 
   async function submitSchedule(values: ScheduleFormValues) {
-    const payload = {
+    const payload: Partial<ScheduledChannelTest> = {
       name: values.name,
       channel_id: values.channel_id,
       interval_minutes: values.interval_minutes,
@@ -349,21 +424,23 @@ export default function ScheduledTests() {
       run_window_end: values.run_window_enabled ? values.run_window_end : null,
       enabled: values.enabled,
       test_scope: 'scheduled_probe' as const,
-      repeat_count: 1,
-      concurrency: 1,
-      use_mock: false,
-      alert_grade_threshold: 'D' as const,
-      alert_score_threshold: null,
-      alert_red_flags_enabled: true,
-      quiet_minutes: 0,
-      max_retries: 0,
-      retry_interval_minutes: 5,
     };
     if (editingSchedule) {
       updateSchedule.mutate({ id: editingSchedule.id, payload });
       return;
     }
-    createSchedule.mutate(payload);
+    createSchedule.mutate({
+      ...payload,
+      repeat_count: 1,
+      concurrency: 1,
+      use_mock: false,
+      alert_grade_threshold: 'D',
+      alert_score_threshold: null,
+      alert_red_flags_enabled: true,
+      quiet_minutes: 0,
+      max_retries: 0,
+      retry_interval_minutes: 5,
+    });
   }
 
   function openReview(alert: ChannelAlert) {
@@ -381,11 +458,29 @@ export default function ScheduledTests() {
     reviewAlert.mutate({ id: reviewingAlert.id, payload: values });
   }
 
+  function deleteOneAlert(alert: ChannelAlert) {
+    setDeletingAlertId(alert.id);
+    deleteAlert.mutate(alert.id);
+  }
+
+  function deleteSelectedAlerts() {
+    const ids = selectedAlertRowKeys.map(String);
+    if (!ids.length) {
+      message.warning('请先选择告警');
+      return;
+    }
+    deleteAlerts.mutate(ids);
+  }
+
   function submitFeishu(values: FeishuFormValues) {
+    const webhookUrl = values.webhook_url?.trim();
+    const webhookSecret = values.webhook_secret?.trim();
+    if (values.enabled && !feishuSetting.data?.webhook_configured && !webhookUrl) {
+      message.error('请先填写飞书机器人 Webhook');
+      return;
+    }
     const payload: FeishuBroadcastUpdate = {
       enabled: values.enabled,
-      webhook_url: values.webhook_url?.trim() || undefined,
-      webhook_secret: values.webhook_secret?.trim() || undefined,
       clear_webhook_secret: values.clear_webhook_secret,
       app_base_url: values.app_base_url?.trim() || null,
       alert_broadcast_enabled: values.alert_broadcast_enabled,
@@ -393,6 +488,8 @@ export default function ScheduledTests() {
       daily_report_time: values.daily_report_time?.format('HH:mm') ?? '09:00',
       timezone: values.timezone,
     };
+    if (webhookUrl) payload.webhook_url = webhookUrl;
+    if (webhookSecret) payload.webhook_secret = webhookSecret;
     saveFeishu.mutate(payload);
   }
 
@@ -436,7 +533,7 @@ export default function ScheduledTests() {
                     <div>
                       <Typography.Title level={4}>自动巡检配置教程</Typography.Title>
                       <Typography.Paragraph type="secondary">
-                        自动巡检只跑两项真实探针：Signature 互通检测和真实模型请求，用响应 ID 判断渠道来源特征。
+                        自动巡检会执行 Thinking Signature 互通检测和多项真实模型请求探针，用响应 ID 判断渠道来源特征。
                       </Typography.Paragraph>
                     </div>
                     <Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>
@@ -536,11 +633,27 @@ export default function ScheduledTests() {
                         render: (_, schedule) => (
                           <Space wrap>
                             <Tooltip title="立即执行一次">
-                              <Button icon={<Play size={15} />} loading={runNow.isPending} onClick={() => runNow.mutate(schedule.id)}>执行</Button>
+                              <Button
+                                icon={<Play size={15} />}
+                                loading={runningScheduleId === schedule.id}
+                                onClick={() => {
+                                  setRunningScheduleId(schedule.id);
+                                  runNow.mutate(schedule.id);
+                                }}
+                              >
+                                执行
+                              </Button>
                             </Tooltip>
                             <Button icon={<Edit3 size={15} />} onClick={() => openEditSchedule(schedule)}>编辑</Button>
-                            <Popconfirm title="删除自动巡检计划" description="历史告警会保留，但不再关联该计划。" onConfirm={() => deleteSchedule.mutate(schedule.id)}>
-                              <Button danger icon={<Trash2 size={15} />} loading={deleteSchedule.isPending}>删除</Button>
+                            <Popconfirm
+                              title="删除自动巡检计划"
+                              description="历史告警会保留，但不再关联该计划。"
+                              onConfirm={() => {
+                                setDeletingScheduleId(schedule.id);
+                                deleteSchedule.mutate(schedule.id);
+                              }}
+                            >
+                              <Button danger icon={<Trash2 size={15} />} loading={deletingScheduleId === schedule.id}>删除</Button>
                             </Popconfirm>
                           </Space>
                         ),
@@ -590,72 +703,95 @@ export default function ScheduledTests() {
             style={{ width: 380, maxWidth: '100%' }}
           />
           <Button onClick={clearAlertFilters}>清空</Button>
+          <Popconfirm
+            title="删除已选告警"
+            description={`将删除 ${selectedAlertRowKeys.length} 条告警，巡检日志和原始证据会保留。确定删除吗？`}
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            disabled={!selectedAlertRowKeys.length}
+            onConfirm={deleteSelectedAlerts}
+          >
+            <Button danger icon={<Trash2 size={15} />} disabled={!selectedAlertRowKeys.length} loading={deleteAlerts.isPending}>
+              删除已选
+            </Button>
+          </Popconfirm>
         </Space>
         <Table
           rowKey="id"
           loading={alerts.isLoading || channels.isLoading}
           dataSource={alerts.data ?? []}
+          rowSelection={{
+            selectedRowKeys: selectedAlertRowKeys,
+            onChange: setSelectedAlertRowKeys,
+            preserveSelectedRowKeys: true,
+          }}
           rowClassName={(alert) => (alert.id === selectedAlertId ? 'highlight-table-row' : '')}
           pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1480 }}
-          columns={[
-            {
-              title: '告警',
-              width: 260,
-              render: (_, alert) => (
-                <Space direction="vertical" size={4}>
-                  <strong>{alert.message ?? '渠道自动巡检异常'}</strong>
-                  <Typography.Text type="secondary">{formatDateTime(alert.created_at)}</Typography.Text>
-                </Space>
-              ),
-            },
-            {
-              title: '渠道',
-              width: 180,
-              render: (_, alert) => channelById.get(alert.channel_id)?.name ?? alert.channel_id,
-            },
-            {
-              title: '评级',
-              width: 120,
-              render: (_, alert) => (
-                <Space>
-                  <Tag color={alert.grade === 'E' ? 'red' : 'volcano'}>{alert.grade}</Tag>
-                  <strong>{alert.final_score.toFixed(1)}</strong>
-                </Space>
-              ),
-            },
-            {
-              title: '异常标签',
-              width: 230,
-              render: (_, alert) => (
-                <Space wrap>
-                  {(alert.trigger_labels?.length ? alert.trigger_labels : ['无']).map((label) => <Tag color={label === '无' ? 'default' : 'red'} key={label}>{label}</Tag>)}
-                </Space>
-              ),
-            },
-            {
-              title: '判断依据',
-              width: 320,
-              render: (_, alert) => {
-                const evidence = alert.evidence_summary ?? {};
-                return (
-                  <Space direction="vertical" size={2}>
+          scroll={{ x: 980 }}
+          expandable={{
+            expandedRowRender: (alert) => {
+              const evidence = alert.evidence_summary ?? {};
+              return (
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  <Space direction="vertical" size={4}>
+                    <Typography.Text strong>错误信息</Typography.Text>
+                    <Typography.Text>{alertErrorText(alert)}</Typography.Text>
+                  </Space>
+                  <Space wrap>
+                    {(alert.trigger_labels?.length ? alert.trigger_labels : ['无异常标签']).map((label) => (
+                      <Tag color={label === '无异常标签' ? 'default' : 'red'} key={label}>{label}</Tag>
+                    ))}
+                  </Space>
+                  <Space direction="vertical" size={4}>
+                    <Typography.Text strong>判断依据</Typography.Text>
                     <Typography.Text>{evidenceText(alert)}</Typography.Text>
                     <Typography.Text type="secondary">
-                      result: {String(evidence.model_request_result_id ?? '-')} · relay: {String(evidence.signature_relay_message_id ?? '-')}
+                      run: {alert.run_id} · report: {alert.report_id} · result: {String(evidence.model_request_result_id ?? '-')} · message: {String(evidence.model_request_message_id ?? '-')} · request: {String(evidence.model_request_request_id ?? '-')}
                     </Typography.Text>
+                    <Typography.Text type="secondary">
+                      source: {String(evidence.signature_source_message_id ?? '-')} · relay: {String(evidence.signature_relay_message_id ?? '-')}
+                    </Typography.Text>
+                  </Space>
+                  {alert.notification_error ? (
+                    <Typography.Text type="danger">飞书发送错误：{alert.notification_error}</Typography.Text>
+                  ) : null}
+                </Space>
+              );
+            },
+          }}
+          columns={[
+            {
+              title: '渠道',
+              width: 280,
+              render: (_, alert) => {
+                const channel = alertChannelText(alert, channelById.get(alert.channel_id)?.name);
+                return (
+                  <Space direction="vertical" size={4}>
+                    <Typography.Text strong>{channel.label}</Typography.Text>
+                    {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
                   </Space>
                 );
               },
             },
             {
-              title: '状态',
-              width: 130,
+              title: '巡检结果',
+              width: 120,
+              render: () => <Tag color="red">错误</Tag>,
+            },
+            {
+              title: '复审状态',
+              width: 150,
               render: (_, alert) => <Tag color={alertStatusColor[alert.status] ?? 'default'}>{alertStatusLabel[alert.status] ?? alert.status}</Tag>,
             },
             {
+              title: '创建时间',
+              width: 190,
+              render: (_, alert) => formatDateTime(alert.created_at),
+            },
+            {
               title: '飞书',
-              width: 150,
+              width: 120,
               render: (_, alert) => (
                 <Tooltip title={alert.notification_error || undefined}>
                   <Tag color={alert.notification_status === 'sent' ? 'green' : alert.notification_status === 'failed' ? 'red' : 'default'}>
@@ -666,13 +802,23 @@ export default function ScheduledTests() {
             },
             {
               title: '操作',
-              width: 250,
+              width: 260,
               fixed: 'right',
               render: (_, alert) => (
                 <Space wrap>
-                  <Link to={`/runs/${alert.run_id}`}>查看报告</Link>
-                  <Button onClick={() => openReview(alert)}>复审</Button>
+                  <Link to={`/runs/${alert.run_id}`}>查看详情</Link>
+                  {alert.status === 'pending_review' ? <Button type="primary" onClick={() => openReview(alert)}>复审</Button> : <Button onClick={() => openReview(alert)}>更新复审</Button>}
                   <Button icon={<RefreshCw size={15} />} loading={resend.isPending} onClick={() => resend.mutate(alert.id)}>重发</Button>
+                  <Popconfirm
+                    title="删除告警"
+                    description="只删除这条复审告警，巡检日志和原始证据会保留。确定删除吗？"
+                    okText="删除"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                    onConfirm={() => deleteOneAlert(alert)}
+                  >
+                    <Button danger icon={<Trash2 size={15} />} loading={deletingAlertId === alert.id}>删除</Button>
+                  </Popconfirm>
                 </Space>
               ),
             },
@@ -710,7 +856,6 @@ export default function ScheduledTests() {
                     <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="巡检任务" value={smartReport.data?.run_count ?? 0} /></Card></Col>
                     <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="异常告警" value={smartReport.data?.alert_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card></Col>
                     <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="待复审" value={smartReport.data?.pending_review_count ?? 0} valueStyle={{ color: '#a35f45' }} /></Card></Col>
-                    <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="平均分" value={smartReport.data?.avg_score ?? '-'} /></Card></Col>
                   </Row>
                   <Typography.Title level={5} className="smart-report-section-title">渠道风险排行</Typography.Title>
                   {smartReport.isLoading ? (
@@ -726,9 +871,6 @@ export default function ScheduledTests() {
                         { title: '巡检次数', dataIndex: 'run_count', width: 110 },
                         { title: '异常数', dataIndex: 'alert_count', width: 100, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
                         { title: '待复审', dataIndex: 'pending_review_count', width: 100 },
-                        { title: '最新评级', dataIndex: 'latest_grade', width: 110, render: (value: string | null) => value ? <Tag color={value === 'A' ? 'green' : value === 'E' ? 'red' : 'gold'}>{value}</Tag> : '-' },
-                        { title: '最新分', dataIndex: 'latest_score', width: 110, render: (value: number | null) => value === null || value === undefined ? '-' : value.toFixed(1) },
-                        { title: '均分', dataIndex: 'avg_score', width: 110, render: (value: number | null) => value === null || value === undefined ? '-' : value.toFixed(1) },
                         { title: '最近巡检', dataIndex: 'last_run_at', width: 180, render: formatDateTime },
                       ]}
                     />
@@ -746,11 +888,23 @@ export default function ScheduledTests() {
                       rowKey="id"
                       dataSource={recentAlerts}
                       pagination={false}
-                      scroll={{ x: 920 }}
+                      scroll={{ x: 1120 }}
                       columns={[
-                        { title: '告警', dataIndex: 'message', width: 280 },
-                        { title: '评级', dataIndex: 'grade', width: 90, render: (value: string) => <Tag color={value === 'E' ? 'red' : 'volcano'}>{value}</Tag> },
-                        { title: '分数', dataIndex: 'final_score', width: 100, render: (value: number) => value.toFixed(1) },
+                        {
+                          title: '渠道',
+                          width: 250,
+                          render: (_, alert) => {
+                            const channel = alertChannelText(alert, channelById.get(alert.channel_id)?.name);
+                            return (
+                              <Space direction="vertical" size={2}>
+                                <Typography.Text strong>{channel.label}</Typography.Text>
+                                {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
+                              </Space>
+                            );
+                          },
+                        },
+                        { title: '错误信息', dataIndex: 'message', width: 340, render: (value: string | null, alert) => alertErrorText({ ...alert, message: value }) },
+                        { title: '定位信息', width: 300, render: (_, alert) => evidenceText(alert) },
                         { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Tag color={alertStatusColor[value] ?? 'default'}>{alertStatusLabel[value] ?? value}</Tag> },
                         { title: '创建时间', dataIndex: 'created_at', width: 180, render: formatDateTime },
                         { title: '操作', width: 120, render: (_, alert) => <Link to={`/runs/${alert.run_id}`}>查看报告</Link> },
@@ -818,7 +972,20 @@ export default function ScheduledTests() {
                       </Form.Item>
                     </Col>
                     <Col xs={24}>
-                      <Form.Item label="飞书机器人 Webhook" name="webhook_url">
+                      <Form.Item
+                        label="飞书机器人 Webhook"
+                        name="webhook_url"
+                        rules={[
+                          {
+                            validator: (_, value) => {
+                              if (!feishuForm.getFieldValue('enabled') || feishuSetting.data?.webhook_configured || String(value ?? '').trim()) {
+                                return Promise.resolve();
+                              }
+                              return Promise.reject(new Error('请填写飞书机器人 Webhook'));
+                            },
+                          },
+                        ]}
+                      >
                         <Input.Password placeholder={feishuSetting.data?.webhook_preview ?? 'https://open.feishu.cn/open-apis/bot/v2/hook/...'} />
                         <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
                           在飞书群添加自定义机器人后复制 Webhook；已配置过时留空会保留原值。
@@ -893,7 +1060,7 @@ export default function ScheduledTests() {
             showIcon
             style={{ marginBottom: 16 }}
             message="固定巡检内容"
-            description="系统会自动执行 Thinking Signature 互通检测和真实模型请求探针，不需要再选择测试集、渠道指纹或评分阈值。"
+            description="系统会自动执行 Thinking Signature 互通检测和多项真实模型请求探针，不需要再选择测试集、渠道指纹或评分阈值。"
           />
           <Form.Item label="计划名称" name="name" rules={[{ required: true, message: '请输入计划名称' }]}>
             <Input placeholder="第三方 Sonnet 渠道每日巡检" />

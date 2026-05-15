@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Form, Select, Space, Steps, Switch, Table, Tag, Typography, message } from 'antd';
-import { Play, ShieldCheck } from 'lucide-react';
-import { api } from '../api';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Alert, Button, Card, Descriptions, Form, Popconfirm, Select, Space, Steps, Switch, Table, Tag, Typography, message } from 'antd';
+import { Play, ShieldCheck, Trash2 } from 'lucide-react';
+import { api, getErrorMessage } from '../api';
+import { formatDateTime } from '../time';
 import type { Channel, SignatureInteropResult } from '../types';
 
 type DisplayStep = SignatureInteropResult['steps'][number];
@@ -64,6 +65,7 @@ function resultTone(result: SignatureInteropResult) {
 }
 
 export default function SignatureInterop() {
+  const queryClient = useQueryClient();
   const [form] = Form.useForm<{ source_channel_id: string; relay_channel_id: string; stream?: boolean }>();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<SignatureInteropResult | null>(null);
@@ -100,6 +102,16 @@ export default function SignatureInterop() {
       ]);
       message.error(error instanceof Error ? error.message : 'Signature 互通检测失败');
     },
+  });
+  const deleteRun = useMutation({
+    mutationFn: api.deleteRun,
+    onSuccess: async () => {
+      message.success('检测日志已删除');
+      setResult(null);
+      await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
   });
 
   function submit(values: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) {
@@ -231,6 +243,14 @@ export default function SignatureInterop() {
 
           <Card title="检测结果" bordered={false}>
             <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="任务">
+                {result.run?.id ? <Typography.Text copyable>{result.run.id}</Typography.Text> : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="结果">
+                {result.result?.id ? <Typography.Text copyable>{result.result.id}</Typography.Text> : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="创建时间">{formatDateTime(result.created_at ?? result.run?.created_at)}</Descriptions.Item>
+              <Descriptions.Item label="完成时间">{formatDateTime(result.completed_at ?? result.run?.finished_at)}</Descriptions.Item>
               <Descriptions.Item label="模型">{result.model}</Descriptions.Item>
               <Descriptions.Item label="Thinking blocks">{result.thinking_block_count}</Descriptions.Item>
               <Descriptions.Item label="Source ID">
@@ -243,6 +263,20 @@ export default function SignatureInterop() {
               <Descriptions.Item label="Relay endpoint" span={2}>{result.relay_endpoint}</Descriptions.Item>
               <Descriptions.Item label="Signature 前缀" span={2}>{result.signature_prefixes.join(', ')}</Descriptions.Item>
             </Descriptions>
+            {result.run?.id ? (
+              <Popconfirm
+                title="删除本次检测日志"
+                description="会删除本次 Signature 检测生成的任务、结果和日志。确定删除吗？"
+                okText="删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => result.run?.id && deleteRun.mutate(result.run.id)}
+              >
+                <Button danger icon={<Trash2 size={15} />} loading={deleteRun.isPending} style={{ marginTop: 16 }}>
+                  删除本次检测日志
+                </Button>
+              </Popconfirm>
+            ) : null}
           </Card>
 
           <Card title="兜底渠道说明" bordered={false}>

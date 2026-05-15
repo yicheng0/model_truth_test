@@ -66,12 +66,6 @@ export default function CreateArenaRun() {
     }
   }, [builtInSuite?.id, form]);
 
-  useEffect(() => {
-    if (!channels.data) return;
-    const enabledCandidates = channels.data.filter((channel) => channel.enabled && isCandidateChannel(channel));
-    form.setFieldValue('arena_channel_ids', enabledCandidates.map((channel) => channel.id));
-  }, [channels.data, form]);
-
   async function submit(values: CreateArenaValues) {
     setLoading(true);
     try {

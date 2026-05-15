@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
 import type { Key } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Empty, Input, Select, Space, Table, Tag, Typography, message } from 'antd';
-import { BarChart3, FileText, GitCompare, Search } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Alert, Button, Card, Empty, Input, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { BarChart3, FileText, GitCompare, Search, Trash2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { formatDateTime } from '../time';
@@ -46,8 +46,10 @@ function labelsOf(reports: ReportSummary[]) {
 
 export default function ReportsPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const reports = useQuery({ queryKey: ['reportSummaries'], queryFn: api.reportSummaries });
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
+  const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [grade, setGrade] = useState('all');
   const [role, setRole] = useState('all');
@@ -58,7 +60,7 @@ export default function ReportsPage() {
   const data = reports.data ?? [];
   const selectedReports = useMemo(() => data.filter((report) => selectedRowKeys.includes(report.report_id)), [data, selectedRowKeys]);
   const selectedModes = useMemo(() => Array.from(new Set(selectedReports.map((report) => report.mode))), [selectedReports]);
-  const canCompare = selectedRowKeys.length >= 2 && selectedModes.length === 1;
+  const canCompare = selectedRowKeys.length >= 2 && selectedRowKeys.length <= 3 && selectedModes.length === 1;
   const roles = useMemo(() => Array.from(new Set(data.map((report) => report.channel_role))).sort(), [data]);
   const labels = useMemo(() => labelsOf(data), [data]);
 
@@ -81,6 +83,31 @@ export default function ReportsPage() {
     });
   }, [data, grade, label, mode, query, role, scoreRange]);
 
+  const deleteOne = useMutation({
+    mutationFn: api.deleteReport,
+    onSuccess: async (_, id) => {
+      message.success('报告已删除');
+      setSelectedRowKeys((keys) => keys.filter((key) => key !== id));
+      await queryClient.invalidateQueries({ queryKey: ['reportSummaries'] });
+      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+      await queryClient.invalidateQueries({ queryKey: ['alerts'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: () => setDeletingReportId(null),
+  });
+
+  const deleteMany = useMutation({
+    mutationFn: api.deleteReports,
+    onSuccess: async (result) => {
+      message.success(`已删除 ${result.deleted} 份报告`);
+      setSelectedRowKeys([]);
+      await queryClient.invalidateQueries({ queryKey: ['reportSummaries'] });
+      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+      await queryClient.invalidateQueries({ queryKey: ['alerts'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
+
   function compareSelected() {
     if (selectedRowKeys.length < 2) {
       message.warning('请至少选择 2 份报告');
@@ -90,7 +117,20 @@ export default function ReportsPage() {
       message.warning('只能对比同一类型的报告');
       return;
     }
+    if (selectedRowKeys.length > 3) {
+      message.warning('最多选择 3 份报告进行对比');
+      return;
+    }
     navigate(`/compare?report_ids=${selectedRowKeys.join(',')}`);
+  }
+
+  function deleteSelected() {
+    const ids = selectedRowKeys.map(String);
+    if (!ids.length) {
+      message.warning('请先选择报告');
+      return;
+    }
+    deleteMany.mutate(ids);
   }
 
   return (
@@ -141,6 +181,25 @@ export default function ReportsPage() {
       </Card>
 
       <Card title={<span className="card-title-with-icon"><FileText size={18} />报告列表</span>} bordered={false}>
+        <Space wrap style={{ width: '100%', marginBottom: 16 }}>
+          <Button icon={<GitCompare size={16} />} disabled={!canCompare} onClick={compareSelected}>
+            对比已选
+          </Button>
+          <Popconfirm
+            title="删除已选报告"
+            description={`将删除 ${selectedRowKeys.length} 份报告及其关联告警，检测任务和原始结果会保留。确定删除吗？`}
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            disabled={!selectedRowKeys.length}
+            onConfirm={deleteSelected}
+          >
+            <Button danger icon={<Trash2 size={15} />} disabled={!selectedRowKeys.length} loading={deleteMany.isPending}>
+              删除已选
+            </Button>
+          </Popconfirm>
+          <Typography.Text type="secondary">已选 {selectedRowKeys.length} / 当前筛选 {filtered.length}</Typography.Text>
+        </Space>
         <Table
           rowKey="report_id"
           loading={reports.isLoading}
@@ -150,13 +209,7 @@ export default function ReportsPage() {
           scroll={{ x: 1280 }}
           rowSelection={{
             selectedRowKeys,
-            onChange: (keys) => {
-              if (keys.length > 3) {
-                message.warning('最多选择 3 份报告');
-                return;
-              }
-              setSelectedRowKeys(keys);
-            },
+            onChange: (keys) => setSelectedRowKeys(keys),
           }}
           columns={[
             {
@@ -219,12 +272,29 @@ export default function ReportsPage() {
             { title: '创建时间', dataIndex: 'created_at', width: 180, render: formatDateTime },
             {
               title: '操作',
-              width: 130,
+              width: 200,
               fixed: 'right',
               render: (_, report) => (
-                <Link to={`/reports/${report.report_id}`} className="table-action-link">
-                  <BarChart3 size={15} /> 查看
-                </Link>
+                <Space wrap>
+                  <Link to={`/reports/${report.report_id}`} className="table-action-link">
+                    <BarChart3 size={15} /> 查看
+                  </Link>
+                  <Popconfirm
+                    title="删除报告"
+                    description="将删除这份报告及其关联告警，检测任务和原始结果会保留。确定删除吗？"
+                    okText="删除"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                    onConfirm={() => {
+                      setDeletingReportId(report.report_id);
+                      deleteOne.mutate(report.report_id);
+                    }}
+                  >
+                    <Button danger icon={<Trash2 size={15} />} loading={deletingReportId === report.report_id}>
+                      删除
+                    </Button>
+                  </Popconfirm>
+                </Space>
               ),
             },
           ]}

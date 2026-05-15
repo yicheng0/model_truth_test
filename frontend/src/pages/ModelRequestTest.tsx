@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Select, Space, Tag, Typography, message } from 'antd';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Popconfirm, Select, Space, Tag, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { BrainCircuit, Bug, Search, Send, Shuffle } from 'lucide-react';
-import { api } from '../api';
+import { BrainCircuit, Bug, Search, Send, Shuffle, Trash2 } from 'lucide-react';
+import { api, getErrorMessage } from '../api';
+import { formatDateTime } from '../time';
 import type { Channel, ModelRequestTestResult } from '../types';
 
 type ModelRequestForm = {
@@ -79,7 +80,9 @@ const THINKING_ADAPTIVE_ENABLED_PROBE_EXTRA_PARAMS = {
     max_tokens: 2000,
   },
   expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
+  expected_error_variant_any: ['temperature may only be set to 1 when thinking is enabled', 'temperature', 'thinking'],
   expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
+  expected_error_variant_label: 'provider_error_variant',
   expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
 };
 
@@ -200,6 +203,7 @@ function parseExtraParams(value?: string) {
 }
 
 export default function ModelRequestTest() {
+  const queryClient = useQueryClient();
   const [form] = Form.useForm<ModelRequestForm>();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<ModelRequestTestResult | null>(null);
@@ -311,6 +315,31 @@ export default function ModelRequestTest() {
       message.error(detail);
     },
   });
+  const deleteProbeRun = useMutation({
+    mutationFn: api.deleteRun,
+    onSuccess: async (_, runId) => {
+      message.success('请求日志已删除');
+      setResult((current) => current?.run.id === runId ? null : current);
+      setComboResults((items) => items.filter((item) => item.payload.run.id !== runId));
+      await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
+  const deleteComboRuns = useMutation({
+    mutationFn: async (ids: string[]) => {
+      const settled = await Promise.allSettled(ids.map((id) => api.deleteRun(id)));
+      const failed = settled.filter((item) => item.status === 'rejected').length;
+      return { deleted: ids.length - failed, failed };
+    },
+    onSuccess: async (payload) => {
+      message.success(payload.failed ? `已删除 ${payload.deleted} 条日志，${payload.failed} 条删除失败` : `已删除 ${payload.deleted} 条日志`);
+      setComboResults([]);
+      await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
 
   function submit(values: ModelRequestForm) {
     setResult(null);
@@ -354,6 +383,19 @@ export default function ModelRequestTest() {
     setResult(null);
     setComboResults([]);
     setRequestError(null);
+  }
+
+  function deleteSingleResult(payload: ModelRequestTestResult) {
+    deleteProbeRun.mutate(payload.run.id);
+  }
+
+  function deleteComboResult() {
+    const ids = comboResults.map((item) => item.payload.run.id);
+    if (!ids.length) {
+      message.warning('没有可删除的组合日志');
+      return;
+    }
+    deleteComboRuns.mutate(ids);
   }
 
   const resultLabels = result?.result.labels ?? [];
@@ -509,6 +551,18 @@ export default function ModelRequestTest() {
                   ].filter(Boolean).join('；')
             }
           />
+          <Popconfirm
+            title="删除本次组合日志"
+            description={`会删除本次组合测试产生的 ${comboResults.length} 条任务日志。确定删除吗？`}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={deleteComboResult}
+          >
+            <Button danger icon={<Trash2 size={15} />} loading={deleteComboRuns.isPending}>
+              删除本次组合日志
+            </Button>
+          </Popconfirm>
           <div className="signature-sim-grid">
             {comboResults.map(({ key, title, payload }) => {
               const labels = payload.result.labels ?? [];
@@ -521,6 +575,9 @@ export default function ModelRequestTest() {
                     <Descriptions.Item label="任务">
                       <Link to={`/runs/${payload.run.id}`}>{payload.run.id}</Link>
                     </Descriptions.Item>
+                    <Descriptions.Item label="Result ID">{payload.result.id}</Descriptions.Item>
+                    <Descriptions.Item label="创建时间">{formatDateTime(payload.run.created_at)}</Descriptions.Item>
+                    <Descriptions.Item label="完成时间">{formatDateTime(payload.run.finished_at)}</Descriptions.Item>
                     <Descriptions.Item label="结果">
                       <Tag color={classification.color}>{classification.text}</Tag>
                     </Descriptions.Item>
@@ -531,6 +588,18 @@ export default function ModelRequestTest() {
                     <Descriptions.Item label="Endpoint">{payload.provider_endpoint || '-'}</Descriptions.Item>
                     <Descriptions.Item label="错误摘要">{error || '未返回错误'}</Descriptions.Item>
                   </Descriptions>
+                  <Popconfirm
+                    title="删除该探针日志"
+                    description="会删除该探针产生的任务和结果。确定删除吗？"
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                    onConfirm={() => deleteSingleResult(payload)}
+                  >
+                    <Button danger icon={<Trash2 size={15} />} loading={deleteProbeRun.isPending && deleteProbeRun.variables === payload.run.id} style={{ marginTop: 12 }}>
+                      删除该日志
+                    </Button>
+                  </Popconfirm>
                 </Card>
               );
             })}
@@ -545,6 +614,9 @@ export default function ModelRequestTest() {
               <Descriptions.Item label="任务">
                 <Link to={`/runs/${result.run.id}`}>{result.run.id}</Link>
               </Descriptions.Item>
+              <Descriptions.Item label="Result ID">{result.result.id}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">{formatDateTime(result.run.created_at)}</Descriptions.Item>
+              <Descriptions.Item label="完成时间">{formatDateTime(result.run.finished_at)}</Descriptions.Item>
               <Descriptions.Item label="状态">{result.run.status}</Descriptions.Item>
               <Descriptions.Item label="Message ID">{result.message_id || '-'}</Descriptions.Item>
               <Descriptions.Item label="渠道特征">{result.message_channel_type}</Descriptions.Item>
@@ -553,6 +625,18 @@ export default function ModelRequestTest() {
               <Descriptions.Item label="模型">{String(normalizedValue(result, 'provider_model') ?? '-')}</Descriptions.Item>
               <Descriptions.Item label="延迟">{String(normalizedValue(result, 'latency_ms') ?? '-')} ms</Descriptions.Item>
             </Descriptions>
+            <Popconfirm
+              title="删除本次请求日志"
+              description="会删除本次真实请求生成的任务、结果和日志。确定删除吗？"
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => deleteSingleResult(result)}
+            >
+              <Button danger icon={<Trash2 size={15} />} loading={deleteProbeRun.isPending && deleteProbeRun.variables === result.run.id} style={{ marginTop: 16 }}>
+                删除本次请求日志
+              </Button>
+            </Popconfirm>
           </Card>
 
           {result.result.normalized_response?.error ? (

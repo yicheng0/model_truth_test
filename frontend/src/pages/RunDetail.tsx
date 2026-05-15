@@ -7,6 +7,7 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTool
 import { api, getErrorMessage } from '../api';
 import { roleColor } from '../channelTaxonomy';
 import { extractPatrolEvidence, type PatrolEvidence } from '../runsUtils';
+import { formatDateTime } from '../time';
 import type { BaselineResult, Channel, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
 
 type DisplayResult = Result | BaselineResult;
@@ -79,6 +80,12 @@ function responseText(result?: DisplayResult) {
   const error = normalized?.error ?? normalized?.raw_response?.error;
   if (typeof error === 'string' && error.trim()) return `请求失败：${error}`;
   return '等待该渠道返回结果';
+}
+
+function compactPatrolText(value?: string | null, limit = 140) {
+  const text = value?.replace(/\s+/g, ' ').trim();
+  if (!text) return '-';
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
 
 function responseSnippet(result?: DisplayResult) {
@@ -209,8 +216,6 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div className="channel-pair-grid">
-        <div className="monitor-stat-card"><span>巡检评级</span><strong><Tag color={evidence.grade === 'E' ? 'red' : evidence.grade === 'D' ? 'orange' : 'green'}>{evidence.grade}</Tag></strong></div>
-        <div className="monitor-stat-card"><span>巡检分</span><strong>{evidence.score.toFixed(1)}</strong></div>
         <div className="monitor-stat-card"><span>真实请求探针</span><strong>{evidence.modelRequests.length}</strong></div>
         <div className="monitor-stat-card"><span>Signature</span><strong><Tag color={evidenceStatusColor(signature?.status)}>{signature?.status ?? '待确认'}</Tag></strong></div>
       </div>
@@ -219,27 +224,37 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
         rowKey={(item) => item.key ?? item.title ?? item.resultId ?? item.messageId ?? 'model-request'}
         dataSource={evidence.modelRequests}
         pagination={false}
-        scroll={{ x: 980 }}
+        scroll={{ x: 2080 }}
         columns={[
           { title: '参数探针', width: 220, render: (_, item) => <strong>{item.title ?? item.key ?? '真实模型请求'}</strong> },
-          { title: '状态', width: 110, render: (_, item) => <Tag color={evidenceStatusColor(item.status)}>{item.status}</Tag> },
+          { title: '状态', width: 110, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag> },
+          { title: '时间', width: 190, render: (_, item) => formatDateTime(item.completedAt ?? item.createdAt) },
           { title: 'Result ID', dataIndex: 'resultId', width: 190, render: (value) => value ?? '-' },
           { title: 'Message ID', dataIndex: 'messageId', width: 190, render: (value) => value ?? '-' },
+          { title: 'Request ID', dataIndex: 'requestId', width: 190, render: (value) => value ?? '-' },
           { title: '渠道类型', dataIndex: 'messageChannelType', width: 180, render: (value) => value ?? '-' },
           { title: '协议', dataIndex: 'requestProtocol', width: 150, render: (value) => value ?? '-' },
           {
-            title: '标签/错误',
-            width: 260,
-            render: (_, item) => item.labels.length ? (
-              <Space wrap size={4}>{item.labels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space>
-            ) : item.error ?? '-',
+            title: '响应/错误内容',
+            width: 360,
+            render: (_, item) => (
+              <Tooltip title={item.responseText || item.rawResponseText || undefined}>
+                <Typography.Text>{compactPatrolText(item.responseText ?? item.rawResponseText ?? item.error)}</Typography.Text>
+              </Tooltip>
+            ),
           },
+          {
+            title: '标签',
+            width: 220,
+            render: (_, item) => item.labels.length ? <Space wrap size={4}>{item.labels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space> : '-',
+          },
+          { title: '错误', width: 220, render: (_, item) => item.error ?? '-' },
         ]}
       />
       {signature ? (
         <div className="patrol-signature-panel">
-          <div><span>Source</span><strong>{signature.sourceChannelId ?? '-'} / {signature.sourceMessageId ?? '-'}</strong></div>
-          <div><span>Relay</span><strong>{signature.relayChannelId ?? '-'} / {signature.relayMessageId ?? '-'}</strong></div>
+          <div><span>Source</span><strong>{signature.sourceChannelId ?? '-'} / msg {signature.sourceMessageId ?? '-'} / req {signature.sourceRequestId ?? '-'}</strong></div>
+          <div><span>Relay</span><strong>{signature.relayChannelId ?? '-'} / msg {signature.relayMessageId ?? '-'} / req {signature.relayRequestId ?? '-'}</strong></div>
           <div><span>Source 类型</span><strong>{signature.sourceMessageChannelType ?? '-'}</strong></div>
           <div><span>Relay 类型</span><strong>{signature.relayMessageChannelType ?? '-'}</strong></div>
         </div>
@@ -293,6 +308,9 @@ export default function RunDetail() {
   const cases = casesQuery.data ?? [];
   const isPatrolRun = Boolean(data?.run.scheduled_test_id) || data?.run.test_scope === 'scheduled_probe';
   const patrolEvidence = useMemo(() => data ? extractPatrolEvidence(data) : null, [data]);
+  const patrolChannelName = data?.run.patrol_channel_name ?? patrolEvidence?.modelRequests[0]?.channelName ?? patrolEvidence?.signature?.relayChannelName ?? null;
+  const patrolChannelId = data?.run.patrol_channel_id ?? patrolEvidence?.modelRequests[0]?.channelId ?? patrolEvidence?.signature?.relayChannelId ?? null;
+  const patrolTitle = patrolChannelName ? `${patrolChannelName} - 自动巡检资源日志` : '自动巡检资源日志';
   const isSamplingRun = !isPatrolRun && data?.run.mode === 'baseline_build';
   const isPerformanceRun = !isPatrolRun && data?.run.mode === 'performance_benchmark';
   const isArenaRun = !isPatrolRun && data?.run.mode === 'arena_comparison';
@@ -567,10 +585,13 @@ export default function RunDetail() {
           <div className="live-monitor-header">
             <div>
               <Typography.Text className="brand-kicker">SCHEDULED PATROL</Typography.Text>
-              <Typography.Title level={2}>自动巡检日志</Typography.Title>
+              <Typography.Title level={2}>{patrolTitle}</Typography.Title>
               <Typography.Paragraph>
-                这里只展示自动巡检的真实模型请求参数探针和 Thinking Signature 互通结果，不混入性能诊断或 Arena 排名视图。
+                这里只展示真实模型请求参数探针和 Thinking Signature 互通结果，不混入性能诊断或 Arena 排名视图。
               </Typography.Paragraph>
+              <Typography.Text type="secondary">
+                渠道：{patrolChannelName ?? '-'}{patrolChannelId ? ` (${patrolChannelId})` : ''}
+              </Typography.Text>
             </div>
             <Tag color={data.run.status === 'running' ? 'processing' : 'default'}>{data.run.status}</Tag>
           </div>

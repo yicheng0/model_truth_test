@@ -142,6 +142,66 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('loads system usage from the maintenance endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          disk_path: '/app',
+          disk_total_bytes: 100,
+          disk_used_bytes: 40,
+          disk_free_bytes: 60,
+          disk_used_percent: 40,
+          run_count: 1,
+          result_count: 2,
+          comparison_count: 3,
+          report_count: 4,
+          alert_count: 5,
+          cleanup_candidate_run_count: 1,
+          cleanup_skipped_baseline_run_count: 0,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.systemUsage();
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/system/usage', expect.any(Object));
+    fetchMock.mockRestore();
+  });
+
+  it('previews and runs run log cleanup through the maintenance endpoint', async () => {
+    const payload = {
+      dry_run: true,
+      deleted_runs: 1,
+      deleted_run_channels: 1,
+      deleted_results: 2,
+      deleted_comparisons: 3,
+      deleted_reports: 4,
+      deleted_alerts: 5,
+      cleared_scheduled_last_run_refs: 0,
+      skipped_running_runs: 0,
+      skipped_baseline_runs: 0,
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...payload, dry_run: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await api.cleanupRunLogs(true);
+    await api.cleanupRunLogs(false);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/system/cleanup-run-logs?dry_run=true',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/system/cleanup-run-logs',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('sends real model request tests through the channel endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
@@ -304,7 +364,9 @@ describe('api request handling', () => {
           max_tokens: 2000,
         },
         expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
+        expected_error_variant_any: ['temperature may only be set to 1 when thinking is enabled', 'temperature', 'thinking'],
         expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
+        expected_error_variant_label: 'provider_error_variant',
         expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
       },
     });
@@ -375,7 +437,9 @@ describe('api request handling', () => {
           max_tokens: 2000,
         },
         expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
+        expected_error_variant_any: ['temperature may only be set to 1 when thinking is enabled', 'temperature', 'thinking'],
         expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
+        expected_error_variant_label: 'provider_error_variant',
         expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
       },
     });
@@ -398,7 +462,9 @@ describe('api request handling', () => {
               max_tokens: 2000,
             },
             expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
+            expected_error_variant_any: ['temperature may only be set to 1 when thinking is enabled', 'temperature', 'thinking'],
             expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
+            expected_error_variant_label: 'provider_error_variant',
             expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
           },
         }),
@@ -439,6 +505,8 @@ describe('api request handling', () => {
                 key: 'thinking_temperature',
                 title: 'Thinking temperature 冲突',
                 status: 'ok',
+                channel_id: 'ch_1',
+                channel_name: 'Relay Channel',
                 result_id: 'res_1',
                 message_id: 'msg_01abc',
                 message_channel_type: 'Claude/Anthropic',
@@ -477,6 +545,8 @@ describe('api request handling', () => {
             ],
             model_request: {
               status: 'ok',
+              channel_id: 'ch_1',
+              channel_name: 'Relay Channel',
               result_id: 'res_1',
               message_id: 'msg_01abc',
               message_channel_type: 'Claude/Anthropic',
@@ -488,7 +558,9 @@ describe('api request handling', () => {
               status: 'pass',
               reason: '兼容',
               source_channel_id: 'aws_bedrock',
+              source_channel_name: 'AWS Bedrock Claude',
               relay_channel_id: 'ch_1',
+              relay_channel_name: 'Relay Channel',
               source_message_id: 'msg_bdrk_01source',
               source_message_channel_type: 'AWS Bedrock',
               relay_message_id: 'msg_01relay',
@@ -496,7 +568,7 @@ describe('api request handling', () => {
               signature_prefixes: ['sig-source'],
             },
             labels: ['patrol_probe_passed'],
-            label_explanations: { patrol_probe_passed: '自动巡检双探针通过。' },
+            label_explanations: [{ label: 'patrol_probe_passed', description: '自动巡检通过。' }],
             detected_provider_hint: '疑似 Claude/Anthropic',
           },
         }),
@@ -565,6 +637,68 @@ describe('api request handling', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/alerts?status=pending_review&id_query=req_locator_123&created_from=2026-05-15T00%3A00%3A00.000Z&created_to=2026-05-16T00%3A00%3A00.000Z',
       expect.any(Object),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('deletes one alert', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ deleted: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.deleteAlert('alert_1');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/alerts/alert_1',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('bulk deletes selected alerts', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ deleted: 2, missing: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.deleteAlerts(['alert_1', 'alert_2']);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/alerts/bulk-delete',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ ids: ['alert_1', 'alert_2'] }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('deletes one report', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ deleted: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.deleteReport('rep_1');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/reports/rep_1',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('bulk deletes selected reports', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ deleted: 2, missing: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.deleteReports(['rep_1', 'rep_2']);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/reports/bulk-delete',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ ids: ['rep_1', 'rep_2'] }),
+      }),
     );
     fetchMock.mockRestore();
   });

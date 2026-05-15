@@ -113,9 +113,9 @@ npm run build
 
 自动巡检在“自动巡检”页面按渠道创建计划。每个计划只检测一个待测渠道，创建时只需要选择待测渠道和执行间隔。
 
-巡检内容固定为两项真实探针：
+巡检内容固定为 Thinking Signature 互通检测和多项真实模型请求探针：
 
 - Thinking Signature 互通检测：指纹源渠道生成带 signature 的 thinking block，再让待测渠道复用。
-- 真实模型请求探针：发送 thinking temperature 冲突请求，记录 `message.id`、协议、endpoint 和 result id。
+- 真实模型请求探针：发送 thinking temperature、Web Search tool、thinking.adaptive.enabled 等参数探针，记录 `message.id`、协议、endpoint 和 result id。
 
 告警会携带 run、report、result、source/relay message id 等证据，方便复审定位。自动巡检默认不使用 mock，也不需要手动选择测试集、渠道指纹、重复次数、并发度或评分阈值；这些旧字段仅用于兼容已有数据。
