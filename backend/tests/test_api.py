@@ -451,6 +451,61 @@ def test_suite_bundle_import_export_and_diff() -> None:
     assert diff.json()["changed"][0]["id"] == "custom_case_1"
 
 
+def test_evalscope_jsonl_import_validation_coverage_and_sample_plan() -> None:
+    reset_database()
+    jsonl = "\n".join(
+        [
+            json.dumps(
+                {
+                    "id": "eval_mcq_1",
+                    "question": "Which model family is developed by Anthropic?",
+                    "choices": ["Claude", "GPT", "Gemini"],
+                    "answer": "Claude",
+                    "category": "identity",
+                    "difficulty": "easy",
+                    "tags": ["identity", "vendor"],
+                }
+            ),
+            json.dumps(
+                {
+                    "id": "eval_tool_1",
+                    "prompt": "Call get_order_status for A-1.",
+                    "task_type": "function_call",
+                    "module": "tool",
+                    "scoring_rules": {"tool_required": True, "tool_name": "get_order_status", "coverage_tags": ["tool"], "difficulty": "medium"},
+                }
+            ),
+        ]
+    )
+    with TestClient(app) as client:
+        imported = client.post(
+            "/api/test-suites/import-evalscope-jsonl",
+            json={
+                "suite": {"id": "evalscope_suite", "name": "EvalScope Suite", "description": "jsonl", "version": "v1", "visibility": "public"},
+                "jsonl": jsonl,
+                "default_module": "custom",
+                "default_task_type": "qa",
+            },
+        )
+        coverage = client.get("/api/test-suites/evalscope_suite/coverage")
+        validation = client.post("/api/test-suites/evalscope_suite/validate")
+        sample = client.post(
+            "/api/runs/sample-plan",
+            json={"suite_id": "evalscope_suite", "test_scope": "full", "coverage_tags": ["identity"], "group_by": "task_type"},
+        )
+
+    assert imported.status_code == 200
+    assert imported.json()["created_cases"] == 2
+    assert coverage.status_code == 200
+    assert coverage.json()["by_task_type"]["mcq"] == 1
+    assert coverage.json()["coverage_tags"]["identity"] == 1
+    assert validation.status_code == 200
+    assert validation.json()["ok"] is True
+    assert sample.status_code == 200
+    assert sample.json()["selected_count"] == 1
+    assert sample.json()["cases"][0]["id"] == "eval_mcq_1"
+
+
 def test_score_result_supports_discriminative_rules() -> None:
     reset_database()
     with SessionLocal() as db:

@@ -28,6 +28,7 @@ from .schemas import (
     ChannelTaxonomySettingUpdate,
     ChannelUpdate,
     ComparisonRead,
+    EvalScopeJsonlImportCreate,
     FeishuBroadcastSettingRead,
     FeishuBroadcastSettingUpdate,
     FeishuTestMessageRead,
@@ -44,8 +45,12 @@ from .schemas import (
     RunRead,
     RunResultsRead,
     RunSummaryRead,
+    SamplePlanCreate,
+    SamplePlanRead,
     TestSuiteBundle,
+    TestSuiteCoverageRead,
     TestSuiteDiffRead,
+    TestSuiteValidationRead,
     ScheduledChannelTestCreate,
     ScheduledChannelTestRead,
     ScheduledChannelTestUpdate,
@@ -80,6 +85,7 @@ from .services import (
     execute_scheduled_channel_test,
     fetch_channel_models,
     finalize_baseline_from_run,
+    build_sample_plan,
     get_or_create_channel_taxonomy_setting,
     feishu_setting_read,
     get_or_create_feishu_setting,
@@ -89,6 +95,7 @@ from .services import (
     MANUAL_PROBE_SUITE_ID,
     refresh_baseline_status,
     import_suite_bundle,
+    import_evalscope_jsonl,
     scheduled_test_loop,
     send_alert_notification,
     send_daily_patrol_report,
@@ -97,11 +104,13 @@ from .services import (
     simulate_message_response,
     smart_patrol_report_markdown,
     suite_diff,
+    suite_coverage,
     test_signature_interop,
     update_channel_taxonomy_setting,
     update_feishu_setting,
     validate_baseline_for_run,
     validate_scheduled_channel_test,
+    validate_suite_cases,
 )
 
 
@@ -323,6 +332,14 @@ def import_test_suite_bundle(data: TestSuiteBundle, db: Session = Depends(get_db
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/test-suites/import-evalscope-jsonl")
+def import_evalscope_jsonl_bundle(data: EvalScopeJsonlImportCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return import_evalscope_jsonl(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/test-suites/{suite_id}/export")
 def export_test_suite_bundle(suite_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
     try:
@@ -335,6 +352,22 @@ def export_test_suite_bundle(suite_id: str, db: Session = Depends(get_db)) -> di
 def diff_test_suite_bundle(suite_id: str, against: str = Query(...), db: Session = Depends(get_db)) -> dict[str, object]:
     try:
         return suite_diff(db, suite_id, against)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/test-suites/{suite_id}/validate", response_model=TestSuiteValidationRead)
+def validate_test_suite_cases(suite_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return validate_suite_cases(db, suite_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/test-suites/{suite_id}/coverage", response_model=TestSuiteCoverageRead)
+def get_test_suite_coverage(suite_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return suite_coverage(db, suite_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -427,6 +460,14 @@ def list_runs_alias(db: Session = Depends(get_db)) -> list[Run]:
 @app.post("/api/runs", response_model=RunRead)
 def start_run_alias(data: RunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Run:
     return start_run(data, background_tasks, db)
+
+
+@app.post("/api/runs/sample-plan", response_model=SamplePlanRead)
+def preview_run_sample_plan(data: SamplePlanCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return build_sample_plan(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/runs/arena", response_model=RunRead)

@@ -28,12 +28,14 @@ from .schemas import (
     ChannelRead,
     ChannelTaxonomySettingUpdate,
     ComparisonRead,
+    EvalScopeJsonlImportCreate,
     FeishuBroadcastSettingUpdate,
     ModelRequestTestCreate,
     ReportRead,
     ResultRead,
     RunCreate,
     RunRead,
+    SamplePlanCreate,
     ScheduledChannelTestCreate,
     TestSuiteBundle,
     TestCaseCreate,
@@ -493,6 +495,171 @@ def import_suite_bundle(db: Session, bundle: TestSuiteBundle) -> dict[str, Any]:
     }
 
 
+def import_evalscope_jsonl(db: Session, data: EvalScopeJsonlImportCreate) -> dict[str, Any]:
+    cases: list[TestCaseCreate] = []
+    for index, raw_line in enumerate(data.jsonl.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSONL at line {index}: {exc.msg}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid JSONL at line {index}: expected object")
+        cases.append(_evalscope_record_to_case(data.suite.id or "evalscope_suite", payload, index, data.default_module, data.default_task_type))
+    return import_suite_bundle(db, TestSuiteBundle(suite=data.suite, cases=cases))
+
+
+def _evalscope_record_to_case(suite_id: str, payload: dict[str, Any], index: int, default_module: str, default_task_type: str) -> TestCaseCreate:
+    prompt = _first_text(payload, ["prompt", "query", "question", "input", "problem", "instruction"])
+    if not prompt and isinstance(payload.get("messages"), list):
+        prompt = _messages_to_prompt(payload["messages"])
+    if not prompt:
+        raise ValueError(f"EvalScope record line {index} has no prompt/query/question/input")
+
+    case_id = str(payload.get("id") or payload.get("case_id") or payload.get("sample_id") or f"{suite_id}_case_{index:04d}")
+    module = str(payload.get("module") or payload.get("category") or payload.get("subset") or default_module)
+    task_type = str(payload.get("task_type") or payload.get("metric") or default_task_type)
+    choices = payload.get("choices") or payload.get("options")
+    answer = payload.get("answer") if "answer" in payload else payload.get("target")
+    scoring_rules = _clean_dict(payload.get("scoring_rules")) or {}
+    scoring_rules.setdefault("task_type", task_type)
+    if choices is not None:
+        scoring_rules["choices"] = choices
+        if "task_type" not in payload and "metric" not in payload:
+            scoring_rules["task_type"] = "mcq"
+    if answer is not None:
+        scoring_rules["answer_key"] = answer
+    if payload.get("reference_answer") is not None:
+        scoring_rules["reference_answer"] = payload["reference_answer"]
+    if payload.get("tags") is not None:
+        scoring_rules["coverage_tags"] = _string_list(payload["tags"])
+    if payload.get("difficulty") is not None:
+        scoring_rules["difficulty"] = str(payload["difficulty"])
+    if payload.get("risk_dimension") is not None:
+        scoring_rules["risk_dimension"] = str(payload["risk_dimension"])
+
+    return TestCaseCreate(
+        id=case_id,
+        suite_id=suite_id,
+        module=module,
+        sort_order=int(payload.get("sort_order") or index),
+        title=str(payload.get("title") or payload.get("name") or case_id),
+        prompt=prompt,
+        system_prompt=payload.get("system_prompt") if isinstance(payload.get("system_prompt"), str) else None,
+        request_params=_clean_dict(payload.get("request_params")) or {"max_tokens": 256, "temperature": 0},
+        scoring_rules=scoring_rules,
+        is_hidden=bool(payload.get("is_hidden", False)),
+        enabled=payload.get("enabled", True) is not False,
+    )
+
+
+def validate_suite_cases(db: Session, suite_id: str) -> dict[str, Any]:
+    suite = db.get(TestSuite, suite_id)
+    if not suite:
+        raise ValueError("Test suite not found")
+    cases = _suite_cases(db, suite_id)
+    issues: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_prompt_hashes: dict[str, str] = {}
+    for case in cases:
+        rules = case.scoring_rules or {}
+        if case.id in seen_ids:
+            issues.append(_suite_issue("error", case.id, "id", "Duplicate case id"))
+        seen_ids.add(case.id)
+        if not case.prompt.strip():
+            issues.append(_suite_issue("error", case.id, "prompt", "Prompt cannot be empty"))
+        prompt_hash = hashlib.sha256(case.prompt.strip().encode("utf-8")).hexdigest()
+        if prompt_hash in seen_prompt_hashes:
+            issues.append(_suite_issue("warning", case.id, "prompt", f"Prompt duplicates {seen_prompt_hashes[prompt_hash]}"))
+        seen_prompt_hashes[prompt_hash] = case.id
+        task_type = _case_task_type(case)
+        if task_type not in {"qa", "mcq", "json_schema", "function_call", "protocol_probe", "arena_prompt"}:
+            issues.append(_suite_issue("warning", case.id, "task_type", f"Unsupported task_type: {task_type}"))
+        if not rules:
+            issues.append(_suite_issue("warning", case.id, "scoring_rules", "Missing scoring rules"))
+        if _case_weight(case) <= 0:
+            issues.append(_suite_issue("error", case.id, "weight", "Weight must be positive"))
+        if task_type == "mcq" and not rules.get("choices"):
+            issues.append(_suite_issue("warning", case.id, "choices", "MCQ cases should define choices"))
+        if task_type == "function_call" and not (rules.get("tool_name") or rules.get("tool_required")):
+            issues.append(_suite_issue("warning", case.id, "tool", "Function calling cases should define tool requirements"))
+        if task_type == "json_schema" and not rules.get("json_schema"):
+            issues.append(_suite_issue("warning", case.id, "json_schema", "JSON schema cases should define json_schema"))
+        if not rules.get("coverage_tags"):
+            issues.append(_suite_issue("info", case.id, "coverage_tags", "Missing coverage tags"))
+        if not rules.get("difficulty"):
+            issues.append(_suite_issue("info", case.id, "difficulty", "Missing difficulty"))
+    return {"suite_id": suite_id, "ok": not any(item["severity"] == "error" for item in issues), "issue_count": len(issues), "issues": issues}
+
+
+def suite_coverage(db: Session, suite_id: str) -> dict[str, Any]:
+    suite = db.get(TestSuite, suite_id)
+    if not suite:
+        raise ValueError("Test suite not found")
+    cases = _suite_cases(db, suite_id)
+    enabled_cases = [case for case in cases if case.enabled]
+    missing_metadata = {"task_type": 0, "difficulty": 0, "coverage_tags": 0, "risk_dimension": 0}
+    by_task_type: list[str] = []
+    by_difficulty: list[str] = []
+    by_risk_dimension: list[str] = []
+    tags: list[str] = []
+    for case in cases:
+        rules = case.scoring_rules or {}
+        by_task_type.append(_case_task_type(case))
+        difficulty = str(rules.get("difficulty") or "unspecified")
+        by_difficulty.append(difficulty)
+        dimension = str(rules.get("risk_dimension") or case_dimension(case))
+        by_risk_dimension.append(dimension)
+        case_tags = _case_tags(case)
+        tags.extend(case_tags)
+        if "task_type" not in rules:
+            missing_metadata["task_type"] += 1
+        if "difficulty" not in rules:
+            missing_metadata["difficulty"] += 1
+        if not case_tags:
+            missing_metadata["coverage_tags"] += 1
+        if "risk_dimension" not in rules:
+            missing_metadata["risk_dimension"] += 1
+    return {
+        "suite_id": suite_id,
+        "case_count": len(cases),
+        "enabled_count": len(enabled_cases),
+        "quick_count": sum(1 for case in cases if (case.scoring_rules or {}).get("quick") is True),
+        "by_module": _count_values([case.module for case in cases]),
+        "by_task_type": _count_values(by_task_type),
+        "by_difficulty": _count_values(by_difficulty),
+        "by_risk_dimension": _count_values(by_risk_dimension),
+        "coverage_tags": _count_values(tags),
+        "missing_metadata": missing_metadata,
+    }
+
+
+def build_sample_plan(db: Session, data: SamplePlanCreate) -> dict[str, Any]:
+    available = cases_for_scope(db, data.suite_id, data.test_scope)
+    selected = [case for case in available if _case_matches_sample_filters(case, data)]
+    grouped_counts = _count_values([_case_sample_group(case, data.group_by) for case in selected])
+    if data.per_group_limit:
+        by_group: dict[str, list[TestCase]] = defaultdict(list)
+        for case in selected:
+            group = _case_sample_group(case, data.group_by)
+            if len(by_group[group]) < data.per_group_limit:
+                by_group[group].append(case)
+        selected = [case for group in sorted(by_group) for case in by_group[group]]
+    if data.limit:
+        selected = selected[: data.limit]
+    return {
+        "suite_id": data.suite_id,
+        "test_scope": data.test_scope,
+        "total_available": len(available),
+        "selected_count": len(selected),
+        "filters": data.model_dump(exclude_none=True),
+        "cases": [TestCaseRead.model_validate(case) for case in selected],
+        "group_counts": grouped_counts,
+    }
+
+
 def suite_diff(db: Session, suite_id: str, against: str) -> dict[str, Any]:
     current = export_suite_bundle(db, suite_id)
     try:
@@ -515,6 +682,108 @@ def suite_diff(db: Session, suite_id: str, against: str) -> dict[str, Any]:
         else:
             unchanged.append(case_id)
     return {"suite_id": suite_id, "against": reference.get("suite", {}).get("id", against), "added": added, "removed": removed, "changed": changed, "unchanged": unchanged}
+
+
+def _suite_cases(db: Session, suite_id: str) -> list[TestCase]:
+    return list(
+        db.scalars(
+            select(TestCase)
+            .where(TestCase.suite_id == suite_id)
+            .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
+        ).all()
+    )
+
+
+def _first_text(payload: dict[str, Any], keys: list[str]) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _messages_to_prompt(messages: list[Any]) -> str:
+    parts = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role") or "user"
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(f"{role}: {content}")
+    return "\n".join(parts)
+
+
+def _clean_dict(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
+def _suite_issue(severity: str, case_id: str | None, field: str | None, message: str) -> dict[str, Any]:
+    return {"severity": severity, "case_id": case_id, "field": field, "message": message}
+
+
+def _case_task_type(case: TestCase) -> str:
+    rules = case.scoring_rules or {}
+    task_type = rules.get("task_type")
+    if isinstance(task_type, str) and task_type.strip():
+        return task_type.strip()
+    if rules.get("tool_required") or rules.get("tool_name"):
+        return "function_call"
+    if rules.get("json_schema") or rules.get("json_required"):
+        return "json_schema"
+    if case.module in {"protocol", "websearch"} or _is_expected_error_probe_case(case):
+        return "protocol_probe"
+    if case.module == "arena":
+        return "arena_prompt"
+    return "qa"
+
+
+def _case_weight(case: TestCase) -> float:
+    try:
+        return float((case.scoring_rules or {}).get("weight", 1.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _case_tags(case: TestCase) -> list[str]:
+    rules = case.scoring_rules or {}
+    return _string_list(rules.get("coverage_tags") or rules.get("tags"))
+
+
+def _case_matches_sample_filters(case: TestCase, data: SamplePlanCreate) -> bool:
+    rules = case.scoring_rules or {}
+    if data.modules and case.module not in data.modules:
+        return False
+    if data.task_types and _case_task_type(case) not in data.task_types:
+        return False
+    if data.difficulties and str(rules.get("difficulty") or "unspecified") not in data.difficulties:
+        return False
+    if data.risk_dimensions and str(rules.get("risk_dimension") or case_dimension(case)) not in data.risk_dimensions:
+        return False
+    if data.coverage_tags:
+        tags = set(_case_tags(case))
+        if not tags.intersection(data.coverage_tags):
+            return False
+    return True
+
+
+def _case_sample_group(case: TestCase, group_by: str) -> str:
+    rules = case.scoring_rules or {}
+    if group_by == "task_type":
+        return _case_task_type(case)
+    if group_by == "difficulty":
+        return str(rules.get("difficulty") or "unspecified")
+    if group_by == "risk_dimension":
+        return str(rules.get("risk_dimension") or case_dimension(case))
+    return case.module
 
 
 def seed_demo_data(db: Session) -> None:

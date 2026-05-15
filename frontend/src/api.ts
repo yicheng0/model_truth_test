@@ -22,11 +22,14 @@ import type {
   SignatureInteropResult,
   SimulatedMessageResponse,
   SmartPatrolReport,
+  SamplePlan,
   TestCase,
   TestScope,
   TestSuite,
   TestSuiteBundle,
+  TestSuiteCoverage,
   TestSuiteDiff,
+  TestSuiteValidation,
 } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
@@ -122,8 +125,12 @@ export const api = {
   suites: () => request<TestSuite[]>('/api/suites'),
   createSuite: (payload: Partial<TestSuite>) => request<TestSuite>('/api/test-suites', { method: 'POST', body: JSON.stringify(payload) }),
   importSuite: (payload: TestSuiteBundle) => request<{ suite: TestSuite; created_suite: boolean; created_cases: number; updated_cases: number; case_count: number }>('/api/test-suites/import', { method: 'POST', body: JSON.stringify(payload) }),
+  importEvalScopeJsonl: (payload: { suite: Partial<TestSuite>; jsonl: string; default_module?: string; default_task_type?: string }) =>
+    request<{ suite: TestSuite; created_suite: boolean; created_cases: number; updated_cases: number; case_count: number }>('/api/test-suites/import-evalscope-jsonl', { method: 'POST', body: JSON.stringify(payload) }),
   exportSuite: (suiteId: string) => request<TestSuiteBundle>(`/api/test-suites/${suiteId}/export`),
   diffSuite: (suiteId: string, against: string) => request<TestSuiteDiff>(`/api/test-suites/${suiteId}/diff?against=${encodeURIComponent(against)}`),
+  validateSuite: (suiteId: string) => request<TestSuiteValidation>(`/api/test-suites/${suiteId}/validate`, { method: 'POST' }),
+  suiteCoverage: (suiteId: string) => request<TestSuiteCoverage>(`/api/test-suites/${suiteId}/coverage`),
   cases: (suiteId?: string) => request<TestCase[]>(suiteId ? `/api/suites/${suiteId}/cases` : '/api/test-cases'),
   createCase: (payload: Partial<TestCase>) => request<TestCase>('/api/test-cases', { method: 'POST', body: JSON.stringify(payload) }),
   updateCase: (id: string, payload: Partial<TestCase>) => request<TestCase>(`/api/test-cases/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
@@ -133,6 +140,7 @@ export const api = {
   runResults: (runId: string) => request<RunResults>(`/api/runs/${runId}/results`),
   runSummary: (runId: string) => request<RunSummary>(`/api/runs/${runId}/summary`),
   startRun: (payload: unknown) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
+  samplePlan: (payload: unknown) => request<SamplePlan>('/api/runs/sample-plan', { method: 'POST', body: JSON.stringify(payload) }),
   startArenaRun: (payload: ArenaRunCreatePayload) => request<Run>('/api/runs/arena', { method: 'POST', body: JSON.stringify(payload) }),
   baselines: (suiteId?: string) => request<BaselineSnapshot[]>(suiteId ? `/api/baselines?suite_id=${encodeURIComponent(suiteId)}` : '/api/baselines'),
   baseline: (id: string) => request<BaselineSnapshot>(`/api/baselines/${id}`),

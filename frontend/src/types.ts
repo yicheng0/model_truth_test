@@ -209,6 +209,41 @@ export type TestSuiteDiff = {
   unchanged: string[];
 };
 
+export type TestSuiteValidation = {
+  suite_id: string;
+  ok: boolean;
+  issue_count: number;
+  issues: Array<{
+    severity: 'error' | 'warning' | 'info' | string;
+    case_id?: string | null;
+    field?: string | null;
+    message: string;
+  }>;
+};
+
+export type TestSuiteCoverage = {
+  suite_id: string;
+  case_count: number;
+  enabled_count: number;
+  quick_count: number;
+  by_module: Record<string, number>;
+  by_task_type: Record<string, number>;
+  by_difficulty: Record<string, number>;
+  by_risk_dimension: Record<string, number>;
+  coverage_tags: Record<string, number>;
+  missing_metadata: Record<string, number>;
+};
+
+export type SamplePlan = {
+  suite_id: string;
+  test_scope: TestScope;
+  total_available: number;
+  selected_count: number;
+  filters: Record<string, unknown>;
+  cases: TestCase[];
+  group_counts: Record<string, number>;
+};
+
 export type PerformanceSummary = {
   request_count?: number;
   error_count?: number;

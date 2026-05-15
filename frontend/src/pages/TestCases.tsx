@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
-import { Download, Edit3, Plus, Trash2, Upload } from 'lucide-react';
+import { Download, Edit3, Plus, Shuffle, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
 import type { TestCase, TestSuite } from '../types';
 
@@ -27,6 +27,7 @@ const moduleOptions = [
   { value: 'protocol', label: '协议细节' },
   { value: 'safety', label: '安全边界' },
   { value: 'format_boundary', label: '格式边界' },
+  { value: 'tool', label: '工具调用' },
   { value: 'tool_use', label: '工具调用' },
   { value: 'streaming', label: '流式输出' },
   { value: 'custom', label: '自定义' },
@@ -41,6 +42,7 @@ const moduleColor: Record<string, string> = {
   protocol: 'gold',
   safety: 'red',
   format_boundary: 'purple',
+  tool: 'magenta',
   tool_use: 'magenta',
   streaming: 'orange',
   custom: 'default',
@@ -74,6 +76,7 @@ export default function TestCases() {
   const [moduleFilter, setModuleFilter] = useState<string>('all');
   const [enabledFilter, setEnabledFilter] = useState<string>('all');
   const [bundleText, setBundleText] = useState('');
+  const [evalScopeJsonl, setEvalScopeJsonl] = useState('');
   const [diffAgainst, setDiffAgainst] = useState('');
 
   const invalidate = async () => {
@@ -120,6 +123,31 @@ export default function TestCases() {
     onError: (error) => message.error(error instanceof Error ? error.message : '导入失败'),
   });
 
+  const importEvalScope = useMutation({
+    mutationFn: (jsonl: string) => {
+      const suiteId = selectedExportSuiteId || suites.data?.[0]?.id || 'evalscope_imported_suite';
+      const suite = suites.data?.find((item) => item.id === suiteId);
+      return api.importEvalScopeJsonl({
+        suite: {
+          id: suiteId,
+          name: suite?.name ?? 'EvalScope Imported Suite',
+          description: suite?.description ?? 'Imported from EvalScope-style JSONL',
+          version: suite?.version ?? 'evalscope-jsonl',
+          visibility: suite?.visibility ?? 'public',
+        },
+        jsonl,
+        default_module: moduleFilter !== 'all' ? moduleFilter : 'custom',
+        default_task_type: 'qa',
+      });
+    },
+    onSuccess: async (result) => {
+      message.success(`EvalScope JSONL 已导入：新增 ${result.created_cases}，更新 ${result.updated_cases}`);
+      setEvalScopeJsonl('');
+      await invalidate();
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : 'EvalScope JSONL 导入失败'),
+  });
+
   const selectedExportSuiteId = suiteFilter !== 'all' ? suiteFilter : suites.data?.[0]?.id;
   const exportedBundle = useQuery({
     queryKey: ['suiteExport', selectedExportSuiteId],
@@ -130,6 +158,27 @@ export default function TestCases() {
     queryKey: ['suiteDiff', selectedExportSuiteId, diffAgainst],
     queryFn: () => api.diffSuite(selectedExportSuiteId || '', diffAgainst),
     enabled: Boolean(selectedExportSuiteId && diffAgainst.trim()),
+  });
+  const suiteCoverage = useQuery({
+    queryKey: ['suiteCoverage', selectedExportSuiteId],
+    queryFn: () => api.suiteCoverage(selectedExportSuiteId || ''),
+    enabled: Boolean(selectedExportSuiteId),
+  });
+  const suiteValidation = useQuery({
+    queryKey: ['suiteValidation', selectedExportSuiteId],
+    queryFn: () => api.validateSuite(selectedExportSuiteId || ''),
+    enabled: Boolean(selectedExportSuiteId),
+  });
+  const samplePlan = useQuery({
+    queryKey: ['samplePlan', selectedExportSuiteId, moduleFilter, enabledFilter],
+    queryFn: () => api.samplePlan({
+      suite_id: selectedExportSuiteId || '',
+      test_scope: 'full',
+      modules: moduleFilter !== 'all' ? [moduleFilter] : [],
+      group_by: 'module',
+      per_group_limit: 3,
+    }),
+    enabled: Boolean(selectedExportSuiteId),
   });
 
   const filteredCases = useMemo(() => {
@@ -234,6 +283,14 @@ export default function TestCases() {
     }
   }
 
+  function submitEvalScopeImport() {
+    if (!evalScopeJsonl.trim()) {
+      message.warning('请先粘贴 EvalScope JSONL');
+      return;
+    }
+    importEvalScope.mutate(evalScopeJsonl);
+  }
+
   function downloadBundle() {
     if (!exportedBundle.data) return;
     const blob = new Blob([JSON.stringify(exportedBundle.data, null, 2)], { type: 'application/json' });
@@ -267,8 +324,47 @@ export default function TestCases() {
         <div><span>题目总数</span><strong>{cases.data?.length ?? 0}</strong></div>
         <div><span>当前展示</span><strong>{filteredCases.length}</strong></div>
         <div><span>模块数量</span><strong>{moduleCounts.size}</strong></div>
-        <div><span>测试集</span><strong>{suites.data?.length ?? 0}</strong></div>
+        <div><span>Quick 题</span><strong>{suiteCoverage.data?.quick_count ?? '-'}</strong></div>
       </section>
+
+      <Card title="题库质量与抽样" bordered={false}>
+        <Space direction="vertical" size={14} className="full-width">
+          <Space wrap>
+            <Tag color={suiteValidation.data?.ok ? 'green' : 'red'}>
+              校验 {suiteValidation.data?.ok ? '通过' : `${suiteValidation.data?.issue_count ?? '-'} 项`}
+            </Tag>
+            {Object.entries(suiteCoverage.data?.by_task_type ?? {}).map(([key, value]) => <Tag key={key} color="blue">{key}: {value}</Tag>)}
+            {Object.entries(suiteCoverage.data?.by_risk_dimension ?? {}).map(([key, value]) => <Tag key={key} color="gold">{key}: {value}</Tag>)}
+          </Space>
+          {suiteValidation.data?.issues?.length ? (
+            <Alert
+              type={suiteValidation.data.ok ? 'info' : 'warning'}
+              showIcon
+              message="题库校验结果"
+              description={
+                <Space wrap>
+                  {suiteValidation.data.issues.slice(0, 8).map((issue, index) => (
+                    <Tag key={`${issue.case_id ?? 'suite'}-${index}`} color={issue.severity === 'error' ? 'red' : issue.severity === 'warning' ? 'orange' : 'default'}>
+                      {issue.case_id ?? 'suite'} · {issue.field ?? '-'} · {issue.message}
+                    </Tag>
+                  ))}
+                </Space>
+              }
+            />
+          ) : null}
+          <Alert
+            type="info"
+            showIcon
+            icon={<Shuffle size={16} />}
+            message={`抽样预览：${samplePlan.data?.selected_count ?? 0} / ${samplePlan.data?.total_available ?? 0} 道`}
+            description={
+              <Space wrap>
+                {(samplePlan.data?.cases ?? []).slice(0, 12).map((item) => <Tag key={item.id}>{item.sort_order}. {item.title}</Tag>)}
+              </Space>
+            }
+          />
+        </Space>
+      </Card>
 
       <Card title="题目筛选" bordered={false}>
           <div className="case-filter-grid">
@@ -305,6 +401,16 @@ export default function TestCases() {
           <Space wrap>
             <Button type="primary" icon={<Upload size={16} />} loading={importBundle.isPending} disabled={!bundleText.trim()} onClick={submitBundleImport}>导入/更新题库</Button>
             <Button onClick={() => exportedBundle.data && setBundleText(JSON.stringify(exportedBundle.data, null, 2))} disabled={!exportedBundle.data}>填入当前导出</Button>
+          </Space>
+          <Input.TextArea
+            rows={4}
+            value={evalScopeJsonl}
+            onChange={(event) => setEvalScopeJsonl(event.target.value)}
+            placeholder='粘贴 EvalScope JSONL，每行一个样本，例如 {"id":"case1","question":"...","answer":"...","choices":["A","B"]}'
+          />
+          <Space wrap>
+            <Button icon={<Upload size={16} />} loading={importEvalScope.isPending} disabled={!evalScopeJsonl.trim()} onClick={submitEvalScopeImport}>导入 EvalScope JSONL</Button>
+            <Typography.Text type="secondary">导入到当前导出测试集，自动映射 question/prompt、choices、answer、tags、difficulty。</Typography.Text>
           </Space>
           <Input.TextArea
             rows={3}

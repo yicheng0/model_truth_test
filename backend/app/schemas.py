@@ -172,6 +172,40 @@ class TestSuiteBundle(BaseModel):
     cases: list[TestCaseCreate] = Field(default_factory=list)
 
 
+class EvalScopeJsonlImportCreate(BaseModel):
+    suite: TestSuiteCreate
+    jsonl: str
+    default_module: str = "custom"
+    default_task_type: str = "qa"
+
+
+class TestSuiteValidationIssue(BaseModel):
+    severity: str
+    case_id: str | None = None
+    field: str | None = None
+    message: str
+
+
+class TestSuiteValidationRead(BaseModel):
+    suite_id: str
+    ok: bool
+    issue_count: int
+    issues: list[TestSuiteValidationIssue] = Field(default_factory=list)
+
+
+class TestSuiteCoverageRead(BaseModel):
+    suite_id: str
+    case_count: int
+    enabled_count: int
+    quick_count: int
+    by_module: dict[str, int] = Field(default_factory=dict)
+    by_task_type: dict[str, int] = Field(default_factory=dict)
+    by_difficulty: dict[str, int] = Field(default_factory=dict)
+    by_risk_dimension: dict[str, int] = Field(default_factory=dict)
+    coverage_tags: dict[str, int] = Field(default_factory=dict)
+    missing_metadata: dict[str, int] = Field(default_factory=dict)
+
+
 class TestSuiteDiffRead(BaseModel):
     suite_id: str
     against: str
@@ -193,6 +227,29 @@ class RunCreate(BaseModel):
     baseline_snapshot_id: str | None = None
     runtime_credentials: dict[str, dict[str, Any]] = Field(default_factory=dict)
     benchmark_config: BenchmarkConfig | None = None
+
+
+class SamplePlanCreate(BaseModel):
+    suite_id: str
+    test_scope: str = "full"
+    modules: list[str] = Field(default_factory=list)
+    task_types: list[str] = Field(default_factory=list)
+    coverage_tags: list[str] = Field(default_factory=list)
+    difficulties: list[str] = Field(default_factory=list)
+    risk_dimensions: list[str] = Field(default_factory=list)
+    limit: int | None = Field(default=None, ge=1, le=500)
+    per_group_limit: int | None = Field(default=None, ge=1, le=100)
+    group_by: str = "module"
+
+
+class SamplePlanRead(BaseModel):
+    suite_id: str
+    test_scope: str
+    total_available: int
+    selected_count: int
+    filters: dict[str, Any]
+    cases: list[TestCaseRead]
+    group_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class ArenaRunCreate(BaseModel):
