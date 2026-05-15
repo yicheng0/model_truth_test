@@ -174,10 +174,15 @@ export default function CreatePerformanceRun() {
               channels={channels.data ?? []}
               placeholder="选择诊断渠道"
               tag={{ color: 'orange', label: 'TTFT / TPOT' }}
+              showCredentialStatus
               notFoundContent="暂无渠道，请先在渠道管理中新增渠道。"
             />
           </Form.Item>
-          <RuntimeCredentialsFields channels={credentialChannels} />
+          <RuntimeCredentialsFields
+            channels={credentialChannels}
+            onlyMissing
+            configuredMessage="已选择渠道均会使用渠道管理中保存的 API Key，无需重复填写。"
+          />
           <Button type="primary" size="large" htmlType="submit" loading={loading} style={{ height: '44px', fontWeight: 600 }}>
             启动性能诊断
           </Button>
