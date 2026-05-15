@@ -1104,6 +1104,37 @@ textarea:focus-visible,
   overflow-wrap: anywhere;
 }
 
+.channel-select-option {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.channel-select-option > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1;
+}
+
+.channel-select-option strong,
+.channel-select-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channel-select-option strong {
+  color: #1e293b;
+  font-weight: 800;
+}
+
+.channel-select-option small {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .run-channel-option {
   min-height: 74px;
   display: grid;

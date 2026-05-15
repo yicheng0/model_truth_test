@@ -33,7 +33,7 @@ const workflowSteps = [
   },
   {
     title: '发起检测任务',
-    description: '选择待测渠道，运行真实性对比、性能诊断或候选渠道 Arena 排名。',
+    description: '选择渠道指纹和待测渠道，运行真实性对比任务。',
     to: '/new-run?mode=compare',
     action: '新建任务',
     icon: ListChecks,
@@ -52,7 +52,9 @@ const featureLinks = [
   { title: '模型请求', description: '向单个渠道发真实请求，查看 message id 和原始响应。', to: '/model-request-test', icon: Send },
   { title: 'Signature 检测', description: '验证 thinking signature 跨渠道复用行为。', to: '/signature-interop', icon: ShieldCheck },
   { title: '渠道指纹', description: '管理已经生成的基线指纹。', to: '/baselines', icon: Database },
-  { title: '新建任务', description: '创建真实性对比、性能诊断、Arena 排名或指纹提取任务。', to: '/new-run', icon: PlayCircle },
+  { title: '新建任务', description: '创建真实性对比或指纹提取任务。', to: '/new-run', icon: PlayCircle },
+  { title: '性能诊断', description: '对渠道做延迟、TTFT、TPOT 和吞吐诊断。', to: '/new-performance', icon: BarChart3 },
+  { title: 'Arena 排名', description: '比较候选渠道胜率、题目分和样本分歧。', to: '/new-arena', icon: GitCompare },
   { title: '任务列表', description: '跟踪运行进度和历史任务。', to: '/runs', icon: GitCompare },
   { title: '报告中心', description: '集中查看渠道评分和诊断结论。', to: '/reports', icon: BarChart3 },
   { title: '自动巡检', description: '为候选渠道设置周期检测和告警。', to: '/scheduled-tests', icon: CalendarClock },
@@ -101,7 +103,7 @@ export default function Dashboard() {
           <Typography.Text className="section-kicker">APIPRO RELAY EVAL</Typography.Text>
           <Typography.Title>渠道真实性测评工作台</Typography.Title>
           <Typography.Paragraph>
-            这里是操作入口和流程总览。先配置渠道，再提取可信渠道指纹，随后对待测渠道发起真实性对比、性能诊断或 Arena 排名任务，最后在报告中心查看结论。
+            这里是操作入口和流程总览。先配置渠道，再提取可信渠道指纹，随后发起真实性对比、性能诊断或 Arena 排名任务，最后在报告中心查看结论。
           </Typography.Paragraph>
         </div>
         <div className="overview-actions">

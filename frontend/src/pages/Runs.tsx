@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Popconfirm, Progress, Space, Table, Tag, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
+import { BarChart3, CircleStop, Fingerprint, GitCompare, Trash2, Trophy } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
@@ -72,6 +72,16 @@ export default function Runs() {
             <Link to="/new-run?mode=compare">
               <Button type="primary" size="large" icon={<GitCompare size={16} />} style={{ height: '40px', fontWeight: 600 }}>
                 真实性对比
+              </Button>
+            </Link>
+            <Link to="/new-performance">
+              <Button size="large" icon={<BarChart3 size={16} />} style={{ height: '40px', fontWeight: 600 }}>
+                性能诊断
+              </Button>
+            </Link>
+            <Link to="/new-arena">
+              <Button size="large" icon={<Trophy size={16} />} style={{ height: '40px', fontWeight: 600 }}>
+                Arena 排名
               </Button>
             </Link>
           </Space>
