@@ -140,6 +140,16 @@ export default function CreateArenaRun() {
           <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
           <span>胜率表示该渠道在同题两两比较中赢过其他候选渠道的比例；平均题目分表示该渠道自身答案质量、规则匹配和性能惩罚后的平均分。</span>
         </div>
+        <div className="arena-basis-panel">
+          <Typography.Text className="section-kicker">BASIS</Typography.Text>
+          <Typography.Title level={4}>这个排名依据什么</Typography.Title>
+          <div className="arena-basis-grid">
+            <div><strong>同一套题库</strong><span>所有候选渠道回答同一批测试题，避免题目不同造成排名偏差。</span></div>
+            <div><strong>真实响应结果</strong><span>使用每个渠道实际返回的内容、错误标签和延迟指标。</span></div>
+            <div><strong>样本分</strong><span>基础结果分 * 0.85，加有效文本补偿，慢响应会扣分，再乘题目权重。</span></div>
+            <div><strong>同题两两比较</strong><span>每道题里候选渠道互相比样本分，赢得胜场，最终形成胜率。</span></div>
+          </div>
+        </div>
         <Form form={form} layout="vertical" onFinish={submit} initialValues={{ judge_mode: 'direct_score', rubric_preset: 'balanced' }}>
           <Form.Item label="任务名" name="name" rules={[{ required: true }]}>
             <Input size="large" placeholder="Sonnet 4.5 候选渠道 Arena 排名" />
@@ -191,11 +201,11 @@ export default function CreateArenaRun() {
                       type="info"
                       showIcon
                       message="当前 Arena 主要使用本地自动评分证据"
-                      description="Judge 渠道、模式和 Rubric 会写入评分证据，便于解释和后续扩展；本次不会强制调用外部 Judge。"
+                      description="当前主要使用系统自动评分。这里的评分标准会写入证据和报告解释口径，便于阅读结果；本次不会强制调用外部 Judge。"
                       style={{ marginBottom: 16 }}
                     />
                     <div className="benchmark-config-grid">
-                      <Form.Item label="评分标准" name="rubric_preset">
+                      <Form.Item label="解释口径" name="rubric_preset">
                         <Select
                           options={[
                             { value: 'balanced', label: '综合质量（推荐）' },

@@ -1200,6 +1200,54 @@ textarea:focus-visible,
   line-height: 1.6;
 }
 
+.arena-basis-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 18px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.arena-basis-panel h4.ant-typography {
+  margin: 0;
+  color: #172033;
+  font-weight: 850;
+}
+
+.arena-basis-panel .ant-typography {
+  margin-bottom: 0;
+  color: #64748b;
+  line-height: 1.65;
+}
+
+.arena-basis-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.arena-basis-grid div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.arena-basis-grid strong {
+  color: #172033;
+  font-weight: 850;
+}
+
+.arena-basis-grid span {
+  color: #64748b;
+  line-height: 1.55;
+}
+
 .arena-estimate-strip,
 .arena-report-explain {
   display: grid;
@@ -2195,6 +2243,7 @@ textarea:focus-visible,
   }
 
   .arena-explain-grid,
+  .arena-basis-grid,
   .arena-estimate-strip,
   .arena-report-explain {
     grid-template-columns: 1fr;

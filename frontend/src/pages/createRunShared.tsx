@@ -31,6 +31,7 @@ export function channelSelectOptions(channels: Channel[] = [], tag?: { color: st
     value: channel.id,
     disabled: !channel.enabled,
     searchLabel: `${channel.name} ${channel.model_name ?? ''}`,
+    selectedLabel: channel.name,
     label: (
       <span className="channel-select-option">
         <span>
@@ -75,6 +76,7 @@ export function ChannelMultiSelect({ loading, placeholder, channels, tag, showCr
       loading={loading}
       placeholder={placeholder}
       optionFilterProp="searchLabel"
+      optionLabelProp="selectedLabel"
       options={channelSelectOptions(channels, tag, showCredentialStatus)}
       notFoundContent={notFoundContent}
     />

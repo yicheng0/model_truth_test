@@ -313,11 +313,18 @@ export default function ReportDetailPage() {
             <Space direction="vertical" size={16} className="full-width">
               <div className="arena-formula-panel">
                 <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
-                <span>当前 Judge 模式：{String(judgeEvidence.judge_mode ?? '-')}；评分标准：{String(judgeEvidence.rubric ?? '默认答案质量、指令遵循、安全性和协议忠实度。')}</span>
+                <span>当前 Judge 模式：{String(judgeEvidence.judge_mode ?? '-')}；解释口径：{String(judgeEvidence.rubric ?? '默认答案质量、指令遵循、安全性和协议忠实度。')}</span>
+              </div>
+              <div className="arena-basis-panel">
+                <Typography.Text className="section-kicker">SCORING BASIS</Typography.Text>
+                <Typography.Title level={4}>这份报告的依据</Typography.Title>
+                <Typography.Paragraph>
+                  这不是人工主观打分。系统基于当前渠道在同一批题上的实际输出、基础结果分、异常标签、响应延迟和题目权重计算样本分；再和其他候选渠道做同题两两比较，生成胜率、败因样本和最终 Arena 分。
+                </Typography.Paragraph>
               </div>
               <div className="dimension-grid">
                 <div className="dimension-tile"><span>Judge 渠道</span><strong>{String(judgeEvidence.judge_channel_id ?? '本地自动评分')}</strong></div>
-                <div className="dimension-tile"><span>自动评分</span><strong>{judgeEvidence.automated === false ? '否' : '是'}</strong></div>
+                <div className="dimension-tile"><span>系统自动评分证据</span><strong>{judgeEvidence.automated === false ? '否' : '是'}</strong></div>
                 <div className="dimension-tile"><span>平均 Judge 分</span><strong>{fmt(numberValue(judgeEvidence.avg_judge_score))}</strong></div>
                 <div className="dimension-tile"><span>低置信样本</span><strong>{arrayValue(judgeEvidence.low_confidence_samples).length}</strong></div>
               </div>

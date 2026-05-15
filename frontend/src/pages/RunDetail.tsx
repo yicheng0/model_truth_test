@@ -687,6 +687,13 @@ export default function RunDetail() {
                 <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
                 <span>胜率来自候选渠道之间的同题两两比较，不代表接近官方渠道；平均题目分会受到答案质量、标签和延迟惩罚影响。</span>
               </div>
+              <div className="arena-basis-panel">
+                <Typography.Text className="section-kicker">SCORING BASIS</Typography.Text>
+                <Typography.Title level={4}>样本分怎么算</Typography.Title>
+                <Typography.Paragraph>
+                  每个候选渠道先回答同一批题。系统用每题基础结果分作为主要依据，乘以 0.85；如果有有效文本会加少量补偿；延迟超过 5000ms 会扣分；最后乘题目权重并限制在 0-100。Arena 再用这些样本分做同题两两比较，得到胜场、胜率和总分。
+                </Typography.Paragraph>
+              </div>
               <div style={{ height: 320 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={arenaChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
@@ -729,7 +736,7 @@ export default function RunDetail() {
               {arenaMatrixRows.length ? (
                 <Card bordered={false} title="胜负矩阵">
                   <Typography.Paragraph type="secondary">
-                    单元格表示“行渠道 Arena 总分 - 列渠道 Arena 总分”。正数表示行渠道领先，负数表示行渠道落后。
+                    单元格表示“行渠道 Arena 总分 - 列渠道 Arena 总分”。正数表示行渠道领先，负数表示行渠道落后；这是总分差，不是人工投票数。
                   </Typography.Paragraph>
                   <Table
                     rowKey="key"
@@ -751,6 +758,9 @@ export default function RunDetail() {
                 </Card>
               ) : null}
               <Card bordered={false} title="关键分歧样本">
+                <Typography.Paragraph type="secondary">
+                  这些样本来自同题两两比较中的较大分差。分差越大，越能说明败方渠道在该题上的输出质量、错误标签或性能表现拖累了排名。
+                </Typography.Paragraph>
                 <Table
                   rowKey="key"
                   dataSource={arenaEvidenceRows}
