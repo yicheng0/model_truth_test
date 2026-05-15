@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
+import dayjs, { type Dayjs } from 'dayjs';
 import { BarChart3, Bell, CalendarClock, Edit3, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
@@ -32,7 +33,7 @@ type FeishuFormValues = {
   app_base_url?: string;
   alert_broadcast_enabled: boolean;
   daily_report_enabled: boolean;
-  daily_report_time: string;
+  daily_report_time: Dayjs | null;
   timezone: string;
 };
 
@@ -203,7 +204,7 @@ export default function ScheduledTests() {
       app_base_url: feishuSetting.data.app_base_url ?? '',
       alert_broadcast_enabled: feishuSetting.data.alert_broadcast_enabled,
       daily_report_enabled: feishuSetting.data.daily_report_enabled,
-      daily_report_time: feishuSetting.data.daily_report_time,
+      daily_report_time: dayjs(`2000-01-01T${feishuSetting.data.daily_report_time}:00`),
       timezone: feishuSetting.data.timezone,
     });
   }, [feishuForm, feishuSetting.data]);
@@ -371,7 +372,7 @@ export default function ScheduledTests() {
       app_base_url: values.app_base_url?.trim() || null,
       alert_broadcast_enabled: values.alert_broadcast_enabled,
       daily_report_enabled: values.daily_report_enabled,
-      daily_report_time: values.daily_report_time,
+      daily_report_time: values.daily_report_time?.format('HH:mm') ?? '09:00',
       timezone: values.timezone,
     };
     saveFeishu.mutate(payload);
@@ -772,7 +773,7 @@ export default function ScheduledTests() {
                     </Col>
                     <Col xs={24} md={12}>
                       <Form.Item label="日报发送时间" name="daily_report_time" rules={[{ required: true, message: '请输入日报时间' }]}>
-                        <Input placeholder="09:00" />
+                        <TimePicker allowClear={false} format="HH:mm" minuteStep={5} showNow={false} style={{ width: '100%' }} />
                       </Form.Item>
                     </Col>
                     <Col xs={24}>
