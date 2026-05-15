@@ -90,6 +90,8 @@ describe('runs utilities', () => {
             signature_interop: {
               status: 'fail',
               reason: 'relay 未接受 signature',
+              created_at: '2026-05-16T01:02:04Z',
+              completed_at: '2026-05-16T01:02:05Z',
               source_channel_id: 'source_1',
               source_channel_name: 'AWS Bedrock Claude',
               source_message_id: 'msg_source',
@@ -132,6 +134,7 @@ describe('runs utilities', () => {
     expect(evidence?.signature).toMatchObject({
       status: 'fail',
       sourceChannelName: 'AWS Bedrock Claude',
+      completedAt: '2026-05-16T01:02:05Z',
       sourceMessageId: 'msg_source',
       sourceRequestId: 'req_source',
       relayChannelName: 'Relay Channel',

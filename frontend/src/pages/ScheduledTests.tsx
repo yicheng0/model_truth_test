@@ -854,10 +854,12 @@ export default function ScheduledTests() {
                 >
                   <Row gutter={[14, 14]} className="smart-report-stats">
                     <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="巡检任务" value={smartReport.data?.run_count ?? 0} /></Card></Col>
+                    <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="成功" value={smartReport.data?.completed_run_count ?? 0} valueStyle={{ color: '#067647' }} /></Card></Col>
+                    <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="错误" value={smartReport.data?.failed_run_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card></Col>
                     <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="异常告警" value={smartReport.data?.alert_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card></Col>
                     <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="待复审" value={smartReport.data?.pending_review_count ?? 0} valueStyle={{ color: '#a35f45' }} /></Card></Col>
                   </Row>
-                  <Typography.Title level={5} className="smart-report-section-title">渠道风险排行</Typography.Title>
+                  <Typography.Title level={5} className="smart-report-section-title">渠道巡检汇总</Typography.Title>
                   {smartReport.isLoading ? (
                     <div className="smart-report-empty">正在加载智能巡检报告</div>
                   ) : channelSummaries.length ? (
@@ -869,7 +871,7 @@ export default function ScheduledTests() {
                       columns={[
                         { title: '渠道', dataIndex: 'channel_name', width: 240 },
                         { title: '巡检次数', dataIndex: 'run_count', width: 110 },
-                        { title: '异常数', dataIndex: 'alert_count', width: 100, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
+                        { title: '错误数', dataIndex: 'alert_count', width: 100, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
                         { title: '待复审', dataIndex: 'pending_review_count', width: 100 },
                         { title: '最近巡检', dataIndex: 'last_run_at', width: 180, render: formatDateTime },
                       ]}

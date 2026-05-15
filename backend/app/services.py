@@ -936,15 +936,12 @@ def seed_demo_data(db: Session) -> None:
     default_case_ids = {case_data["id"] for case_data in default_case_data}
     stale_case_ids = [case_id for case_id in case_by_id if case_id not in default_case_ids]
     if stale_case_ids:
-        stale_cases = [case_by_id[case_id] for case_id in stale_case_ids if case_id in case_by_id]
         db.execute(delete(BaselineResult).where(BaselineResult.test_case_id.in_(stale_case_ids)))
         db.execute(delete(Result).where(Result.test_case_id.in_(stale_case_ids)))
         db.execute(delete(Comparison).where(Comparison.test_case_id.in_(stale_case_ids)))
         db.execute(delete(TestCase).where(TestCase.id.in_(stale_case_ids)))
         db.commit()
-        for stale_case in stale_cases:
-            if stale_case in db:
-                db.expunge(stale_case)
+        db.expunge_all()
         case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == default_suite()["id"])).all()}
 
     for case_data in default_case_data:
@@ -1862,7 +1859,30 @@ async def attach_signature_interop_to_scheduled_run(
         source = _signature_source_for_scheduled_test(db, scheduled)
         relay = db.get(Channel, scheduled.channel_id)
         if not source or not relay:
-            return None
+            missing_result = {
+                "ok": False,
+                "status": "fail",
+                "reason": "未找到可用的参考 source 渠道，无法执行 Thinking Signature 互通检测",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "source_channel_id": source.id if source else None,
+                "source_channel_name": source.name if source else None,
+                "relay_channel_id": relay.id if relay else scheduled.channel_id,
+                "relay_channel_name": relay.name if relay else None,
+                "fallback_note": SIGNATURE_FALLBACK_NOTE,
+                "labels": ["signature_source_missing"],
+                "steps": [
+                    {
+                        "name": "自动巡检 Signature 互通检测",
+                        "status": "fail",
+                        "detail": "缺少启用状态的参考 source 渠道",
+                        "excerpt": None,
+                    }
+                ],
+            }
+            if relay:
+                _attach_signature_interop_result_to_reports(db, run_id, relay.id, missing_result)
+            return missing_result
         if scheduled.use_mock:
             skipped_result = {
                 "ok": True,
@@ -1888,17 +1908,22 @@ async def attach_signature_interop_to_scheduled_run(
         relay_id = relay.id
 
     try:
+        signature_started_at = datetime.now(timezone.utc).isoformat()
         with session_factory() as db:
             source = db.get(Channel, source_id) if source_id else None
             relay = db.get(Channel, relay_id) if relay_id else None
             if not source or not relay:
                 return None
         signature_result = await test_signature_interop(source, relay)
+        signature_result.setdefault("created_at", signature_started_at)
+        signature_result.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
     except Exception as exc:
         signature_result = {
             "ok": False,
             "status": "fail",
             "reason": str(exc),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
             "source_channel_id": source_id,
             "relay_channel_id": relay_id,
             "fallback_note": SIGNATURE_FALLBACK_NOTE,
@@ -1959,6 +1984,8 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "ok": bool(result.get("ok")),
         "status": result.get("status"),
         "reason": result.get("reason"),
+        "created_at": result.get("created_at"),
+        "completed_at": result.get("completed_at"),
         "source_channel_id": result.get("source_channel_id"),
         "source_channel_name": result.get("source_channel_name"),
         "relay_channel_id": result.get("relay_channel_id"),
@@ -2181,6 +2208,7 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
         if isinstance(item, dict)
     ) or "| - | - | - | - | - | - | - | - | - | - | - |"
     signature = evidence.get("signature_interop") or {}
+    signature_time = signature.get("completed_at") or signature.get("created_at") or evidence.get("completed_at") or "-"
     return f"""# {channel.name} - 自动巡检资源报告
 
 ## 基本信息
@@ -2202,6 +2230,7 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
 ## Thinking Signature 互通
 
 - 状态：{signature.get("status") or "-"}
+- 检测时间：{signature_time}
 - Source 渠道：{signature.get("source_channel_name") or "-"} ({signature.get("source_channel_id") or "-"})
 - 来源 message id：{signature.get("source_message_id") or "-"}
 - 来源 request id：{signature.get("source_request_id") or "-"}
@@ -2766,22 +2795,28 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
         .order_by(ChannelAlert.created_at.desc())
     ).all()
     channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
-    run_by_id = {run.id: run for run in runs}
+    schedule_channel_by_id = {schedule.id: schedule.channel_id for schedule in schedules}
     reports_by_channel: dict[str, list[Report]] = defaultdict(list)
+    report_channels_by_run: dict[str, set[str]] = defaultdict(set)
     for report in reports:
         reports_by_channel[report.channel_id].append(report)
+        report_channels_by_run[report.run_id].add(report.channel_id)
     alerts_by_channel: dict[str, list[ChannelAlert]] = defaultdict(list)
     for alert in alerts:
         alerts_by_channel[alert.channel_id].append(alert)
+    runs_by_channel: dict[str, list[Run]] = defaultdict(list)
+    for run in runs:
+        scheduled_channel_id = schedule_channel_by_id.get(run.scheduled_test_id or "")
+        run_channel_ids = {scheduled_channel_id} if scheduled_channel_id else report_channels_by_run.get(run.id, set())
+        for channel_id in run_channel_ids:
+            if channel_id:
+                runs_by_channel[channel_id].append(run)
 
-    channel_ids = sorted({schedule.channel_id for schedule in schedules} | set(reports_by_channel) | set(alerts_by_channel))
+    channel_ids = sorted({schedule.channel_id for schedule in schedules} | set(reports_by_channel) | set(alerts_by_channel) | set(runs_by_channel))
     channel_summaries = []
     for channel_id in channel_ids:
         channel = channels.get(channel_id)
-        channel_reports = reports_by_channel.get(channel_id, [])
-        latest_report = channel_reports[0] if channel_reports else None
-        channel_runs = [run for run in runs if run_by_id.get(run.id) and any(report.run_id == run.id and report.channel_id == channel_id for report in reports)]
-        scores = [report.final_score for report in channel_reports]
+        channel_runs = runs_by_channel.get(channel_id, [])
         channel_alerts = alerts_by_channel.get(channel_id, [])
         last_run_at = max([run.created_at for run in channel_runs if run.created_at], default=None)
         channel_summaries.append(
@@ -2791,19 +2826,20 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
                 "run_count": len(channel_runs),
                 "alert_count": len(channel_alerts),
                 "pending_review_count": sum(1 for alert in channel_alerts if alert.status == "pending_review"),
-                "latest_grade": latest_report.grade if latest_report else None,
-                "latest_score": latest_report.final_score if latest_report else None,
-                "avg_score": round(sum(scores) / len(scores), 2) if scores else None,
                 "last_run_at": last_run_at,
             }
         )
-    channel_summaries.sort(key=lambda item: (item["alert_count"], -(item["avg_score"] or 0), item["channel_name"]), reverse=True)
+    channel_summaries.sort(
+        key=lambda item: (
+            item["pending_review_count"],
+            item["alert_count"],
+            _datetime_sort_value(item["last_run_at"]),
+            item["channel_name"],
+        ),
+        reverse=True,
+    )
 
-    grade_distribution = {grade: 0 for grade in ["A", "B", "C", "D", "E"]}
-    for report in reports:
-        grade_distribution[report.grade] = grade_distribution.get(report.grade, 0) + 1
-    trend = _smart_patrol_trend(runs, reports, alerts)
-    scores = [report.final_score for report in reports]
+    trend = _smart_patrol_trend(runs, alerts)
     return {
         "from_at": from_at,
         "to_at": to_at,
@@ -2814,34 +2850,28 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
         "failed_run_count": sum(1 for run in runs if run.status == "failed"),
         "alert_count": len(alerts),
         "pending_review_count": sum(1 for alert in alerts if alert.status == "pending_review"),
-        "avg_score": round(sum(scores) / len(scores), 2) if scores else None,
-        "grade_distribution": grade_distribution,
+        "channel_names": {channel_id: channel.name for channel_id, channel in channels.items()},
         "channel_summaries": channel_summaries,
         "recent_alerts": alerts[:10],
         "trend": trend,
     }
 
 
-def _smart_patrol_trend(runs: list[Run], reports: list[Report], alerts: list[ChannelAlert]) -> list[dict[str, Any]]:
+def _smart_patrol_trend(runs: list[Run], alerts: list[ChannelAlert]) -> list[dict[str, Any]]:
     run_count_by_date: dict[str, int] = defaultdict(int)
     alert_count_by_date: dict[str, int] = defaultdict(int)
-    scores_by_date: dict[str, list[float]] = defaultdict(list)
     for run in runs:
         if run.created_at:
             run_count_by_date[_date_key(run.created_at)] += 1
     for alert in alerts:
         if alert.created_at:
             alert_count_by_date[_date_key(alert.created_at)] += 1
-    for report in reports:
-        if report.created_at:
-            scores_by_date[_date_key(report.created_at)].append(report.final_score)
-    dates = sorted(set(run_count_by_date) | set(alert_count_by_date) | set(scores_by_date))
+    dates = sorted(set(run_count_by_date) | set(alert_count_by_date))
     return [
         {
             "date": date,
             "run_count": run_count_by_date.get(date, 0),
             "alert_count": alert_count_by_date.get(date, 0),
-            "avg_score": round(sum(scores_by_date[date]) / len(scores_by_date[date]), 2) if scores_by_date.get(date) else None,
         }
         for date in dates
     ]
@@ -2851,15 +2881,28 @@ def _date_key(value: datetime) -> str:
     return _as_utc(value).date().isoformat()
 
 
+def _fmt_datetime(value: Any) -> str:
+    if not isinstance(value, datetime):
+        return "-"
+    return _as_utc(value).isoformat()
+
+
+def _datetime_sort_value(value: Any) -> float:
+    if not isinstance(value, datetime):
+        return 0
+    return _as_utc(value).timestamp()
+
+
 def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
+    channel_names = report.get("channel_names") or {}
     channel_lines = "\n".join(
-        f"- {item['channel_name']}：巡检 {item['run_count']} 次，异常 {item['alert_count']} 次，待复审 {item['pending_review_count']}"
+        f"- {item['channel_name']}：巡检 {item['run_count']} 次，错误 {item['alert_count']} 次，待复审 {item['pending_review_count']}，最近巡检 {_fmt_datetime(item.get('last_run_at'))}"
         for item in report["channel_summaries"][:8]
     ) or "- 暂无渠道巡检数据"
     alert_lines = "\n".join(
-        f"- {alert.message or alert.channel_id}"
+        f"- {channel_names.get(alert.channel_id, alert.channel_id)}：{scoreless_alert_message(alert.message or alert.channel_id)}"
         for alert in report["recent_alerts"][:8]
-    ) or "- 暂无异常告警"
+    ) or "- 暂无错误告警"
     return f"""# 智能巡检汇总报告
 
 ## 时间范围
@@ -2871,15 +2914,15 @@ def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
 
 - 巡检计划：{report['enabled_schedule_count']} / {report['schedule_count']} 启用
 - 自动巡检任务：{report['run_count']} 次
-- 完成 / 失败：{report['completed_run_count']} / {report['failed_run_count']}
+- 成功 / 错误：{report['completed_run_count']} / {report['failed_run_count']}
 - 异常告警：{report['alert_count']}
 - 待复审：{report['pending_review_count']}
 
-## 渠道风险排行
+## 渠道巡检汇总
 
 {channel_lines}
 
-## 最近异常
+## 最近错误
 
 {alert_lines}
 """
@@ -2934,15 +2977,15 @@ def smart_patrol_daily_text(report: dict[str, Any], setting: FeishuBroadcastSett
     report_link = f"{app_base_url}/scheduled-tests?tab=report" if app_base_url else "/scheduled-tests?tab=report"
     top_channels = report["channel_summaries"][:5]
     channel_lines = "\n".join(
-        f"{index + 1}. {item['channel_name']}：异常 {item['alert_count']}，待复审 {item['pending_review_count']}"
+        f"{index + 1}. {item['channel_name']}：错误 {item['alert_count']}，待复审 {item['pending_review_count']}"
         for index, item in enumerate(top_channels)
     ) or "暂无渠道巡检数据"
     return (
-        "Claude 渠道智能巡检日报\n"
+        "智能巡检日报\n"
         f"时间范围：{report['from_at'].isoformat()} ~ {report['to_at'].isoformat()}\n"
-        f"自动巡检：{report['run_count']} 次，完成 {report['completed_run_count']}，失败 {report['failed_run_count']}\n"
-        f"异常告警：{report['alert_count']}，待复审 {report['pending_review_count']}\n"
-        "渠道风险排行：\n"
+        f"自动巡检：{report['run_count']} 次，成功 {report['completed_run_count']}，错误 {report['failed_run_count']}\n"
+        f"异常：{report['alert_count']}，待复审 {report['pending_review_count']}\n"
+        "重点渠道：\n"
         f"{channel_lines}\n"
         f"报告：{report_link}"
     )

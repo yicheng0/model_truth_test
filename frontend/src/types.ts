@@ -527,9 +527,6 @@ export type SmartPatrolChannelSummary = {
   run_count: number;
   alert_count: number;
   pending_review_count: number;
-  latest_grade?: Report['grade'] | null;
-  latest_score?: number | null;
-  avg_score?: number | null;
   last_run_at?: string | null;
 };
 
@@ -537,7 +534,6 @@ export type SmartPatrolTrendPoint = {
   date: string;
   run_count: number;
   alert_count: number;
-  avg_score?: number | null;
 };
 
 export type SmartPatrolReport = {
@@ -550,8 +546,6 @@ export type SmartPatrolReport = {
   failed_run_count: number;
   alert_count: number;
   pending_review_count: number;
-  avg_score?: number | null;
-  grade_distribution: Record<string, number>;
   channel_summaries: SmartPatrolChannelSummary[];
   recent_alerts: ChannelAlert[];
   trend: SmartPatrolTrendPoint[];

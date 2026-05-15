@@ -19,7 +19,7 @@ from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, score_result, seed_demo_data, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, score_result, seed_demo_data, smart_patrol_daily_text, suite_fingerprint
 
 
 def reset_database() -> None:
@@ -1401,7 +1401,7 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
     assert run_payload["patrol_channel_id"] == "negative_sample"
     assert run_payload["patrol_channel_name"] == "Negative Sample"
     assert run_payload["name"].startswith("Negative Sample - 自动巡检资源")
-    assert "自动巡检" not in run_payload["name"]
+    assert "双探针" not in run_payload["name"]
     assert alerts
     assert alerts[0]["channel_id"] == "negative_sample"
     assert alerts[0]["notification_status"] == "skipped"
@@ -3109,11 +3109,57 @@ def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None
     assert report["alert_count"] >= 1
     assert report["pending_review_count"] >= 1
     assert report["channel_summaries"]
+    assert "avg_score" not in report
+    assert "grade_distribution" not in report
+    assert "latest_grade" not in report["channel_summaries"][0]
+    assert "latest_score" not in report["channel_summaries"][0]
+    assert "avg_score" not in report["channel_summaries"][0]
+    if report["trend"]:
+        assert "avg_score" not in report["trend"][0]
     assert markdown.status_code == 200
     assert "智能巡检汇总报告" in markdown.text
+    assert "成功 / 错误" in markdown.text
+    assert "渠道巡检汇总" in markdown.text
+    assert "最近错误" in markdown.text
     assert "平均分" not in markdown.text
     assert "评级分布" not in markdown.text
     assert "分数" not in markdown.text
+    assert "评级" not in markdown.text
+    assert "score" not in markdown.text
+    assert "grade" not in markdown.text
+
+
+def test_smart_patrol_daily_text_uses_scoreless_summary(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "daily text patrol",
+                "channel_id": "negative_sample",
+                "interval_minutes": 60,
+                "enabled": True,
+            },
+        ).json()
+        client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
+        asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+
+    with SessionLocal() as db:
+        setting = get_or_create_feishu_setting(db)
+        report = build_smart_patrol_report(db, datetime.now(timezone.utc) - timedelta(days=1), datetime.now(timezone.utc))
+        text = smart_patrol_daily_text(report, setting)
+
+    assert "智能巡检日报" in text
+    assert "自动巡检：" in text
+    assert "成功" in text
+    assert "错误" in text
+    assert "重点渠道：" in text
+    assert "平均分" not in text
+    assert "评级" not in text
+    assert "分数" not in text
+    assert "score" not in text
+    assert "grade" not in text
 
 
 def test_scheduled_alert_notification_uses_error_message(monkeypatch) -> None:
@@ -3265,11 +3311,6 @@ def test_scheduled_signature_source_uses_fingerprint_source_channel(monkeypatch)
 def test_scheduled_signature_source_missing_creates_alert(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
-    with SessionLocal() as db:
-        for channel in db.scalars(select(Channel).where(Channel.is_reference.is_(True))).all():
-            channel.enabled = False
-        db.commit()
-
     with TestClient(app) as client:
         schedule = client.post(
             "/api/scheduled-tests",
@@ -3280,12 +3321,18 @@ def test_scheduled_signature_source_missing_creates_alert(monkeypatch) -> None:
                 "enabled": True,
             },
         ).json()
+    with SessionLocal() as db:
+        for channel in db.scalars(select(Channel).where(Channel.is_reference.is_(True))).all():
+            channel.enabled = False
+        db.commit()
 
     asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
 
-    with TestClient(app) as client:
-        payload = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
-        alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        payload = scheduled_channel_test_read(db, scheduled)
+        alerts = [channel_alert_read(db, alert) for alert in db.scalars(select(ChannelAlert).where(ChannelAlert.status == "pending_review")).all()]
 
     summary = payload["latest_probe_summary"]
     assert summary["signature_interop"]["status"] == "fail"

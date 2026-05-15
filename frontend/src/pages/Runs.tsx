@@ -301,6 +301,9 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
         <Space direction="vertical" size={4}>
           <Typography.Text strong>Thinking Signature 互通</Typography.Text>
           <Typography.Text type="secondary">
+            time: {formatDateTime(evidence.signature.completedAt ?? evidence.signature.createdAt)}
+          </Typography.Text>
+          <Typography.Text type="secondary">
             source: {channelLabel(evidence.signature.sourceChannelName, evidence.signature.sourceChannelId)} / msg {evidence.signature.sourceMessageId ?? '-'} / req {evidence.signature.sourceRequestId ?? '-'} / {evidence.signature.sourceMessageChannelType ?? '-'}
           </Typography.Text>
           <Typography.Text type="secondary">

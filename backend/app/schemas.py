@@ -498,9 +498,6 @@ class SmartPatrolChannelSummary(BaseModel):
     run_count: int
     alert_count: int
     pending_review_count: int
-    latest_grade: str | None = None
-    latest_score: float | None = None
-    avg_score: float | None = None
     last_run_at: datetime | None = None
 
 
@@ -508,7 +505,6 @@ class SmartPatrolTrendPoint(BaseModel):
     date: str
     run_count: int
     alert_count: int
-    avg_score: float | None = None
 
 
 class SmartPatrolReportRead(BaseModel):
@@ -521,8 +517,6 @@ class SmartPatrolReportRead(BaseModel):
     failed_run_count: int
     alert_count: int
     pending_review_count: int
-    avg_score: float | None = None
-    grade_distribution: dict[str, int]
     channel_summaries: list[SmartPatrolChannelSummary]
     recent_alerts: list[ChannelAlertRead]
     trend: list[SmartPatrolTrendPoint]

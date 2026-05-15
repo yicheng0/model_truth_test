@@ -23,6 +23,8 @@ export type PatrolModelRequestEvidence = {
 export type PatrolSignatureEvidence = {
   status?: string | null;
   reason?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
   sourceChannelId?: string | null;
   sourceChannelName?: string | null;
   sourceMessageId?: string | null;
@@ -146,6 +148,8 @@ function normalizeSignature(item: Record<string, unknown> | null): PatrolSignatu
   return {
     status: asNullableString(item.status),
     reason: asNullableString(item.reason),
+    createdAt: asNullableString(item.created_at),
+    completedAt: asNullableString(item.completed_at),
     sourceChannelId: asNullableString(item.source_channel_id),
     sourceChannelName: asNullableString(item.source_channel_name),
     sourceMessageId: asNullableString(item.source_message_id),
