@@ -693,7 +693,22 @@ export default function ScheduledTests() {
                   showIcon
                   style={{ marginBottom: 18 }}
                   message="飞书配置教程"
-                  description="Webhook 从飞书群机器人复制；签名密钥只有机器人开启签名校验时才填，不懂可以先留空；系统访问地址填写别人能打开的前端地址，用于告警和日报里的跳转链接。"
+                  description={(
+                    <Space direction="vertical" size={8}>
+                      <Typography.Text>
+                        Webhook 从飞书群机器人复制；签名密钥只有机器人开启签名校验时才填，不懂可以先留空；系统访问地址填写别人能打开的前端地址，用于告警和日报里的跳转链接。
+                      </Typography.Text>
+                      <Typography.Text>
+                        申请方式：进入要接收通知的飞书群，打开群设置或群应用，添加“自定义机器人”，按提示创建机器人后复制 Webhook 地址。机器人安全设置里如果开启“签名校验”，飞书会生成一段签名密钥，把它填到下方“签名密钥”；没有开启签名校验就不用填。
+                      </Typography.Text>
+                      <Typography.Text>
+                        这里使用的是群自定义机器人，不需要申请飞书开放平台应用，也不需要填写 App ID 或 App Secret。保存设置后先点击“发送测试消息”，群里能收到消息再开启告警和日报。
+                      </Typography.Text>
+                      <Typography.Text type="secondary">
+                        官方参考：<Typography.Link href="https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot" target="_blank" rel="noreferrer">飞书自定义机器人使用指南</Typography.Link>
+                      </Typography.Text>
+                    </Space>
+                  )}
                 />
                 <Form form={feishuForm} layout="vertical" onFinish={submitFeishu} requiredMark={false}>
                   <Row gutter={18}>
