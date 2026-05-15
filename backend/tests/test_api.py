@@ -4,6 +4,7 @@ import os
 import asyncio
 import json
 import uuid
+from datetime import datetime
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_claude_eval.db")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
@@ -18,7 +19,7 @@ from app.database import SessionLocal, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, finalize_baseline_from_run, invoke_channel, request_fingerprint, score_result, seed_demo_data, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, finalize_baseline_from_run, invoke_channel, next_scheduled_run_at, request_fingerprint, score_result, seed_demo_data, suite_fingerprint
 
 
 def reset_database() -> None:
@@ -1302,6 +1303,73 @@ def test_scheduled_channel_test_supports_simplified_probe_create() -> None:
     assert payload["suite_id"] == "manual_model_request_probe"
     assert payload["baseline_snapshot_id"] == "scheduled_probe_baseline"
     assert payload["test_scope"] == "scheduled_probe"
+
+
+def test_scheduled_channel_test_supports_run_window() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "window patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "run_window_start": "09:00",
+                "run_window_end": "18:00",
+                "enabled": True,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_window_start"] == "09:00"
+    assert payload["run_window_end"] == "18:00"
+
+
+def test_scheduled_channel_test_rejects_invalid_run_window() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        missing_end = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "missing end",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "run_window_start": "09:00",
+            },
+        )
+        same_time = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "same time",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "run_window_start": "09:00",
+                "run_window_end": "09:00",
+            },
+        )
+        invalid_time = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "invalid time",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "run_window_start": "24:00",
+                "run_window_end": "09:00",
+            },
+        )
+
+    assert missing_end.status_code == 422
+    assert same_time.status_code == 422
+    assert invalid_time.status_code == 422
+
+
+def test_next_scheduled_run_at_respects_run_window() -> None:
+    base = datetime.fromisoformat("2026-05-15T00:30:00+00:00")
+    assert next_scheduled_run_at(base, 60, "09:00", "18:00") == datetime.fromisoformat("2026-05-15T01:30:00+00:00")
+    assert next_scheduled_run_at(base, 600, "09:00", "18:00") == datetime.fromisoformat("2026-05-16T01:00:00+00:00")
+    assert next_scheduled_run_at(base, 60, "22:00", "02:00") == datetime.fromisoformat("2026-05-15T14:00:00+00:00")
+    assert next_scheduled_run_at(datetime.fromisoformat("2026-05-15T16:30:00+00:00"), 30, "22:00", "02:00") == datetime.fromisoformat("2026-05-15T17:00:00+00:00")
 
 
 def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypatch) -> None:

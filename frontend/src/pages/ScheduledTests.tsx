@@ -12,6 +12,9 @@ type ScheduleFormValues = {
   name: string;
   channel_id: string;
   interval_minutes: number;
+  run_window_enabled?: boolean;
+  run_window_start?: string;
+  run_window_end?: string;
   enabled: boolean;
 };
 
@@ -92,6 +95,14 @@ function intervalText(minutes: number) {
   return `${minutes} 分钟`;
 }
 
+function runWindowText(schedule: Pick<ScheduledChannelTest, 'run_window_start' | 'run_window_end'>) {
+  if (!schedule.run_window_start || !schedule.run_window_end) return '全天';
+  if (schedule.run_window_start > schedule.run_window_end) {
+    return `${schedule.run_window_start}-次日 ${schedule.run_window_end} 北京时间`;
+  }
+  return `${schedule.run_window_start}-${schedule.run_window_end} 北京时间`;
+}
+
 function evidenceText(alert: ChannelAlert) {
   const evidence = alert.evidence_summary ?? {};
   const hint = evidence.detected_provider_hint ? String(evidence.detected_provider_hint) : '';
@@ -121,6 +132,7 @@ export default function ScheduledTests() {
   const [alertStatus, setAlertStatus] = useState<string>('pending_review');
   const [activeTab, setActiveTab] = useState(initialTab);
   const [reportRange, setReportRange] = useState('7d');
+  const runWindowEnabled = Form.useWatch('run_window_enabled', scheduleForm);
   const reportDates = useMemo(() => reportRangeToDates(reportRange), [reportRange]);
   const needsPlanData = activeTab === 'plans';
   const needsAlertData = activeTab === 'alerts';
@@ -260,6 +272,9 @@ export default function ScheduledTests() {
     scheduleForm.setFieldsValue({
       enabled: true,
       interval_minutes: 1440,
+      run_window_enabled: false,
+      run_window_start: '09:00',
+      run_window_end: '18:00',
     });
     setScheduleModalOpen(true);
   }
@@ -270,6 +285,9 @@ export default function ScheduledTests() {
       name: schedule.name,
       channel_id: schedule.channel_id,
       interval_minutes: schedule.interval_minutes,
+      run_window_enabled: Boolean(schedule.run_window_start && schedule.run_window_end),
+      run_window_start: schedule.run_window_start ?? '09:00',
+      run_window_end: schedule.run_window_end ?? '18:00',
       enabled: schedule.enabled,
     });
     setScheduleModalOpen(true);
@@ -280,6 +298,8 @@ export default function ScheduledTests() {
       name: values.name,
       channel_id: values.channel_id,
       interval_minutes: values.interval_minutes,
+      run_window_start: values.run_window_enabled ? values.run_window_start : null,
+      run_window_end: values.run_window_enabled ? values.run_window_end : null,
       enabled: values.enabled,
       test_scope: 'scheduled_probe' as const,
       repeat_count: 1,
@@ -429,6 +449,11 @@ export default function ScheduledTests() {
                         title: '频率',
                         width: 110,
                         render: (_, schedule) => intervalText(schedule.interval_minutes),
+                      },
+                      {
+                        title: '执行窗口',
+                        width: 190,
+                        render: (_, schedule) => runWindowText(schedule),
                       },
                       {
                         title: '上次运行',
@@ -815,6 +840,28 @@ export default function ScheduledTests() {
               日常建议 1440 分钟；刚接入或排查时可用 60 分钟。
             </Typography.Text>
           </Form.Item>
+          <Form.Item name="run_window_enabled" valuePropName="checked">
+            <Checkbox>限制自动执行时间段</Checkbox>
+          </Form.Item>
+          {runWindowEnabled ? (
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item label="开始时间（北京时间）" name="run_window_start" rules={[{ required: true, message: '请选择开始时间' }]}>
+                  <Input type="time" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="结束时间（北京时间）" name="run_window_end" rules={[{ required: true, message: '请选择结束时间' }]}>
+                  <Input type="time" />
+                </Form.Item>
+              </Col>
+              <Col span={24}>
+                <Typography.Text type="secondary">
+                  间隔只在该时间段内生效；窗口外会顺延到下一个开始时间。结束早于开始时按跨天窗口处理。
+                </Typography.Text>
+              </Col>
+            </Row>
+          ) : null}
           <Space size="large" wrap>
             <Form.Item name="enabled" valuePropName="checked">
               <Checkbox>启用计划</Checkbox>

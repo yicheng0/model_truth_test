@@ -93,6 +93,8 @@ class ScheduledChannelTest(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     interval_minutes: Mapped[int] = mapped_column(Integer, default=1440, nullable=False)
+    run_window_start: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    run_window_end: Mapped[str | None] = mapped_column(String(5), nullable=True)
     test_scope: Mapped[str] = mapped_column(String(30), default="full", nullable=False)
     repeat_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     concurrency: Mapped[int] = mapped_column(Integer, default=4, nullable=False)

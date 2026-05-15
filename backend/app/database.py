@@ -91,6 +91,10 @@ def _ensure_run_baseline_columns() -> None:
             connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0"))
         if "retry_interval_minutes" not in scheduled_columns:
             connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN retry_interval_minutes INTEGER NOT NULL DEFAULT 5"))
+        if "run_window_start" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN run_window_start VARCHAR(5)"))
+        if "run_window_end" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN run_window_end VARCHAR(5)"))
 
 
 def get_db() -> Generator[Session, None, None]:

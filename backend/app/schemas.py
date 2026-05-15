@@ -1,9 +1,25 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+TIME_OF_DAY_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+def validate_run_window(start: str | None, end: str | None) -> tuple[str | None, str | None]:
+    if not start and not end:
+        return None, None
+    if not start or not end:
+        raise ValueError("run_window_start and run_window_end must be provided together")
+    if not TIME_OF_DAY_RE.fullmatch(start) or not TIME_OF_DAY_RE.fullmatch(end):
+        raise ValueError("run window times must use HH:mm format")
+    if start == end:
+        raise ValueError("run window start and end must be different")
+    return start, end
 
 
 class ChannelBase(BaseModel):
@@ -279,6 +295,8 @@ class ScheduledChannelTestBase(BaseModel):
     baseline_snapshot_id: str | None = None
     enabled: bool = True
     interval_minutes: int = Field(default=1440, ge=5)
+    run_window_start: str | None = None
+    run_window_end: str | None = None
     test_scope: str = "scheduled_probe"
     repeat_count: int = Field(default=1, ge=1, le=5)
     concurrency: int = Field(default=4, ge=1, le=16)
@@ -290,6 +308,11 @@ class ScheduledChannelTestBase(BaseModel):
     max_retries: int = Field(default=0, ge=0, le=3)
     retry_interval_minutes: int = Field(default=5, ge=1, le=60)
     next_run_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_schedule_window(self) -> "ScheduledChannelTestBase":
+        self.run_window_start, self.run_window_end = validate_run_window(self.run_window_start, self.run_window_end)
+        return self
 
 
 class ScheduledChannelTestCreate(ScheduledChannelTestBase):
@@ -303,6 +326,8 @@ class ScheduledChannelTestUpdate(BaseModel):
     baseline_snapshot_id: str | None = None
     enabled: bool | None = None
     interval_minutes: int | None = Field(default=None, ge=5)
+    run_window_start: str | None = None
+    run_window_end: str | None = None
     test_scope: str | None = None
     repeat_count: int | None = Field(default=None, ge=1, le=5)
     concurrency: int | None = Field(default=None, ge=1, le=16)
@@ -314,6 +339,15 @@ class ScheduledChannelTestUpdate(BaseModel):
     max_retries: int | None = Field(default=None, ge=0, le=3)
     retry_interval_minutes: int | None = Field(default=None, ge=1, le=60)
     next_run_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_schedule_window(self) -> "ScheduledChannelTestUpdate":
+        if "run_window_start" not in self.model_fields_set and "run_window_end" not in self.model_fields_set:
+            return self
+        if {"run_window_start", "run_window_end"} - self.model_fields_set:
+            raise ValueError("run_window_start and run_window_end must be provided together")
+        self.run_window_start, self.run_window_end = validate_run_window(self.run_window_start, self.run_window_end)
+        return self
 
 
 class ScheduledChannelTestRead(ScheduledChannelTestBase):

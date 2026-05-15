@@ -95,6 +95,7 @@ from .services import (
     refresh_baseline_status,
     import_suite_bundle,
     import_evalscope_jsonl,
+    next_run_for_scheduled_test,
     scheduled_test_loop,
     send_alert_notification,
     send_daily_patrol_report,
@@ -694,12 +695,14 @@ def update_scheduled_test(scheduled_id: str, data: ScheduledChannelTestUpdate, d
         "suite_id": scheduled.suite_id,
         "baseline_snapshot_id": scheduled.baseline_snapshot_id,
         "interval_minutes": scheduled.interval_minutes,
+        "run_window_start": scheduled.run_window_start,
+        "run_window_end": scheduled.run_window_end,
         "test_scope": scheduled.test_scope,
     }
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(scheduled, key, value)
     if scheduled.enabled and scheduled.next_run_at is None:
-        scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+        scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
     try:
         validate_scheduled_channel_test(db, scheduled)
     except ValueError as exc:
@@ -707,8 +710,9 @@ def update_scheduled_test(scheduled_id: str, data: ScheduledChannelTestUpdate, d
             setattr(scheduled, key, value)
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if "interval_minutes" in data.model_fields_set and "next_run_at" not in data.model_fields_set:
-        scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+    schedule_fields = {"interval_minutes", "run_window_start", "run_window_end"}
+    if schedule_fields.intersection(data.model_fields_set) and "next_run_at" not in data.model_fields_set:
+        scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
     db.commit()
     db.refresh(scheduled)
     return scheduled

@@ -368,6 +368,8 @@ export type ScheduledChannelTest = {
   baseline_snapshot_id?: string | null;
   enabled: boolean;
   interval_minutes: number;
+  run_window_start?: string | null;
+  run_window_end?: string | null;
   test_scope: TestScope;
   repeat_count: number;
   concurrency: number;

@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -45,9 +45,67 @@ from .schemas import (
 )
 from .suite_seed import default_cases, default_suite
 
+SCHEDULE_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _parse_schedule_time(value: str) -> datetime_time:
+    hour, minute = value.split(":", maxsplit=1)
+    return datetime_time(hour=int(hour), minute=int(minute))
+
+
+def _is_in_schedule_window(candidate_local: datetime, start_time: datetime_time, end_time: datetime_time) -> bool:
+    local_time = candidate_local.time()
+    if start_time < end_time:
+        return start_time <= local_time < end_time
+    return local_time >= start_time or local_time < end_time
+
+
+def _schedule_window_start_for_local(candidate_local: datetime, start_time: datetime_time, end_time: datetime_time) -> datetime:
+    candidate_date = candidate_local.date()
+    if start_time < end_time:
+        if candidate_local.time() < end_time:
+            return datetime.combine(candidate_date, start_time, tzinfo=SCHEDULE_TIMEZONE)
+        return datetime.combine(candidate_date + timedelta(days=1), start_time, tzinfo=SCHEDULE_TIMEZONE)
+    if candidate_local.time() < end_time:
+        return datetime.combine(candidate_date - timedelta(days=1), start_time, tzinfo=SCHEDULE_TIMEZONE)
+    return datetime.combine(candidate_date, start_time, tzinfo=SCHEDULE_TIMEZONE)
+
+
+def next_scheduled_run_at(
+    base_at: datetime,
+    interval_minutes: int,
+    run_window_start: str | None = None,
+    run_window_end: str | None = None,
+) -> datetime:
+    """Return the next automatic run timestamp in UTC."""
+    base_utc = base_at if base_at.tzinfo else base_at.replace(tzinfo=timezone.utc)
+    candidate_utc = base_utc.astimezone(timezone.utc) + timedelta(minutes=max(5, interval_minutes))
+    if not run_window_start or not run_window_end:
+        return candidate_utc
+
+    start_time = _parse_schedule_time(run_window_start)
+    end_time = _parse_schedule_time(run_window_end)
+    candidate_local = candidate_utc.astimezone(SCHEDULE_TIMEZONE)
+    if _is_in_schedule_window(candidate_local, start_time, end_time):
+        return candidate_utc
+
+    window_start = _schedule_window_start_for_local(candidate_local, start_time, end_time)
+    if candidate_local < window_start:
+        return window_start.astimezone(timezone.utc)
+    return (window_start + timedelta(days=1)).astimezone(timezone.utc)
+
+
+def next_run_for_scheduled_test(scheduled: ScheduledChannelTest, base_at: datetime | None = None) -> datetime:
+    return next_scheduled_run_at(
+        base_at or datetime.now(timezone.utc),
+        scheduled.interval_minutes,
+        scheduled.run_window_start,
+        scheduled.run_window_end,
+    )
 
 
 def similarity(a: str, b: str) -> float:
@@ -1013,7 +1071,12 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
             raise ValueError("Scheduled channel tests require suite_id and baseline_snapshot_id")
         validate_baseline_for_run(db, data.baseline_snapshot_id, data.suite_id)
         suite_id, baseline_snapshot_id = data.suite_id, data.baseline_snapshot_id
-    next_run_at = data.next_run_at or datetime.now(timezone.utc) + timedelta(minutes=max(5, data.interval_minutes))
+    next_run_at = data.next_run_at or next_scheduled_run_at(
+        datetime.now(timezone.utc),
+        data.interval_minutes,
+        data.run_window_start,
+        data.run_window_end,
+    )
     scheduled = ScheduledChannelTest(
         id=data.id or new_id("sched"),
         name=data.name,
@@ -1022,6 +1085,8 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
         baseline_snapshot_id=baseline_snapshot_id,
         enabled=data.enabled,
         interval_minutes=max(5, data.interval_minutes),
+        run_window_start=data.run_window_start,
+        run_window_end=data.run_window_end,
         test_scope=test_scope if test_scope in {"quick", "full", "scheduled_probe"} else "scheduled_probe",
         repeat_count=max(1, data.repeat_count),
         concurrency=max(1, data.concurrency),
@@ -1582,7 +1647,7 @@ async def execute_scheduled_channel_test(
                 scheduled.last_status = "running"
                 scheduled.last_error = None
                 if advance_next_run and attempt_index == 0:
-                    scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
                 db.commit()
 
             await execute_run(session_factory, run_id, use_mock=use_mock)
@@ -1618,7 +1683,7 @@ async def execute_scheduled_channel_test(
                 scheduled.last_status = "failed"
                 scheduled.last_error = str(exc)
                 if advance_next_run:
-                    scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
                 db.commit()
         return None
 
@@ -1760,7 +1825,7 @@ async def execute_scheduled_probe_run(
         if not channel:
             raise ValueError("Channel not found")
         if advance_next_run:
-            scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+            scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
         scheduled.last_status = "running"
         scheduled.last_error = None
         db.commit()
@@ -1803,7 +1868,7 @@ async def execute_scheduled_probe_run(
                 scheduled.last_status = "failed"
                 scheduled.last_error = str(exc)
                 if advance_next_run:
-                    scheduled.next_run_at = datetime.now(timezone.utc) + timedelta(minutes=max(5, scheduled.interval_minutes))
+                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
                 db.commit()
         return None
 
@@ -2373,7 +2438,7 @@ async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_secon
                 if scheduled.last_status in {"queued", "running"}:
                     continue
                 scheduled.last_status = "queued"
-                scheduled.next_run_at = now + timedelta(minutes=max(5, scheduled.interval_minutes))
+                scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
                 due_ids.append(scheduled.id)
             db.commit()
         for scheduled_id in due_ids:
