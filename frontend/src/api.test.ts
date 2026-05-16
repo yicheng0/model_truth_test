@@ -25,6 +25,21 @@ describe('api request handling', () => {
     expect(getErrorMessage(new ApiError('Forbidden', 403))).toBe('Forbidden');
   });
 
+  it('treats missing scheduled health endpoint as unavailable diagnostics', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'Scheduled test not found' }), {
+        status: 404,
+        statusText: 'Not Found',
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await expect(api.scheduledTestsHealth()).resolves.toBeNull();
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/scheduled-tests/health', expect.any(Object));
+    fetchMock.mockRestore();
+  });
+
   it('updates channel taxonomy settings with the expected endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

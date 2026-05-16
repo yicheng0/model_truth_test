@@ -228,6 +228,17 @@ def test_health_check_reports_database_ok() -> None:
     assert response.json() == {"status": "ok", "database": "ok"}
 
 
+def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.get("/api/scheduled-tests/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["instance_id"]
+    assert {"enabled", "instance_id", "stale_schedule_count", "queued_schedule_count", "running_schedule_count", "next_due_at"} <= set(payload)
+
+
 def test_seed_demo_data_restores_default_channels_only_when_empty() -> None:
     init_db()
     with SessionLocal() as db:

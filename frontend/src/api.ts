@@ -153,7 +153,14 @@ export const api = {
   updateBaseline: (id: string, payload: { name: string }) => request<BaselineSnapshot>(`/api/baselines/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteBaseline: (id: string) => request<{ deleted: boolean }>(`/api/baselines/${id}`, { method: 'DELETE' }),
   scheduledTests: () => request<ScheduledChannelTest[]>('/api/scheduled-tests'),
-  scheduledTestsHealth: () => request<ScheduledTestsHealth>('/api/scheduled-tests/health'),
+  scheduledTestsHealth: async () => {
+    try {
+      return await request<ScheduledTestsHealth>('/api/scheduled-tests/health');
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
   createScheduledTest: (payload: ScheduledChannelTestCreate) => request<ScheduledChannelTest>('/api/scheduled-tests', { method: 'POST', body: JSON.stringify(payload) }),
   updateScheduledTest: (id: string, payload: Partial<ScheduledChannelTestCreate>) =>
     request<ScheduledChannelTest>(`/api/scheduled-tests/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),

@@ -300,7 +300,8 @@ export default function ScheduledTests() {
     queryKey: ['scheduledTestsHealth'],
     queryFn: api.scheduledTestsHealth,
     enabled: needsPlanData,
-    refetchInterval: activeTab === 'plans' ? 5000 : false,
+    retry: false,
+    refetchInterval: (query) => (activeTab === 'plans' && query.state.data !== null ? 5000 : false),
   });
   const alerts = useQuery({
     queryKey: ['alerts', alertStatus, trimmedAlertIdQuery, alertDateFilters.created_from, alertDateFilters.created_to],
@@ -609,10 +610,11 @@ export default function ScheduledTests() {
     setOpenAlertLog(null);
   }
 
-  const planError = needsPlanData ? schedules.error ?? schedulerHealth.error ?? channels.error : null;
+  const planError = needsPlanData ? schedules.error ?? channels.error : null;
   const alertError = needsAlertData ? alerts.error ?? channels.error : null;
   const reportError = activeTab === 'report' ? smartReport.error : null;
   const feishuError = activeTab === 'feishu' ? feishuSetting.error : null;
+  const schedulerHealthError = needsPlanData ? schedulerHealth.error : null;
   const error = planError ?? alertError ?? reportError ?? feishuError;
   const hasError = Boolean(error);
   const channelSummaries = smartReport.data?.channel_summaries ?? [];
@@ -688,25 +690,45 @@ export default function ScheduledTests() {
                   extra={<Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>}
                   bordered={false}
                 >
+                  {schedulerHealthError ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message="调度器健康检查暂不可用"
+                      description={getErrorMessage(schedulerHealthError)}
+                    />
+                  ) : null}
                   <Row gutter={[12, 12]} className="scheduler-health-row">
                     <Col xs={24} sm={12} lg={6}>
                       <Card bordered={false}>
-                        <Statistic title="调度器" value={schedulerHealth.data?.enabled ? '启用' : '停用'} valueStyle={{ color: schedulerHealth.data?.enabled ? '#067647' : '#667085' }} />
+                        <Statistic
+                          title="调度器"
+                          value={schedulerHealth.data ? (schedulerHealth.data.enabled ? '启用' : '停用') : '未知'}
+                          valueStyle={{ color: schedulerHealth.data ? (schedulerHealth.data.enabled ? '#067647' : '#667085') : '#667085' }}
+                        />
                       </Card>
                     </Col>
                     <Col xs={24} sm={12} lg={6}>
                       <Card bordered={false}>
-                        <Statistic title="运行中 / 排队" value={`${schedulerHealth.data?.running_schedule_count ?? 0} / ${schedulerHealth.data?.queued_schedule_count ?? 0}`} />
+                        <Statistic
+                          title="运行中 / 排队"
+                          value={schedulerHealth.data ? `${schedulerHealth.data.running_schedule_count} / ${schedulerHealth.data.queued_schedule_count}` : '-'}
+                        />
                       </Card>
                     </Col>
                     <Col xs={24} sm={12} lg={6}>
                       <Card bordered={false}>
-                        <Statistic title="疑似卡住" value={schedulerHealth.data?.stale_schedule_count ?? 0} valueStyle={{ color: schedulerHealth.data?.stale_schedule_count ? '#b42318' : '#067647' }} />
+                        <Statistic
+                          title="疑似卡住"
+                          value={schedulerHealth.data ? schedulerHealth.data.stale_schedule_count : '-'}
+                          valueStyle={{ color: schedulerHealth.data?.stale_schedule_count ? '#b42318' : '#067647' }}
+                        />
                       </Card>
                     </Col>
                     <Col xs={24} sm={12} lg={6}>
                       <Card bordered={false}>
-                        <Statistic title="最近心跳" value={formatDateTime(schedulerHealth.data?.last_tick_at) || '-'} />
+                        <Statistic title="最近心跳" value={schedulerHealth.data ? formatDateTime(schedulerHealth.data.last_tick_at) || '-' : '-'} />
                       </Card>
                     </Col>
                   </Row>

@@ -160,10 +160,11 @@ describe('scheduled alert log helpers', () => {
         channelId: 'channel_1',
         channelModel: 'claude-sonnet',
         probeSource: 'api / openai_chat_completions',
+        resultId: 'result_123',
         messageId: 'msg_123',
         requestId: 'req_789',
         error: '接口超时',
       }),
-    ).toContain('Result ID：-');
+    ).toContain('Result ID：result_123');
   });
 });
