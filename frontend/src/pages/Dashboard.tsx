@@ -5,7 +5,6 @@ import {
   BarChart3,
   CalendarClock,
   Database,
-  FileText,
   GitCompare,
   Network,
   PlayCircle,
@@ -31,10 +30,10 @@ const workflowSteps = [
   },
   {
     title: '查看检测报告',
-    description: '集中查看渠道评分、异常标签、性能指标和 Markdown 诊断结论。',
+    description: '查看渠道评分、异常标签、性能指标和 Markdown 诊断结论。',
     to: '/reports',
     action: '看报告',
-    icon: FileText,
+    icon: BarChart3,
   },
   {
     title: '复核渠道结论',
@@ -48,7 +47,6 @@ const workflowSteps = [
 const featureLinks = [
   { title: '渠道管理', description: '维护渠道、协议、模型和密钥。', to: '/channels', icon: Network },
   { title: '渠道指纹', description: '管理已经生成的基线指纹。', to: '/baselines', icon: Database },
-  { title: '报告中心', description: '集中查看渠道评分和诊断结论。', to: '/reports', icon: BarChart3 },
   { title: '模型请求', description: '向单个渠道发真实请求，查看 message id 和原始响应。', to: '/model-request-test', icon: Send },
   { title: 'Signature 检测', description: '验证 thinking signature 跨渠道复用行为。', to: '/signature-interop', icon: ShieldCheck },
   { title: '自动巡检', description: '为候选渠道设置周期检测和告警。', to: '/scheduled-tests', icon: CalendarClock },
@@ -82,7 +80,7 @@ export default function Dashboard() {
           <Typography.Text className="section-kicker">APIPRO RELAY EVAL</Typography.Text>
           <Typography.Title>渠道真实性测评工作台</Typography.Title>
           <Typography.Paragraph>
-            这里聚合渠道配置、渠道指纹和报告结论。先确认渠道信息，再维护可信指纹资产，最后在报告中心复核渠道评分、异常标签和诊断结论。
+            这里聚合渠道配置、渠道指纹和报告结论。先确认渠道信息，再维护可信指纹资产，最后复核渠道评分、异常标签和诊断结论。
           </Typography.Paragraph>
         </div>
         <div className="overview-actions">
@@ -90,7 +88,7 @@ export default function Dashboard() {
             <Button type="primary" size="large" icon={<Network size={17} />}>配置渠道</Button>
           </Link>
           <Link to="/reports">
-            <Button size="large" icon={<FileText size={17} />}>查看报告</Button>
+            <Button size="large" icon={<BarChart3 size={17} />}>查看报告</Button>
           </Link>
         </div>
       </section>

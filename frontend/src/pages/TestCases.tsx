@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Collapse, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import { Download, Edit3, Plus, Shuffle, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
 import type { SamplePlanCreate, TestCase, TestCaseCreate, TestSuite } from '../types';
@@ -390,48 +390,61 @@ export default function TestCases() {
         </div>
       </Card>
 
-      <Card title={<span className="card-title-with-icon"><Upload size={18} />题库导入与差异</span>} bordered={false}>
-        <Space direction="vertical" size={14} className="full-width">
-          <Input.TextArea
-            rows={5}
-            value={bundleText}
-            onChange={(event) => setBundleText(event.target.value)}
-            placeholder="粘贴 TestSuite bundle JSON，包含 suite 与 cases"
-          />
-          <Space wrap>
-            <Button type="primary" icon={<Upload size={16} />} loading={importBundle.isPending} disabled={!bundleText.trim()} onClick={submitBundleImport}>导入/更新题库</Button>
-            <Button onClick={() => exportedBundle.data && setBundleText(JSON.stringify(exportedBundle.data, null, 2))} disabled={!exportedBundle.data}>填入当前导出</Button>
-          </Space>
-          <Input.TextArea
-            rows={4}
-            value={evalScopeJsonl}
-            onChange={(event) => setEvalScopeJsonl(event.target.value)}
-            placeholder='粘贴 EvalScope JSONL，每行一个样本，例如 {"id":"case1","question":"...","answer":"...","choices":["A","B"]}'
-          />
-          <Space wrap>
-            <Button icon={<Upload size={16} />} loading={importEvalScope.isPending} disabled={!evalScopeJsonl.trim()} onClick={submitEvalScopeImport}>导入 EvalScope JSONL</Button>
-            <Typography.Text type="secondary">导入到当前导出测试集，自动映射 question/prompt、choices、answer、tags、difficulty。</Typography.Text>
-          </Space>
-          <Input.TextArea
-            rows={3}
-            value={diffAgainst}
-            onChange={(event) => setDiffAgainst(event.target.value)}
-            placeholder="粘贴对比 bundle JSON，或输入另一个 suite_id"
-          />
-          {suiteDiff.data ? (
-            <Alert
-              type="info"
-              showIcon
-              message={`差异：新增 ${suiteDiff.data.added.length}，删除 ${suiteDiff.data.removed.length}，变更 ${suiteDiff.data.changed.length}，未变 ${suiteDiff.data.unchanged.length}`}
-              description={
-                <Space wrap>
-                  {suiteDiff.data.changed.slice(0, 6).map((item) => <Tag key={item.id}>{item.id}: {item.fields.join(', ')}</Tag>)}
+      <Collapse
+        className="case-import-collapse"
+        bordered={false}
+        defaultActiveKey={[]}
+        items={[
+          {
+            key: 'import',
+            label: <span className="card-title-with-icon"><Upload size={18} />题库导入与差异</span>,
+            children: (
+              <Card bordered={false} className="case-import-card">
+                <Space direction="vertical" size={14} className="full-width">
+                  <Input.TextArea
+                    rows={5}
+                    value={bundleText}
+                    onChange={(event) => setBundleText(event.target.value)}
+                    placeholder="粘贴 TestSuite bundle JSON，包含 suite 与 cases"
+                  />
+                  <Space wrap>
+                    <Button type="primary" icon={<Upload size={16} />} loading={importBundle.isPending} disabled={!bundleText.trim()} onClick={submitBundleImport}>导入/更新题库</Button>
+                    <Button onClick={() => exportedBundle.data && setBundleText(JSON.stringify(exportedBundle.data, null, 2))} disabled={!exportedBundle.data}>填入当前导出</Button>
+                  </Space>
+                  <Input.TextArea
+                    rows={4}
+                    value={evalScopeJsonl}
+                    onChange={(event) => setEvalScopeJsonl(event.target.value)}
+                    placeholder='粘贴 EvalScope JSONL，每行一个样本，例如 {"id":"case1","question":"...","answer":"...","choices":["A","B"]}'
+                  />
+                  <Space wrap>
+                    <Button icon={<Upload size={16} />} loading={importEvalScope.isPending} disabled={!evalScopeJsonl.trim()} onClick={submitEvalScopeImport}>导入 EvalScope JSONL</Button>
+                    <Typography.Text type="secondary">导入到当前导出测试集，自动映射 question/prompt、choices、answer、tags、difficulty。</Typography.Text>
+                  </Space>
+                  <Input.TextArea
+                    rows={3}
+                    value={diffAgainst}
+                    onChange={(event) => setDiffAgainst(event.target.value)}
+                    placeholder="粘贴对比 bundle JSON，或输入另一个 suite_id"
+                  />
+                  {suiteDiff.data ? (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message={`差异：新增 ${suiteDiff.data.added.length}，删除 ${suiteDiff.data.removed.length}，变更 ${suiteDiff.data.changed.length}，未变 ${suiteDiff.data.unchanged.length}`}
+                      description={
+                        <Space wrap>
+                          {suiteDiff.data.changed.slice(0, 6).map((item) => <Tag key={item.id}>{item.id}: {item.fields.join(', ')}</Tag>)}
+                        </Space>
+                      }
+                    />
+                  ) : null}
                 </Space>
-              }
-            />
-          ) : null}
-        </Space>
-      </Card>
+              </Card>
+            ),
+          },
+        ]}
+      />
 
       <Card title="内置与自定义题目" bordered={false}>
         <Table

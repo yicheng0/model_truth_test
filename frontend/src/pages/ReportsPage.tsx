@@ -203,7 +203,7 @@ export default function ReportsPage() {
       <div className="page-heading">
         <div>
           <Typography.Text className="section-kicker">REPORT CENTER</Typography.Text>
-          <Typography.Title level={2}>报告中心</Typography.Title>
+          <Typography.Title level={2}>报告页</Typography.Title>
           <Typography.Paragraph>
             汇总真实性、性能诊断和 Arena 排名报告。只有同一类型的 2-3 份报告可以进入横向分析。
           </Typography.Paragraph>

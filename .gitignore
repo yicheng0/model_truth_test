@@ -7,10 +7,15 @@ node_modules/
 dist/
 build/
 .env
+.env.*
 *.db
+*.db-wal
+*.db-shm
 *.sqlite3
 *.tsbuildinfo
 *.log
 backend/.venv/
 frontend/.vite/
 frontend/dist/
+.DS_Store
+*.code-workspace

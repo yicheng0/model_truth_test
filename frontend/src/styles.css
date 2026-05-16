@@ -112,6 +112,10 @@ textarea:focus-visible,
   padding: 24px 18px;
 }
 
+.enterprise-sidebar.ant-layout-sider-collapsed .ant-layout-sider-children {
+  padding: 24px 12px;
+}
+
 .workspace {
   min-width: 0;
   min-height: 100vh;
@@ -189,6 +193,10 @@ textarea:focus-visible,
   text-decoration: none;
 }
 
+.brand-lockup-copy {
+  min-width: 0;
+}
+
 .brand-logo {
   width: 52px;
   height: 52px;
@@ -215,6 +223,22 @@ textarea:focus-visible,
   white-space: normal;
 }
 
+.sidebar-collapse-button {
+  width: 100%;
+  min-height: 40px;
+  margin-bottom: 10px;
+  color: var(--brand-primary-strong);
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+}
+
+.sidebar-collapse-button:hover {
+  color: var(--brand-primary-strong) !important;
+  background: var(--surface-panel) !important;
+  border-color: var(--border-medium) !important;
+}
+
 .side-nav {
   display: grid;
   gap: 8px;
@@ -232,6 +256,11 @@ textarea:focus-visible,
   text-decoration: none;
   font-weight: 800;
   transition: background 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.side-nav-label,
+.side-tool-label {
+  min-width: 0;
 }
 
 .side-nav-item:hover {
@@ -267,11 +296,41 @@ textarea:focus-visible,
   transition: border-color 180ms ease, color 180ms ease, background 180ms ease, transform 180ms ease;
 }
 
+.side-tool-link {
+  display: block;
+}
+
 .side-tool-button:hover {
   border-color: #d7b7a9 !important;
   color: #8d4f39 !important;
   background: #faf8f3 !important;
   transform: scale(1.02);
+}
+
+.enterprise-sidebar.ant-layout-sider-collapsed .brand-lockup {
+  justify-content: center;
+  margin-bottom: 18px;
+}
+
+.enterprise-sidebar.ant-layout-sider-collapsed .brand-lockup-copy,
+.enterprise-sidebar.ant-layout-sider-collapsed .side-nav-label,
+.enterprise-sidebar.ant-layout-sider-collapsed .side-tool-label {
+  display: none;
+}
+
+.enterprise-sidebar.ant-layout-sider-collapsed .side-nav {
+  gap: 10px;
+}
+
+.enterprise-sidebar.ant-layout-sider-collapsed .side-nav-item,
+.enterprise-sidebar.ant-layout-sider-collapsed .side-tool-button {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.enterprise-sidebar.ant-layout-sider-collapsed .sidebar-tools {
+  padding-top: 14px;
 }
 
 .nav-pills,
@@ -379,6 +438,32 @@ textarea:focus-visible,
   gap: 8px;
   font-size: 18px;
   font-weight: 700;
+}
+
+.case-import-collapse.ant-collapse {
+  border: 0;
+  background: transparent;
+}
+
+.case-import-collapse .ant-collapse-item {
+  border: 0;
+}
+
+.case-import-collapse .ant-collapse-header {
+  padding: 0;
+}
+
+.case-import-collapse .ant-collapse-content {
+  border: 0;
+  background: transparent;
+}
+
+.case-import-collapse .ant-collapse-content-box {
+  padding: 16px 0 0;
+}
+
+.case-import-card {
+  background: var(--surface-card);
 }
 
 .patrol-log-card .ant-card-head {
@@ -2551,6 +2636,10 @@ textarea:focus-visible,
     margin-bottom: 14px;
   }
 
+  .sidebar-collapse-button {
+    display: none;
+  }
+
   .side-nav {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -2648,6 +2737,10 @@ textarea:focus-visible,
   .brand-zone {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .sidebar-collapse-button {
+    display: none;
   }
 
   .side-nav,

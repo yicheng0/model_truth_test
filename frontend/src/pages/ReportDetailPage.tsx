@@ -492,7 +492,7 @@ export default function ReportDetailPage() {
         </div>
         <Space wrap>
           <Button href={api.reportUrl(report.run_id)} target="_blank" icon={<Download size={16} />}>导出 Markdown</Button>
-          <Link to="/reports"><Button>返回报告中心</Button></Link>
+          <Link to="/reports"><Button>返回报告页</Button></Link>
         </Space>
       </div>
 

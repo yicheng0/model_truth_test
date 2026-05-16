@@ -55,8 +55,8 @@ export default function ComparePage() {
   if (reportIds.length < 2) {
     return (
       <Card bordered={false}>
-        <Empty description="请先在报告中心选择 2-3 份报告进行对比">
-          <Link to="/reports"><Button type="primary">进入报告中心</Button></Link>
+        <Empty description="请先选择 2-3 份报告进行对比">
+          <Link to="/reports"><Button type="primary">进入报告页</Button></Link>
         </Empty>
       </Card>
     );
@@ -99,7 +99,7 @@ export default function ComparePage() {
           <Typography.Title level={2}>{modeLabel(mode)}</Typography.Title>
           <Typography.Paragraph>{pageDescription(mode)}</Typography.Paragraph>
         </div>
-        <Link to="/reports"><Button>返回报告中心</Button></Link>
+        <Link to="/reports"><Button>返回报告页</Button></Link>
       </div>
 
       <section className="metric-strip">
