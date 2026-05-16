@@ -1,7 +1,7 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Popover, Typography } from 'antd';
-import { Activity, BarChart3, CalendarClock, ClipboardList, Database, FileText, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Settings2, Trophy } from 'lucide-react';
+import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Settings2, Trophy } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
@@ -21,6 +21,23 @@ const ComparePage = lazy(() => import('./pages/ComparePage'));
 const ResourceLogManagement = lazy(() => import('./pages/ResourceLogManagement'));
 
 const { Content, Sider } = Layout;
+const SIDEBAR_COLLAPSED_KEY = 'apipro.sidebar.collapsed';
+
+function readSidebarCollapsed() {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeSidebarCollapsed(collapsed: boolean) {
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
+  } catch {
+    // Storage can be unavailable in hardened browser contexts.
+  }
+}
 
 const navItems = [
   { key: '/', icon: Activity, label: '总览', to: '/' },
@@ -34,32 +51,55 @@ const navItems = [
   { key: '/new-performance', icon: BarChart3, label: '性能诊断', to: '/new-performance' },
   { key: '/new-arena', icon: Trophy, label: 'Arena 排名', to: '/new-arena' },
   { key: '/runs', icon: GitCompare, label: '任务列表', to: '/runs' },
-  { key: '/reports', icon: FileText, label: '报告中心', to: '/reports' },
 ];
 
 function Shell() {
   const location = useLocation();
   const selected = `/${location.pathname.split('/')[1] || ''}`;
+  const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
+
+  useEffect(() => {
+    writeSidebarCollapsed(collapsed);
+  }, [collapsed]);
 
   return (
     <Layout className="app-shell">
-      <Sider width={288} className="enterprise-sidebar">
+      <Sider
+        width={288}
+        collapsedWidth={88}
+        collapsed={collapsed}
+        className="enterprise-sidebar"
+      >
         <Link className="brand-lockup" to="/">
-          <img className="brand-logo" src="https://wenwen-us.oss-us-west-1.aliyuncs.com/apipro_logo.png" alt="APIPro logo" />
-          <span>
+          <img className="brand-logo" src="/apipro-logo.svg" alt="APIPro logo" />
+          <span className="brand-lockup-copy">
             <Typography.Text className="brand-kicker">APIPro Team</Typography.Text>
             <Typography.Title level={4}>APIPro Relay Eval</Typography.Title>
           </span>
         </Link>
+
+        <Button
+          className="sidebar-collapse-button"
+          type="text"
+          icon={collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+          onClick={() => setCollapsed((value) => !value)}
+          aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
+        />
 
         <nav className="side-nav" aria-label="主导航">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = selected === item.key || (item.key === '/' && selected === '/');
             return (
-              <Link key={item.key} className={`side-nav-item ${active ? 'active' : ''}`} to={item.to}>
+              <Link
+                key={item.key}
+                className={`side-nav-item ${active ? 'active' : ''}`}
+                to={item.to}
+                title={collapsed ? item.label : undefined}
+                aria-label={item.label}
+              >
                 <Icon size={18} />
-                {item.label}
+                <span className="side-nav-label">{item.label}</span>
               </Link>
             );
           })}
@@ -67,8 +107,8 @@ function Shell() {
 
         <div className="sidebar-tools">
           <Link className="side-tool-link" to="/resource-log-management">
-            <Button className="side-tool-button" icon={<Settings2 size={16} />}>
-              资源与日志管理
+            <Button className="side-tool-button" icon={<Settings2 size={16} />} title={collapsed ? '资源与日志管理' : undefined}>
+              <span className="side-tool-label">资源与日志管理</span>
             </Button>
           </Link>
           <Popover
@@ -82,8 +122,8 @@ function Shell() {
               </div>
             }
           >
-            <Button className="side-tool-button" icon={<Headphones size={16} />}>
-              联系客服
+            <Button className="side-tool-button" icon={<Headphones size={16} />} title={collapsed ? '联系客服' : undefined}>
+              <span className="side-tool-label">联系客服</span>
             </Button>
           </Popover>
         </div>

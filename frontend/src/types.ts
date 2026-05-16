@@ -12,14 +12,16 @@ export type Channel = {
 
 export type ChannelRole = string;
 
+/** Legacy — prefer narrower interfaces below. */
 export type JsonObject = Record<string, any>;
 
-export type ChannelAuthConfig = JsonObject & {
+export interface ChannelAuthConfig {
+  [key: string]: unknown;
   api_key?: string;
   account_type?: string;
   request_protocol?: string;
   region?: string;
-};
+}
 
 export type ResponsePayload = JsonObject & {
   content?: Array<Record<string, unknown>>;
@@ -39,53 +41,67 @@ export type ResponsePayload = JsonObject & {
   ResponseMetadata?: JsonObject;
 };
 
-export type MetricsPayload = JsonObject & {
+export interface MetricsPayload {
   latency_ms?: number;
   ttft_ms?: number;
   tokens_per_second?: number;
-};
+}
 
-export type ReportEvidence = JsonObject & {
+export interface ArenaEvidence {
+  rank?: number;
+  win_rate?: number;
+  avg_case_score?: number;
+  pair_count?: number;
+  case_count?: number;
+}
+
+export interface TopEvidenceItem {
+  test_case_id?: string;
+  winner_channel_id?: string;
+  loser_channel_id?: string;
+  winner_score?: number | null;
+  loser_score?: number | null;
+  margin?: number | null;
+  labels?: string[];
+}
+
+export interface SignatureInteropEvidence {
+  status?: 'pass' | 'fail' | 'skipped' | string;
+  reason?: string | null;
+  source_channel_id?: string | null;
+  source_channel_name?: string | null;
+  source_channel_account_type?: string | null;
+  source_channel_provider_type?: string | null;
+  relay_channel_id?: string | null;
+  relay_channel_name?: string | null;
+  relay_channel_account_type?: string | null;
+  relay_channel_provider_type?: string | null;
+  source_message_id?: string | null;
+  source_request_id?: string | null;
+  source_message_channel_type?: string | null;
+  relay_message_id?: string | null;
+  relay_request_id?: string | null;
+  relay_message_channel_type?: string | null;
+  signature_prefixes?: string[];
+  created_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface ReportEvidence {
   test_scope?: string;
   confidence?: number | string | null;
   labels?: string[];
   label_explanations?: Array<{ label: string; description: string }>;
   detected_provider_hint?: string | null;
   dimension_scores?: Record<string, number | null | undefined>;
-  arena?: JsonObject & {
-    rank?: number;
-    win_rate?: number;
-    avg_case_score?: number;
-    pair_count?: number;
-    case_count?: number;
-  };
-  arena_matrix?: Array<JsonObject>;
-  judge_evidence?: JsonObject;
-  top_evidence?: Array<JsonObject & {
-    test_case_id?: string;
-    winner_channel_id?: string;
-    loser_channel_id?: string;
-    winner_score?: number | null;
-    loser_score?: number | null;
-    margin?: number | null;
-    labels?: string[];
-  }>;
-  model_request?: JsonObject;
-  model_requests?: Array<JsonObject>;
-  signature_interop?: JsonObject & {
-    status?: 'pass' | 'fail' | 'skipped' | string;
-    reason?: string | null;
-    source_channel_id?: string | null;
-    source_channel_name?: string | null;
-    relay_channel_id?: string | null;
-    relay_channel_name?: string | null;
-    source_message_id?: string | null;
-    source_message_channel_type?: string | null;
-    relay_message_id?: string | null;
-    relay_message_channel_type?: string | null;
-    signature_prefixes?: string[];
-  };
-};
+  arena?: ArenaEvidence;
+  arena_matrix?: Array<Record<string, unknown>>;
+  judge_evidence?: Record<string, unknown>;
+  top_evidence?: Array<TopEvidenceItem>;
+  model_request?: Record<string, unknown>;
+  model_requests?: Array<Record<string, unknown>>;
+  signature_interop?: SignatureInteropEvidence;
+}
 
 export type ChannelTaxonomySetting = {
   id: string;

@@ -4,18 +4,20 @@ import os
 import asyncio
 import json
 import uuid
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_claude_eval.db")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 os.environ.setdefault("SKIP_BUILTIN_CHANNEL_CLEANUP", "1")
 os.environ.setdefault("AUTO_SCHEDULER_ENABLED", "false")
+os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "0")
 
 from fastapi.testclient import TestClient
 import httpx
 from sqlalchemy import delete, func, select
 
-from app.database import SessionLocal, init_db
+from app.database import SessionLocal, engine, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
@@ -23,6 +25,16 @@ from app.services import _anthropic_compatible_call, _anthropic_messages_url, _a
 
 
 def reset_database() -> None:
+    engine.dispose()
+    engine.dispose()
+    if engine.url.get_backend_name() == "sqlite":
+        db_path = Path(engine.url.database or "")
+        if db_path.exists():
+            db_path.unlink()
+        for suffix in ("-journal", "-wal", "-shm"):
+            sidecar = Path(f"{db_path}{suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
     init_db()
     with SessionLocal() as db:
         for model in [ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel, ChannelTaxonomySetting, FeishuBroadcastSetting]:
@@ -237,6 +249,84 @@ def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
     payload = response.json()
     assert payload["instance_id"]
     assert {"enabled", "instance_id", "stale_schedule_count", "queued_schedule_count", "running_schedule_count", "next_due_at"} <= set(payload)
+
+
+def test_startup_seed_removes_stale_default_cases_without_crashing() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        db.add(
+            TestCaseModel(
+                id="stale_default_case",
+                suite_id="claude_full_35",
+                module="stale",
+                sort_order=9999,
+                title="Stale default case",
+                prompt="This case should be removed by startup seeding.",
+                request_params={},
+                scoring_rules={},
+                is_hidden=False,
+                enabled=True,
+            )
+        )
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        assert db.get(TestCaseModel, "stale_default_case") is None
+
+
+def test_reset_database_clears_custom_state_and_restores_defaults() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        db.add(
+            Channel(
+                id="temp_channel",
+                name="Temp Channel",
+                provider_type="third_party_anthropic",
+                role="candidate",
+                base_url="https://temp.example/v1",
+                model_name="claude-temp",
+                enabled=True,
+            )
+        )
+        db.add(
+            Run(
+                id="temp_run",
+                suite_id="claude_full_35",
+                name="Temp Run",
+                mode="full_comparison",
+                test_scope="full",
+                status="completed",
+                repeat_count=1,
+                concurrency=1,
+                total_jobs=0,
+                completed_jobs=0,
+            )
+        )
+        db.commit()
+
+    reset_database()
+
+    with SessionLocal() as db:
+        suite = db.get(TestSuiteModel, "claude_full_35")
+        default_channels = list(db.scalars(select(Channel).order_by(Channel.id)).all())
+        default_case_count = db.scalar(select(func.count()).select_from(TestCaseModel).where(TestCaseModel.suite_id == "claude_full_35"))
+
+    assert suite is not None
+    assert suite.version == "2026.05-representative-32"
+    assert [channel.id for channel in default_channels] == [
+        "anthropic_official",
+        "aws_bedrock",
+        "azure_foundry",
+        "negative_sample",
+        "openai_compat_demo",
+        "third_party_demo",
+    ]
+    assert default_case_count == 32
+    assert all(channel.id != "temp_channel" for channel in default_channels)
 
 
 def test_seed_demo_data_restores_default_channels_only_when_empty() -> None:

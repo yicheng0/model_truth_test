@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Col, Collapse, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
 import { BarChart3, Bell, CalendarClock, Edit3, Eye, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -684,6 +684,11 @@ export default function ScheduledTests() {
                       <small>返回 run/report/message/request/source/relay 等定位 ID。</small>
                     </div>
                   </div>
+                  <Collapse
+                    size="small"
+                    ghost
+                    items={patrolParameterFaq}
+                  />
                 </section>
                 <Card
                   title={<span className="card-title-with-icon"><CalendarClock size={18} />按渠道自动巡检</span>}
@@ -738,6 +743,7 @@ export default function ScheduledTests() {
                     dataSource={schedules.data ?? []}
                     pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
                     scroll={{ x: 1380 }}
+                    locale={{ emptyText: schedules.isLoading || channels.isLoading ? ' ' : <Empty description="暂无自动巡检计划" image={Empty.PRESENTED_IMAGE_SIMPLE}><Button type="primary" onClick={openCreateSchedule}>立即创建</Button></Empty> }}
                     columns={[
                       {
                         title: '计划',
@@ -752,11 +758,20 @@ export default function ScheduledTests() {
                       {
                         title: '渠道',
                         width: 220,
-                        render: (_, schedule) => channelById.get(schedule.channel_id)?.name ?? schedule.channel_id,
+                        render: (_, schedule) => {
+                          const channel = channelById.get(schedule.channel_id);
+                          if (!channel) return <Typography.Text>{schedule.channel_id}</Typography.Text>;
+                          return (
+                            <Space direction="vertical" size={2}>
+                              <Typography.Text strong>{channel.name}</Typography.Text>
+                              <Typography.Text type="secondary">{channel.model_name ?? '未配置模型'}</Typography.Text>
+                            </Space>
+                          );
+                        },
                       },
                       {
                         title: '巡检结果',
-                        width: 120,
+                        width: 100,
                         render: (_, schedule) => probeSummary(schedule),
                       },
                       {
@@ -779,7 +794,18 @@ export default function ScheduledTests() {
                       {
                         title: '下次执行',
                         width: 180,
-                        render: (_, schedule) => formatDateTime(schedule.next_run_at),
+                        render: (_, schedule) => {
+                          if (!schedule.next_run_at) return '-';
+                          const next = dayjs(schedule.next_run_at);
+                          const diffMin = next.diff(dayjs(), 'minute');
+                          const relative = diffMin <= 0 ? '即将执行' : diffMin < 60 ? `${diffMin} 分钟后` : diffMin < 1440 ? `${Math.floor(diffMin / 60)} 小时后` : `${Math.floor(diffMin / 1440)} 天后`;
+                          return (
+                            <Space direction="vertical" size={2}>
+                              <Typography.Text>{formatDateTime(schedule.next_run_at)}</Typography.Text>
+                              {schedule.enabled ? <Typography.Text type="secondary">{relative}</Typography.Text> : null}
+                            </Space>
+                          );
+                        },
                       },
                       {
                         title: '状态',

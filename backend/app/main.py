@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import asyncio
 import logging
+import uuid
 import os
 import shutil
 from contextlib import asynccontextmanager
@@ -9,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
+import time as time_module
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select
@@ -72,6 +76,7 @@ from .schemas import (
     TestSuiteUpdate,
 )
 from .services import (
+    _clean_auth_config,
     build_comparisons,
     build_reports,
     build_special_run_reports,
@@ -129,6 +134,11 @@ from .services import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     init_db()
     with SessionLocal() as db:
         seed_demo_data(db)
@@ -175,6 +185,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Rate limiting ---
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "100") or "100")
+_rate_limit_buckets: defaultdict[str, list[float]] = defaultdict(list)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next) -> Response:
+    if RATE_LIMIT_PER_MINUTE <= 0:
+        return await call_next(request)
+    now = time_module.monotonic()
+    ip = _client_ip(request)
+    window = _rate_limit_buckets[ip]
+    window[:] = [t for t in window if t > now - 60.0]
+    if len(window) >= RATE_LIMIT_PER_MINUTE:
+        return JSONResponse(status_code=429, content={"detail": "Too many requests"}, headers={"Retry-After": "60"})
+    window.append(now)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next) -> Response:
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    response: Response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 TERMINAL_RUN_STATUSES = {"completed", "failed", "canceled", "interrupted"}
@@ -265,6 +309,8 @@ def run_read(db: Session, run: Run) -> RunRead:
         scheduled = db.get(ScheduledChannelTest, run.scheduled_test_id)
         if scheduled:
             patrol_channel = db.get(Channel, scheduled.channel_id)
+        else:
+            logger.warning("run_read: scheduled_test_id=%s not found for run_id=%s", run.scheduled_test_id, run.id)
     if not patrol_channel and (run.scheduled_test_id or run.test_scope == "scheduled_probe"):
         report = db.scalar(select(Report).where(Report.run_id == run.id).order_by(Report.created_at.desc()))
         if report:
@@ -295,7 +341,13 @@ def health(db: Session = Depends(get_db)) -> dict[str, str]:
 
 
 @app.get("/api/system/usage", response_model=SystemUsageRead)
-def system_usage(db: Session = Depends(get_db)) -> SystemUsageRead:
+def system_usage(
+    db: Session = Depends(get_db),
+    x_admin_key: str | None = Header(None, alias="X-Admin-Key"),
+) -> SystemUsageRead:
+    expected = os.getenv("ADMIN_API_KEY", "").strip()
+    if expected and x_admin_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
     disk_path = Path.cwd()
     disk = shutil.disk_usage(disk_path)
     candidate_run_ids, skipped_baseline_runs, active_runs = _cleanup_candidate_run_ids(db)
@@ -362,8 +414,29 @@ def cleanup_run_logs(dry_run: bool = Query(False), db: Session = Depends(get_db)
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_request: Request, exc: Exception):
+    request_id = getattr(_request.state, "request_id", None) or "unknown"
     logger.exception("Unhandled application error", exc_info=exc)
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error",
+            "request_id": request_id,
+            "path": str(_request.url.path),
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+    request_id = getattr(_request.state, "request_id", None) or "unknown"
+    errors = []
+    for error in exc.errors():
+        field = ".".join(str(loc) for loc in error["loc"])
+        errors.append({"field": field, "message": error["msg"], "type": error["type"]})
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "Validation error", "errors": errors, "request_id": request_id},
+    )
 
 
 @app.get("/api/channels", response_model=list[ChannelRead])
@@ -392,8 +465,15 @@ def update_channel(channel_id: str, data: ChannelUpdate, db: Session = Depends(g
     channel = db.get(Channel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    SAFE_COLUMNS = {"name", "provider_type", "role", "base_url", "model_name", "is_reference", "enabled", "auth_config"}
     for key, value in data.model_dump(exclude_unset=True).items():
-        setattr(channel, key, value)
+        if key not in SAFE_COLUMNS:
+            continue
+        if key == "auth_config":
+            value = _clean_auth_config(value)
+            channel.auth_config_encrypted = value
+        else:
+            setattr(channel, key, value)
     if data.is_reference is not None and data.role is None:
         channel.role = "gold" if channel.is_reference else "candidate"
     db.commit()
@@ -964,8 +1044,12 @@ def delete_scheduled_test(scheduled_id: str, db: Session = Depends(get_db)) -> d
     scheduled = db.get(ScheduledChannelTest, scheduled_id)
     if not scheduled:
         raise HTTPException(status_code=404, detail="Scheduled test not found")
+    # Detach references so orphaned runs/alerts don't break the frontend.
     for alert in db.scalars(select(ChannelAlert).where(ChannelAlert.scheduled_test_id == scheduled_id)).all():
         alert.scheduled_test_id = None
+    for run in db.scalars(select(Run).where(Run.scheduled_test_id == scheduled_id)).all():
+        run.scheduled_test_id = None
+    db.flush()
     db.delete(scheduled)
     db.commit()
     return {"deleted": True}

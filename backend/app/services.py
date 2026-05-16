@@ -51,7 +51,13 @@ SCHEDULE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 SCHEDULER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 SCHEDULER_LOCK_MINUTES = int(os.getenv("SCHEDULER_LOCK_MINUTES", "30") or "30")
 SCHEDULER_LAST_TICK_AT: datetime | None = None
-logger = logging.getLogger(__name__)
+if not logging.getLogger().handlers and not logging.getLogger("claude_eval").handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+logger = logging.getLogger("claude_eval.services")
 
 
 def new_id(prefix: str) -> str:
@@ -1091,7 +1097,8 @@ def seed_demo_data(db: Session) -> None:
             case_by_id[case_data["id"]] = create_case(db, TestCaseCreate(**case_data))
             continue
         case.module = case_data["module"]
-        case.sort_order = case_data.get("sort_order", case.sort_order)
+        if "sort_order" in case_data:
+            case.sort_order = case_data["sort_order"]
         case.title = case_data["title"]
         case.prompt = case_data["prompt"]
         case.system_prompt = case_data.get("system_prompt")
@@ -1717,9 +1724,11 @@ async def execute_run(
         if not run:
             return
 
+        _completed_jobs = 0
+        _BATCH_SIZE = 20
+
         def add_result(case: TestCase, channel: Channel, attempt: int, normalized: dict[str, Any]) -> None:
             db.add(_result_from_normalized(run.id, case, channel, attempt, normalized))
-            run.completed_jobs += 1
 
         async def cancel_active_tasks(tasks: set[asyncio.Task[tuple[TestCase, Channel, int, dict[str, Any]]]]) -> None:
             for pending_task in tasks:
@@ -1728,6 +1737,8 @@ async def execute_run(
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         def finish_canceled_run() -> None:
+            nonlocal _completed_jobs
+            run.completed_jobs = _completed_jobs
             run.status = "canceled"
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
@@ -1747,6 +1758,7 @@ async def execute_run(
                 run.finished_at = run.finished_at or datetime.now(timezone.utc)
                 db.commit()
                 return
+            logger.info("run_started run_id=%s mode=%s suite_id=%s total_jobs=%d concurrency=%d", run_id, run.mode, run.suite_id, run.total_jobs, run.concurrency)
             run.status = "running"
             run.started_at = datetime.now(timezone.utc)
             db.commit()
@@ -1858,13 +1870,20 @@ async def execute_run(
                         finish_canceled_run()
                         return
                     add_result(case, channel, attempt, normalized)
-                    db.commit()
+                    _completed_jobs += 1
+                    if _completed_jobs % _BATCH_SIZE == 0:
+                        run.completed_jobs = _completed_jobs
+                        db.commit()
+                    logger.debug("run_progress run_id=%s job=%d/%d case=%s channel=%s", run_id, _completed_jobs, run.total_jobs, case.id, channel.id)
 
             if not refresh_active_run():
                 return
             if run.status == "canceled":
                 finish_canceled_run()
                 return
+            run.completed_jobs = _completed_jobs
+            db.commit()
+            logger.info("run_post_processing run_id=%s mode=%s completed_jobs=%d", run_id, run.mode, run.completed_jobs)
             apply_repeat_consistency_scores(db, run.id)
             if run.mode == "baseline_build":
                 finalize_baseline_from_run(db, run.id)
@@ -1876,6 +1895,7 @@ async def execute_run(
             run.status = "completed"
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
+            logger.info("run_completed run_id=%s mode=%s completed_jobs=%d", run_id, run.mode, run.completed_jobs)
         except Exception as exc:  # keep failed runs inspectable
             await cancel_active_tasks(active_tasks)
             if not refresh_active_run():
@@ -1884,6 +1904,7 @@ async def execute_run(
                 finish_canceled_run()
                 return
             run.status = "failed"
+            logger.exception("run_failed run_id=%s mode=%s", run_id, run.mode)
             run.finished_at = datetime.now(timezone.utc)
             if run.mode == "baseline_build" and run.baseline_snapshot_id:
                 snapshot = db.get(BaselineSnapshot, run.baseline_snapshot_id)
@@ -1967,6 +1988,7 @@ async def execute_scheduled_channel_test(
                 if advance_next_run and attempt_index == 0:
                     scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
                 db.commit()
+            logger.info("scheduled_run_executing scheduled_id=%s run_id=%s channel=%s", scheduled_id, run_id, channel.name)
 
             await execute_run(session_factory, run_id, use_mock=use_mock)
 
@@ -1989,6 +2011,7 @@ async def execute_scheduled_channel_test(
                 scheduled.last_status = "queued"
                 scheduled.last_error = f"Run finished with status {run.status}; retry {attempt_index}/{max_retries} queued"
                 scheduled.locked_by = SCHEDULER_INSTANCE_ID
+                logger.warning("scheduled_run_retry scheduled_id=%s run_id=%s attempt=%d/%d status=%s", scheduled_id, run_id, attempt_index, max_retries, run.status)
                 scheduled.locked_until = _lock_expiry()
                 db.commit()
             await asyncio.sleep(max(1, retry_interval_minutes) * 60)
@@ -1999,6 +2022,7 @@ async def execute_scheduled_channel_test(
                 if advance_next_run:
                     scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
                 release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc))
+                logger.exception("scheduled_test_failed scheduled_id=%s run_id=%s", scheduled_id, run_id)
         return None
 
 
@@ -3265,28 +3289,50 @@ def smart_patrol_daily_text(report: dict[str, Any], setting: FeishuBroadcastSett
 
 async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_seconds: int = 60) -> None:
     global SCHEDULER_LAST_TICK_AT
-    while True:
-        SCHEDULER_LAST_TICK_AT = datetime.now(timezone.utc)
-        try:
-            await send_daily_patrol_report(session_factory)
-            now = datetime.now(timezone.utc)
-            due_ids: list[str] = []
-            with session_factory() as db:
-                recover_stale_scheduled_tests(db, now=now)
-                schedules = db.scalars(
-                    select(ScheduledChannelTest)
-                    .where(ScheduledChannelTest.enabled.is_(True), ScheduledChannelTest.next_run_at <= _naive_utc(now))
-                    .order_by(ScheduledChannelTest.next_run_at)
-                ).all()
-                for scheduled in schedules:
-                    claimed = claim_scheduled_test(db, scheduled.id, now=now, advance_next_run=True)
-                    if claimed:
-                        due_ids.append(claimed.id)
-            for scheduled_id in due_ids:
-                asyncio.create_task(execute_scheduled_channel_test(session_factory, scheduled_id, advance_next_run=False))
-        except Exception:
-            logger.exception("Scheduled test loop tick failed")
-        await asyncio.sleep(max(5, poll_seconds))
+    _tracked_tasks: set[asyncio.Task[Any]] = set()
+    try:
+        while True:
+            SCHEDULER_LAST_TICK_AT = datetime.now(timezone.utc)
+            try:
+                await send_daily_patrol_report(session_factory)
+                now = datetime.now(timezone.utc)
+                due_ids: list[str] = []
+                with session_factory() as db:
+                    recover_stale_scheduled_tests(db, now=now)
+                    schedules = db.scalars(
+                        select(ScheduledChannelTest)
+                        .where(ScheduledChannelTest.enabled.is_(True), ScheduledChannelTest.next_run_at <= _naive_utc(now))
+                        .order_by(ScheduledChannelTest.next_run_at)
+                    ).all()
+                    for scheduled in schedules:
+                        claimed = claim_scheduled_test(db, scheduled.id, now=now, advance_next_run=True)
+                        if claimed:
+                            due_ids.append(claimed.id)
+                if due_ids:
+                    logger.info("scheduler_tick due=%d claimed=%d", len(schedules), len(due_ids))
+                tasks = [
+                    asyncio.create_task(execute_scheduled_channel_test(session_factory, sid, advance_next_run=False))
+                    for sid in due_ids
+                ]
+                _tracked_tasks.update(tasks)
+                for task in asyncio.as_completed(tasks):
+                    try:
+                        await task
+                    except Exception:
+                        logger.exception("Scheduled test task failed")
+                    finally:
+                        _tracked_tasks.discard(task)
+            except Exception:
+                logger.exception("Scheduled test loop tick failed")
+            await asyncio.sleep(max(5, poll_seconds))
+    except asyncio.CancelledError:
+        logger.info("scheduler_shutting_down tracked_tasks=%d", len(_tracked_tasks))
+        for task in _tracked_tasks:
+            task.cancel()
+            if _tracked_tasks:
+                await asyncio.gather(*_tracked_tasks, return_exceptions=True)
+                _tracked_tasks.clear()
+        raise
 
 
 def _sort_channels_for_run(channels: list[Channel]) -> list[Channel]:
@@ -3547,6 +3593,7 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
 
     started = time.perf_counter()
     try:
+        logger.debug("channel_call_start channel=%s case=%s attempt=%d protocol=%s", channel.id, case.id, attempt, protocol)
         raw_response, resolved_protocol, endpoint = await _live_call_with_metadata(channel, case, raw_request, credentials)
         latency_ms = int((time.perf_counter() - started) * 1000)
         return normalize_response(
@@ -3565,6 +3612,7 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         error_message = _message_from_exception(exc)
+        logger.warning("channel_call_failed channel=%s case=%s attempt=%d protocol=%s latency_ms=%d error=%s", channel.id, case.id, attempt, protocol, latency_ms, error_message[:200])
         return normalize_response(
             channel,
             case,
@@ -3637,6 +3685,7 @@ async def _auto_live_call(
             return raw_response, protocol, endpoint
         except Exception as exc:
             errors.append(f"{protocol} {endpoint or '-'}: {exc}")
+            logger.debug("auto_protocol_probe_failed channel=%s protocol=%s error=%s", channel.id, protocol, str(exc)[:200])
     raise RuntimeError("自动协议探测失败：" + "；".join(errors))
 
 
@@ -3733,7 +3782,7 @@ def _missing_live_credentials(channel: Channel, credentials: dict[str, Any]) -> 
 
 
 def _anthropic_messages_url(base_url: str | None) -> str:
-    normalized = (base_url or "https://api.anthropic.com").rstrip("/")
+    normalized = (base_url or "https://api.anthropic.com").rstrip("/")  # default fallback for Anthropic-compatible channels only
     if normalized.endswith("/v1/messages") or normalized.endswith("/messages"):
         return normalized
     if normalized.endswith("/v1"):
@@ -4277,7 +4326,10 @@ async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any],
     base_url = (credentials.get("base_url") or channel.base_url or "").rstrip("/")
     url = _openai_chat_completions_url(base_url)
     params = raw_request["params"]
-    headers = {"authorization": f"Bearer {credentials.get('api_key', '')}", "content-type": "application/json"}
+    headers = {"content-type": "application/json"}
+    api_key = credentials.get("api_key")
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
     body = {
         "model": credentials.get("model") or channel.model_name,
         "messages": raw_request["messages"],
@@ -4336,24 +4388,27 @@ def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, A
         aws_session_token=credentials.get("aws_session_token"),
         config=Config(connect_timeout=10, read_timeout=90, retries={"max_attempts": 1}),
     )
-    params = case.request_params or {}
-    if params.get("thinking") or params.get("tools") or "stream" in params:
-        return _aws_bedrock_messages_call(client, channel, case, credentials, params)
-    response = client.converse(
-        modelId=credentials.get("model") or channel.model_name,
-        messages=[{"role": "user", "content": [{"text": case.prompt}]}],
-        inferenceConfig={"maxTokens": params.get("max_tokens", 1024), "temperature": params.get("temperature", 0)},
-    )
-    text = "\n".join(block.get("text", "") for block in response.get("output", {}).get("message", {}).get("content", []))
-    return {
-        "id": response.get("ResponseMetadata", {}).get("RequestId", f"aws_{uuid.uuid4().hex[:8]}"),
-        "type": "message",
-        "model": channel.model_name,
-        "content": [{"type": "text", "text": text}],
-        "stop_reason": response.get("stopReason"),
-        "usage": response.get("usage"),
-        "cloud_wrapper": {"provider": "aws_bedrock", "region": region, "request_id": response.get("ResponseMetadata", {}).get("RequestId")},
-    }
+    try:
+        params = case.request_params or {}
+        if params.get("thinking") or params.get("tools") or "stream" in params:
+            return _aws_bedrock_messages_call(client, channel, case, credentials, params)
+        response = client.converse(
+            modelId=credentials.get("model") or channel.model_name,
+            messages=[{"role": "user", "content": [{"text": case.prompt}]}],
+            inferenceConfig={"maxTokens": params.get("max_tokens", 1024), "temperature": params.get("temperature", 0)},
+        )
+        text = "\n".join(block.get("text", "") for block in response.get("output", {}).get("message", {}).get("content", []))
+        return {
+            "id": response.get("ResponseMetadata", {}).get("RequestId", f"aws_{uuid.uuid4().hex[:8]}"),
+            "type": "message",
+            "model": channel.model_name,
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": response.get("stopReason"),
+            "usage": response.get("usage"),
+            "cloud_wrapper": {"provider": "aws_bedrock", "region": region, "request_id": response.get("ResponseMetadata", {}).get("RequestId")},
+        }
+    finally:
+        client.close()
 
 
 def _aws_bedrock_messages_call(client: Any, channel: Channel, case: TestCase, credentials: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
@@ -4784,7 +4839,7 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     if rules.get("json_required"):
         try:
             parsed_json = json.loads(text)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             score -= 35
             labels.append("json_invalid")
             parsed_json = None
@@ -4923,6 +4978,7 @@ def _dict_contains(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
 
 def build_comparisons(db: Session, run_id: str, baseline_snapshot_id: str | None = None) -> None:
     db.execute(delete(Comparison).where(Comparison.run_id == run_id))
+    logger.info("build_comparisons_start run_id=%s baseline=%s", run_id, baseline_snapshot_id)
     run = db.get(Run, run_id)
     baseline_snapshot_id = baseline_snapshot_id or (run.baseline_snapshot_id if run else None)
     results = db.scalars(select(Result).where(Result.run_id == run_id)).all()
@@ -5014,6 +5070,7 @@ def _avg_sim(text: str, references: list[str]) -> float:
 
 def build_reports(db: Session, run_id: str) -> None:
     db.execute(delete(Report).where(Report.run_id == run_id))
+    logger.info("build_reports_start run_id=%s", run_id)
     run = db.get(Run, run_id)
     snapshot = db.get(BaselineSnapshot, run.baseline_snapshot_id) if run and run.baseline_snapshot_id else None
     comparisons = db.scalars(select(Comparison).where(Comparison.run_id == run_id)).all()

@@ -11,152 +11,36 @@ import { extractPatrolEvidence, formatPatrolChannel, type PatrolEvidence, type P
 import { formatDateTime } from '../time';
 import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
 import { isComboManualProbeRun, manualProbeSummaryRows } from './runDetailManualProbe';
-
-type DisplayResult = Result | BaselineResult;
-
-type CasePanelRow = {
-  key: string;
-  caseItem: TestCase;
-  sample?: DisplayResult;
-  sampleAttempts: number;
-  official?: DisplayResult;
-  officialAttempts: number;
-  candidate?: DisplayResult;
-  candidateAttempts: number;
-  comparison?: Comparison;
-};
-
-type OutputDrawerState = {
-  title: string;
-  channelName: string;
-  roleLabel: string;
-  caseTitle: string;
-  attemptIndex: number;
-  score?: number;
-  latency?: number;
-  result?: DisplayResult;
-};
-
-type ManualProbeRow = {
-  key: string;
-  title: string;
-  status: string;
-  channelName: string;
-  channelId: string;
-  channelType: string;
-  resultId?: string | null;
-  messageId?: string | null;
-  requestId?: string | null;
-  requestProtocol?: string | null;
-  providerEndpoint?: string | null;
-  completedAt?: string | null;
-  labels: string[];
-  error?: string | null;
-  responseText?: string | null;
-  rawResponseText?: string | null;
-  rawRequestText?: string | null;
-  score?: number;
-};
-
-type ArenaRankingRow = {
-  key: string;
-  rank: number;
-  channelId: string;
-  name: string;
-  score: number;
-  winRate: number;
-  avgCaseScore: number;
-  wins: number;
-  pairCount: number;
-  caseCount: number;
-  labels: string[];
-};
-
-type ArenaEvidenceRow = {
-  key: string;
-  testCaseId: string;
-  caseTitle: string;
-  winnerChannelId: string;
-  loserChannelId: string;
-  winnerName: string;
-  loserName: string;
-  winnerScore: number;
-  loserScore: number;
-  margin: number;
-  labels: string[];
-};
-
-function latestResult(results?: DisplayResult[]) {
-  if (!results?.length) return undefined;
-  return [...results].sort((a, b) => {
-    if (b.attempt_index !== a.attempt_index) return b.attempt_index - a.attempt_index;
-    return String(b.created_at ?? '').localeCompare(String(a.created_at ?? ''));
-  })[0];
-}
-
-function responseText(result?: DisplayResult) {
-  const normalized = result?.normalized_response;
-  const text = normalized?.content_text;
-  if (typeof text === 'string' && text.trim()) return text;
-  const toolCalls = normalized?.tool_calls;
-  if (Array.isArray(toolCalls) && toolCalls.length) return JSON.stringify(toolCalls, null, 2);
-  const error = normalized?.error ?? normalized?.raw_response?.error;
-  if (typeof error === 'string' && error.trim()) return `请求失败：${error}`;
-  return '等待该渠道返回结果';
-}
-
-function compactPatrolText(value?: string | null, limit = 140) {
-  const text = value?.replace(/\s+/g, ' ').trim();
-  if (!text) return '-';
-  return text.length > limit ? `${text.slice(0, limit)}...` : text;
-}
-
-function responseSnippet(result?: DisplayResult) {
-  const text = responseText(result).replace(/\s+/g, ' ').trim();
-  if (!result) return '等待返回';
-  return text.length > 120 ? `${text.slice(0, 120)}...` : text;
-}
-
-function prettyJson(value: unknown) {
-  if (value === undefined || value === null) return '-';
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function metricValue(value?: number) {
-  return value === undefined || Number.isNaN(value) ? '-' : value.toFixed(1);
-}
-
-function numberValue(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
-function arrayValue(value: unknown) {
-  return Array.isArray(value) ? value : [];
-}
-
-function riskTone(score?: number) {
-  if (score === undefined) return { color: 'default', text: '等待对比' };
-  if (score >= 85) return { color: 'green', text: '接近指纹' };
-  if (score >= 70) return { color: 'gold', text: '轻微偏离' };
-  return { color: 'red', text: '明显偏离' };
-}
-
-function rowStatus(row: CasePanelRow) {
-  if (row.comparison) return { color: 'green', text: '已对比' };
-  if (row.official && row.candidate) return { color: 'blue', text: '等待评分' };
-  if (row.official || row.candidate) return { color: 'gold', text: '部分返回' };
-  return { color: 'default', text: '排队中' };
-}
-
-function sampleRowStatus(row: CasePanelRow) {
-  if (row.sample?.normalized_response?.error) return { color: 'red', text: '请求失败' };
-  if (row.sample) return { color: 'green', text: '已返回' };
-  return { color: 'default', text: '排队中' };
-}
+import {
+  type ArenaEvidenceRow,
+  type ArenaRankingRow,
+  type CasePanelRow,
+  type DisplayResult,
+  type ManualProbeRow,
+  type OutputDrawerState,
+  arrayValue,
+  asRecord,
+  channelLabel,
+  compactPatrolText,
+  compactText,
+  evidenceStatusColor,
+  formatDimension,
+  labelDescription,
+  latestResult,
+  manualProbeChannelType,
+  metricValue,
+  numberValue,
+  payloadRequestId,
+  prettyJson,
+  responseSnippet,
+  responseText,
+  riskTone,
+  rowStatus,
+  runModeLabel,
+  sampleRowStatus,
+  stringifyJson,
+  toText,
+} from './runDetailUtils';
 
 function resultCell(
   channel: Channel | undefined,
@@ -201,34 +85,6 @@ function comparisonCell(comparison?: Comparison) {
       <span className="result-cell-snippet">{comparison?.labels?.length ? comparison.labels.join(' / ') : '暂无异常标签'}</span>
     </div>
   );
-}
-
-function formatDimension(value: unknown) {
-  return typeof value === 'number' ? value.toFixed(1) : '-';
-}
-
-function labelDescription(label: string, report?: RunResults['reports'][number]) {
-  const explanations = report?.evidence?.label_explanations;
-  if (Array.isArray(explanations)) {
-    const item = explanations.find((entry) => entry?.label === label);
-    if (item?.description) return item.description;
-  }
-  return label;
-}
-
-function runModeLabel(mode?: RunMode | string) {
-  if (mode === 'baseline_build') return '渠道指纹提取';
-  if (mode === 'performance_benchmark') return '性能诊断';
-  if (mode === 'arena_comparison') return 'Arena 排名';
-  if (mode === 'manual_probe') return '模型请求探针';
-  return '真实性对比';
-}
-
-function evidenceStatusColor(status?: string | null) {
-  if (status === 'ok' || status === 'pass') return 'green';
-  if (status === 'error' || status === 'fail') return 'red';
-  if (status === 'skipped') return 'default';
-  return 'gold';
 }
 
 function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
@@ -336,63 +192,6 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
       ) : null}
     </Space>
   );
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function toText(value: unknown) {
-  if (typeof value !== 'string') return null;
-  const text = value.trim();
-  return text || null;
-}
-
-function stringifyJson(value: unknown) {
-  if (value === null || value === undefined) return null;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function compactText(value?: string | null, limit = 180) {
-  const text = value?.replace(/\s+/g, ' ').trim();
-  if (!text) return '-';
-  return text.length > limit ? `${text.slice(0, limit)}...` : text;
-}
-
-function channelLabel(name?: string | null, id?: string | null) {
-  if (name && id) return `${name} (${id})`;
-  return name || id || '-';
-}
-
-function manualProbeChannelType(channel?: Channel, taxonomy?: ChannelTaxonomySetting | null) {
-  if (!channel) return '-';
-  return [
-    formatPatrolChannel({ id: channel.id, name: channel.name, accountType: channel.auth_config?.account_type, providerType: channel.provider_type }),
-    providerTypeLabel(channel.provider_type, taxonomy ?? undefined),
-    accountTypeLabel(channel.auth_config?.account_type),
-  ].filter(Boolean).join(' · ');
-}
-
-function payloadRequestId(value: unknown) {
-  const payload = asRecord(value);
-  if (!payload) return null;
-  const direct = toText(payload.request_id) ?? toText(payload.requestId);
-  if (direct) return direct;
-  const error = asRecord(payload.error);
-  const errorRequestId = toText(error?.request_id) ?? toText(error?.requestId);
-  if (errorRequestId) return errorRequestId;
-  const metadata = asRecord(payload._response_metadata);
-  const metadataRequestId = toText(metadata?.request_id);
-  if (metadataRequestId) return metadataRequestId;
-  const cloudWrapper = asRecord(payload.cloud_wrapper);
-  const wrapperRequestId = toText(cloudWrapper?.request_id) ?? toText(cloudWrapper?.requestId);
-  if (wrapperRequestId) return wrapperRequestId;
-  const responseMetadata = asRecord(payload.ResponseMetadata);
-  return toText(responseMetadata?.RequestId) ?? toText(responseMetadata?.RequestID);
 }
 
 function manualProbeResponseText(result: DisplayResult) {
