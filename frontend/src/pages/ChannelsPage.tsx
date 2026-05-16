@@ -10,6 +10,7 @@ import {
   buildTokenflowApiKey,
   buildTokenflowChannelId,
   defaultAccountType,
+  formatChannelDisplayName,
   providerTypeForAccountType,
 } from "../channelCredentials";
 import type { ChannelRole } from "../types";
@@ -109,7 +110,7 @@ export function ChannelsPage() {
             <tbody>
               {(channels.data ?? []).map((channel) => (
                 <tr key={channel.id}>
-                  <td><strong>{channel.name}</strong></td>
+                  <td><strong>{formatChannelDisplayName(channel)}</strong></td>
                   <td>{accountTypeLabel(channel.auth_config?.account_type)}</td>
                   <td><Badge tone={roleTone[channel.role as keyof typeof roleTone] ?? "purple"}>{channel.role}</Badge></td>
                   <td>{channel.auth_config?.api_key ? "自动生成" : "未配置"}</td>

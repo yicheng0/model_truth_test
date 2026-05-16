@@ -1,0 +1,162 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - link "APIPro logo APIPro Team APIPro Relay Eval" [ref=e6] [cursor=pointer]:
+        - /url: /
+        - img "APIPro logo" [ref=e7]
+        - generic [ref=e8]:
+          - generic [ref=e9]: APIPro Team
+          - heading "APIPro Relay Eval" [level=4] [ref=e10]
+      - navigation "主导航" [ref=e11]:
+        - link "总览" [ref=e12] [cursor=pointer]:
+          - /url: /
+          - img [ref=e13]
+          - text: 总览
+        - link "渠道管理" [ref=e15] [cursor=pointer]:
+          - /url: /channels
+          - img [ref=e16]
+          - text: 渠道管理
+        - link "题目管理" [ref=e21] [cursor=pointer]:
+          - /url: /test-cases
+          - img [ref=e22]
+          - text: 题目管理
+        - link "基线管理" [ref=e25] [cursor=pointer]:
+          - /url: /baselines
+          - img [ref=e26]
+          - text: 基线管理
+        - link "自动巡检" [ref=e30] [cursor=pointer]:
+          - /url: /scheduled-tests
+          - img [ref=e31]
+          - text: 自动巡检
+        - link "创建检测" [ref=e35] [cursor=pointer]:
+          - /url: /new-run
+          - img [ref=e36]
+          - text: 创建检测
+        - link "任务列表" [ref=e39] [cursor=pointer]:
+          - /url: /runs
+          - img [ref=e40]
+          - text: 任务列表
+      - button "联系客服" [ref=e46] [cursor=pointer]:
+        - img [ref=e48]
+        - generic [ref=e50]: 联系客服
+  - main [ref=e52]:
+    - generic [ref=e53]:
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - generic [ref=e57]: CHANNELS
+          - heading "渠道管理" [level=2] [ref=e58]
+          - generic [ref=e59]: 管理渠道的展示分类、协议参数和是否作为对照渠道。API Key 不在这里明文展示，真实检测时再按运行任务临时输入或接入加密保存。
+        - generic [ref=e60]:
+          - generic [ref=e62]: 对照渠道 0
+          - generic [ref=e64]: 待测渠道 0
+      - generic [ref=e66]:
+        - generic [ref=e69]: 新增渠道
+        - generic [ref=e71]:
+          - generic [ref=e72]:
+            - generic [ref=e74]:
+              - generic "名称" [ref=e76]: "* 名称"
+              - textbox "* 名称" [ref=e80]:
+                - /placeholder: 输入渠道名称
+            - generic [ref=e82]:
+              - generic "角色" [ref=e84]: "* 角色"
+              - generic [ref=e88] [cursor=pointer]:
+                - generic [ref=e91]:
+                  - generic "待测第三方" [ref=e93]:
+                    - generic [ref=e94]: 待测第三方
+                    - img [ref=e96]:
+                      - img [ref=e97]
+                  - combobox "* 角色" [ref=e101]
+                - generic:
+                  - img:
+                    - img
+            - generic [ref=e103]:
+              - generic "Provider Type" [ref=e105]: "* Provider Type"
+              - generic [ref=e109] [cursor=pointer]:
+                - generic [ref=e112]:
+                  - generic "Third-party Anthropic compatible" [ref=e114]:
+                    - generic [ref=e115]: Third-party Anthropic compatible
+                    - img [ref=e117]:
+                      - img [ref=e118]
+                  - combobox "* Provider Type" [ref=e122]
+                - generic:
+                  - img:
+                    - img
+            - generic [ref=e124]:
+              - generic "模型名" [ref=e126]
+              - generic [ref=e130] [cursor=pointer]:
+                - generic [ref=e132]:
+                  - combobox "模型名" [ref=e136]
+                  - generic: 选择或输入模型名
+                - generic:
+                  - img:
+                    - img
+            - generic [ref=e138]:
+              - generic "Base URL" [ref=e140]
+              - textbox "Base URL" [ref=e144]:
+                - /placeholder: https://api.example.com
+            - generic [ref=e146]:
+              - generic "对照渠道" [ref=e148]
+              - switch "对照渠道" [ref=e152] [cursor=pointer]:
+                - generic [ref=e154]:
+                  - generic: 对照
+                  - generic: 待测
+          - button "保存渠道" [ref=e155] [cursor=pointer]:
+            - img [ref=e157]
+            - generic [ref=e158]: 保存渠道
+      - generic [ref=e160]:
+        - generic [ref=e162]:
+          - generic [ref=e163]: 固定对照渠道
+          - button "一键补齐" [ref=e165] [cursor=pointer]:
+            - img [ref=e167]
+            - generic [ref=e170]: 一键补齐
+        - generic [ref=e171]:
+          - generic [ref=e172]: 这些渠道会在创建检测任务时默认作为对照渠道，可直接勾选使用；你仍然可以停用或编辑它们的模型名、Base URL。
+          - generic [ref=e173]:
+            - generic [ref=e174]:
+              - generic [ref=e175]:
+                - strong [ref=e176]: Anthropic Official
+                - generic [ref=e177]: claude-sonnet-4-5
+              - generic [ref=e178]:
+                - generic [ref=e180]: 金标 Anthropic
+                - generic [ref=e182]: 待创建
+            - generic [ref=e183]:
+              - generic [ref=e184]:
+                - strong [ref=e185]: AWS Bedrock Claude
+                - generic [ref=e186]: anthropic.claude-sonnet-4-5-v1:0
+              - generic [ref=e187]:
+                - generic [ref=e189]: 官方云参考
+                - generic [ref=e191]: 待创建
+            - generic [ref=e192]:
+              - generic [ref=e193]:
+                - strong [ref=e194]: Azure AI Foundry Claude
+                - generic [ref=e195]: claude-sonnet-4-5
+              - generic [ref=e196]:
+                - generic [ref=e198]: 官方云参考
+                - generic [ref=e200]: 待创建
+      - generic [ref=e202]:
+        - generic [ref=e205]: 渠道列表
+        - generic [ref=e208]:
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - table:
+                    - rowgroup:
+                      - row "名称 对照渠道 状态 角色 复审 类型 模型 Base URL 操作":
+                        - columnheader "名称"
+                        - columnheader "对照渠道"
+                        - columnheader "状态"
+                        - columnheader "角色"
+                        - columnheader "复审"
+                        - columnheader "类型"
+                        - columnheader "模型"
+                        - columnheader "Base URL"
+                        - columnheader "操作"
+                    - rowgroup:
+                      - row "暂无数据 暂无数据":
+                        - cell "暂无数据 暂无数据":
+                          - generic:
+                            - generic:
+                              - generic:
+                                - img "暂无数据"
+                              - generic: 暂无数据

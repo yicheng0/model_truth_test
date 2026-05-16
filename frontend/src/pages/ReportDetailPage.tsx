@@ -5,8 +5,10 @@ import type { TabsProps } from 'antd';
 import { Copy, Download, Eye, FileJson, Gauge, ListFilter } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
+import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { Report, ReportPredictionRow, Result, RunMode } from '../types';
+import { formatPatrolChannel } from '../runsUtils';
 
 const gradeColor: Record<Report['grade'], string> = {
   A: 'green',
@@ -57,13 +59,6 @@ function compactId(value: unknown) {
   const text = stringValue(value);
   if (text === '-' || text.length <= 22) return text;
   return `${text.slice(0, 11)}...${text.slice(-7)}`;
-}
-
-function channelLabel(name: unknown, id: unknown) {
-  const channelName = stringValue(name);
-  const channelId = stringValue(id);
-  if (channelName !== '-' && channelId !== '-') return `${channelName} (${channelId})`;
-  return channelName !== '-' ? channelName : channelId;
 }
 
 function modeLabel(mode: RunMode) {
@@ -173,7 +168,7 @@ export default function ReportDetailPage() {
           <Card bordered={false}>
             <Descriptions column={{ xs: 1, md: 2, xl: 3 }} bordered size="small">
               <Descriptions.Item label="报告类型">{modeLabel(mode)}</Descriptions.Item>
-              <Descriptions.Item label="渠道">{data.channel.name}</Descriptions.Item>
+              <Descriptions.Item label="渠道">{formatChannelDisplayName(data.channel)}</Descriptions.Item>
               <Descriptions.Item label="模型">{data.channel.model_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="角色">{data.channel.role}</Descriptions.Item>
               <Descriptions.Item label="任务状态">{data.run.status}</Descriptions.Item>
@@ -219,15 +214,20 @@ export default function ReportDetailPage() {
                   <Typography.Text className="section-kicker">PATROL PROBES</Typography.Text>
                   <Typography.Title level={4}>自动巡检探针结果</Typography.Title>
                 </div>
+                {modelRequests[0] ? (
+                  <Typography.Text type="secondary">
+                    Message ID：{String(modelRequests[0].message_id ?? '-')} · Request ID：{String(modelRequests[0].request_id ?? '-')}
+                  </Typography.Text>
+                ) : null}
                 <Table
                   rowKey={(row, index) => String(row.key ?? row.result_id ?? index)}
                   dataSource={modelRequests}
                   pagination={false}
                   size="small"
-                  scroll={{ x: 980 }}
+                  scroll={{ x: 790 }}
                   columns={[
                     { title: '参数探针', width: 210, render: (_, row) => <strong>{stringValue(row.title ?? row.key)}</strong> },
-                    { title: '渠道', width: 220, render: (_, row) => channelLabel(row.channel_name, row.channel_id) },
+                    { title: '渠道', width: 220, render: (_, row) => formatPatrolChannel({ id: stringValue(row.channel_id), name: stringValue(row.channel_name), providerType: stringValue((row as Record<string, unknown>).channel_provider_type), accountType: stringValue((row as Record<string, unknown>).channel_account_type) }, stringValue(row.channel_id)) },
                     {
                       title: '状态',
                       width: 100,
@@ -236,8 +236,8 @@ export default function ReportDetailPage() {
                         return <Tag color={hasError ? 'red' : 'green'}>{hasError ? '异常' : '正常'}</Tag>;
                       },
                     },
-                    { title: 'Result ID', width: 190, render: (_, row) => compactId(row.result_id) },
                     { title: 'Message ID', width: 190, render: (_, row) => compactId(row.message_id) },
+                    { title: 'Request ID', width: 190, render: (_, row) => compactId(row.request_id) },
                     { title: '协议', width: 130, render: (_, row) => stringValue(row.request_protocol) },
                     { title: 'Endpoint', width: 230, render: (_, row) => compactId(row.provider_endpoint) },
                     {
@@ -254,10 +254,12 @@ export default function ReportDetailPage() {
                     <span>Signature 状态</span>
                     <strong><Tag color={signatureInterop.status === 'pass' ? 'green' : signatureInterop.status === 'fail' ? 'red' : 'default'}>{stringValue(signatureInterop.status)}</Tag></strong>
                   </div>
-                  <div><span>Source 渠道</span><strong>{channelLabel(signatureInterop.source_channel_name, signatureInterop.source_channel_id)}</strong></div>
-                  <div><span>Source ID</span><strong>{compactId(signatureInterop.source_message_id)}</strong></div>
-                  <div><span>Relay 渠道</span><strong>{channelLabel(signatureInterop.relay_channel_name, signatureInterop.relay_channel_id)}</strong></div>
-                  <div><span>Relay ID</span><strong>{compactId(signatureInterop.relay_message_id)}</strong></div>
+                  <div><span>Source 渠道</span><strong>{formatPatrolChannel({ id: stringValue(signatureInterop.source_channel_id), name: stringValue(signatureInterop.source_channel_name), providerType: stringValue((signatureInterop as Record<string, unknown>).source_channel_provider_type), accountType: stringValue((signatureInterop as Record<string, unknown>).source_channel_account_type) }, stringValue(signatureInterop.source_channel_id))}</strong></div>
+                  <div><span>Source Message ID</span><strong>{compactId(signatureInterop.source_message_id)}</strong></div>
+                  <div><span>Source Request ID</span><strong>{compactId(signatureInterop.source_request_id)}</strong></div>
+                  <div><span>Relay 渠道</span><strong>{formatPatrolChannel({ id: stringValue(signatureInterop.relay_channel_id), name: stringValue(signatureInterop.relay_channel_name), providerType: stringValue((signatureInterop as Record<string, unknown>).relay_channel_provider_type), accountType: stringValue((signatureInterop as Record<string, unknown>).relay_channel_account_type) }, stringValue(signatureInterop.relay_channel_id))}</strong></div>
+                  <div><span>Relay Message ID</span><strong>{compactId(signatureInterop.relay_message_id)}</strong></div>
+                  <div><span>Relay Request ID</span><strong>{compactId(signatureInterop.relay_request_id)}</strong></div>
                   <div><span>Signature 前缀</span><strong>{arrayValue(signatureInterop.signature_prefixes).join(', ') || '-'}</strong></div>
                 </div>
                 {signatureInterop.reason ? <Typography.Text type="secondary">{String(signatureInterop.reason)}</Typography.Text> : null}
@@ -484,7 +486,7 @@ export default function ReportDetailPage() {
       <div className="page-heading">
         <div>
           <Typography.Text className="section-kicker">{modeLabel(mode)}</Typography.Text>
-          <Typography.Title level={2}>{data.channel.name}</Typography.Title>
+          <Typography.Title level={2}>{formatChannelDisplayName(data.channel)}</Typography.Title>
           <Typography.Paragraph>{data.run.name} · {data.suite?.name ?? data.run.suite_id}</Typography.Paragraph>
           <Typography.Paragraph type="secondary">{modeDescription(mode)}</Typography.Paragraph>
         </div>

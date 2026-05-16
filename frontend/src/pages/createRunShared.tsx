@@ -1,6 +1,6 @@
 import { Form, Input, Select, Tag, Typography } from 'antd';
 import type { Rule } from 'antd/es/form';
-import { hasStoredApiKey } from '../channelCredentials';
+import { formatChannelDisplayName, hasStoredApiKey } from '../channelCredentials';
 import type { Channel, TestSuite } from '../types';
 
 export type RuntimeCredentialValues = {
@@ -30,12 +30,12 @@ export function channelSelectOptions(channels: Channel[] = [], tag?: { color: st
   return channels.map((channel) => ({
     value: channel.id,
     disabled: !channel.enabled,
-    searchLabel: `${channel.name} ${channel.model_name ?? ''}`,
-    selectedLabel: channel.name,
+    searchLabel: `${formatChannelDisplayName(channel)} ${channel.name} ${channel.model_name ?? ''}`,
+    selectedLabel: formatChannelDisplayName(channel),
     label: (
       <span className="channel-select-option">
         <span>
-          <strong>{channel.name}</strong>
+          <strong>{formatChannelDisplayName(channel)}</strong>
           <small>{channel.model_name || '未配置模型'}</small>
         </span>
         {tag ? <Tag color={tag.color}>{tag.label}</Tag> : null}
@@ -114,7 +114,7 @@ export function RuntimeCredentialsFields({ channels, onlyMissing = false, config
       {displayChannels.map((channel) => (
         <div className="credential-row" key={channel.id}>
           <div className="credential-channel">
-            <strong>{channel.name}</strong>
+            <strong>{formatChannelDisplayName(channel)}</strong>
             <small>{channel.model_name || '未配置模型'}</small>
           </div>
           {hasStoredApiKey(channel) ? (

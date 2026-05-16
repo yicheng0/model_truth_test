@@ -6,7 +6,7 @@ import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
 import { buildRuntimeCredentials } from '../channelCredentials';
 import { formatDateTime } from '../time';
-import type { BaselineSnapshot, Channel, TestSuite } from '../types';
+import type { BaselineSnapshot, Channel, RunCreate, TestScope, TestSuite } from '../types';
 import {
   ChannelMultiSelect,
   RuntimeCredentialsFields,
@@ -125,10 +125,10 @@ export default function CreateRun() {
         channel_ids: grouped,
         repeat_count: 1,
         concurrency: 1,
-        test_scope: 'full',
+        test_scope: 'full' as TestScope,
         use_mock: false,
         runtime_credentials: runtimeCredentials,
-      };
+      } satisfies Omit<RunCreate, 'mode' | 'baseline_snapshot_id'>;
       const run =
         mode === 'baseline_build'
           ? await api.buildBaseline(payload)

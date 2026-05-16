@@ -66,7 +66,7 @@ export function RunsPage() {
                   <td>{run.repeat_count}</td>
                   <td>{run.concurrency}</td>
                   <td>
-                    <Link className="text-button" to={`/runs/${run.id}/compare${firstCase ? `/${firstCase}` : ""}`}><GitCompare size={16} />查看</Link>
+                    <Link className="text-button" to={`/runs/${run.id}`}><GitCompare size={16} />查看</Link>
                   </td>
                 </tr>
               ))}
@@ -77,4 +77,3 @@ export function RunsPage() {
     </div>
   );
 }
-

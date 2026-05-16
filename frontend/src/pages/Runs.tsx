@@ -1,12 +1,12 @@
 import { useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Empty, Modal, Popconfirm, Progress, Space, Statistic, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Empty, Popconfirm, Progress, Space, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { BarChart3, CalendarClock, CircleStop, DatabaseZap, Fingerprint, GitCompare, Trash2, Trophy } from 'lucide-react';
+import { BarChart3, CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2, Trophy } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { extractPatrolEvidence, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
-import type { Run, RunLogCleanupResult } from '../types';
+import type { Run } from '../types';
 
 type RunChannelGroup = {
   key: string;
@@ -72,6 +72,12 @@ function compactText(value?: string | null, limit = 360) {
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
 
+function PatrolIdText({ value }: { value?: string | null }) {
+  const shortValue = compactId(value);
+  const content = <Typography.Text className="patrol-log-id">{shortValue}</Typography.Text>;
+  return value && shortValue !== value ? <Tooltip title={value}>{content}</Tooltip> : content;
+}
+
 function formatBytes(value?: number | null) {
   if (value === null || value === undefined) return '-';
   if (value < 1024) return `${value} B`;
@@ -83,11 +89,6 @@ function formatBytes(value?: number | null) {
     index += 1;
   }
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
-}
-
-function channelLabel(name?: string | null, id?: string | null) {
-  if (name && id) return `${name} (${id})`;
-  return name || id || '-';
 }
 
 function primaryRunChannel(run: Run) {
@@ -130,6 +131,13 @@ function groupRunsByChannel(runs: Run[]): RunChannelGroup[] {
   return Array.from(groups.values()).sort((left, right) => new Date(right.latestRun.created_at ?? 0).getTime() - new Date(left.latestRun.created_at ?? 0).getTime());
 }
 
+function preferredDetailRun(runs: Run[]) {
+  const manualProbeRuns = runs
+    .filter((run) => run.mode === 'manual_probe')
+    .sort((left, right) => new Date(right.created_at ?? 0).getTime() - new Date(left.created_at ?? 0).getTime());
+  return manualProbeRuns[0] ?? runs[0];
+}
+
 function patrolResultState(evidence: PatrolEvidence) {
   const blockingLabels = evidence.labels.filter((label) => label !== 'patrol_probe_passed' && label !== 'provider_error_variant');
   const hasModelError = evidence.modelRequests.some((item) => item.status === 'error' || item.status === 'fail' || Boolean(item.error) || item.labels.some((label) => label !== 'provider_error_variant'));
@@ -138,8 +146,16 @@ function patrolResultState(evidence: PatrolEvidence) {
 }
 
 function patrolRunTitle(run: Run) {
-  const channel = run.patrol_channel_name ?? run.patrol_channel_id;
-  if (!channel) return run.name;
+  const channel = formatPatrolChannel(
+    {
+      id: run.patrol_channel_id,
+      name: run.patrol_channel_name,
+      accountType: run.patrol_channel_account_type,
+      providerType: run.patrol_channel_provider_type,
+    },
+    run.patrol_channel_id,
+  );
+  if (!channel || channel === '-') return run.name;
   return run.name.startsWith(`${channel} - `) ? run.name : `${channel} - ${run.name}`;
 }
 
@@ -190,6 +206,7 @@ function PatrolReviewCell({ run }: { run: Run }) {
 function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = true }: { evidence: PatrolEvidence; compact?: boolean; showProbeDetails?: boolean }) {
   const signature = evidence.signature;
   const resultState = patrolResultState(evidence);
+  const primaryRequest = evidence.modelRequests[0];
   if (compact) {
     return (
       <Tooltip title="点开展开行或查看巡检详情查看探针日志">
@@ -203,6 +220,11 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
         <Tag color={resultState === 'ok' ? 'green' : 'red'}>{resultState === 'ok' ? '正确' : '异常'}</Tag>
         {signature ? <Tag color={evidenceStatusColor(signature.status)}>Signature {signature.status ?? '待确认'}</Tag> : null}
       </Space>
+      {primaryRequest ? (
+        <Typography.Text type="secondary">
+          Message ID：{primaryRequest.messageId ?? '-'} · Request ID：{primaryRequest.requestId ?? '-'}
+        </Typography.Text>
+      ) : null}
       {resultState === 'error' ? <Typography.Text type="danger">错误需要复审</Typography.Text> : null}
       {showProbeDetails ? (
         <>
@@ -212,16 +234,15 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
               <div className="patrol-log-probe" key={item.key ?? item.resultId ?? item.title ?? 'probe'}>
                 <span>{item.title ?? item.key ?? '真实请求探针'}</span>
                 <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag>
-                <small>{channelLabel(item.channelName, item.channelId)}</small>
+                <small>{formatPatrolChannel({ id: item.channelId, name: item.channelName, accountType: item.channelAccountType, providerType: item.channelProviderType }, item.channelId)}</small>
                 <small>time {formatDateTime(item.completedAt ?? item.createdAt)}</small>
-                <small>result {compact ? compactId(item.resultId) : item.resultId ?? '-'}</small>
                 <small>msg {compact ? compactId(item.messageId) : item.messageId ?? '-'}</small>
                 <small>req {compact ? compactId(item.requestId) : item.requestId ?? '-'}</small>
               </div>
             ))}
           </div>
           <Typography.Text type="secondary">
-            source: {channelLabel(signature?.sourceChannelName, signature?.sourceChannelId)} / msg {compact ? compactId(signature?.sourceMessageId) : signature?.sourceMessageId ?? '-'} / req {compact ? compactId(signature?.sourceRequestId) : signature?.sourceRequestId ?? '-'} · relay: {channelLabel(signature?.relayChannelName, signature?.relayChannelId)} / msg {compact ? compactId(signature?.relayMessageId) : signature?.relayMessageId ?? '-'} / req {compact ? compactId(signature?.relayRequestId) : signature?.relayRequestId ?? '-'}
+            source: {formatPatrolChannel({ id: signature?.sourceChannelId, name: signature?.sourceChannelName, accountType: signature?.sourceChannelAccountType, providerType: signature?.sourceChannelProviderType }, signature?.sourceChannelId)} / msg {compact ? compactId(signature?.sourceMessageId) : signature?.sourceMessageId ?? '-'} / req {compact ? compactId(signature?.sourceRequestId) : signature?.sourceRequestId ?? '-'} · relay: {formatPatrolChannel({ id: signature?.relayChannelId, name: signature?.relayChannelName, accountType: signature?.relayChannelAccountType, providerType: signature?.relayChannelProviderType }, signature?.relayChannelId)} / msg {compact ? compactId(signature?.relayMessageId) : signature?.relayMessageId ?? '-'} / req {compact ? compactId(signature?.relayRequestId) : signature?.relayRequestId ?? '-'}
           </Typography.Text>
         </>
       ) : null}
@@ -262,52 +283,61 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
   }
 
   return (
-    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+    <Space direction="vertical" size={8} style={{ width: '100%' }} className="patrol-evidence-detail">
       <PatrolEvidenceSummary evidence={evidence} showProbeDetails={false} />
       <Table
+        className="patrol-evidence-detail-table"
         rowKey={(item) => item.key ?? item.title ?? item.resultId ?? item.messageId ?? 'model-request'}
         size="small"
         pagination={false}
         dataSource={evidence.modelRequests}
-        scroll={{ x: 1600 }}
+        scroll={{ x: 1190 }}
         columns={[
-          { title: '真实请求探针', width: 190, render: (_, item) => item.title ?? item.key ?? '真实模型请求' },
-          { title: '渠道', width: 220, render: (_, item) => channelLabel(item.channelName, item.channelId) },
-          { title: '状态', width: 110, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag> },
-          { title: '时间', width: 190, render: (_, item) => formatDateTime(item.completedAt ?? item.createdAt) },
-          { title: 'Result ID', dataIndex: 'resultId', width: 190, render: (value) => value ?? '-' },
-          { title: 'Message ID', dataIndex: 'messageId', width: 190, render: (value) => value ?? '-' },
-          { title: 'Request ID', dataIndex: 'requestId', width: 190, render: (value) => value ?? '-' },
-          { title: '渠道类型', dataIndex: 'messageChannelType', width: 180, render: (value) => value ?? '-' },
-          { title: '协议', dataIndex: 'requestProtocol', width: 160, render: (value) => value ?? '-' },
+          { title: '真实请求探针', width: 160, render: (_, item) => item.title ?? item.key ?? '真实模型请求' },
+          { title: '渠道', width: 180, render: (_, item) => formatPatrolChannel({ id: item.channelId, name: item.channelName, accountType: item.channelAccountType, providerType: item.channelProviderType }, item.channelId) },
+          { title: '状态', width: 84, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag> },
+          { title: '时间', width: 156, render: (_, item) => formatDateTime(item.completedAt ?? item.createdAt) },
+          { title: 'Message ID', dataIndex: 'messageId', width: 126, render: (value) => <PatrolIdText value={value} /> },
+          { title: 'Request ID', dataIndex: 'requestId', width: 126, render: (value) => <PatrolIdText value={value} /> },
+          { title: '渠道类型', dataIndex: 'messageChannelType', width: 132, render: (value) => value ?? '-' },
+          { title: '协议', dataIndex: 'requestProtocol', width: 104, render: (value) => value ?? '-' },
           {
             title: '响应/错误内容',
-            width: 360,
+            width: 260,
             render: (_, item) => (
               <Tooltip title={item.responseText || item.rawResponseText || undefined}>
-                <Typography.Text>{compactText(item.responseText ?? item.rawResponseText)}</Typography.Text>
+                <Typography.Text>{compactText(item.responseText ?? item.rawResponseText, 180)}</Typography.Text>
               </Tooltip>
             ),
           },
           {
             title: '标签',
-            width: 220,
-            render: (_, item) => item.labels.length ? <Space wrap>{item.labels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space> : '-',
+            width: 170,
+            render: (_, item) => item.labels.length ? <Space wrap size={[4, 2]}>{item.labels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space> : '-',
           },
-          { title: '错误', dataIndex: 'error', width: 220, render: (value) => value ?? '-' },
+          {
+            title: '错误',
+            dataIndex: 'error',
+            width: 160,
+            render: (value) => value ? (
+              <Tooltip title={value}>
+                <Typography.Text>{compactText(value, 120)}</Typography.Text>
+              </Tooltip>
+            ) : '-',
+          },
         ]}
       />
       {evidence.signature ? (
-        <Space direction="vertical" size={4}>
+        <Space direction="vertical" size={2} className="patrol-signature-summary">
           <Typography.Text strong>Thinking Signature 互通</Typography.Text>
           <Typography.Text type="secondary">
             time: {formatDateTime(evidence.signature.completedAt ?? evidence.signature.createdAt)}
           </Typography.Text>
           <Typography.Text type="secondary">
-            source: {channelLabel(evidence.signature.sourceChannelName, evidence.signature.sourceChannelId)} / msg {evidence.signature.sourceMessageId ?? '-'} / req {evidence.signature.sourceRequestId ?? '-'} / {evidence.signature.sourceMessageChannelType ?? '-'}
+            source: {formatPatrolChannel({ id: evidence.signature.sourceChannelId, name: evidence.signature.sourceChannelName, accountType: evidence.signature.sourceChannelAccountType, providerType: evidence.signature.sourceChannelProviderType }, evidence.signature.sourceChannelId)} / msg <PatrolIdText value={evidence.signature.sourceMessageId} /> / req <PatrolIdText value={evidence.signature.sourceRequestId} /> / {evidence.signature.sourceMessageChannelType ?? '-'}
           </Typography.Text>
           <Typography.Text type="secondary">
-            relay: {channelLabel(evidence.signature.relayChannelName, evidence.signature.relayChannelId)} / msg {evidence.signature.relayMessageId ?? '-'} / req {evidence.signature.relayRequestId ?? '-'} / {evidence.signature.relayMessageChannelType ?? '-'}
+            relay: {formatPatrolChannel({ id: evidence.signature.relayChannelId, name: evidence.signature.relayChannelName, accountType: evidence.signature.relayChannelAccountType, providerType: evidence.signature.relayChannelProviderType }, evidence.signature.relayChannelId)} / msg <PatrolIdText value={evidence.signature.relayMessageId} /> / req <PatrolIdText value={evidence.signature.relayRequestId} /> / {evidence.signature.relayMessageChannelType ?? '-'}
           </Typography.Text>
           <Typography.Text type="secondary">
             signature: {evidence.signature.signaturePrefixes.join(', ') || '-'}
@@ -319,138 +349,11 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
   );
 }
 
-function cleanupSummary(result?: RunLogCleanupResult | null) {
-  if (!result) return '暂无预估数据';
-  return `可清理 ${result.deleted_runs} 个任务，${result.deleted_results} 条结果，${result.deleted_reports} 份报告，${result.deleted_alerts} 条告警`;
-}
-
-function SystemMaintenanceModal({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const usage = useQuery({
-    queryKey: ['systemUsage'],
-    queryFn: api.systemUsage,
-    enabled: open,
-  });
-  const preview = useQuery({
-    queryKey: ['cleanupRunLogsPreview'],
-    queryFn: () => api.cleanupRunLogs(true),
-    enabled: open,
-  });
-  const cleanup = useMutation({
-    mutationFn: () => api.cleanupRunLogs(false),
-    onSuccess: async (result) => {
-      message.success(`已清理 ${result.deleted_runs} 个任务日志`);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['runs'] }),
-        queryClient.invalidateQueries({ queryKey: ['reports'] }),
-        queryClient.invalidateQueries({ queryKey: ['alerts'] }),
-        queryClient.invalidateQueries({ queryKey: ['systemUsage'] }),
-        queryClient.invalidateQueries({ queryKey: ['cleanupRunLogsPreview'] }),
-      ]);
-    },
-    onError: (error) => message.error(getErrorMessage(error)),
-  });
-
-  const data = usage.data;
-  const cleanupDisabled = cleanup.isPending || !preview.data?.deleted_runs;
-
-  return (
-    <Modal
-      title="资源与日志清理"
-      open={open}
-      onCancel={onClose}
-      width={760}
-      footer={[
-        <Button key="close" onClick={onClose}>关闭</Button>,
-        <Popconfirm
-          key="cleanup"
-          title="清理已结束日志"
-          description="会删除已完成、失败、取消和中断的任务日志；运行中任务和渠道指纹引用任务会保留。"
-          okText="确认清理"
-          cancelText="返回"
-          onConfirm={() => cleanup.mutate()}
-          disabled={cleanupDisabled}
-        >
-          <Button danger type="primary" loading={cleanup.isPending} disabled={cleanupDisabled}>
-            清理已结束日志
-          </Button>
-        </Popconfirm>,
-      ]}
-    >
-      {usage.isError ? (
-        <Alert
-          type="error"
-          showIcon
-          message="资源占用加载失败"
-          description={getErrorMessage(usage.error)}
-          action={<Button onClick={() => usage.refetch()}>重试</Button>}
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-      {preview.isError ? (
-        <Alert
-          type="error"
-          showIcon
-          message="清理预估加载失败"
-          description={getErrorMessage(preview.error)}
-          action={<Button onClick={() => preview.refetch()}>重试</Button>}
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-      <Space direction="vertical" size={16} style={{ width: '100%' }}>
-        <Space wrap size={12}>
-          <Card size="small" style={{ width: 170 }}>
-            <Statistic title="磁盘已用" value={data?.disk_used_percent ?? 0} precision={1} suffix="%" loading={usage.isLoading} />
-          </Card>
-          <Card size="small" style={{ width: 170 }}>
-            <Statistic title="磁盘可用" value={formatBytes(data?.disk_free_bytes)} loading={usage.isLoading} />
-          </Card>
-          <Card size="small" style={{ width: 170 }}>
-            <Statistic title="内存已用" value={data?.memory_used_percent ?? '-'} precision={1} suffix={data?.memory_used_percent === null || data?.memory_used_percent === undefined ? '' : '%'} loading={usage.isLoading} />
-          </Card>
-          <Card size="small" style={{ width: 170 }}>
-            <Statistic title="数据库大小" value={formatBytes(data?.database_size_bytes)} loading={usage.isLoading} />
-          </Card>
-        </Space>
-        <Progress
-          percent={Math.round(data?.disk_used_percent ?? 0)}
-          status={(data?.disk_used_percent ?? 0) >= 90 ? 'exception' : 'normal'}
-        />
-        <Descriptions size="small" column={2} bordered>
-          <Descriptions.Item label="监控路径">{data?.disk_path ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="数据库">{data?.database_path ?? '非 SQLite 或不可定位'}</Descriptions.Item>
-          <Descriptions.Item label="任务数">{data?.run_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="结果数">{data?.result_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="报告数">{data?.report_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="告警数">{data?.alert_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="清理预估" span={2}>{preview.isLoading ? '正在计算...' : cleanupSummary(preview.data)}</Descriptions.Item>
-          <Descriptions.Item label="保留任务" span={2}>
-            运行中/待执行 {preview.data?.skipped_running_runs ?? data?.cleanup_skipped_baseline_run_count ?? 0} 个，指纹引用 {preview.data?.skipped_baseline_runs ?? 0} 个
-          </Descriptions.Item>
-        </Descriptions>
-        <Alert
-          type="warning"
-          showIcon
-          message="清理只删除已结束任务的日志数据"
-          description="渠道、测试集、自动巡检配置和渠道指纹会保留。被渠道指纹引用的任务不会被清理。"
-        />
-      </Space>
-    </Modal>
-  );
-}
-
 export default function Runs() {
   const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [selectedPatrolRowKeys, setSelectedPatrolRowKeys] = useState<Key[]>([]);
-  const [maintenanceOpen, setMaintenanceOpen] = useState(false);
   const runs = useQuery({
     queryKey: ['runs'],
     queryFn: api.runs,
@@ -572,9 +475,6 @@ export default function Runs() {
         title={<span style={{ fontSize: '18px', fontWeight: 600 }}>检测任务列表</span>}
         extra={
           <Space wrap>
-            <Button size="large" icon={<DatabaseZap size={16} />} style={{ height: '40px', fontWeight: 600 }} onClick={() => setMaintenanceOpen(true)}>
-              资源与日志清理
-            </Button>
             <Link to="/new-run?mode=baseline">
               <Button size="large" icon={<Fingerprint size={16} />} style={{ height: '40px', fontWeight: 600 }}>
                 提取渠道指纹
@@ -675,15 +575,29 @@ export default function Runs() {
             {
               title: '最近任务',
               width: 260,
-              render: (_, group) => group.latestRun.name,
+              render: (_, group) => {
+                const preferredRun = preferredDetailRun(group.runs);
+                if (!preferredRun) return '-';
+                const shouldCallOutLatest = preferredRun.id !== group.latestRun.id;
+                return (
+                  <Space direction="vertical" size={2}>
+                    <Link to={`/runs/${preferredRun.id}`} style={{ fontWeight: 600 }}>
+                      {preferredRun.name}
+                    </Link>
+                    {shouldCallOutLatest ? (
+                      <Typography.Text type="secondary">最近一次任务：{group.latestRun.name}</Typography.Text>
+                    ) : null}
+                  </Space>
+                );
+              },
             },
             { title: '最近创建时间', width: 190, render: (_, group) => formatDateTime(group.latestRun.created_at) },
           ]}
         />
       </Card>
-      <SystemMaintenanceModal open={maintenanceOpen} onClose={() => setMaintenanceOpen(false)} />
 
       <Card
+        className="patrol-log-card"
         title={<span className="card-title-with-icon"><CalendarClock size={18} />自动巡检日志</span>}
         extra={
           <Popconfirm
@@ -695,7 +609,7 @@ export default function Runs() {
             disabled={!deletableSelectedPatrolRuns.length}
             onConfirm={deleteSelectedPatrolRuns}
           >
-            <Button danger icon={<Trash2 size={15} />} disabled={!deletableSelectedPatrolRuns.length} loading={deletePatrolRuns.isPending}>
+            <Button size="small" danger icon={<Trash2 size={14} />} disabled={!deletableSelectedPatrolRuns.length} loading={deletePatrolRuns.isPending}>
               删除已选
             </Button>
           </Popconfirm>
@@ -703,7 +617,9 @@ export default function Runs() {
         bordered={false}
       >
         <Table
+          className="patrol-log-table"
           rowKey="id"
+          size="small"
           loading={runs.isLoading}
           dataSource={patrolRuns}
           rowSelection={{
@@ -714,7 +630,7 @@ export default function Runs() {
           }}
           locale={{ emptyText: <Empty description="暂无自动巡检日志" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1280 }}
+          scroll={{ x: 1040 }}
           expandable={{
             expandedRowRender: (run) => <PatrolEvidenceDetail runId={run.id} />,
             rowExpandable: (run) => run.status === 'completed' || run.status === 'failed',
@@ -723,37 +639,37 @@ export default function Runs() {
             {
               title: '渠道',
               dataIndex: 'name',
-              width: 260,
+              width: 220,
               render: (_, run) => (
                 <Space direction="vertical" size={2}>
-                  <Typography.Text strong>{channelLabel(run.patrol_channel_name, run.patrol_channel_id)}</Typography.Text>
+                  <Typography.Text strong>{formatPatrolChannel({ id: run.patrol_channel_id, name: run.patrol_channel_name, accountType: run.patrol_channel_account_type, providerType: run.patrol_channel_provider_type }, run.patrol_channel_id)}</Typography.Text>
                   <Typography.Text type="secondary">{patrolRunTitle(run)}</Typography.Text>
                 </Space>
               ),
             },
             {
               title: '巡检结果',
-              width: 140,
+              width: 104,
               render: (_, run) => <PatrolEvidenceCell run={run} />,
             },
             {
               title: '复审',
-              width: 130,
+              width: 96,
               render: (_, run) => <PatrolReviewCell run={run} />,
             },
             {
               title: '计划',
               dataIndex: 'scheduled_test_id',
-              width: 220,
-              render: (value: string | null | undefined) => value ?? '-',
+              width: 150,
+              render: (value: string | null | undefined) => <PatrolIdText value={value} />,
             },
-            { title: '创建时间', dataIndex: 'created_at', width: 190, render: formatDateTime },
-            { title: '结束时间', dataIndex: 'finished_at', width: 190, render: formatDateTime },
+            { title: '创建时间', dataIndex: 'created_at', width: 156, render: formatDateTime },
+            { title: '结束时间', dataIndex: 'finished_at', width: 156, render: formatDateTime },
             {
               title: '操作',
-              width: 250,
+              width: 160,
               render: (_, run) => (
-                <Space>
+                <Space size={6}>
                   <Link to={`/runs/${run.id}`} style={{ fontWeight: 600 }}>查看详情</Link>
                   {canCancel(run.status) ? (
                     <Popconfirm
@@ -764,7 +680,8 @@ export default function Runs() {
                       onConfirm={() => cancelRun(run)}
                     >
                       <Button
-                        icon={<CircleStop size={15} />}
+                        size="small"
+                        icon={<CircleStop size={14} />}
                         loading={cancelingId === run.id}
                       >
                         取消
@@ -781,8 +698,9 @@ export default function Runs() {
                     onConfirm={() => deleteRun(run)}
                   >
                     <Button
+                      size="small"
                       danger
-                      icon={<Trash2 size={15} />}
+                      icon={<Trash2 size={14} />}
                       loading={deletingId === run.id}
                       disabled={run.status === 'running'}
                     >

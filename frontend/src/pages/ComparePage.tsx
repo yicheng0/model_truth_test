@@ -5,7 +5,7 @@ import { GitCompare, Radar as RadarIcon } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Bar, BarChart, CartesianGrid, Legend, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { api, getErrorMessage } from '../api';
-import type { Report, RunMode } from '../types';
+import type { Report, ReportCompareMatrixRow, ReportComparePredictionCell, RunMode } from '../types';
 
 const gradeColor: Record<Report['grade'], string> = {
   A: 'green',
@@ -19,7 +19,7 @@ function fmt(value?: number | null, suffix = '') {
   return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)}${suffix}` : '-';
 }
 
-function responseText(value: any) {
+function responseText(value?: ReportComparePredictionCell | null) {
   const normalized = value?.result?.normalized_response;
   if (typeof normalized?.content_text === 'string' && normalized.content_text.trim()) return normalized.content_text;
   if (Array.isArray(normalized?.tool_calls) && normalized.tool_calls.length) return JSON.stringify(normalized.tool_calls);
@@ -39,6 +39,11 @@ function pageDescription(mode: RunMode | string) {
   if (mode === 'arena_comparison') return '比较候选渠道之间的 Arena 排名、胜率和样本级分歧，不等同于官方基线真实性对比。';
   return '横向比较 2-3 个真实性报告的维度分、样本输出、协议证据和异常标签。';
 }
+
+type DimensionChartRow = {
+  dimension: string;
+  [key: string]: number | string;
+};
 
 export default function ComparePage() {
   const [params] = useSearchParams();
@@ -71,7 +76,7 @@ export default function ComparePage() {
   const isArena = mode === 'arena_comparison';
   const reportKeys = data.reports.map((report) => report.report_id);
   const modules = Array.from(new Set(data.prediction_rows.map((row) => row.module))).sort();
-  const chartRows = data.dimensions.map((dimension) => ({
+  const chartRows: DimensionChartRow[] = data.dimensions.map((dimension) => ({
     dimension,
     ...Object.fromEntries(data.reports.map((report) => [report.channel_name, report.dimension_scores[dimension] ?? 0])),
   }));
@@ -133,7 +138,7 @@ export default function ComparePage() {
                     ) : null}
                     <div className="report-chart">
                       <ResponsiveContainer width="100%" height={340}>
-                        <BarChart data={data.performance_matrix}>
+                        <BarChart data={data.performance_matrix as ReportCompareMatrixRow[]}>
                           <CartesianGrid strokeDasharray="3 3" />
                           <XAxis dataKey="channel_name" />
                           <YAxis />
@@ -150,7 +155,7 @@ export default function ComparePage() {
                 <Card bordered={false} title={isPerformance ? '性能指标矩阵' : isArena ? 'Arena 报告矩阵' : '维度得分矩阵'}>
                   <Table
                     rowKey={isPerformance ? 'report_id' : 'dimension'}
-                    dataSource={isPerformance ? data.performance_matrix : data.score_matrix}
+                    dataSource={isPerformance ? (data.performance_matrix as ReportCompareMatrixRow[]) : (data.score_matrix as ReportCompareMatrixRow[])}
                     pagination={false}
                     scroll={{ x: 720 }}
                     columns={isPerformance ? [

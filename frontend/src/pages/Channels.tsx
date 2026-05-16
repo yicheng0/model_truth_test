@@ -7,6 +7,7 @@ import {
   accountTypeLabel,
   accountTypeOptions,
   buildChannelAuthConfig,
+  formatChannelDisplayName,
   buildTokenflowApiKey,
   buildTokenflowChannelId,
   defaultAccountType,
@@ -15,7 +16,7 @@ import {
   providerTypeForAccountType,
 } from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
-import type { Channel } from '../types';
+import type { Channel, ChannelCreate } from '../types';
 
 type ChannelFormValues = {
   name: string;
@@ -75,6 +76,16 @@ export default function Channels() {
   const [editForm] = Form.useForm<ChannelFormValues>();
   const [editing, setEditing] = useState<Channel | null>(null);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const createDisplayName = formatChannelDisplayName({
+    channel_number: Form.useWatch('channel_number', createForm),
+    name: Form.useWatch('name', createForm),
+    account_type: Form.useWatch('account_type', createForm) || defaultAccountType,
+  });
+  const editDisplayName = formatChannelDisplayName({
+    channel_number: Form.useWatch('channel_number', editForm),
+    name: Form.useWatch('name', editForm),
+    account_type: Form.useWatch('account_type', editForm) || defaultAccountType,
+  }, editing?.id);
 
   const invalidate = async () => {
     await Promise.all([
@@ -92,7 +103,7 @@ export default function Channels() {
   }
 
   const create = useMutation({
-    mutationFn: async (values: Partial<Channel>) => {
+    mutationFn: async (values: ChannelCreate) => {
       await persistModelOption(values.model_name);
       return api.createChannel(values);
     },
@@ -104,7 +115,7 @@ export default function Channels() {
   });
 
   const update = useMutation({
-    mutationFn: async ({ id, values }: { id: string; values: Partial<Channel> }) => {
+    mutationFn: async ({ id, values }: { id: string; values: Partial<ChannelCreate> }) => {
       await persistModelOption(values.model_name);
       return api.updateChannel(id, values);
     },
@@ -173,7 +184,7 @@ export default function Channels() {
     });
   }
 
-  function channelPayload(values: ChannelFormValues, existing?: Channel | null): Partial<Channel> {
+  function channelPayload(values: ChannelFormValues, existing?: Channel | null): ChannelCreate {
     const modelName = firstSelectValue(values.model_name);
     const accountType = values.account_type || defaultAccountType;
     const channelNumber = values.channel_number?.trim();
@@ -190,7 +201,7 @@ export default function Channels() {
   }
 
   function submitCreate(values: ChannelFormValues) {
-    create.mutate({ ...channelPayload(values), enabled: true });
+    create.mutate({ ...channelPayload(values), enabled: true } satisfies ChannelCreate);
   }
 
   function submitEdit(values: ChannelFormValues) {
@@ -244,6 +255,9 @@ export default function Channels() {
               <Select size="large" options={accountTypeOptions} />
             </Form.Item>
           </div>
+          <Typography.Text type="secondary">
+            前端显示名：<Typography.Text code>{createDisplayName}</Typography.Text>
+          </Typography.Text>
           <Collapse
             className="channel-advanced"
             items={[
@@ -289,10 +303,10 @@ export default function Channels() {
               title: '名称',
               dataIndex: 'name',
               width: 240,
-              render: (name: string, channel) => (
+              render: (_name: string, channel) => (
                 <Space direction="vertical" size={2}>
                   <Space size={6} wrap>
-                    <strong>{name}</strong>
+                    <strong>{formatChannelDisplayName(channel)}</strong>
                     {channel.is_reference ? <Tag color="blue">指纹源</Tag> : <Tag color="purple">待测</Tag>}
                   </Space>
                   <Typography.Text type="secondary">{channel.id}</Typography.Text>
@@ -405,6 +419,9 @@ export default function Channels() {
           <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
             <Select options={accountTypeOptions} />
           </Form.Item>
+          <Typography.Text type="secondary">
+            前端显示名：<Typography.Text code>{editDisplayName}</Typography.Text>
+          </Typography.Text>
           <Collapse
             className="channel-advanced"
             items={[

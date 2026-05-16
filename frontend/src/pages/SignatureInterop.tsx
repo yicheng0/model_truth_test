@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Descriptions, Form, Popconfirm, Select, Space, Steps, Switch, Table, Tag, Typography, message } from 'antd';
 import { Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { Channel, SignatureInteropResult } from '../types';
 
@@ -78,7 +79,7 @@ export default function SignatureInterop() {
 
   const channelOptions = availableChannels.map((channel) => ({
     value: channel.id,
-    label: `${channel.name} · ${channel.model_name || '未配置模型'}`,
+    label: `${formatChannelDisplayName(channel)} · ${channel.model_name || '未配置模型'}`,
   }));
 
   const signatureInterop = useMutation({
@@ -253,11 +254,17 @@ export default function SignatureInterop() {
               <Descriptions.Item label="完成时间">{formatDateTime(result.completed_at ?? result.run?.finished_at)}</Descriptions.Item>
               <Descriptions.Item label="模型">{result.model}</Descriptions.Item>
               <Descriptions.Item label="Thinking blocks">{result.thinking_block_count}</Descriptions.Item>
-              <Descriptions.Item label="Source ID">
+              <Descriptions.Item label="Source Message ID">
                 {result.source_message_id || '-'} · {result.source_message_channel_type}
               </Descriptions.Item>
-              <Descriptions.Item label="Relay ID">
+              <Descriptions.Item label="Source Request ID">
+                {result.source_request_id || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="Relay Message ID">
                 {result.relay_message_id || '-'} · {result.relay_message_channel_type}
+              </Descriptions.Item>
+              <Descriptions.Item label="Relay Request ID">
+                {result.relay_request_id || '-'}
               </Descriptions.Item>
               <Descriptions.Item label="Source endpoint" span={2}>{result.source_endpoint}</Descriptions.Item>
               <Descriptions.Item label="Relay endpoint" span={2}>{result.relay_endpoint}</Descriptions.Item>

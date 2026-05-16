@@ -11,6 +11,16 @@ export type ChannelAuthFormValues = {
   channel_number?: string;
 };
 
+export type ChannelDisplayInput = Omit<Partial<Pick<Channel, 'id' | 'name' | 'provider_type' | 'auth_config'>>, 'id' | 'name' | 'provider_type'> & {
+  id?: string | null;
+  name?: string | null;
+  provider_type?: string | null;
+  account_type?: string | null;
+  accountType?: string | null;
+  providerType?: string | null;
+  channel_number?: string | null;
+};
+
 export const accountTypeOptions = [
   { value: 'reverse', label: '逆向' },
   { value: 'kiro.claudecode', label: 'Kiro Claude Code' },
@@ -89,6 +99,42 @@ export function buildTokenflowApiKey(channelNumber?: string) {
 export function parseTokenflowChannelNumber(channelId?: string) {
   const match = (channelId ?? '').match(/^(.+)-tokenflow-[A-Za-z0-9-]+$/);
   return match?.[1] ?? '';
+}
+
+function nonEmptyText(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+export function channelDisplayAccountType(channel?: ChannelDisplayInput | null) {
+  return (
+    nonEmptyText(channel?.auth_config?.account_type) ||
+    nonEmptyText(channel?.accountType) ||
+    nonEmptyText(channel?.account_type) ||
+    nonEmptyText(channel?.providerType) ||
+    nonEmptyText(channel?.provider_type)
+  );
+}
+
+export function formatChannelDisplayName(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
+  const rawId = nonEmptyText(channel?.id) || nonEmptyText(fallbackId);
+  const channelNumber = nonEmptyText(channel?.channel_number) || parseTokenflowChannelNumber(rawId);
+  const name = nonEmptyText(channel?.name);
+  const accountType = channelDisplayAccountType(channel);
+  const parts = [channelNumber, name, accountType].filter(Boolean);
+  if (parts.length) return parts.join('-');
+  return rawId || '-';
+}
+
+export function formatProviderChannelDisplayName(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
+  return formatChannelDisplayName(
+    {
+      id: channel?.id,
+      name: channel?.name,
+      channel_number: channel?.channel_number,
+      accountType: channel?.providerType ?? channel?.provider_type ?? channel?.accountType ?? channel?.account_type ?? channel?.auth_config?.account_type,
+    },
+    fallbackId,
+  );
 }
 
 export function trimmedValue(value?: string) {

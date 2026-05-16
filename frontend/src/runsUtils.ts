@@ -1,4 +1,5 @@
-import type { Result, Run, RunResults } from './types';
+import type { Channel, Result, Run, RunResults } from './types';
+import { formatChannelDisplayName } from './channelCredentials';
 
 export type PatrolModelRequestEvidence = {
   key?: string | null;
@@ -6,6 +7,8 @@ export type PatrolModelRequestEvidence = {
   status: string;
   channelId?: string | null;
   channelName?: string | null;
+  channelProviderType?: string | null;
+  channelAccountType?: string | null;
   resultId?: string | null;
   messageId?: string | null;
   requestId?: string | null;
@@ -27,11 +30,15 @@ export type PatrolSignatureEvidence = {
   completedAt?: string | null;
   sourceChannelId?: string | null;
   sourceChannelName?: string | null;
+  sourceChannelProviderType?: string | null;
+  sourceChannelAccountType?: string | null;
   sourceMessageId?: string | null;
   sourceRequestId?: string | null;
   sourceMessageChannelType?: string | null;
   relayChannelId?: string | null;
   relayChannelName?: string | null;
+  relayChannelProviderType?: string | null;
+  relayChannelAccountType?: string | null;
   relayMessageId?: string | null;
   relayRequestId?: string | null;
   relayMessageChannelType?: string | null;
@@ -46,6 +53,15 @@ export type PatrolEvidence = {
   detectedProviderHint?: string | null;
   modelRequests: PatrolModelRequestEvidence[];
   signature?: PatrolSignatureEvidence | null;
+};
+
+export type PatrolChannel = {
+  id?: string | null;
+  name?: string | null;
+  provider_type?: string | null;
+  providerType?: string | null;
+  account_type?: string | null;
+  accountType?: string | null;
 };
 
 export function splitRunsByPatrol(runs: Run[]) {
@@ -89,9 +105,12 @@ export function extractPatrolEvidence(results: RunResults): PatrolEvidence | nul
 
 function hydrateModelRequest(item: PatrolModelRequestEvidence, result?: Result): PatrolModelRequestEvidence {
   if (!result) return item;
+  const normalized = asRecord(result.normalized_response);
+  const rawResponse = asRecord(result.raw_response);
   return {
     ...item,
-    requestId: item.requestId ?? requestIdFromPayload(result.raw_response) ?? requestIdFromPayload(result.normalized_response),
+    messageId: item.messageId ?? asNullableString(rawResponse?.id) ?? asNullableString(normalized?.provider_message_id),
+    requestId: item.requestId ?? requestIdFromPayload(result.raw_request) ?? requestIdFromPayload(result.raw_response) ?? requestIdFromPayload(result.normalized_response),
     createdAt: item.createdAt ?? result.created_at ?? null,
     completedAt: item.completedAt ?? result.created_at ?? null,
     responseText: modelResponseText(result) ?? item.error ?? null,
@@ -130,6 +149,8 @@ function normalizeModelRequest(value: unknown): PatrolModelRequestEvidence | nul
     status: asNullableString(item.status) ?? (error ? 'error' : labels.length ? 'error' : 'ok'),
     channelId: asNullableString(item.channel_id),
     channelName: asNullableString(item.channel_name),
+    channelProviderType: asNullableString(item.channel_provider_type),
+    channelAccountType: asNullableString(item.channel_account_type),
     resultId: asNullableString(item.result_id),
     messageId: asNullableString(item.message_id),
     requestId: asNullableString(item.request_id),
@@ -152,11 +173,15 @@ function normalizeSignature(item: Record<string, unknown> | null): PatrolSignatu
     completedAt: asNullableString(item.completed_at),
     sourceChannelId: asNullableString(item.source_channel_id),
     sourceChannelName: asNullableString(item.source_channel_name),
+    sourceChannelProviderType: asNullableString(item.source_channel_provider_type),
+    sourceChannelAccountType: asNullableString(item.source_channel_account_type),
     sourceMessageId: asNullableString(item.source_message_id),
     sourceRequestId: asNullableString(item.source_request_id),
     sourceMessageChannelType: asNullableString(item.source_message_channel_type),
     relayChannelId: asNullableString(item.relay_channel_id),
     relayChannelName: asNullableString(item.relay_channel_name),
+    relayChannelProviderType: asNullableString(item.relay_channel_provider_type),
+    relayChannelAccountType: asNullableString(item.relay_channel_account_type),
     relayMessageId: asNullableString(item.relay_message_id),
     relayRequestId: asNullableString(item.relay_request_id),
     relayMessageChannelType: asNullableString(item.relay_message_channel_type),
@@ -198,6 +223,19 @@ function asStringRecord(value: unknown): Record<string, string> {
   const record = asRecord(value);
   if (!record) return {};
   return Object.fromEntries(Object.entries(record).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+}
+
+export function formatPatrolChannel(channel?: PatrolChannel | Channel | null, fallbackId?: string | null) {
+  const record = channel && typeof channel === 'object' ? channel as Record<string, unknown> : {};
+  return formatChannelDisplayName({
+    id: typeof record.id === 'string' ? record.id : undefined,
+    name: typeof record.name === 'string' ? record.name : undefined,
+    provider_type: typeof record.provider_type === 'string' ? record.provider_type : undefined,
+    providerType: typeof record.providerType === 'string' ? record.providerType : undefined,
+    account_type: typeof record.account_type === 'string' ? record.account_type : undefined,
+    accountType: typeof record.accountType === 'string' ? record.accountType : undefined,
+    auth_config: record.auth_config && typeof record.auth_config === 'object' ? record.auth_config as Channel['auth_config'] : undefined,
+  }, fallbackId);
 }
 
 function asLabelExplanationRecord(value: unknown): Record<string, string> {

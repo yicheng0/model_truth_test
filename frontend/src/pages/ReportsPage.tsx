@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import type { Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Empty, Input, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
 import { BarChart3, FileText, GitCompare, Search, Trash2 } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { formatDateTime } from '../time';
 import type { Report, ReportSummary, RunMode } from '../types';
@@ -32,6 +32,32 @@ const modeOptions: Array<{ value: RunMode | 'all'; label: string }> = [
   { value: 'baseline_build', label: '渠道指纹报告' },
 ];
 
+const gradeOptions = ['A', 'B', 'C', 'D', 'E'] as const;
+
+function paramValue(params: URLSearchParams, key: string, fallback: string, allowed: readonly string[]) {
+  const value = params.get(key);
+  return value && allowed.includes(value) ? value : fallback;
+}
+
+function setSearchParamValue(params: URLSearchParams, key: string, value?: string | null) {
+  const trimmed = value?.trim();
+  if (trimmed) params.set(key, trimmed);
+  else params.delete(key);
+}
+
+function bulkDeleteMessage(entity: string, result: { deleted: number; missing: string[] }) {
+  const missing = result.missing ?? [];
+  if (result.deleted > 0 && missing.length === 0) {
+    message.success(`已删除 ${result.deleted} ${entity}`);
+    return;
+  }
+  if (result.deleted > 0) {
+    message.warning(`已删除 ${result.deleted} ${entity}，${missing.length} 个未命中：${missing.join('、')}`);
+    return;
+  }
+  message.warning(`未删除任何${entity}，${missing.length ? `未命中：${missing.join('、')}` : '所选项不存在或已被删除'}`);
+}
+
 function modeLabel(mode: string) {
   return modeOptions.find((item) => item.value === mode)?.label ?? mode;
 }
@@ -44,18 +70,24 @@ function labelsOf(reports: ReportSummary[]) {
   return Array.from(new Set(reports.flatMap((report) => report.labels ?? []))).sort();
 }
 
+function normalizedLabels(report: ReportSummary) {
+  return report.labels ?? [];
+}
+
 export default function ReportsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const reports = useQuery({ queryKey: ['reportSummaries'], queryFn: api.reportSummaries });
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
-  const [grade, setGrade] = useState('all');
-  const [role, setRole] = useState('all');
-  const [label, setLabel] = useState('all');
-  const [scoreRange, setScoreRange] = useState('all');
-  const [mode, setMode] = useState<RunMode | 'all'>('candidate_eval');
+  const [query, setQuery] = useState(() => searchParams.get('q') ?? '');
+  const [grade, setGrade] = useState(() => paramValue(searchParams, 'grade', 'all', ['all', ...gradeOptions]));
+  const [role, setRole] = useState(() => searchParams.get('role') ?? 'all');
+  const [label, setLabel] = useState(() => searchParams.get('label') ?? 'all');
+  const [scoreRange, setScoreRange] = useState(() => paramValue(searchParams, 'score', 'all', scoreRanges.map((item) => item.value)));
+  const [mode, setMode] = useState<RunMode | 'all'>(() => paramValue(searchParams, 'mode', 'candidate_eval', modeOptions.map((item) => item.value)) as RunMode | 'all');
+  const deferredQuery = useDeferredValue(query);
 
   const data = reports.data ?? [];
   const selectedReports = useMemo(() => data.filter((report) => selectedRowKeys.includes(report.report_id)), [data, selectedRowKeys]);
@@ -63,25 +95,49 @@ export default function ReportsPage() {
   const canCompare = selectedRowKeys.length >= 2 && selectedRowKeys.length <= 3 && selectedModes.length === 1;
   const roles = useMemo(() => Array.from(new Set(data.map((report) => report.channel_role))).sort(), [data]);
   const labels = useMemo(() => labelsOf(data), [data]);
+  const hasActiveFilters = mode !== 'all' || grade !== 'all' || role !== 'all' || label !== 'all' || scoreRange !== 'all' || Boolean(query.trim());
+
+  useEffect(() => {
+    setQuery(searchParams.get('q') ?? '');
+    setGrade(paramValue(searchParams, 'grade', 'all', ['all', ...gradeOptions]));
+    setRole(searchParams.get('role') ?? 'all');
+    setLabel(searchParams.get('label') ?? 'all');
+    setScoreRange(paramValue(searchParams, 'score', 'all', scoreRanges.map((item) => item.value)));
+    setMode(paramValue(searchParams, 'mode', 'candidate_eval', modeOptions.map((item) => item.value)) as RunMode | 'all');
+  }, [searchParams]);
+
+  useEffect(() => {
+    const next = new URLSearchParams(searchParams);
+    setSearchParamValue(next, 'q', query);
+    mode === 'candidate_eval' ? next.delete('mode') : next.set('mode', mode);
+    grade === 'all' ? next.delete('grade') : next.set('grade', grade);
+    role === 'all' ? next.delete('role') : next.set('role', role);
+    label === 'all' ? next.delete('label') : next.set('label', label);
+    scoreRange === 'all' ? next.delete('score') : next.set('score', scoreRange);
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+  }, [grade, label, mode, query, role, scoreRange, searchParams, setSearchParams]);
 
   const filtered = useMemo(() => {
-    const text = query.trim().toLowerCase();
+    const text = deferredQuery.trim().toLowerCase();
     return data.filter((report) => {
       if (mode !== 'all' && report.mode !== mode) return false;
       if (grade !== 'all' && report.grade !== grade) return false;
       if (role !== 'all' && report.channel_role !== role) return false;
-      if (label !== 'all' && !report.labels.includes(label)) return false;
+      const reportLabels = normalizedLabels(report);
+      if (label !== 'all' && !reportLabels.includes(label)) return false;
       if (scoreRange === 'high' && report.final_score < 85) return false;
       if (scoreRange === 'medium' && (report.final_score < 70 || report.final_score >= 85)) return false;
       if (scoreRange === 'low' && report.final_score >= 70) return false;
       if (!text) return true;
-      return [report.run_name, report.channel_name, report.summary, report.grade, ...report.labels]
+      return [report.run_name, report.channel_name, report.summary, report.grade, ...reportLabels]
         .filter(Boolean)
         .join(' ')
         .toLowerCase()
         .includes(text);
     });
-  }, [data, grade, label, mode, query, role, scoreRange]);
+  }, [data, deferredQuery, grade, label, mode, role, scoreRange]);
 
   const deleteOne = useMutation({
     mutationFn: api.deleteReport,
@@ -99,7 +155,7 @@ export default function ReportsPage() {
   const deleteMany = useMutation({
     mutationFn: api.deleteReports,
     onSuccess: async (result) => {
-      message.success(`已删除 ${result.deleted} 份报告`);
+      bulkDeleteMessage('份报告', result);
       setSelectedRowKeys([]);
       await queryClient.invalidateQueries({ queryKey: ['reportSummaries'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
@@ -131,6 +187,15 @@ export default function ReportsPage() {
       return;
     }
     deleteMany.mutate(ids);
+  }
+
+  function clearFilters() {
+    setQuery('');
+    setMode('candidate_eval');
+    setGrade('all');
+    setRole('all');
+    setLabel('all');
+    setScoreRange('all');
   }
 
   return (
@@ -177,6 +242,7 @@ export default function ReportsPage() {
           <Select value={role} onChange={setRole} options={[{ value: 'all', label: '全部角色' }, ...roles.map((item) => ({ value: item, label: item }))]} />
           <Select value={label} onChange={setLabel} options={[{ value: 'all', label: '全部标签' }, ...labels.map((item) => ({ value: item, label: item }))]} />
           <Select value={scoreRange} onChange={setScoreRange} options={scoreRanges} />
+          <Button onClick={clearFilters}>清空</Button>
         </div>
       </Card>
 
@@ -187,7 +253,7 @@ export default function ReportsPage() {
           </Button>
           <Popconfirm
             title="删除已选报告"
-            description={`将删除 ${selectedRowKeys.length} 份报告及其关联告警，检测任务和原始结果会保留。确定删除吗？`}
+            description={`将删除 ${selectedRowKeys.length} 份报告及其关联告警；检测任务和原始结果会保留。确定删除吗？`}
             okText="删除"
             okButtonProps={{ danger: true }}
             cancelText="取消"
@@ -204,7 +270,7 @@ export default function ReportsPage() {
           rowKey="report_id"
           loading={reports.isLoading}
           dataSource={filtered}
-          locale={{ emptyText: <Empty description="暂无报告" /> }}
+          locale={{ emptyText: reports.isLoading ? '正在加载报告' : hasActiveFilters ? <Empty description="当前筛选条件下无报告" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : <Empty description="暂无报告" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 份报告` }}
           scroll={{ x: 1280 }}
           rowSelection={{
@@ -264,8 +330,8 @@ export default function ReportsPage() {
               width: 260,
               render: (_, report) => (
                 <Space wrap size={4}>
-                  {(report.labels.length ? report.labels.slice(0, 4) : ['no_labels']).map((item) => <Tag key={item} color={item === 'no_labels' ? 'green' : 'orange'}>{item}</Tag>)}
-                  {report.labels.length > 4 ? <Tag>+{report.labels.length - 4}</Tag> : null}
+                  {(normalizedLabels(report).length ? normalizedLabels(report).slice(0, 4) : ['no_labels']).map((item) => <Tag key={item} color={item === 'no_labels' ? 'green' : 'orange'}>{item}</Tag>)}
+                  {normalizedLabels(report).length > 4 ? <Tag>+{normalizedLabels(report).length - 4}</Tag> : null}
                 </Space>
               ),
             },
@@ -281,7 +347,7 @@ export default function ReportsPage() {
                   </Link>
                   <Popconfirm
                     title="删除报告"
-                    description="将删除这份报告及其关联告警，检测任务和原始结果会保留。确定删除吗？"
+                    description="将删除这份报告及其关联告警；检测任务和原始结果会保留。确定删除吗？"
                     okText="删除"
                     okButtonProps={{ danger: true }}
                     cancelText="取消"

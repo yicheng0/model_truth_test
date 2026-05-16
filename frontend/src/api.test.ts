@@ -70,6 +70,7 @@ describe('api request handling', () => {
 
     await api.createChannel({
       name: 'Custom Gateway',
+      provider_type: 'customer_gateway',
       enabled: true,
     });
 
@@ -79,6 +80,7 @@ describe('api request handling', () => {
         method: 'POST',
         body: JSON.stringify({
           name: 'Custom Gateway',
+          provider_type: 'customer_gateway',
           enabled: true,
         }),
       }),
@@ -468,6 +470,48 @@ describe('api request handling', () => {
             expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
           },
         }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('preserves signature interop request ids from the API response', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          status: 'pass',
+          reason: '兼容',
+          source_channel_id: 'source_1',
+          relay_channel_id: 'relay_1',
+          source_endpoint: 'https://source.example/v1/messages',
+          relay_endpoint: 'https://relay.example/v1/messages',
+          model: 'claude-opus-4-6',
+          thinking_block_count: 1,
+          signature_prefixes: ['sig-source'],
+          source_message_id: 'msg_bdrk_01source',
+          source_message_channel_type: 'AWS Bedrock',
+          source_request_id: 'req_source_123',
+          relay_message_id: 'msg_vrtx_01relay',
+          relay_message_channel_type: 'Vertex',
+          relay_request_id: 'req_relay_456',
+          relay_raw_excerpt: '{}',
+          fallback_note: '',
+          steps: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const result = await api.signatureInteropTest({ source_channel_id: 'source_1', relay_channel_id: 'relay_1' });
+
+    expect(result.source_request_id).toBe('req_source_123');
+    expect(result.relay_request_id).toBe('req_relay_456');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/signature-interop-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ source_channel_id: 'source_1', relay_channel_id: 'relay_1' }),
       }),
     );
     fetchMock.mockRestore();

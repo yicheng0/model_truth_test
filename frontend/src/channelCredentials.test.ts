@@ -5,6 +5,7 @@ import {
   buildRuntimeCredentials,
   buildTokenflowApiKey,
   buildTokenflowChannelId,
+  formatChannelDisplayName,
   hasStoredApiKey,
   isValidChannelNumber,
   parseTokenflowChannelNumber,
@@ -94,5 +95,17 @@ describe('channel credential helpers', () => {
     expect(parseTokenflowChannelNumber('9333-tokenflow-aws')).toBe('9333');
     expect(isValidChannelNumber('9333_ab-c')).toBe(true);
     expect(isValidChannelNumber('9333 token')).toBe(false);
+  });
+
+  it('formats the channel display name from configured fields', () => {
+    expect(
+      formatChannelDisplayName({
+        id: '8678-tokenflow-aws',
+        name: '鬼手',
+        auth_config: { account_type: 'aws' },
+      }),
+    ).toBe('8678-鬼手-aws');
+    expect(formatChannelDisplayName({ name: '鬼手', account_type: 'aws' })).toBe('鬼手-aws');
+    expect(formatChannelDisplayName(null, 'legacy_channel')).toBe('legacy_channel');
   });
 });

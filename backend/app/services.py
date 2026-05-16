@@ -5,8 +5,10 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
+import socket
 import time
 import uuid
 from collections import defaultdict
@@ -16,7 +18,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -46,6 +48,10 @@ from .schemas import (
 from .suite_seed import default_cases, default_suite
 
 SCHEDULE_TIMEZONE = ZoneInfo("Asia/Shanghai")
+SCHEDULER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+SCHEDULER_LOCK_MINUTES = int(os.getenv("SCHEDULER_LOCK_MINUTES", "30") or "30")
+SCHEDULER_LAST_TICK_AT: datetime | None = None
+logger = logging.getLogger(__name__)
 
 
 def new_id(prefix: str) -> str:
@@ -106,6 +112,141 @@ def next_run_for_scheduled_test(scheduled: ScheduledChannelTest, base_at: dateti
         scheduled.run_window_start,
         scheduled.run_window_end,
     )
+
+
+def scheduler_enabled() -> bool:
+    return os.getenv("AUTO_SCHEDULER_ENABLED", "true").lower() not in {"0", "false", "no"}
+
+
+def _naive_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return _as_utc(value).replace(tzinfo=None)
+
+
+def _lock_expiry(now: datetime | None = None) -> datetime:
+    return (now or datetime.now(timezone.utc)) + timedelta(minutes=max(1, SCHEDULER_LOCK_MINUTES))
+
+
+def _schedule_lock_active(scheduled: ScheduledChannelTest, now: datetime | None = None) -> bool:
+    if not scheduled.locked_until:
+        return False
+    return _as_utc(scheduled.locked_until) > (now or datetime.now(timezone.utc))
+
+
+def release_scheduled_test_lock(
+    db: Session,
+    scheduled: ScheduledChannelTest,
+    *,
+    status: str | None = None,
+    error: str | None = None,
+    finished_at: datetime | None = None,
+) -> None:
+    now = finished_at or datetime.now(timezone.utc)
+    values: dict[str, Any] = {
+        "last_error": error,
+        "last_finished_at": now,
+        "locked_by": None,
+        "locked_until": None,
+    }
+    if status is not None:
+        values["last_status"] = status
+    db.execute(
+        update(ScheduledChannelTest)
+        .where(ScheduledChannelTest.id == scheduled.id)
+        .values(**values)
+    )
+    db.commit()
+    db.refresh(scheduled)
+
+
+def claim_scheduled_test(
+    db: Session,
+    scheduled_id: str,
+    *,
+    now: datetime | None = None,
+    advance_next_run: bool = False,
+    force: bool = False,
+) -> ScheduledChannelTest | None:
+    now = now or datetime.now(timezone.utc)
+    scheduled = db.get(ScheduledChannelTest, scheduled_id)
+    if not scheduled:
+        return None
+    if not force and not scheduled.enabled:
+        return None
+    if _schedule_lock_active(scheduled, now):
+        return None
+    values: dict[str, Any] = {
+        "locked_by": SCHEDULER_INSTANCE_ID,
+        "locked_until": _lock_expiry(now),
+        "last_status": "queued",
+        "last_error": None,
+        "last_queued_at": now,
+    }
+    if advance_next_run:
+        values["next_run_at"] = next_run_for_scheduled_test(scheduled, now)
+    result = db.execute(
+        update(ScheduledChannelTest)
+        .where(ScheduledChannelTest.id == scheduled.id)
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        return None
+    db.commit()
+    db.refresh(scheduled)
+    return scheduled
+
+
+def recover_stale_scheduled_tests(db: Session, *, now: datetime | None = None) -> int:
+    now = now or datetime.now(timezone.utc)
+    stale = db.scalars(
+        select(ScheduledChannelTest)
+        .where(
+            ScheduledChannelTest.last_status.in_(["queued", "running"]),
+            ScheduledChannelTest.locked_until.is_not(None),
+            ScheduledChannelTest.locked_until <= _naive_utc(now),
+        )
+        .order_by(ScheduledChannelTest.locked_until)
+    ).all()
+    recovered = 0
+    for scheduled in stale:
+        run = db.get(Run, scheduled.last_run_id) if scheduled.last_run_id else None
+        if run and run.status in {"pending", "running"}:
+            run.status = "failed"
+            run.finished_at = now
+        scheduled.last_status = run.status if run and run.status in {"completed", "failed", "canceled", "interrupted"} else "failed"
+        scheduled.last_error = "自动巡检任务锁已过期，系统已恢复调度"
+        scheduled.last_finished_at = now
+        scheduled.locked_by = None
+        scheduled.locked_until = None
+        scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
+        recovered += 1
+    if recovered:
+        db.commit()
+    return recovered
+
+
+def scheduled_tests_health(db: Session) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    recover_stale_scheduled_tests(db, now=now)
+    schedules = list(db.scalars(select(ScheduledChannelTest)).all())
+    enabled = [schedule for schedule in schedules if schedule.enabled]
+    stale = [
+        schedule
+        for schedule in schedules
+        if schedule.last_status in {"queued", "running"} and schedule.locked_until and _as_utc(schedule.locked_until) <= now
+    ]
+    next_due = min([_as_utc(schedule.next_run_at) for schedule in enabled if schedule.next_run_at], default=None)
+    return {
+        "enabled": scheduler_enabled(),
+        "instance_id": SCHEDULER_INSTANCE_ID,
+        "last_tick_at": SCHEDULER_LAST_TICK_AT,
+        "stale_schedule_count": len(stale),
+        "queued_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "queued"),
+        "running_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "running"),
+        "next_due_at": next_due,
+    }
 
 
 def similarity(a: str, b: str) -> float:
@@ -1365,6 +1506,7 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
         "result": result,
         "message_id": normalized.get("provider_message_id"),
         "message_channel_type": classify_claude_message_id(normalized.get("provider_message_id")),
+        "request_id": request_id_from_normalized(normalized),
         "request_protocol": normalized.get("request_protocol"),
         "provider_endpoint": normalized.get("provider_endpoint"),
     }
@@ -1457,6 +1599,17 @@ SCHEDULED_MODEL_REQUEST_PROBES: list[dict[str, Any]] = [
 ]
 
 
+def patrol_channel_display_name(channel: Channel | None, fallback_name: str | None = None) -> str:
+    channel_id = (channel.id if channel else "") or ""
+    match = re.match(r"^(.+)-tokenflow-[A-Za-z0-9-]+$", channel_id)
+    display_id = match.group(1) if match else ""
+    channel_name = (channel.name if channel else "") or (fallback_name or "")
+    account_type = ((channel.auth_config or {}).get("account_type") if channel else None) or ""
+    parts = [display_id, channel_name, account_type]
+    formatted = "-".join(str(part).strip() for part in parts if str(part).strip())
+    return formatted or (channel_name or fallback_name or channel_id or "-")
+
+
 async def create_scheduled_model_request_probe(db: Session, channel: Channel, scheduled: ScheduledChannelTest) -> dict[str, Any]:
     if not channel.enabled:
         raise ValueError("Channel is disabled")
@@ -1466,7 +1619,7 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
     run = Run(
         id=new_id("run"),
         suite_id=suite.id,
-        name=f"{channel.name} - 自动巡检资源"[:200],
+        name=f"{patrol_channel_display_name(channel)} - 自动巡检资源"[:200],
         mode=MANUAL_PROBE_MODE,
         test_scope="quick",
         status="running",
@@ -1760,6 +1913,12 @@ async def execute_scheduled_channel_test(
 ) -> Run | None:
     with session_factory() as db:
         scheduled = db.get(ScheduledChannelTest, scheduled_id)
+        if not scheduled:
+            return None
+        if scheduled.locked_by != SCHEDULER_INSTANCE_ID or not _schedule_lock_active(scheduled):
+            scheduled = claim_scheduled_test(db, scheduled_id, advance_next_run=False, force=True)
+            if not scheduled:
+                return None
         if scheduled and scheduled.test_scope == "scheduled_probe":
             return await execute_scheduled_probe_run(session_factory, scheduled_id, advance_next_run=advance_next_run)
     run_id: str | None = None
@@ -1780,7 +1939,7 @@ async def execute_scheduled_channel_test(
                 max_retries = max(0, scheduled.max_retries)
                 retry_interval_minutes = max(1, scheduled.retry_interval_minutes)
                 use_mock = scheduled.use_mock
-                run_name = f"{channel.name} - 资源检测 - {scheduled.name}"
+                run_name = f"{patrol_channel_display_name(channel)} - 资源检测 - {scheduled.name}"
                 if attempt_index:
                     run_name = f"{run_name}（重试 {attempt_index}/{max_retries}）"
                 run = create_run(
@@ -1802,6 +1961,9 @@ async def execute_scheduled_channel_test(
                 scheduled.last_run_id = run.id
                 scheduled.last_status = "running"
                 scheduled.last_error = None
+                scheduled.last_started_at = datetime.now(timezone.utc)
+                scheduled.locked_by = SCHEDULER_INSTANCE_ID
+                scheduled.locked_until = _lock_expiry()
                 if advance_next_run and attempt_index == 0:
                     scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
                 db.commit()
@@ -1814,33 +1976,29 @@ async def execute_scheduled_channel_test(
                 if not scheduled or not run:
                     return run
                 if run.status == "completed":
-                    scheduled.last_status = run.status
-                    scheduled.last_error = None
-                    db.commit()
+                    release_scheduled_test_lock(db, scheduled, status=run.status, error=None)
                     await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
                     await create_alerts_for_run(session_factory, run.id, scheduled.id)
                     return run
                 if run.status != "failed" or attempt_index >= max_retries:
-                    scheduled.last_status = run.status
-                    scheduled.last_error = f"Run finished with status {run.status}"
-                    db.commit()
+                    release_scheduled_test_lock(db, scheduled, status=run.status, error=f"Run finished with status {run.status}")
                     if run.status == "failed":
                         await create_alerts_for_run(session_factory, run.id, scheduled.id)
                     return run
                 attempt_index += 1
                 scheduled.last_status = "queued"
                 scheduled.last_error = f"Run finished with status {run.status}; retry {attempt_index}/{max_retries} queued"
+                scheduled.locked_by = SCHEDULER_INSTANCE_ID
+                scheduled.locked_until = _lock_expiry()
                 db.commit()
             await asyncio.sleep(max(1, retry_interval_minutes) * 60)
     except Exception as exc:
         with session_factory() as db:
             scheduled = db.get(ScheduledChannelTest, scheduled_id)
             if scheduled:
-                scheduled.last_status = "failed"
-                scheduled.last_error = str(exc)
                 if advance_next_run:
                     scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
-                db.commit()
+                release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc))
         return None
 
 
@@ -1988,8 +2146,12 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "completed_at": result.get("completed_at"),
         "source_channel_id": result.get("source_channel_id"),
         "source_channel_name": result.get("source_channel_name"),
+        "source_channel_provider_type": result.get("source_channel_provider_type"),
+        "source_channel_account_type": result.get("source_channel_account_type"),
         "relay_channel_id": result.get("relay_channel_id"),
         "relay_channel_name": result.get("relay_channel_name"),
+        "relay_channel_provider_type": result.get("relay_channel_provider_type"),
+        "relay_channel_account_type": result.get("relay_channel_account_type"),
         "source_message_id": result.get("source_message_id"),
         "source_message_channel_type": result.get("source_message_channel_type"),
         "source_request_id": result.get("source_request_id"),
@@ -2025,6 +2187,10 @@ async def execute_scheduled_probe_run(
         scheduled = db.get(ScheduledChannelTest, scheduled_id)
         if not scheduled:
             return None
+        if scheduled.locked_by != SCHEDULER_INSTANCE_ID or not _schedule_lock_active(scheduled):
+            scheduled = claim_scheduled_test(db, scheduled_id, advance_next_run=False, force=True)
+            if not scheduled:
+                return None
         validate_scheduled_channel_test(db, scheduled)
         channel = db.get(Channel, scheduled.channel_id)
         if not channel:
@@ -2033,6 +2199,9 @@ async def execute_scheduled_probe_run(
             scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
         scheduled.last_status = "running"
         scheduled.last_error = None
+        scheduled.last_started_at = datetime.now(timezone.utc)
+        scheduled.locked_by = SCHEDULER_INSTANCE_ID
+        scheduled.locked_until = _lock_expiry()
         db.commit()
 
     model_payload: dict[str, Any] | None = None
@@ -2059,9 +2228,7 @@ async def execute_scheduled_probe_run(
                 return run
             signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
             report = build_scheduled_probe_report(db, scheduled, run.id, model_payload, signature_result)
-            scheduled.last_status = "completed"
-            scheduled.last_error = None
-            db.commit()
+            release_scheduled_test_lock(db, scheduled, status="completed", error=None)
             db.refresh(run)
 
         await create_alerts_for_run(session_factory, run.id if run else "", scheduled_id)
@@ -2070,11 +2237,9 @@ async def execute_scheduled_probe_run(
         with session_factory() as db:
             scheduled = db.get(ScheduledChannelTest, scheduled_id)
             if scheduled:
-                scheduled.last_status = "failed"
-                scheduled.last_error = str(exc)
                 if advance_next_run:
                     scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
-                db.commit()
+                release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc))
         return None
 
 
@@ -2091,6 +2256,8 @@ def build_scheduled_probe_report(
     for item in model_requests:
         item["channel_id"] = channel.id if channel else scheduled.channel_id
         item["channel_name"] = channel.name if channel else None
+        item["channel_provider_type"] = channel.provider_type if channel else None
+        item["channel_account_type"] = (channel.auth_config or {}).get("account_type") if channel else None
     labels = {label for item in model_requests for label in item.get("labels", []) if isinstance(label, str)}
     if isinstance(result, Result):
         labels.update(result.labels or [])
@@ -2149,6 +2316,7 @@ def build_scheduled_probe_report(
 def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not model_payload:
         return []
+    channel = model_payload.get("channel") if isinstance(model_payload.get("channel"), Channel) else None
     results = model_payload.get("results")
     if isinstance(results, list):
         return [
@@ -2158,6 +2326,8 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
                 "run_id": item.get("run_id") or (model_payload.get("run").id if model_payload.get("run") else None),
                 "channel_id": item.get("channel_id"),
                 "channel_name": item.get("channel_name"),
+                "channel_provider_type": item.get("channel_provider_type"),
+                "channel_account_type": item.get("channel_account_type"),
                 "result_id": item.get("result_id"),
                 "message_id": item.get("message_id"),
                 "message_channel_type": item.get("message_channel_type"),
@@ -2182,6 +2352,8 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
             "run_id": model_payload.get("run").id if model_payload.get("run") else None,
             "channel_id": model_payload.get("channel_id"),
             "channel_name": model_payload.get("channel_name"),
+            "channel_provider_type": model_payload.get("channel_provider_type") or (channel.provider_type if channel else None),
+            "channel_account_type": model_payload.get("channel_account_type") or ((channel.auth_config or {}).get("account_type") if channel else None),
             "result_id": result.id if isinstance(result, Result) else None,
             "message_id": model_payload.get("message_id"),
             "message_channel_type": model_payload.get("message_channel_type"),
@@ -2203,10 +2375,10 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
     if not model_requests and isinstance(evidence.get("model_request"), dict):
         model_requests = [evidence["model_request"]]
     model_rows = "\n".join(
-        f"| {item.get('title') or item.get('key') or '-'} | {item.get('channel_name') or '-'} ({item.get('channel_id') or '-'}) | {_probe_status_text(item)} | {item.get('completed_at') or item.get('created_at') or '-'} | {item.get('result_id') or '-'} | {item.get('message_id') or '-'} | {item.get('request_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
+        f"| {item.get('title') or item.get('key') or '-'} | {item.get('channel_name') or '-'} ({item.get('channel_id') or '-'}) | {_probe_status_text(item)} | {item.get('completed_at') or item.get('created_at') or '-'} | {item.get('message_id') or '-'} | {item.get('request_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
         for item in model_requests
         if isinstance(item, dict)
-    ) or "| - | - | - | - | - | - | - | - | - | - | - |"
+    ) or "| - | - | - | - | - | - | - | - | - | - |"
     signature = evidence.get("signature_interop") or {}
     signature_time = signature.get("completed_at") or signature.get("created_at") or evidence.get("completed_at") or "-"
     return f"""# {channel.name} - 自动巡检资源报告
@@ -2223,8 +2395,8 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
 
 ## 真实模型请求
 
-| 参数探针 | 渠道 | 状态 | 时间 | Result ID | Message ID | Request ID | 请求协议 | Provider endpoint | 标签 | 错误 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 参数探针 | 渠道 | 状态 | 时间 | Message ID | Request ID | 请求协议 | Provider endpoint | 标签 | 错误 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 {model_rows}
 
 ## Thinking Signature 互通
@@ -2293,12 +2465,15 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
         "channel_id": alert.channel_id,
         "channel_name": channel.name if channel else alert.channel_id,
         "channel_provider_type": channel.provider_type if channel else None,
+        "channel_account_type": (channel.auth_config or {}).get("account_type") if channel else None,
         "channel_model_name": channel.model_name if channel else None,
         "error_message": error_message,
         "model_request_result_id": model_request.get("result_id"),
         "model_request_message_id": model_request.get("message_id"),
         "model_request_request_id": model_request.get("request_id"),
         "model_request_channel_type": model_request.get("message_channel_type"),
+        "model_request_channel_provider_type": model_request.get("channel_provider_type"),
+        "model_request_channel_account_type": model_request.get("channel_account_type"),
         "model_requests": model_requests,
         "request_protocol": model_request.get("request_protocol"),
         "provider_endpoint": model_request.get("provider_endpoint"),
@@ -2306,9 +2481,13 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
         "signature_source_message_id": signature.get("source_message_id"),
         "signature_source_request_id": signature.get("source_request_id"),
         "signature_source_channel_type": signature.get("source_message_channel_type"),
+        "signature_source_channel_provider_type": signature.get("source_channel_provider_type"),
+        "signature_source_channel_account_type": signature.get("source_channel_account_type"),
         "signature_relay_message_id": signature.get("relay_message_id"),
         "signature_relay_request_id": signature.get("relay_request_id"),
         "signature_relay_channel_type": signature.get("relay_message_channel_type"),
+        "signature_relay_channel_provider_type": signature.get("relay_channel_provider_type"),
+        "signature_relay_channel_account_type": signature.get("relay_channel_account_type"),
         "label_explanations": label_descriptions,
         "detected_provider_hint": evidence.get("detected_provider_hint"),
     }
@@ -2514,8 +2693,12 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
                 "reason": signature.get("reason"),
                 "source_channel_id": signature.get("source_channel_id"),
                 "source_channel_name": signature.get("source_channel_name"),
+                "source_channel_provider_type": signature.get("source_channel_provider_type"),
+                "source_channel_account_type": signature.get("source_channel_account_type"),
                 "relay_channel_id": signature.get("relay_channel_id"),
                 "relay_channel_name": signature.get("relay_channel_name"),
+                "relay_channel_provider_type": signature.get("relay_channel_provider_type"),
+                "relay_channel_account_type": signature.get("relay_channel_account_type"),
                 "source_message_id": signature.get("source_message_id"),
                 "source_message_channel_type": signature.get("source_message_channel_type"),
                 "source_request_id": signature.get("source_request_id"),
@@ -2539,6 +2722,12 @@ def _probe_summary_status(item: dict[str, Any]) -> str:
 
 
 def scheduled_channel_test_read(db: Session, scheduled: ScheduledChannelTest) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    is_stale = bool(
+        scheduled.last_status in {"queued", "running"}
+        and scheduled.locked_until
+        and _as_utc(scheduled.locked_until) <= now
+    )
     return {
         "id": scheduled.id,
         "name": scheduled.name,
@@ -2559,6 +2748,12 @@ def scheduled_channel_test_read(db: Session, scheduled: ScheduledChannelTest) ->
         "quiet_minutes": scheduled.quiet_minutes,
         "max_retries": scheduled.max_retries,
         "retry_interval_minutes": scheduled.retry_interval_minutes,
+        "locked_by": scheduled.locked_by,
+        "locked_until": scheduled.locked_until,
+        "last_queued_at": scheduled.last_queued_at,
+        "last_started_at": scheduled.last_started_at,
+        "last_finished_at": scheduled.last_finished_at,
+        "is_stale": is_stale,
         "next_run_at": scheduled.next_run_at,
         "last_run_id": scheduled.last_run_id,
         "last_status": scheduled.last_status,
@@ -2582,8 +2777,11 @@ def channel_alert_read(db: Session, alert: ChannelAlert) -> dict[str, Any]:
         "final_score": alert.final_score,
         "trigger_labels": alert.trigger_labels,
         "message": alert.message,
+        "dedupe_key": alert.dedupe_key,
         "notification_status": alert.notification_status,
         "notification_error": alert.notification_error,
+        "notification_attempt_count": alert.notification_attempt_count,
+        "last_notification_attempt_at": alert.last_notification_attempt_at,
         "evidence_summary": alert_evidence_summary(db, alert),
         "notified_at": alert.notified_at,
         "reviewer_name": alert.reviewer_name,
@@ -2603,7 +2801,8 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
             labels = report_labels(report)
             if not report_needs_alert(report, labels, scheduled):
                 continue
-            if scheduled and _recent_open_alert_exists(db, scheduled, report.channel_id):
+            dedupe_key = alert_dedupe_key(report, labels, scheduled)
+            if scheduled and _recent_open_alert_exists(db, scheduled, report.channel_id, dedupe_key):
                 continue
             existing = db.scalar(select(ChannelAlert).where(ChannelAlert.report_id == report.id))
             if existing:
@@ -2611,7 +2810,7 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
                 continue
             channel = db.get(Channel, report.channel_id)
             severity = "critical" if report.grade == "E" or ALERT_RED_FLAGS.intersection(labels) else "high"
-            message = f"{channel.name if channel else report.channel_id} 自动巡检异常：{alert_error_message(report.evidence or {}, labels)}"
+            message = f"{patrol_channel_display_name(channel, report.channel_id)} 自动巡检异常：{alert_error_message(report.evidence or {}, labels)}"
             alert = ChannelAlert(
                 id=new_id("alert"),
                 scheduled_test_id=scheduled_id,
@@ -2624,6 +2823,7 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
                 final_score=report.final_score,
                 trigger_labels=sorted(set(labels)),
                 message=message,
+                dedupe_key=dedupe_key,
                 notification_status="pending",
             )
             db.add(alert)
@@ -2657,29 +2857,69 @@ def report_needs_alert(report: Report, labels: list[str] | None = None, schedule
     return grade_alert or score_alert or red_flag_alert
 
 
-def _recent_open_alert_exists(db: Session, scheduled: ScheduledChannelTest, channel_id: str) -> bool:
+def alert_dedupe_key(report: Report, labels: list[str], scheduled: ScheduledChannelTest | None = None) -> str:
+    evidence = report.evidence if isinstance(report.evidence, dict) else {}
+    summary = alert_evidence_summary_for_evidence(evidence)
+    locator = (
+        summary.get("model_request_result_id")
+        or summary.get("model_request_message_id")
+        or summary.get("model_request_request_id")
+        or summary.get("signature_relay_message_id")
+        or summary.get("signature_source_message_id")
+        or summary.get("signature_relay_request_id")
+        or summary.get("signature_source_request_id")
+    )
+    label_part = ",".join(sorted(set(labels))) or report.grade
+    kind = f"{label_part}|{locator}" if locator else label_part
+    raw = f"{scheduled.id if scheduled else '-'}|{report.channel_id}|{kind}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def alert_evidence_summary_for_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    primary = model_request or next((item for item in model_requests if isinstance(item, dict)), {})
+    signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    return {
+        "model_request_result_id": primary.get("result_id"),
+        "model_request_message_id": primary.get("message_id"),
+        "model_request_request_id": primary.get("request_id"),
+        "model_request_channel_provider_type": primary.get("channel_provider_type"),
+        "model_request_channel_account_type": primary.get("channel_account_type"),
+        "signature_source_message_id": signature.get("source_message_id"),
+        "signature_source_request_id": signature.get("source_request_id"),
+        "signature_relay_message_id": signature.get("relay_message_id"),
+        "signature_relay_request_id": signature.get("relay_request_id"),
+    }
+
+
+def _recent_open_alert_exists(db: Session, scheduled: ScheduledChannelTest, channel_id: str, dedupe_key: str | None = None) -> bool:
     if scheduled.quiet_minutes <= 0:
         return False
     since = datetime.now(timezone.utc) - timedelta(minutes=scheduled.quiet_minutes)
-    return bool(
-        db.scalar(
-            select(ChannelAlert.id)
-            .where(
-                ChannelAlert.scheduled_test_id == scheduled.id,
-                ChannelAlert.channel_id == channel_id,
-                ChannelAlert.status == "pending_review",
-                ChannelAlert.created_at >= since,
-            )
-            .limit(1)
+    stmt = (
+        select(ChannelAlert.id)
+        .where(
+            ChannelAlert.scheduled_test_id == scheduled.id,
+            ChannelAlert.channel_id == channel_id,
+            ChannelAlert.status == "pending_review",
+            ChannelAlert.created_at >= since,
         )
+        .limit(1)
     )
+    if dedupe_key:
+        stmt = stmt.where(ChannelAlert.dedupe_key == dedupe_key)
+    return bool(db.scalar(stmt))
 
 
 async def send_alert_notification(session_factory: sessionmaker[Session], alert_id: str) -> ChannelAlert | None:
+    max_attempts = 3
     with session_factory() as db:
         alert = db.get(ChannelAlert, alert_id)
         if not alert:
             return None
+        alert.notification_attempt_count = (alert.notification_attempt_count or 0) + 1
+        alert.last_notification_attempt_at = datetime.now(timezone.utc)
         setting = get_or_create_feishu_setting(db)
         if not setting.enabled or not setting.alert_broadcast_enabled:
             alert.notification_status = "skipped"
@@ -2695,27 +2935,34 @@ async def send_alert_notification(session_factory: sessionmaker[Session], alert_
             return alert
         payload = feishu_text_payload(alert, db, setting)
         webhook_url = setting.webhook_url
+        db.commit()
 
-    try:
-        await post_feishu_payload(webhook_url, payload)
-        with session_factory() as db:
-            alert = db.get(ChannelAlert, alert_id)
-            if alert:
-                alert.notification_status = "sent"
-                alert.notification_error = None
-                alert.notified_at = datetime.now(timezone.utc)
-                db.commit()
-                db.refresh(alert)
-            return alert
-    except Exception as exc:
-        with session_factory() as db:
-            alert = db.get(ChannelAlert, alert_id)
-            if alert:
-                alert.notification_status = "failed"
-                alert.notification_error = str(exc)
-                db.commit()
-                db.refresh(alert)
-            return alert
+    last_error: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            await post_feishu_payload(webhook_url, payload)
+            with session_factory() as db:
+                alert = db.get(ChannelAlert, alert_id)
+                if alert:
+                    alert.notification_status = "sent"
+                    alert.notification_error = None
+                    alert.notified_at = datetime.now(timezone.utc)
+                    db.commit()
+                    db.refresh(alert)
+                return alert
+        except Exception as exc:
+            last_error = exc
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+    with session_factory() as db:
+        alert = db.get(ChannelAlert, alert_id)
+        if alert:
+            alert.notification_status = "failed"
+            alert.notification_error = str(last_error) if last_error else "Unknown notification failure"
+            db.commit()
+            db.refresh(alert)
+        return alert
 
 
 async def post_feishu_payload(webhook_url: str, payload: dict[str, Any]) -> None:
@@ -2748,7 +2995,6 @@ def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadca
     evidence = alert_evidence_summary(db, alert) or {}
     message_id = evidence.get("model_request_message_id") or evidence.get("signature_relay_message_id") or evidence.get("signature_source_message_id")
     request_id = evidence.get("model_request_request_id") or evidence.get("signature_relay_request_id") or evidence.get("signature_source_request_id")
-    result_id = evidence.get("model_request_result_id")
     detail = evidence.get("error_message") or scoreless_alert_message(alert.message)
     text = (
         "Claude 渠道自动巡检发现异常\n"
@@ -2757,8 +3003,7 @@ def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadca
         f"任务：{run.name if run else alert.run_id}\n"
         f"错误：{detail}\n"
         f"异常标签：{labels}\n"
-        f"Result ID：{result_id or '-'}\n"
-        f"消息ID：{message_id or '-'}\n"
+        f"Message ID：{message_id or '-'}\n"
         f"Request ID：{request_id or '-'}\n"
         f"报告：{run_link}\n"
         f"复审：{review_link}"
@@ -2823,6 +3068,9 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
             {
                 "channel_id": channel_id,
                 "channel_name": channel.name if channel else channel_id,
+                "channel_provider_type": channel.provider_type if channel else None,
+                "channel_account_type": (channel.auth_config or {}).get("account_type") if channel else None,
+                "channel_model_name": channel.model_name if channel else None,
                 "run_count": len(channel_runs),
                 "alert_count": len(channel_alerts),
                 "pending_review_count": sum(1 for alert in channel_alerts if alert.status == "pending_review"),
@@ -2850,7 +3098,10 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
         "failed_run_count": sum(1 for run in runs if run.status == "failed"),
         "alert_count": len(alerts),
         "pending_review_count": sum(1 for alert in alerts if alert.status == "pending_review"),
-        "channel_names": {channel_id: channel.name for channel_id, channel in channels.items()},
+        "channel_names": {
+            channel_id: _smart_patrol_channel_display(channel_id, channel.name, channel.provider_type)
+            for channel_id, channel in channels.items()
+        },
         "channel_summaries": channel_summaries,
         "recent_alerts": alerts[:10],
         "trend": trend,
@@ -2893,10 +3144,31 @@ def _datetime_sort_value(value: Any) -> float:
     return _as_utc(value).timestamp()
 
 
+def _tokenflow_channel_number(channel_id: str | None) -> str:
+    if not channel_id:
+        return ""
+    match = re.match(r"^(.+)-tokenflow-[A-Za-z0-9-]+$", channel_id)
+    return match.group(1) if match else ""
+
+
+def _smart_patrol_channel_display(
+    channel_id: str | None,
+    channel_name: str | None,
+    provider_type: str | None,
+) -> str:
+    parts = [
+        _tokenflow_channel_number(channel_id),
+        (channel_name or "").strip(),
+        (provider_type or "").strip(),
+    ]
+    text = "-".join(part for part in parts if part)
+    return text or (channel_id or "-")
+
+
 def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
     channel_names = report.get("channel_names") or {}
     channel_lines = "\n".join(
-        f"- {item['channel_name']}：巡检 {item['run_count']} 次，错误 {item['alert_count']} 次，待复审 {item['pending_review_count']}，最近巡检 {_fmt_datetime(item.get('last_run_at'))}"
+        f"- {_smart_patrol_channel_display(item.get('channel_id'), item.get('channel_name'), item.get('channel_provider_type'))}：巡检 {item['run_count']} 次，错误 {item['alert_count']} 次，待复审 {item['pending_review_count']}，最近巡检 {_fmt_datetime(item.get('last_run_at'))}"
         for item in report["channel_summaries"][:8]
     ) or "- 暂无渠道巡检数据"
     alert_lines = "\n".join(
@@ -2977,7 +3249,7 @@ def smart_patrol_daily_text(report: dict[str, Any], setting: FeishuBroadcastSett
     report_link = f"{app_base_url}/scheduled-tests?tab=report" if app_base_url else "/scheduled-tests?tab=report"
     top_channels = report["channel_summaries"][:5]
     channel_lines = "\n".join(
-        f"{index + 1}. {item['channel_name']}：错误 {item['alert_count']}，待复审 {item['pending_review_count']}"
+        f"{index + 1}. {_smart_patrol_channel_display(item.get('channel_id'), item.get('channel_name'), item.get('channel_provider_type'))}：错误 {item['alert_count']}，待复审 {item['pending_review_count']}"
         for index, item in enumerate(top_channels)
     ) or "暂无渠道巡检数据"
     return (
@@ -2992,25 +3264,28 @@ def smart_patrol_daily_text(report: dict[str, Any], setting: FeishuBroadcastSett
 
 
 async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_seconds: int = 60) -> None:
+    global SCHEDULER_LAST_TICK_AT
     while True:
-        await send_daily_patrol_report(session_factory)
-        now = datetime.now(timezone.utc)
-        due_ids: list[str] = []
-        with session_factory() as db:
-            schedules = db.scalars(
-                select(ScheduledChannelTest)
-                .where(ScheduledChannelTest.enabled.is_(True), ScheduledChannelTest.next_run_at <= now)
-                .order_by(ScheduledChannelTest.next_run_at)
-            ).all()
-            for scheduled in schedules:
-                if scheduled.last_status in {"queued", "running"}:
-                    continue
-                scheduled.last_status = "queued"
-                scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
-                due_ids.append(scheduled.id)
-            db.commit()
-        for scheduled_id in due_ids:
-            asyncio.create_task(execute_scheduled_channel_test(session_factory, scheduled_id, advance_next_run=False))
+        SCHEDULER_LAST_TICK_AT = datetime.now(timezone.utc)
+        try:
+            await send_daily_patrol_report(session_factory)
+            now = datetime.now(timezone.utc)
+            due_ids: list[str] = []
+            with session_factory() as db:
+                recover_stale_scheduled_tests(db, now=now)
+                schedules = db.scalars(
+                    select(ScheduledChannelTest)
+                    .where(ScheduledChannelTest.enabled.is_(True), ScheduledChannelTest.next_run_at <= _naive_utc(now))
+                    .order_by(ScheduledChannelTest.next_run_at)
+                ).all()
+                for scheduled in schedules:
+                    claimed = claim_scheduled_test(db, scheduled.id, now=now, advance_next_run=True)
+                    if claimed:
+                        due_ids.append(claimed.id)
+            for scheduled_id in due_ids:
+                asyncio.create_task(execute_scheduled_channel_test(session_factory, scheduled_id, advance_next_run=False))
+        except Exception:
+            logger.exception("Scheduled test loop tick failed")
         await asyncio.sleep(max(5, poll_seconds))
 
 
@@ -5737,6 +6012,80 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
 ## 风险说明
 
 本报告不写“100% 真/假”，只基于协议、能力、工具调用、截断、多轮上下文、安全边界和稳定性证据给出风险评级。若本次复用了历史官方基线，只代表与该基线快照的差异，不证明渠道永久可信。
+"""
+
+
+def render_report_markdown(db: Session, report: Report) -> str:
+    current = (report.markdown or "").strip()
+    if current:
+        return current
+
+    run = db.get(Run, report.run_id)
+    channel = db.get(Channel, report.channel_id)
+    if not run or not channel:
+        return (report.summary or "").strip()
+
+    evidence = report.evidence or {}
+    summary = report.summary or _summary_for(report.grade)
+    mode = str(evidence.get("mode") or run.mode or "").strip()
+    if evidence.get("test_scope") == "scheduled_probe" or run.test_scope == "scheduled_probe" or mode == "scheduled_probe":
+        return scheduled_probe_markdown(channel, report.final_score, report.grade, summary, evidence)
+    if mode == "performance_benchmark" or run.mode == "performance_benchmark":
+        return special_report_markdown(channel, "性能诊断报告", report.final_score, report.grade, summary, evidence)
+    if mode == "arena_comparison" or run.mode == "arena_comparison":
+        return special_report_markdown(channel, "Arena 排名报告", report.final_score, report.grade, summary, evidence)
+    if mode in {"candidate_eval", "full_comparison", MANUAL_PROBE_MODE} or any(key in evidence for key in ("avg_gold_similarity", "avg_official_cloud_similarity", "comparison_count", "dimension_scores")):
+        normalized_evidence = _normalized_report_evidence(evidence)
+        return report_markdown(channel, report.final_score, report.grade, summary, normalized_evidence)
+    return _generic_report_markdown(run, channel, report, summary, evidence)
+
+
+def hydrate_report_markdown(db: Session, report: Report) -> bool:
+    rendered = render_report_markdown(db, report)
+    current = report.markdown or ""
+    if rendered == current.strip():
+        if current and current != current.strip():
+            report.markdown = current.strip()
+            return True
+        return False
+    report.markdown = rendered
+    return True
+
+
+def _normalized_report_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(evidence)
+    normalized["labels"] = [str(label) for label in (evidence.get("labels") or []) if str(label).strip()]
+    normalized.setdefault("avg_gold_similarity", 0.0)
+    normalized.setdefault("avg_official_cloud_similarity", 0.0)
+    normalized.setdefault("comparison_count", 0)
+    normalized.setdefault("confidence", "medium")
+    normalized.setdefault("dimension_scores", {})
+    normalized.setdefault("label_explanations", [])
+    normalized.setdefault("top_evidence", [])
+    normalized.setdefault("signature_interop", {})
+    return normalized
+
+
+def _generic_report_markdown(run: Run, channel: Channel, report: Report, summary: str, evidence: dict[str, Any]) -> str:
+    labels = ", ".join(str(label) for label in (evidence.get("labels") or []) if str(label).strip()) or "未发现显著异常"
+    evidence_block = json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) if evidence else "{}"
+    return f"""# 报告摘要
+
+## 基本信息
+
+- 渠道：{channel.name}
+- 声称模型：{channel.model_name or "未配置"}
+- 运行模式：{run.mode}
+- 评级：{report.grade}
+- 总分：{report.final_score:.1f} / 100
+- 结论：{summary}
+- 异常标签：{labels}
+
+## 证据
+
+```json
+{evidence_block}
+```
 """
 
 

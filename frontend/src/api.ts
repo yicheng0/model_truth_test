@@ -1,7 +1,9 @@
 import type {
   BaselineResult,
+  BaselineBuildCreate,
   BaselineSnapshot,
   Channel,
+  ChannelCreate,
   ChannelAlert,
   ChannelTaxonomySetting,
   ChannelTaxonomyUpdate,
@@ -15,15 +17,20 @@ import type {
   ReportSummary,
   Result,
   Run,
+  RunCreate,
   RunLogCleanupResult,
   RunMode,
   RunResults,
   RunSummary,
+  SamplePlanCreate,
   ScheduledChannelTest,
+  ScheduledChannelTestCreate,
+  ScheduledTestsHealth,
   SignatureInteropResult,
   SmartPatrolReport,
   SystemUsage,
   SamplePlan,
+  TestCaseCreate,
   TestCase,
   TestScope,
   TestSuite,
@@ -34,27 +41,6 @@ import type {
 } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
-
-type RunCreatePayload = {
-  name: string;
-  suite_id: string;
-  channel_ids?: Record<string, string[]>;
-  repeat_count: number;
-  concurrency: number;
-  mode?: RunMode;
-  test_scope?: TestScope;
-  baseline_snapshot_id?: string;
-  use_mock?: boolean;
-  runtime_credentials?: Record<string, Record<string, unknown>>;
-  benchmark_config?: {
-    concurrency_steps?: number[];
-    duration_seconds?: number;
-    warmup_requests?: number;
-    target_qps?: number | null;
-    sla_p95_ms?: number | null;
-    max_error_rate?: number | null;
-  } | null;
-};
 
 type ArenaRunCreatePayload = {
   name: string;
@@ -69,8 +55,6 @@ type ArenaRunCreatePayload = {
   judge_mode?: string;
   judge_rubric?: string | null;
 };
-
-type ChannelWritePayload = Partial<Omit<Channel, 'auth_config'>> & { auth_config?: Record<string, unknown> | null };
 
 type AlertFilters = {
   status?: string;
@@ -131,8 +115,8 @@ export const api = {
   systemUsage: () => request<SystemUsage>('/api/system/usage'),
   cleanupRunLogs: (dryRun = false) => request<RunLogCleanupResult>(`/api/system/cleanup-run-logs${dryRun ? '?dry_run=true' : ''}`, { method: 'POST' }),
   channels: () => request<Channel[]>('/api/channels'),
-  createChannel: (payload: ChannelWritePayload) => request<Channel>('/api/channels', { method: 'POST', body: JSON.stringify(payload) }),
-  updateChannel: (id: string, payload: ChannelWritePayload) =>
+  createChannel: (payload: ChannelCreate) => request<Channel>('/api/channels', { method: 'POST', body: JSON.stringify(payload) }),
+  updateChannel: (id: string, payload: Partial<ChannelCreate>) =>
     request<Channel>(`/api/channels/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteChannel: (id: string) => request<{ deleted: boolean }>(`/api/channels/${id}`, { method: 'DELETE' }),
   healthCheck: (id: string) => request<Record<string, unknown>>(`/api/channels/${id}/health-check`, { method: 'POST' }),
@@ -151,26 +135,27 @@ export const api = {
   validateSuite: (suiteId: string) => request<TestSuiteValidation>(`/api/test-suites/${suiteId}/validate`, { method: 'POST' }),
   suiteCoverage: (suiteId: string) => request<TestSuiteCoverage>(`/api/test-suites/${suiteId}/coverage`),
   cases: (suiteId?: string) => request<TestCase[]>(suiteId ? `/api/suites/${suiteId}/cases` : '/api/test-cases'),
-  createCase: (payload: Partial<TestCase>) => request<TestCase>('/api/test-cases', { method: 'POST', body: JSON.stringify(payload) }),
-  updateCase: (id: string, payload: Partial<TestCase>) => request<TestCase>(`/api/test-cases/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  createCase: (payload: TestCaseCreate) => request<TestCase>('/api/test-cases', { method: 'POST', body: JSON.stringify(payload) }),
+  updateCase: (id: string, payload: Partial<TestCaseCreate>) => request<TestCase>(`/api/test-cases/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCase: (id: string) => request<{ deleted: boolean }>(`/api/test-cases/${id}`, { method: 'DELETE' }),
   runs: () => request<Run[]>('/api/runs'),
   run: (runId: string) => request<Run>(`/api/runs/${runId}`),
   runResults: (runId: string) => request<RunResults>(`/api/runs/${runId}/results`),
   runSummary: (runId: string) => request<RunSummary>(`/api/runs/${runId}/summary`),
-  startRun: (payload: unknown) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
-  samplePlan: (payload: unknown) => request<SamplePlan>('/api/runs/sample-plan', { method: 'POST', body: JSON.stringify(payload) }),
+  startRun: (payload: RunCreate) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
+  samplePlan: (payload: SamplePlanCreate) => request<SamplePlan>('/api/runs/sample-plan', { method: 'POST', body: JSON.stringify(payload) }),
   startArenaRun: (payload: ArenaRunCreatePayload) => request<Run>('/api/runs/arena', { method: 'POST', body: JSON.stringify(payload) }),
   baselines: (suiteId?: string) => request<BaselineSnapshot[]>(suiteId ? `/api/baselines?suite_id=${encodeURIComponent(suiteId)}` : '/api/baselines'),
   baseline: (id: string) => request<BaselineSnapshot>(`/api/baselines/${id}`),
   baselineResults: (id: string) => request<BaselineResult[]>(`/api/baselines/${id}/results`),
-  buildBaseline: (payload: unknown) => request<Run>('/api/baselines/build', { method: 'POST', body: JSON.stringify(payload) }),
+  buildBaseline: (payload: BaselineBuildCreate) => request<Run>('/api/baselines/build', { method: 'POST', body: JSON.stringify(payload) }),
   validateBaseline: (id: string) => request<BaselineSnapshot>(`/api/baselines/${id}/validate`, { method: 'POST' }),
   updateBaseline: (id: string, payload: { name: string }) => request<BaselineSnapshot>(`/api/baselines/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteBaseline: (id: string) => request<{ deleted: boolean }>(`/api/baselines/${id}`, { method: 'DELETE' }),
   scheduledTests: () => request<ScheduledChannelTest[]>('/api/scheduled-tests'),
-  createScheduledTest: (payload: Partial<ScheduledChannelTest>) => request<ScheduledChannelTest>('/api/scheduled-tests', { method: 'POST', body: JSON.stringify(payload) }),
-  updateScheduledTest: (id: string, payload: Partial<ScheduledChannelTest>) =>
+  scheduledTestsHealth: () => request<ScheduledTestsHealth>('/api/scheduled-tests/health'),
+  createScheduledTest: (payload: ScheduledChannelTestCreate) => request<ScheduledChannelTest>('/api/scheduled-tests', { method: 'POST', body: JSON.stringify(payload) }),
+  updateScheduledTest: (id: string, payload: Partial<ScheduledChannelTestCreate>) =>
     request<ScheduledChannelTest>(`/api/scheduled-tests/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteScheduledTest: (id: string) => request<{ deleted: boolean }>(`/api/scheduled-tests/${id}`, { method: 'DELETE' }),
   runScheduledTestNow: (id: string) => request<ScheduledChannelTest>(`/api/scheduled-tests/${id}/run-now`, { method: 'POST' }),
@@ -207,7 +192,7 @@ export const api = {
     const query = params.toString();
     return `${API_BASE}/api/scheduled-tests/report.md${query ? `?${query}` : ''}`;
   },
-  createRun: (payload: RunCreatePayload) =>
+  createRun: (payload: RunCreate) =>
     request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
   cancelRun: (id: string) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
   deleteRun: (id: string) => request<{ deleted: boolean }>(`/api/runs/${id}`, { method: 'DELETE' }),

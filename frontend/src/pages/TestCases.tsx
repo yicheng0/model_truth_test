@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import { Download, Edit3, Plus, Shuffle, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
-import type { TestCase, TestSuite } from '../types';
+import type { SamplePlanCreate, TestCase, TestCaseCreate, TestSuite } from '../types';
 
 type CaseFormValues = {
   suite_id: string;
@@ -95,7 +95,7 @@ export default function TestCases() {
   });
 
   const update = useMutation({
-    mutationFn: ({ id, values }: { id: string; values: Partial<TestCase> }) => api.updateCase(id, values),
+    mutationFn: ({ id, values }: { id: string; values: Partial<TestCaseCreate> }) => api.updateCase(id, values),
     onSuccess: async () => {
       message.success('题目已更新');
       closeModal();
@@ -114,7 +114,7 @@ export default function TestCases() {
   });
 
   const importBundle = useMutation({
-    mutationFn: (payload: unknown) => api.importSuite(payload as any),
+    mutationFn: api.importSuite,
     onSuccess: async (result) => {
       message.success(`题库已导入：新增 ${result.created_cases}，更新 ${result.updated_cases}`);
       setBundleText('');
@@ -177,7 +177,7 @@ export default function TestCases() {
       modules: moduleFilter !== 'all' ? [moduleFilter] : [],
       group_by: 'module',
       per_group_limit: 3,
-    }),
+    } satisfies SamplePlanCreate),
     enabled: Boolean(selectedExportSuiteId),
   });
 
@@ -250,7 +250,7 @@ export default function TestCases() {
       return;
     }
 
-    const payload: Partial<TestCase> = {
+    const payload: TestCaseCreate = {
       suite_id: values.suite_id,
       module: values.module,
       sort_order: values.sort_order,

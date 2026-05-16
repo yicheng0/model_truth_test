@@ -85,8 +85,10 @@ class SignatureInteropTestRead(BaseModel):
     signature_prefixes: list[str]
     source_message_id: str | None = None
     source_message_channel_type: str
+    source_request_id: str | None = None
     relay_message_id: str | None = None
     relay_message_channel_type: str
+    relay_request_id: str | None = None
     relay_raw_excerpt: str
     fallback_note: str
     steps: list[SignatureInteropStepRead]
@@ -284,6 +286,8 @@ class RunRead(BaseModel):
     scheduled_test_id: str | None = None
     patrol_channel_id: str | None = None
     patrol_channel_name: str | None = None
+    patrol_channel_provider_type: str | None = None
+    patrol_channel_account_type: str | None = None
     channels: list[dict[str, str | None]] = Field(default_factory=list)
     status: str
     repeat_count: int
@@ -394,6 +398,12 @@ class ScheduledChannelTestUpdate(BaseModel):
 class ScheduledChannelTestRead(ScheduledChannelTestBase):
     model_config = ConfigDict(from_attributes=True)
     id: str
+    locked_by: str | None = None
+    locked_until: datetime | None = None
+    last_queued_at: datetime | None = None
+    last_started_at: datetime | None = None
+    last_finished_at: datetime | None = None
+    is_stale: bool = False
     last_run_id: str | None = None
     last_status: str | None = None
     last_error: str | None = None
@@ -418,8 +428,11 @@ class ChannelAlertRead(BaseModel):
     final_score: float
     trigger_labels: list[str] | None = None
     message: str | None = None
+    dedupe_key: str | None = None
     notification_status: str
     notification_error: str | None = None
+    notification_attempt_count: int = 0
+    last_notification_attempt_at: datetime | None = None
     evidence_summary: dict[str, Any] | None = None
     notified_at: datetime | None = None
     reviewer_name: str | None = None
@@ -437,6 +450,16 @@ class ChannelAlertReviewUpdate(BaseModel):
 
 class BulkDeleteRequest(BaseModel):
     ids: list[str] = Field(default_factory=list)
+
+
+class ScheduledTestHealthRead(BaseModel):
+    enabled: bool
+    instance_id: str
+    last_tick_at: datetime | None = None
+    stale_schedule_count: int
+    queued_schedule_count: int
+    running_schedule_count: int
+    next_due_at: datetime | None = None
 
 
 class FeishuBroadcastSettingRead(BaseModel):
@@ -495,6 +518,9 @@ class ChannelTaxonomySettingUpdate(BaseModel):
 class SmartPatrolChannelSummary(BaseModel):
     channel_id: str
     channel_name: str
+    channel_provider_type: str | None = None
+    channel_account_type: str | None = None
+    channel_model_name: str | None = None
     run_count: int
     alert_count: int
     pending_review_count: int
@@ -739,6 +765,7 @@ class ModelRequestTestRead(BaseModel):
     run: RunRead
     result: ResultRead
     message_id: str | None = None
+    request_id: str | None = None
     message_channel_type: str
     request_protocol: str | None = None
     provider_endpoint: str | None = None

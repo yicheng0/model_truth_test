@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractPatrolEvidence, splitRunsByPatrol } from './runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, splitRunsByPatrol } from './runsUtils';
 import type { Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -338,5 +338,50 @@ describe('runs utilities', () => {
     });
     expect(evidence?.labels).toEqual(['patrol_probe_passed']);
     expect(evidence?.detectedProviderHint).toBe('疑似 Claude/Anthropic');
+  });
+
+  it('formats patrol channels with channel id, name and account type', () => {
+    const evidence = extractPatrolEvidence({
+      run: run('patrol_3', 'sched_3'),
+      run_channels: [],
+      results: [],
+      comparisons: [],
+      baseline_results: [],
+      reports: [
+        {
+          id: 'rep_3',
+          run_id: 'patrol_3',
+          channel_id: 'ch_3',
+          final_score: 90,
+          grade: 'A',
+          evidence: {
+            test_scope: 'scheduled_probe',
+            model_requests: [
+              {
+                key: 'thinking_temperature',
+                channel_id: '8890',
+                channel_name: '鬼手',
+                channel_account_type: 'aws',
+                channel_provider_type: 'aws_bedrock',
+                result_id: 'res_1',
+              },
+            ],
+            signature_interop: {
+              source_channel_id: '8890',
+              source_channel_name: '鬼手',
+              source_channel_account_type: 'aws',
+              source_channel_provider_type: 'aws_bedrock',
+              relay_channel_id: '8890',
+              relay_channel_name: '鬼手',
+              relay_channel_account_type: 'aws',
+              relay_channel_provider_type: 'aws_bedrock',
+            },
+          },
+        },
+      ],
+    });
+
+    expect(evidence?.modelRequests[0].channelAccountType).toBe('aws');
+    expect(formatPatrolChannel({ id: '8890-tokenflow-aws', name: '鬼手', accountType: 'aws' }, '8890-tokenflow-aws')).toBe('8890-鬼手-aws');
   });
 });

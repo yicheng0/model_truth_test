@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import os
 import asyncio
+import logging
+import os
 import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Response
+import httpx
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
@@ -57,6 +60,7 @@ from .schemas import (
     TestSuiteValidationRead,
     ScheduledChannelTestCreate,
     ScheduledChannelTestRead,
+    ScheduledTestHealthRead,
     ScheduledChannelTestUpdate,
     SmartPatrolReportRead,
     SystemUsageRead,
@@ -86,6 +90,7 @@ from .services import (
     create_suite,
     compare_reports,
     export_suite_bundle,
+    claim_scheduled_test,
     execute_run,
     execute_scheduled_channel_test,
     fetch_channel_models,
@@ -103,12 +108,14 @@ from .services import (
     import_suite_bundle,
     import_evalscope_jsonl,
     next_run_for_scheduled_test,
+    scheduled_tests_health,
     scheduled_test_loop,
     scheduled_channel_test_read,
     send_alert_notification,
     send_daily_patrol_report,
     send_feishu_test_message,
     seed_demo_data,
+    hydrate_report_markdown,
     smart_patrol_report_markdown,
     suite_diff,
     suite_coverage,
@@ -139,6 +146,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Claude Channel Authenticity Eval", version="0.1.0", lifespan=lifespan)
+logger = logging.getLogger(__name__)
 
 
 def cors_origins() -> list[str]:
@@ -188,6 +196,18 @@ def _database_size_bytes() -> int | None:
 
 
 def _memory_usage() -> dict[str, int | float | None]:
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        psutil = None
+    if psutil is not None:
+        mem = psutil.virtual_memory()
+        return {
+            "memory_total_bytes": int(mem.total),
+            "memory_available_bytes": int(mem.available),
+            "memory_used_bytes": int(mem.used),
+            "memory_used_percent": round(float(mem.percent), 2),
+        }
     meminfo = Path("/proc/meminfo")
     if not meminfo.exists():
         return {
@@ -252,6 +272,8 @@ def run_read(db: Session, run: Run) -> RunRead:
     if patrol_channel:
         payload.patrol_channel_id = patrol_channel.id
         payload.patrol_channel_name = patrol_channel.name
+        payload.patrol_channel_provider_type = patrol_channel.provider_type
+        payload.patrol_channel_account_type = (patrol_channel.auth_config or {}).get("account_type")
     return payload
 
 
@@ -338,6 +360,12 @@ def cleanup_run_logs(dry_run: bool = Query(False), db: Session = Depends(get_db)
     return payload
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception):
+    logger.exception("Unhandled application error", exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
 @app.get("/api/channels", response_model=list[ChannelRead])
 def list_channels(db: Session = Depends(get_db)) -> list[Channel]:
     return list(db.scalars(select(Channel).order_by(Channel.role, Channel.name)).all())
@@ -420,8 +448,15 @@ async def channel_model_request_test(channel_id: str, data: ModelRequestTestCrea
         return await create_model_request_test(db, channel, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        logger.exception("Model request test timed out for channel %s", channel_id)
+        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
+    except httpx.HTTPStatusError as exc:
+        logger.exception("Model request test failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream service returned an error") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.exception("Model request test failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream request failed") from exc
 
 
 @app.get("/api/channels/{channel_id}/models", response_model=list[str])
@@ -433,8 +468,15 @@ async def channel_models(channel_id: str, db: Session = Depends(get_db)) -> list
         return await fetch_channel_models(channel)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        logger.exception("Model list fetch timed out for channel %s", channel_id)
+        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
+    except httpx.HTTPStatusError as exc:
+        logger.exception("Model list fetch failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream service returned an error") from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.exception("Model list fetch failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream request failed") from exc
 
 
 @app.get("/api/suites", response_model=list[TestSuiteRead])
@@ -584,15 +626,28 @@ def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = 
         run = create_run(db, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    background_tasks.add_task(
-        execute_run,
-        SessionLocal,
-        run.id,
-        data.runtime_credentials,
-        data.use_mock,
-        benchmark_config=data.benchmark_config.model_dump() if data.benchmark_config else None,
-    )
-    return run_read(db, run)
+    benchmark_config = data.benchmark_config.model_dump() if data.benchmark_config else None
+    if data.use_mock:
+        asyncio.run(
+            execute_run(
+                SessionLocal,
+                run.id,
+                data.runtime_credentials,
+                data.use_mock,
+                benchmark_config=benchmark_config,
+            )
+        )
+    else:
+        background_tasks.add_task(
+            execute_run,
+            SessionLocal,
+            run.id,
+            data.runtime_credentials,
+            data.use_mock,
+            benchmark_config=benchmark_config,
+        )
+    refreshed = db.get(Run, run.id) or run
+    return run_read(db, refreshed)
 
 
 @app.get("/api/eval-runs", response_model=list[RunRead])
@@ -641,15 +696,28 @@ def start_arena_run(data: ArenaRunCreate, background_tasks: BackgroundTasks, db:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    background_tasks.add_task(
-        execute_run,
-        SessionLocal,
-        run.id,
-        data.runtime_credentials,
-        data.use_mock,
-        arena_config={"judge_channel_id": data.judge_channel_id, "judge_mode": data.judge_mode, "judge_rubric": data.judge_rubric},
-    )
-    return run_read(db, run)
+    arena_config = {"judge_channel_id": data.judge_channel_id, "judge_mode": data.judge_mode, "judge_rubric": data.judge_rubric}
+    if data.use_mock:
+        asyncio.run(
+            execute_run(
+                SessionLocal,
+                run.id,
+                data.runtime_credentials,
+                data.use_mock,
+                arena_config=arena_config,
+            )
+        )
+    else:
+        background_tasks.add_task(
+            execute_run,
+            SessionLocal,
+            run.id,
+            data.runtime_credentials,
+            data.use_mock,
+            arena_config=arena_config,
+        )
+    refreshed = db.get(Run, run.id) or run
+    return run_read(db, refreshed)
 
 
 @app.get("/api/baselines", response_model=list[BaselineSnapshotRead])
@@ -727,14 +795,25 @@ def build_baseline(data: BaselineBuildCreate, background_tasks: BackgroundTasks,
         run, _snapshot = create_baseline_build(db, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    background_tasks.add_task(
-        execute_run,
-        SessionLocal,
-        run.id,
-        data.runtime_credentials,
-        data.use_mock,
-    )
-    return run
+    if data.use_mock:
+        asyncio.run(
+            execute_run(
+                SessionLocal,
+                run.id,
+                data.runtime_credentials,
+                data.use_mock,
+            )
+        )
+    else:
+        background_tasks.add_task(
+            execute_run,
+            SessionLocal,
+            run.id,
+            data.runtime_credentials,
+            data.use_mock,
+        )
+    refreshed = db.get(Run, run.id) or run
+    return run_read(db, refreshed)
 
 
 @app.post("/api/baselines/{baseline_id}/validate", response_model=BaselineSnapshotRead)
@@ -829,6 +908,11 @@ def download_smart_patrol_report(
     )
 
 
+@app.get("/api/scheduled-tests/health", response_model=ScheduledTestHealthRead)
+def get_scheduled_tests_health(db: Session = Depends(get_db)) -> dict[str, object]:
+    return scheduled_tests_health(db)
+
+
 @app.post("/api/scheduled-tests/report/send-daily", response_model=FeishuTestMessageRead)
 async def send_smart_patrol_daily_report() -> dict[str, object]:
     return await send_daily_patrol_report(SessionLocal, force=True)
@@ -900,11 +984,12 @@ async def run_scheduled_test_now(
         validate_scheduled_channel_test(db, scheduled)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    scheduled.last_status = "queued"
-    scheduled.last_error = None
-    db.commit()
-    db.refresh(scheduled)
-    background_tasks.add_task(execute_scheduled_channel_test, SessionLocal, scheduled.id)
+    claimed = claim_scheduled_test(db, scheduled.id, force=True)
+    if claimed:
+        background_tasks.add_task(execute_scheduled_channel_test, SessionLocal, claimed.id)
+        scheduled = claimed
+    else:
+        db.refresh(scheduled)
     return ScheduledChannelTestRead.model_validate(scheduled_channel_test_read(db, scheduled))
 
 
@@ -1155,6 +1240,11 @@ def download_report(run_id: str, db: Session = Depends(get_db)) -> Response:
     reports = db.scalars(select(Report).where(Report.run_id == run_id).order_by(Report.final_score.asc())).all()
     if not reports:
         raise HTTPException(status_code=404, detail="Report not found")
+    updated = False
+    for report in reports:
+        updated = hydrate_report_markdown(db, report) or updated
+    if updated:
+        db.commit()
     markdown = "\n\n---\n\n".join(report.markdown or "" for report in reports)
     return Response(markdown, media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{run_id}.md"'})
 
@@ -1230,6 +1320,10 @@ def get_report_detail_alias(report_id: str, db: Session = Depends(get_db)) -> di
     detail = get_report_detail(db, report_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Report not found")
+    report = db.get(Report, report_id)
+    if report and hydrate_report_markdown(db, report):
+        db.commit()
+        detail["report"] = ReportRead.model_validate(report)
     return detail
 
 
@@ -1238,6 +1332,8 @@ def get_report_alias(report_id: str, db: Session = Depends(get_db)) -> Report:
     report = db.get(Report, report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    if hydrate_report_markdown(db, report):
+        db.commit()
     return report
 
 

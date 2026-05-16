@@ -4,7 +4,7 @@ import { Alert, Button, Card, Collapse, Form, Input, Select, Tag, Typography, me
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
-import { buildRuntimeCredentials } from '../channelCredentials';
+import { buildRuntimeCredentials, formatChannelDisplayName } from '../channelCredentials';
 import type { Channel, TestSuite } from '../types';
 import {
   ChannelMultiSelect,
@@ -215,7 +215,7 @@ export default function CreateArenaRun() {
                           showSearch
                           placeholder="可选，默认使用本地确定性评分"
                           optionFilterProp="label"
-                          options={referenceChannels.map((channel) => ({ value: channel.id, label: channel.name, disabled: !channel.enabled }))}
+                          options={referenceChannels.map((channel) => ({ value: channel.id, label: formatChannelDisplayName(channel), disabled: !channel.enabled }))}
                         />
                       </Form.Item>
                       <Form.Item label="Judge 模式" name="judge_mode">

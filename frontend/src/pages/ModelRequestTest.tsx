@@ -4,6 +4,7 @@ import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Popconfirm
 import { Link } from 'react-router-dom';
 import { BrainCircuit, Bug, Search, Send, Shuffle, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { Channel, ModelRequestTestResult } from '../types';
 
@@ -146,7 +147,7 @@ function normalizedValue(result: ModelRequestTestResult | null, key: string) {
 
 function rawResponseHasThinkingSignature(result: ModelRequestTestResult | null) {
   const content = result?.result.raw_response?.content;
-  return Array.isArray(content) && content.some((block) => block && typeof block === 'object' && block.type === 'thinking' && block.signature);
+  return Array.isArray(content) && content.some((block) => block && typeof block === 'object' && 'type' in block && (block as Record<string, unknown>).type === 'thinking' && 'signature' in block);
 }
 
 function resultErrorText(result: ModelRequestTestResult) {
@@ -217,7 +218,7 @@ export default function ModelRequestTest() {
 
   const channelOptions = availableChannels.map((channel) => ({
     value: channel.id,
-    label: `${channel.name} · ${channel.model_name || '未配置模型'}`,
+    label: `${formatChannelDisplayName(channel)} · ${channel.model_name || '未配置模型'}`,
   }));
 
   useEffect(() => {
@@ -575,7 +576,8 @@ export default function ModelRequestTest() {
                     <Descriptions.Item label="任务">
                       <Link to={`/runs/${payload.run.id}`}>{payload.run.id}</Link>
                     </Descriptions.Item>
-                    <Descriptions.Item label="Result ID">{payload.result.id}</Descriptions.Item>
+                    <Descriptions.Item label="Message ID">{payload.message_id || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="Request ID">{payload.request_id || '-'}</Descriptions.Item>
                     <Descriptions.Item label="创建时间">{formatDateTime(payload.run.created_at)}</Descriptions.Item>
                     <Descriptions.Item label="完成时间">{formatDateTime(payload.run.finished_at)}</Descriptions.Item>
                     <Descriptions.Item label="结果">
@@ -614,11 +616,11 @@ export default function ModelRequestTest() {
               <Descriptions.Item label="任务">
                 <Link to={`/runs/${result.run.id}`}>{result.run.id}</Link>
               </Descriptions.Item>
-              <Descriptions.Item label="Result ID">{result.result.id}</Descriptions.Item>
               <Descriptions.Item label="创建时间">{formatDateTime(result.run.created_at)}</Descriptions.Item>
               <Descriptions.Item label="完成时间">{formatDateTime(result.run.finished_at)}</Descriptions.Item>
               <Descriptions.Item label="状态">{result.run.status}</Descriptions.Item>
               <Descriptions.Item label="Message ID">{result.message_id || '-'}</Descriptions.Item>
+              <Descriptions.Item label="Request ID">{result.request_id || '-'}</Descriptions.Item>
               <Descriptions.Item label="渠道特征">{result.message_channel_type}</Descriptions.Item>
               <Descriptions.Item label="协议">{result.request_protocol || '-'}</Descriptions.Item>
               <Descriptions.Item label="Endpoint">{result.provider_endpoint || '-'}</Descriptions.Item>

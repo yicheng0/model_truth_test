@@ -5,12 +5,87 @@ export type Channel = {
   role: ChannelRole;
   base_url?: string | null;
   model_name?: string | null;
-  auth_config?: Record<string, unknown>;
+  auth_config?: ChannelAuthConfig;
   is_reference: boolean;
   enabled: boolean;
 };
 
 export type ChannelRole = string;
+
+export type JsonObject = Record<string, any>;
+
+export type ChannelAuthConfig = JsonObject & {
+  api_key?: string;
+  account_type?: string;
+  request_protocol?: string;
+  region?: string;
+};
+
+export type ResponsePayload = JsonObject & {
+  content?: Array<Record<string, unknown>>;
+  content_text?: string;
+  tool_calls?: Array<Record<string, unknown>>;
+  error?: unknown;
+  usage?: JsonObject;
+  stream_events?: string[];
+  provider_message_id?: string;
+  provider_model?: string;
+  stop_reason?: string;
+  raw_response?: ResponsePayload;
+  request_id?: string;
+  requestId?: string;
+  _response_metadata?: JsonObject;
+  cloud_wrapper?: JsonObject;
+  ResponseMetadata?: JsonObject;
+};
+
+export type MetricsPayload = JsonObject & {
+  latency_ms?: number;
+  ttft_ms?: number;
+  tokens_per_second?: number;
+};
+
+export type ReportEvidence = JsonObject & {
+  test_scope?: string;
+  confidence?: number | string | null;
+  labels?: string[];
+  label_explanations?: Array<{ label: string; description: string }>;
+  detected_provider_hint?: string | null;
+  dimension_scores?: Record<string, number | null | undefined>;
+  arena?: JsonObject & {
+    rank?: number;
+    win_rate?: number;
+    avg_case_score?: number;
+    pair_count?: number;
+    case_count?: number;
+  };
+  arena_matrix?: Array<JsonObject>;
+  judge_evidence?: JsonObject;
+  top_evidence?: Array<JsonObject & {
+    test_case_id?: string;
+    winner_channel_id?: string;
+    loser_channel_id?: string;
+    winner_score?: number | null;
+    loser_score?: number | null;
+    margin?: number | null;
+    labels?: string[];
+  }>;
+  model_request?: JsonObject;
+  model_requests?: Array<JsonObject>;
+  signature_interop?: JsonObject & {
+    status?: 'pass' | 'fail' | 'skipped' | string;
+    reason?: string | null;
+    source_channel_id?: string | null;
+    source_channel_name?: string | null;
+    relay_channel_id?: string | null;
+    relay_channel_name?: string | null;
+    source_message_id?: string | null;
+    source_message_channel_type?: string | null;
+    relay_message_id?: string | null;
+    relay_message_channel_type?: string | null;
+    signature_prefixes?: string[];
+  };
+};
 
 export type ChannelTaxonomySetting = {
   id: string;
@@ -30,6 +105,18 @@ export type ChannelTaxonomyUpdate = {
   model_options?: Array<string | null>;
 };
 
+export type ChannelCreate = {
+  id?: string | null;
+  name: string;
+  provider_type: string;
+  role?: string | null;
+  base_url?: string | null;
+  model_name?: string | null;
+  auth_config?: ChannelAuthConfig | null;
+  is_reference?: boolean;
+  enabled?: boolean;
+};
+
 export type SignatureInteropResult = {
   ok: boolean;
   status: 'pass' | 'fail' | string;
@@ -47,8 +134,10 @@ export type SignatureInteropResult = {
   signature_prefixes: string[];
   source_message_id?: string | null;
   source_message_channel_type: string;
+  source_request_id?: string | null;
   relay_message_id?: string | null;
   relay_message_channel_type: string;
+  relay_request_id?: string | null;
   relay_raw_excerpt: string;
   fallback_note: string;
   steps: Array<{
@@ -63,6 +152,7 @@ export type ModelRequestTestResult = {
   run: Run;
   result: Result;
   message_id?: string | null;
+  request_id?: string | null;
   message_channel_type: string;
   request_protocol?: string | null;
   provider_endpoint?: string | null;
@@ -84,8 +174,22 @@ export type TestCase = {
   title: string;
   prompt: string;
   system_prompt?: string | null;
-  request_params?: Record<string, unknown> | null;
-  scoring_rules?: Record<string, unknown> | null;
+  request_params?: JsonObject | null;
+  scoring_rules?: JsonObject | null;
+  is_hidden?: boolean;
+  enabled?: boolean;
+};
+
+export type TestCaseCreate = {
+  id?: string | null;
+  suite_id: string;
+  module: string;
+  sort_order?: number;
+  title: string;
+  prompt: string;
+  system_prompt?: string | null;
+  request_params?: JsonObject | null;
+  scoring_rules?: JsonObject | null;
   is_hidden?: boolean;
   enabled?: boolean;
 };
@@ -100,6 +204,8 @@ export type Run = {
   scheduled_test_id?: string | null;
   patrol_channel_id?: string | null;
   patrol_channel_name?: string | null;
+  patrol_channel_provider_type?: string | null;
+  patrol_channel_account_type?: string | null;
   channels?: Array<{ channel_id?: string | null; channel_name?: string | null; role_in_run?: string | null }>;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'interrupted' | 'canceled';
   repeat_count: number;
@@ -109,6 +215,62 @@ export type Run = {
   started_at?: string | null;
   finished_at?: string | null;
   created_at?: string | null;
+};
+
+export type BenchmarkConfig = {
+  concurrency_steps?: number[];
+  duration_seconds?: number;
+  warmup_requests?: number;
+  target_qps?: number | null;
+  sla_p95_ms?: number | null;
+  max_error_rate?: number | null;
+};
+
+export type RunCreate = {
+  name: string;
+  suite_id: string;
+  channel_ids?: Record<string, string[]>;
+  repeat_count: number;
+  concurrency: number;
+  mode?: RunMode;
+  test_scope?: TestScope;
+  baseline_snapshot_id?: string;
+  use_mock?: boolean;
+  runtime_credentials?: Record<string, JsonObject>;
+  benchmark_config?: BenchmarkConfig | null;
+};
+
+export type BaselineBuildCreate = {
+  name: string;
+  suite_id: string;
+  channel_ids?: Record<string, string[]>;
+  repeat_count: number;
+  concurrency: number;
+  use_mock?: boolean;
+  test_scope?: TestScope;
+  expires_in_days?: number;
+  runtime_credentials?: Record<string, JsonObject>;
+};
+
+export type ScheduledChannelTestCreate = {
+  name: string;
+  channel_id: string;
+  suite_id?: string | null;
+  baseline_snapshot_id?: string | null;
+  enabled?: boolean;
+  interval_minutes?: number;
+  run_window_start?: string | null;
+  run_window_end?: string | null;
+  test_scope?: TestScope;
+  repeat_count?: number;
+  concurrency?: number;
+  use_mock?: boolean;
+  alert_grade_threshold?: 'C' | 'D' | 'E';
+  alert_score_threshold?: number | null;
+  alert_red_flags_enabled?: boolean;
+  quiet_minutes?: number;
+  max_retries?: number;
+  retry_interval_minutes?: number;
 };
 
 export type SystemUsage = {
@@ -156,9 +318,12 @@ export type ScheduledProbeModelRequest = {
   channel_name?: string | null;
   result_id?: string | null;
   message_id?: string | null;
+  request_id?: string | null;
   message_channel_type?: string | null;
   request_protocol?: string | null;
   provider_endpoint?: string | null;
+  created_at?: string | null;
+  completed_at?: string | null;
   labels?: string[];
   score?: number | null;
   error?: string | null;
@@ -177,10 +342,10 @@ export type Result = {
   test_case_id: string;
   channel_id: string;
   attempt_index: number;
-  normalized_response?: Record<string, any> | null;
-  raw_request?: Record<string, any> | null;
-  raw_response?: Record<string, any> | null;
-  metrics?: Record<string, any> | null;
+  normalized_response?: ResponsePayload | null;
+  raw_request?: JsonObject | null;
+  raw_response?: ResponsePayload | null;
+  metrics?: MetricsPayload | null;
   score: number;
   labels?: string[] | null;
   created_at?: string | null;
@@ -209,10 +374,10 @@ export type BaselineResult = {
   channel_id: string;
   role_in_baseline: string;
   attempt_index: number;
-  normalized_response?: Record<string, any> | null;
-  raw_request?: Record<string, any> | null;
-  raw_response?: Record<string, any> | null;
-  metrics?: Record<string, any> | null;
+  normalized_response?: ResponsePayload | null;
+  raw_request?: JsonObject | null;
+  raw_response?: ResponsePayload | null;
+  metrics?: MetricsPayload | null;
   score: number;
   labels?: string[] | null;
   created_at?: string | null;
@@ -238,7 +403,7 @@ export type Report = {
   final_score: number;
   grade: 'A' | 'B' | 'C' | 'D' | 'E';
   summary?: string | null;
-  evidence?: Record<string, any> | null;
+  evidence?: ReportEvidence | null;
   markdown?: string | null;
   created_at?: string | null;
 };
@@ -247,6 +412,39 @@ export type TestSuiteBundle = {
   suite: Partial<TestSuite>;
   cases: Array<Partial<TestCase>>;
 };
+
+export type ReportComparePredictionCell = {
+  result?: Result | null;
+  comparison?: Comparison | null;
+  labels: string[];
+  score?: number | null;
+  latency_ms?: number | null;
+};
+
+export type ReportComparePredictionRow = {
+  test_case_id: string;
+  title: string;
+  module: string;
+  sort_order: number;
+  prompt: string;
+  reports: Record<string, ReportComparePredictionCell | null>;
+};
+
+export type ReportCompareMatrixRow = Record<string, any> & {
+  dimension?: string;
+  report_id?: string;
+  channel_id?: string;
+  channel_name?: string;
+  success_rate?: number | null;
+  p95_latency_ms?: number | null;
+  avg_ttft_ms?: number | null;
+  avg_tpot_ms?: number | null;
+  avg_tokens_per_second?: number | null;
+  failure_rate?: number | null;
+};
+
+export type ReportCompareScoreRow = ReportCompareMatrixRow;
+export type ReportComparePerformanceRow = ReportCompareMatrixRow;
 
 export type TestSuiteDiff = {
   suite_id: string;
@@ -287,7 +485,7 @@ export type SamplePlan = {
   test_scope: TestScope;
   total_available: number;
   selected_count: number;
-  filters: Record<string, unknown>;
+  filters: JsonObject;
   cases: TestCase[];
   group_counts: Record<string, number>;
 };
@@ -368,23 +566,10 @@ export type ReportCompare = {
   mode: RunMode;
   reports: ReportSummary[];
   dimensions: string[];
-  score_matrix: Array<Record<string, any>>;
-  prediction_rows: Array<{
-    test_case_id: string;
-    title: string;
-    module: string;
-    sort_order: number;
-    prompt: string;
-    reports: Record<string, {
-      result?: Result | null;
-      comparison?: Comparison | null;
-      labels: string[];
-      score?: number | null;
-      latency_ms?: number | null;
-    } | null>;
-  }>;
+  score_matrix: ReportCompareMatrixRow[];
+  prediction_rows: ReportComparePredictionRow[];
   label_diff: Record<string, string[]>;
-  performance_matrix: Array<Record<string, any>>;
+  performance_matrix: ReportCompareMatrixRow[];
 };
 
 export type RunResults = {
@@ -412,9 +597,26 @@ export type RunSummary = {
   p95_latency_ms?: number | null;
   grade_distribution: Record<string, number>;
   label_distribution: Record<string, number>;
-  performance_by_channel: Array<Record<string, any>>;
-  arena_rankings: Array<Record<string, any>>;
-  top_evidence: Array<Record<string, any>>;
+  performance_by_channel: ReportCompareMatrixRow[];
+  arena_rankings: Array<JsonObject & {
+    channel_id?: string;
+    score?: number | null;
+    win_rate?: number | null;
+    avg_case_score?: number | null;
+    wins?: number | null;
+    pair_count?: number | null;
+    case_count?: number | null;
+    labels?: string[] | null;
+  }>;
+  top_evidence: Array<JsonObject & {
+    test_case_id?: string;
+    winner_channel_id?: string;
+    loser_channel_id?: string;
+    winner_score?: number | null;
+    loser_score?: number | null;
+    margin?: number | null;
+    labels?: string[] | null;
+  }>;
 };
 
 export type ScheduledChannelTest = {
@@ -437,6 +639,12 @@ export type ScheduledChannelTest = {
   quiet_minutes: number;
   max_retries: number;
   retry_interval_minutes: number;
+  locked_by?: string | null;
+  locked_until?: string | null;
+  last_queued_at?: string | null;
+  last_started_at?: string | null;
+  last_finished_at?: string | null;
+  is_stale?: boolean;
   next_run_at?: string | null;
   last_run_id?: string | null;
   last_status?: string | null;
@@ -482,15 +690,28 @@ export type ChannelAlert = {
   final_score: number;
   trigger_labels?: string[] | null;
   message?: string | null;
+  dedupe_key?: string | null;
   notification_status: 'pending' | 'sent' | 'failed' | 'skipped' | string;
   notification_error?: string | null;
-  evidence_summary?: Record<string, any> | null;
+  notification_attempt_count?: number;
+  last_notification_attempt_at?: string | null;
+  evidence_summary?: JsonObject | null;
   notified_at?: string | null;
   reviewer_name?: string | null;
   review_note?: string | null;
   reviewed_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+};
+
+export type ScheduledTestsHealth = {
+  enabled: boolean;
+  instance_id: string;
+  last_tick_at?: string | null;
+  stale_schedule_count: number;
+  queued_schedule_count: number;
+  running_schedule_count: number;
+  next_due_at?: string | null;
 };
 
 export type FeishuBroadcastSetting = {
@@ -524,10 +745,26 @@ export type FeishuBroadcastUpdate = {
 export type SmartPatrolChannelSummary = {
   channel_id: string;
   channel_name: string;
+  channel_provider_type?: string | null;
+  channel_account_type?: string | null;
+  channel_model_name?: string | null;
   run_count: number;
   alert_count: number;
   pending_review_count: number;
   last_run_at?: string | null;
+};
+
+export type SamplePlanCreate = {
+  suite_id: string;
+  test_scope?: string;
+  modules?: string[];
+  task_types?: string[];
+  coverage_tags?: string[];
+  difficulties?: string[];
+  risk_dimensions?: string[];
+  limit?: number | null;
+  per_group_limit?: number | null;
+  group_by?: string;
 };
 
 export type SmartPatrolTrendPoint = {

@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Popover, Typography } from 'antd';
-import { Activity, BarChart3, CalendarClock, ClipboardList, Database, FileText, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Trophy } from 'lucide-react';
+import { Activity, BarChart3, CalendarClock, ClipboardList, Database, FileText, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Settings2, Trophy } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
@@ -18,6 +18,7 @@ const ModelRequestTest = lazy(() => import('./pages/ModelRequestTest'));
 const ReportsPage = lazy(() => import('./pages/ReportsPage'));
 const ReportDetailPage = lazy(() => import('./pages/ReportDetailPage'));
 const ComparePage = lazy(() => import('./pages/ComparePage'));
+const ResourceLogManagement = lazy(() => import('./pages/ResourceLogManagement'));
 
 const { Content, Sider } = Layout;
 
@@ -65,6 +66,11 @@ function Shell() {
         </nav>
 
         <div className="sidebar-tools">
+          <Link className="side-tool-link" to="/resource-log-management">
+            <Button className="side-tool-button" icon={<Settings2 size={16} />}>
+              资源与日志管理
+            </Button>
+          </Link>
           <Popover
             trigger="click"
             placement="rightBottom"
@@ -94,6 +100,7 @@ function Shell() {
               <Route path="/test-cases" element={<TestCases />} />
               <Route path="/baselines" element={<Baselines />} />
               <Route path="/scheduled-tests" element={<ScheduledTests />} />
+              <Route path="/resource-log-management" element={<ResourceLogManagement />} />
               <Route path="/new-run" element={<CreateRun />} />
               <Route path="/new-performance" element={<CreatePerformanceRun />} />
               <Route path="/new-arena" element={<CreateArenaRun />} />

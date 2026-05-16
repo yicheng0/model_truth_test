@@ -372,6 +372,36 @@ def test_report_summary_detail_and_compare_endpoints() -> None:
         assert client.get("/api/reports/compare", params={"ids": f"{report_ids[0]},missing"}).status_code == 404
 
 
+def test_report_detail_backfills_missing_markdown() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report_id = report.id
+        report.markdown = None
+        db.commit()
+
+    with TestClient(app) as client:
+        detail = client.get(f"/api/reports/{report_id}")
+        markdown = client.get(f"/api/reports/{report_id}/markdown")
+        run_markdown = client.get(f"/api/runs/{run_id}/report.md")
+
+    assert detail.status_code == 200
+    assert "Claude 渠道真实性测评报告" in detail.json()["markdown"]
+    assert markdown.status_code == 200
+    assert "Claude 渠道真实性测评报告" in markdown.json()["markdown"]
+    assert "Claude 渠道真实性测评报告" in run_markdown.text
+    with SessionLocal() as db:
+        persisted = db.get(Report, report_id)
+        assert persisted is not None
+        assert persisted.markdown is not None
+        assert "Claude 渠道真实性测评报告" in persisted.markdown
+
+
 def test_report_delete_removes_report_and_linked_alerts_only() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -500,14 +530,12 @@ def test_report_compare_rejects_mixed_modes() -> None:
                 "use_mock": True,
             },
         ).json()
+        client.get(f"/api/runs/{compare_run['id']}/results")
+        client.get(f"/api/runs/{performance_run['id']}/results")
         summaries = client.get("/api/reports/summary").json()
-        report_ids = [
-            item["report_id"]
-            for item in summaries
-            if item["run_id"] in {compare_run["id"], performance_run["id"]}
-        ]
-
-        response = client.get("/api/reports/compare", params={"ids": ",".join(report_ids[:2])})
+        compare_report_id = next(item["report_id"] for item in summaries if item["run_id"] == compare_run["id"])
+        performance_report_id = next(item["report_id"] for item in summaries if item["run_id"] == performance_run["id"])
+        response = client.get("/api/reports/compare", params={"ids": f"{compare_report_id},{performance_report_id}"})
 
     assert response.status_code == 400
     assert "modes must match" in response.json()["detail"]
@@ -2252,6 +2280,7 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
                         "id": "msg_bdrk_01source",
                         "type": "message",
                         "model": "claude-opus-4-6",
+                        "_response_metadata": {"request_id": "req_source_123"},
                         "content": [
                             {"type": "thinking", "thinking": "source thinking", "signature": "sig-source-compatible"},
                             {"type": "text", "text": "source answer"},
@@ -2265,6 +2294,7 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
                     "id": "msg_vrtx_01relay",
                     "type": "message",
                     "model": "claude-opus-4-6",
+                    "_response_metadata": {"request_id": "req_relay_456"},
                     "content": [{"type": "text", "text": "relay answer"}],
                 },
                 request=request,
@@ -2310,7 +2340,9 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert payload["created_at"]
     assert payload["completed_at"]
     assert payload["source_message_channel_type"] == "AWS Bedrock"
+    assert payload["source_request_id"] == "req_source_123"
     assert payload["relay_message_channel_type"] == "Vertex"
+    assert payload["relay_request_id"] == "req_relay_456"
     assert payload["signature_prefixes"] == ["sig-source-compatible"]
     assert [step["name"] for step in payload["steps"]] == [
         "步骤 A：请求 Source thinking",
@@ -2496,6 +2528,7 @@ def test_model_request_test_persists_manual_probe_result(monkeypatch) -> None:
                 "content": [{"type": "text", "text": "真实响应内容"}],
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 8, "output_tokens": 4},
+                "_response_metadata": {"request_id": "req_01manualprobe"},
             },
             "anthropic_messages",
             "https://relay.example/v1/messages",
@@ -2527,6 +2560,7 @@ def test_model_request_test_persists_manual_probe_result(monkeypatch) -> None:
     payload = response.json()
     assert response.status_code == 200
     assert payload["message_id"] == "msg_01manualprobe"
+    assert payload["request_id"] == "req_01manualprobe"
     assert payload["message_channel_type"] == "Anthropic"
     assert payload["request_protocol"] == "anthropic_messages"
     assert payload["run"]["mode"] == "manual_probe"
@@ -2560,6 +2594,7 @@ def test_manual_probe_is_hidden_from_default_suite_and_case_lists(monkeypatch) -
                 "content": [{"type": "text", "text": "manual response"}],
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 3, "output_tokens": 2},
+                "_response_metadata": {"request_id": "req_01hiddenmanualprobe"},
             },
             "anthropic_messages",
             "https://relay.example/v1/messages",
@@ -3109,6 +3144,8 @@ def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None
     assert report["alert_count"] >= 1
     assert report["pending_review_count"] >= 1
     assert report["channel_summaries"]
+    assert report["channel_summaries"][0]["channel_provider_type"]
+    assert "Negative Sample" in report["channel_summaries"][0]["channel_name"]
     assert "avg_score" not in report
     assert "grade_distribution" not in report
     assert "latest_grade" not in report["channel_summaries"][0]
@@ -3120,6 +3157,7 @@ def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None
     assert "智能巡检汇总报告" in markdown.text
     assert "成功 / 错误" in markdown.text
     assert "渠道巡检汇总" in markdown.text
+    assert "Negative Sample-third_party_openai_compatible" in markdown.text
     assert "最近错误" in markdown.text
     assert "平均分" not in markdown.text
     assert "评级分布" not in markdown.text
@@ -3142,7 +3180,6 @@ def test_smart_patrol_daily_text_uses_scoreless_summary(monkeypatch) -> None:
                 "enabled": True,
             },
         ).json()
-        client.post(f"/api/scheduled-tests/{schedule['id']}/run-now")
         asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
 
     with SessionLocal() as db:
@@ -3155,6 +3192,7 @@ def test_smart_patrol_daily_text_uses_scoreless_summary(monkeypatch) -> None:
     assert "成功" in text
     assert "错误" in text
     assert "重点渠道：" in text
+    assert "Negative Sample-third_party_openai_compatible" in text
     assert "平均分" not in text
     assert "评级" not in text
     assert "分数" not in text
@@ -3183,9 +3221,9 @@ def test_scheduled_alert_notification_uses_error_message(monkeypatch) -> None:
     assert "异常标签：" in text
     assert "渠道：Negative Sample（negative_sample）" in text
     assert "模型：" in text
-    assert "Result ID：" in text
     assert "Request ID：" in text
-    assert "消息ID：" in text
+    assert "Message ID：" in text
+    assert "Result ID：" not in text
 
 
 def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
@@ -3243,9 +3281,9 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert "Thinking temperature 冲突" in markdown
     assert "Web Search tool" in markdown
     assert "thinking.adaptive.enabled" in markdown
-    assert "Result ID" in markdown
     assert "Message ID" in markdown
     assert "Request ID" in markdown
+    assert "Result ID" not in markdown
     assert "时间" in markdown
     assert "Negative Sample (negative_sample)" in markdown
     assert "# Negative Sample - 自动巡检资源报告" in markdown

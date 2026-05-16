@@ -5,10 +5,12 @@ import { CheckCircle2, Clock3, Eye, GitCompare, ShieldCheck, TriangleAlert } fro
 import { useParams } from 'react-router-dom';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
 import { api, getErrorMessage } from '../api';
-import { roleColor } from '../channelTaxonomy';
-import { extractPatrolEvidence, type PatrolEvidence } from '../runsUtils';
+import { accountTypeLabel, formatChannelDisplayName } from '../channelCredentials';
+import { providerTypeLabel, roleColor } from '../channelTaxonomy';
+import { extractPatrolEvidence, formatPatrolChannel, type PatrolEvidence, type PatrolModelRequestEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
-import type { BaselineResult, Channel, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
+import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
+import { isComboManualProbeRun, manualProbeSummaryRows } from './runDetailManualProbe';
 
 type DisplayResult = Result | BaselineResult;
 
@@ -33,6 +35,27 @@ type OutputDrawerState = {
   score?: number;
   latency?: number;
   result?: DisplayResult;
+};
+
+type ManualProbeRow = {
+  key: string;
+  title: string;
+  status: string;
+  channelName: string;
+  channelId: string;
+  channelType: string;
+  resultId?: string | null;
+  messageId?: string | null;
+  requestId?: string | null;
+  requestProtocol?: string | null;
+  providerEndpoint?: string | null;
+  completedAt?: string | null;
+  labels: string[];
+  error?: string | null;
+  responseText?: string | null;
+  rawResponseText?: string | null;
+  rawRequestText?: string | null;
+  score?: number;
 };
 
 type ArenaRankingRow = {
@@ -208,6 +231,50 @@ function evidenceStatusColor(status?: string | null) {
   return 'gold';
 }
 
+function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
+  const responseText = item.responseText ?? item.rawResponseText ?? item.error ?? '-';
+  return (
+    <div className="patrol-probe-detail">
+      <div className="patrol-probe-meta-grid">
+        <div>
+          <span>Result ID</span>
+          <Typography.Text code copyable={item.resultId ? { text: item.resultId } : false}>{item.resultId || '-'}</Typography.Text>
+        </div>
+        <div>
+          <span>Message ID</span>
+          <Typography.Text code copyable={item.messageId ? { text: item.messageId } : false}>{item.messageId || '-'}</Typography.Text>
+        </div>
+        <div>
+          <span>Request ID</span>
+          <Typography.Text code copyable={item.requestId ? { text: item.requestId } : false}>{item.requestId || '-'}</Typography.Text>
+        </div>
+        <div>
+          <span>Endpoint</span>
+          <Typography.Text copyable={item.providerEndpoint ? { text: item.providerEndpoint } : false}>{item.providerEndpoint || '-'}</Typography.Text>
+        </div>
+      </div>
+      <div className="patrol-probe-detail-row">
+        <span>标签</span>
+        <div>
+          {item.labels.length ? (
+            <Space wrap size={4}>{item.labels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space>
+          ) : (
+            <Typography.Text type="secondary">-</Typography.Text>
+          )}
+        </div>
+      </div>
+      <div className="patrol-probe-detail-row">
+        <span>错误</span>
+        <Typography.Text>{item.error || '-'}</Typography.Text>
+      </div>
+      <div className="patrol-probe-detail-row full">
+        <span>完整响应 / 原始响应</span>
+        <pre className="patrol-probe-response">{responseText}</pre>
+      </div>
+    </div>
+  );
+}
+
 function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
   if (!evidence) {
     return <Empty description="暂无巡检证据" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
@@ -219,36 +286,37 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
         <div className="monitor-stat-card"><span>真实请求探针</span><strong>{evidence.modelRequests.length}</strong></div>
         <div className="monitor-stat-card"><span>Signature</span><strong><Tag color={evidenceStatusColor(signature?.status)}>{signature?.status ?? '待确认'}</Tag></strong></div>
       </div>
+      {evidence.modelRequests[0] ? (
+        <Typography.Text type="secondary">
+          Message ID：{evidence.modelRequests[0].messageId ?? '-'} · Request ID：{evidence.modelRequests[0].requestId ?? '-'}
+        </Typography.Text>
+      ) : null}
       {evidence.detectedProviderHint ? <Typography.Paragraph className="report-summary-text">{evidence.detectedProviderHint}</Typography.Paragraph> : null}
       <Table
+        className="patrol-probe-table"
         rowKey={(item) => item.key ?? item.title ?? item.resultId ?? item.messageId ?? 'model-request'}
         dataSource={evidence.modelRequests}
         pagination={false}
-        scroll={{ x: 2080 }}
+        scroll={{ x: 980 }}
+        expandable={{
+          expandedRowRender: (item) => <PatrolProbeDetail item={item} />,
+          rowExpandable: () => true,
+        }}
         columns={[
           { title: '参数探针', width: 220, render: (_, item) => <strong>{item.title ?? item.key ?? '真实模型请求'}</strong> },
           { title: '状态', width: 110, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag> },
           { title: '时间', width: 190, render: (_, item) => formatDateTime(item.completedAt ?? item.createdAt) },
-          { title: 'Result ID', dataIndex: 'resultId', width: 190, render: (value) => value ?? '-' },
-          { title: 'Message ID', dataIndex: 'messageId', width: 190, render: (value) => value ?? '-' },
-          { title: 'Request ID', dataIndex: 'requestId', width: 190, render: (value) => value ?? '-' },
           { title: '渠道类型', dataIndex: 'messageChannelType', width: 180, render: (value) => value ?? '-' },
           { title: '协议', dataIndex: 'requestProtocol', width: 150, render: (value) => value ?? '-' },
           {
-            title: '响应/错误内容',
-            width: 360,
+            title: '响应摘要',
+            width: 330,
             render: (_, item) => (
               <Tooltip title={item.responseText || item.rawResponseText || undefined}>
                 <Typography.Text>{compactPatrolText(item.responseText ?? item.rawResponseText ?? item.error)}</Typography.Text>
               </Tooltip>
             ),
           },
-          {
-            title: '标签',
-            width: 220,
-            render: (_, item) => item.labels.length ? <Space wrap size={4}>{item.labels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space> : '-',
-          },
-          { title: '错误', width: 220, render: (_, item) => item.error ?? '-' },
         ]}
       />
       {signature ? (
@@ -268,6 +336,116 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
       ) : null}
     </Space>
   );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function toText(value: unknown) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text || null;
+}
+
+function stringifyJson(value: unknown) {
+  if (value === null || value === undefined) return null;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function compactText(value?: string | null, limit = 180) {
+  const text = value?.replace(/\s+/g, ' ').trim();
+  if (!text) return '-';
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function channelLabel(name?: string | null, id?: string | null) {
+  if (name && id) return `${name} (${id})`;
+  return name || id || '-';
+}
+
+function manualProbeChannelType(channel?: Channel, taxonomy?: ChannelTaxonomySetting | null) {
+  if (!channel) return '-';
+  return [
+    formatPatrolChannel({ id: channel.id, name: channel.name, accountType: channel.auth_config?.account_type, providerType: channel.provider_type }),
+    providerTypeLabel(channel.provider_type, taxonomy ?? undefined),
+    accountTypeLabel(channel.auth_config?.account_type),
+  ].filter(Boolean).join(' · ');
+}
+
+function payloadRequestId(value: unknown) {
+  const payload = asRecord(value);
+  if (!payload) return null;
+  const direct = toText(payload.request_id) ?? toText(payload.requestId);
+  if (direct) return direct;
+  const error = asRecord(payload.error);
+  const errorRequestId = toText(error?.request_id) ?? toText(error?.requestId);
+  if (errorRequestId) return errorRequestId;
+  const metadata = asRecord(payload._response_metadata);
+  const metadataRequestId = toText(metadata?.request_id);
+  if (metadataRequestId) return metadataRequestId;
+  const cloudWrapper = asRecord(payload.cloud_wrapper);
+  const wrapperRequestId = toText(cloudWrapper?.request_id) ?? toText(cloudWrapper?.requestId);
+  if (wrapperRequestId) return wrapperRequestId;
+  const responseMetadata = asRecord(payload.ResponseMetadata);
+  return toText(responseMetadata?.RequestId) ?? toText(responseMetadata?.RequestID);
+}
+
+function manualProbeResponseText(result: DisplayResult) {
+  const normalized = result.normalized_response;
+  const contentText = toText(normalized?.content_text);
+  if (contentText) return contentText;
+  const errorText = toText(normalized?.error);
+  if (errorText) return errorText;
+  const rawError = asRecord(normalized?.raw_response)?.error;
+  const rawErrorText = toText(rawError);
+  if (rawErrorText) return rawErrorText;
+  return stringifyJson(result.raw_response) ?? '等待该渠道返回结果';
+}
+
+function extractManualProbeRows(results: RunResults, cases: TestCase[], channels: Map<string, Channel>, taxonomy?: ChannelTaxonomySetting | null): ManualProbeRow[] {
+  const caseById = new Map(cases.map((caseItem) => [caseItem.id, caseItem]));
+
+  return [...results.results]
+    .sort((left, right) => {
+      if (left.test_case_id !== right.test_case_id) return left.test_case_id.localeCompare(right.test_case_id);
+      if (right.attempt_index !== left.attempt_index) return right.attempt_index - left.attempt_index;
+      return String(right.created_at ?? '').localeCompare(String(left.created_at ?? ''));
+    })
+    .map((result, index) => {
+      const caseItem = caseById.get(result.test_case_id);
+      const normalized = result.normalized_response ?? {};
+      const rawResponse = asRecord(result.raw_response);
+      const labels = Array.isArray(result.labels) ? result.labels.filter((label): label is string => typeof label === 'string') : [];
+      const channelId = result.channel_id;
+      const channel = channels.get(channelId);
+      const channelName = channel?.name ?? result.channel_id;
+      const status = result.score === 100 ? 'ok' : 'error';
+      return {
+        key: `${result.test_case_id}:${result.channel_id}:${result.attempt_index}:${index}`,
+        title: caseItem?.title ?? result.test_case_id,
+        status,
+        channelName,
+        channelId,
+        channelType: manualProbeChannelType(channel, taxonomy),
+        resultId: result.id,
+        messageId: toText(rawResponse?.id) ?? toText(normalized.provider_message_id),
+        requestId: payloadRequestId(result.raw_request) ?? payloadRequestId(normalized) ?? toText(rawResponse?.request_id) ?? toText(normalized.request_id),
+        requestProtocol: toText(rawResponse?.request_protocol) ?? toText(normalized.request_protocol),
+        providerEndpoint: toText(rawResponse?.provider_endpoint) ?? toText(normalized.provider_endpoint),
+        completedAt: result.created_at ? String(result.created_at) : null,
+        labels,
+        error: toText(normalized.error) ?? toText(rawResponse?.error),
+        responseText: manualProbeResponseText(result),
+        rawResponseText: stringifyJson(result.raw_response),
+        rawRequestText: stringifyJson(result.raw_request),
+        score: result.score,
+      };
+    });
 }
 
 export default function RunDetail() {
@@ -296,6 +474,7 @@ export default function RunDetail() {
     },
   });
   const channelsQuery = useQuery({ queryKey: ['channels'], queryFn: api.channels });
+  const taxonomyQuery = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
   const casesQuery = useQuery({
     queryKey: ['cases', runResults.data?.run.suite_id],
     queryFn: () => api.cases(runResults.data?.run.suite_id),
@@ -305,22 +484,28 @@ export default function RunDetail() {
   const data = runResults.data ?? null;
   const summary = runSummary.data ?? null;
   const channels = channelsQuery.data ?? [];
+  const taxonomy = taxonomyQuery.data ?? null;
   const cases = casesQuery.data ?? [];
   const isPatrolRun = Boolean(data?.run.scheduled_test_id) || data?.run.test_scope === 'scheduled_probe';
+  const channelById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels]);
   const patrolEvidence = useMemo(() => data ? extractPatrolEvidence(data) : null, [data]);
   const patrolChannelName = data?.run.patrol_channel_name ?? patrolEvidence?.modelRequests[0]?.channelName ?? patrolEvidence?.signature?.relayChannelName ?? null;
   const patrolChannelId = data?.run.patrol_channel_id ?? patrolEvidence?.modelRequests[0]?.channelId ?? patrolEvidence?.signature?.relayChannelId ?? null;
-  const patrolTitle = patrolChannelName ? `${patrolChannelName} - 自动巡检资源日志` : '自动巡检资源日志';
+  const patrolChannel = patrolChannelId ? channelById.get(patrolChannelId) : undefined;
+  const patrolTitle = patrolChannelName ? `${formatPatrolChannel(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)} - 自动巡检资源日志` : '自动巡检资源日志';
   const isSamplingRun = !isPatrolRun && data?.run.mode === 'baseline_build';
   const isPerformanceRun = !isPatrolRun && data?.run.mode === 'performance_benchmark';
   const isArenaRun = !isPatrolRun && data?.run.mode === 'arena_comparison';
   const isAuthenticityRun = !isPatrolRun && (data?.run.mode === 'candidate_eval' || data?.run.mode === 'full_comparison');
 
-  const channelById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels]);
   const caseById = useMemo(() => new Map(cases.map((caseItem) => [caseItem.id, caseItem])), [cases]);
   const runChannelIds = useMemo(() => new Set((data?.run_channels ?? []).map((item) => item.channel_id)), [data?.run_channels]);
   const baselineChannelIds = useMemo(() => new Set((data?.baseline_results ?? []).map((item) => item.channel_id)), [data?.baseline_results]);
   const runRoleByChannel = useMemo(() => new Map((data?.run_channels ?? []).map((item) => [item.channel_id, item.role_in_run])), [data?.run_channels]);
+  const manualProbeRows = useMemo(
+    () => data?.run.mode === 'manual_probe' ? extractManualProbeRows(data, cases, channelById, taxonomy) : [],
+    [cases, channelById, data, taxonomy],
+  );
 
   const sampleChannels = useMemo(
     () => channels.filter((channel) => runChannelIds.has(channel.id)),
@@ -519,6 +704,10 @@ export default function RunDetail() {
     };
   });
   const labelRows = Object.entries(summary?.label_distribution ?? {}).map(([label, count]) => ({ label, count }));
+  const manualProbeIsCombo = isComboManualProbeRun(data?.run.name, manualProbeRows.length);
+  const manualProbeSummary = data?.run.mode === 'manual_probe'
+    ? manualProbeSummaryRows(data.run.name, manualProbeRows, data.run.total_jobs)
+    : [];
 
   if (runResults.isError || channelsQuery.isError || casesQuery.isError || runSummary.isError) {
     const error = runResults.error ?? channelsQuery.error ?? casesQuery.error ?? runSummary.error;
@@ -556,6 +745,15 @@ export default function RunDetail() {
         }
         bordered={false}
       >
+        {data.run.mode === 'manual_probe' ? (
+          <Alert
+            type={manualProbeIsCombo ? 'warning' : 'info'}
+            showIcon
+            message={manualProbeIsCombo ? '组合纯度检测日志' : '单项参数报错日志'}
+            description="这里只展示参数纯度探针、原生报错、message/request id 和原始响应，不显示 Arena 或性能诊断内容。"
+            style={{ marginBottom: 16 }}
+          />
+        ) : null}
         <Descriptions column={{ xs: 1, sm: 2, md: 4 }} style={{ marginBottom: '18px' }}>
           <Descriptions.Item label="状态">
             <Tag color={data.run.status === 'completed' ? 'green' : data.run.status === 'failed' ? 'red' : 'gold'}>
@@ -564,17 +762,25 @@ export default function RunDetail() {
           </Descriptions.Item>
           <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
           <Descriptions.Item label="运行模式">{isPatrolRun ? '自动巡检' : runModeLabel(data.run.mode)}</Descriptions.Item>
-          <Descriptions.Item label="检测范围">{isPatrolRun ? '巡检探针' : data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
-          <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>
-            {data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}
-          </Descriptions.Item>
-          <Descriptions.Item label="已返回题目">{returnedRows} / {rows.length}</Descriptions.Item>
-          {isPatrolRun ? (
-            <Descriptions.Item label="巡检计划">{data.run.scheduled_test_id ?? '-'}</Descriptions.Item>
-          ) : isSamplingRun ? (
-            <Descriptions.Item label="指纹源渠道">{sampleChannels.length}</Descriptions.Item>
+          {data.run.mode === 'manual_probe' ? (
+            manualProbeSummary.map((item) => (
+              <Descriptions.Item key={item.label} label={item.label}>{item.value}</Descriptions.Item>
+            ))
           ) : (
-            <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
+            <>
+              <Descriptions.Item label="检测范围">{isPatrolRun ? '巡检探针' : data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
+              <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>
+                {data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}
+              </Descriptions.Item>
+              <Descriptions.Item label="已返回题目">{returnedRows} / {rows.length}</Descriptions.Item>
+              {isPatrolRun ? (
+                <Descriptions.Item label="巡检计划">{data.run.scheduled_test_id ?? '-'}</Descriptions.Item>
+              ) : isSamplingRun ? (
+                <Descriptions.Item label="指纹源渠道">{sampleChannels.length}</Descriptions.Item>
+              ) : (
+                <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
+              )}
+            </>
           )}
         </Descriptions>
         <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
@@ -590,12 +796,89 @@ export default function RunDetail() {
                 这里只展示真实模型请求参数探针和 Thinking Signature 互通结果，不混入性能诊断或 Arena 排名视图。
               </Typography.Paragraph>
               <Typography.Text type="secondary">
-                渠道：{patrolChannelName ?? '-'}{patrolChannelId ? ` (${patrolChannelId})` : ''}
+                渠道：{formatPatrolChannel(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)}
               </Typography.Text>
             </div>
             <Tag color={data.run.status === 'running' ? 'processing' : 'default'}>{data.run.status}</Tag>
           </div>
           <PatrolDetailPanel evidence={patrolEvidence} />
+        </Card>
+      ) : data.run.mode === 'manual_probe' ? (
+        <Card bordered={false} className="live-monitor-card">
+          <div className="live-monitor-header">
+            <div>
+              <Typography.Text className="brand-kicker">MANUAL PROBE LOG</Typography.Text>
+              <Typography.Title level={2}>{data.run.name}</Typography.Title>
+              <Typography.Paragraph>
+                这里只展示手动参数探针的证据链。组合测试会并列展示三条探针日志，单项测试只展示一次请求。
+              </Typography.Paragraph>
+              <Typography.Text type="secondary">
+                {manualProbeIsCombo ? '组合测试' : '单项测试'} · {manualProbeRows.length} 条日志
+              </Typography.Text>
+            </div>
+            <Tag color={data.run.status === 'running' ? 'processing' : 'default'}>{data.run.status}</Tag>
+          </div>
+          <Table
+            rowKey="key"
+            size="small"
+            pagination={false}
+            dataSource={manualProbeRows}
+            scroll={{ x: 2330 }}
+            locale={{ emptyText: <Empty description="暂无参数探针日志" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+            columns={[
+              { title: '探针', dataIndex: 'title', width: 200 },
+              { title: '状态', width: 110, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag> },
+              { title: '渠道', width: 220, render: (_, item) => channelLabel(item.channelName, item.channelId) },
+              { title: '渠道类型', dataIndex: 'channelType', width: 340, render: (value) => value ?? '-' },
+              {
+                title: 'Message ID',
+                dataIndex: 'messageId',
+                width: 210,
+                render: (value) => value ? <Typography.Text code copyable>{value}</Typography.Text> : '-',
+              },
+              {
+                title: 'Request ID',
+                dataIndex: 'requestId',
+                width: 210,
+                render: (value) => value ? <Typography.Text code copyable>{value}</Typography.Text> : '-',
+              },
+              { title: '协议', dataIndex: 'requestProtocol', width: 150, render: (value) => value ?? '-' },
+              { title: 'Endpoint', dataIndex: 'providerEndpoint', width: 260, render: (value) => value ?? '-' },
+              { title: '完成时间', dataIndex: 'completedAt', width: 190, render: (value) => value ? formatDateTime(value) : '-' },
+              { title: '评分', dataIndex: 'score', width: 100, render: (value) => metricValue(value) },
+              { title: '标签', width: 240, render: (_, item) => item.labels.length ? <Space wrap size={4}>{item.labels.map((label) => <Tag key={label} color="volcano">{label}</Tag>)}</Space> : '-' },
+              {
+                title: '错误/输出',
+                width: 360,
+                render: (_, item) => (
+                  <Tooltip title={item.rawResponseText || item.responseText || undefined}>
+                    <Typography.Text>{compactText(item.error ?? item.responseText ?? item.rawResponseText)}</Typography.Text>
+                  </Tooltip>
+                ),
+              },
+            ]}
+          />
+          <div style={{ marginTop: 16 }} className="signature-sim-grid">
+            {manualProbeRows.map((item) => (
+              <Card key={item.key} title={item.title} bordered={false}>
+                <Descriptions bordered size="small" column={1}>
+                  <Descriptions.Item label="状态">{item.status === 'ok' ? '正确' : '异常'}</Descriptions.Item>
+                  <Descriptions.Item label="渠道">{channelLabel(item.channelName, item.channelId)}</Descriptions.Item>
+                  <Descriptions.Item label="渠道类型">{item.channelType}</Descriptions.Item>
+                  <Descriptions.Item label="Message ID">{item.messageId ? <Typography.Text code copyable>{item.messageId}</Typography.Text> : '-'}</Descriptions.Item>
+                  <Descriptions.Item label="Request ID">{item.requestId ? <Typography.Text code copyable>{item.requestId}</Typography.Text> : '-'}</Descriptions.Item>
+                  <Descriptions.Item label="协议">{item.requestProtocol ?? '-'}</Descriptions.Item>
+                  <Descriptions.Item label="Endpoint">{item.providerEndpoint ?? '-'}</Descriptions.Item>
+                  <Descriptions.Item label="完成时间">{item.completedAt ? formatDateTime(item.completedAt) : '-'}</Descriptions.Item>
+                  <Descriptions.Item label="评分">{metricValue(item.score)}</Descriptions.Item>
+                  <Descriptions.Item label="标签">{item.labels.length ? item.labels.join(', ') : '-'}</Descriptions.Item>
+                </Descriptions>
+                <Card title="返回内容" bordered={false} style={{ marginTop: 12 }}>
+                  <pre className="output-drawer-pre">{item.responseText ?? item.rawResponseText ?? item.error ?? '-'}</pre>
+                </Card>
+              </Card>
+            ))}
+          </div>
         </Card>
       ) : summary ? (
         <Card bordered={false}>
@@ -949,7 +1232,7 @@ export default function RunDetail() {
                 value={selectedSampleChannelId || undefined}
                 placeholder="选择指纹源渠道"
                 onChange={setSelectedSampleChannelId}
-                options={sampleChannels.map((channel) => ({ value: channel.id, label: channel.name }))}
+                options={sampleChannels.map((channel) => ({ value: channel.id, label: formatChannelDisplayName(channel) }))}
               />
             </div>
             <div className="monitor-stat-card">
@@ -969,7 +1252,7 @@ export default function RunDetail() {
                 value={selectedOfficialId || undefined}
                 placeholder={data.baseline_snapshot ? '选择渠道指纹来源' : '选择指纹源渠道'}
                 onChange={setSelectedOfficialId}
-                options={officialChannels.map((channel) => ({ value: channel.id, label: channel.name }))}
+                options={officialChannels.map((channel) => ({ value: channel.id, label: formatChannelDisplayName(channel) }))}
               />
             </div>
             <div className="channel-pair-card candidate">
@@ -978,7 +1261,7 @@ export default function RunDetail() {
                 value={selectedCandidateId || undefined}
                 placeholder="选择待测渠道"
                 onChange={setSelectedCandidateId}
-                options={candidateChannels.map((channel) => ({ value: channel.id, label: channel.name }))}
+                options={candidateChannels.map((channel) => ({ value: channel.id, label: formatChannelDisplayName(channel) }))}
               />
             </div>
             <div className="monitor-stat-card">

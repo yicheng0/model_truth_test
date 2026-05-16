@@ -1,13 +1,26 @@
-import { useEffect, useMemo, useState, type Key } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
-import { BarChart3, Bell, CalendarClock, Edit3, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
+import { BarChart3, Bell, CalendarClock, Edit3, Eye, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
+import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../channelCredentials';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
-import type { Channel, ChannelAlert, ChannelAlertStatus, FeishuBroadcastUpdate, ScheduledChannelTest } from '../types';
+import type { Channel, ChannelAlert, ChannelAlertStatus, FeishuBroadcastUpdate, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
+import {
+  alertChannelId,
+  alertChannelModel,
+  alertOutcomeColor,
+  alertOutcomeLabel,
+  alertProbeCompletedAt,
+  alertProbeSource,
+  alertProbeTitle,
+  alertRequestId,
+  alertResponseId,
+} from '../scheduledAlertLog';
+import AlertLogDrawer from '../components/AlertLogDrawer';
 
 type ScheduleFormValues = {
   name: string;
@@ -38,7 +51,8 @@ type FeishuFormValues = {
 };
 
 type AlertTimeRange = [Dayjs | null, Dayjs | null] | null;
-
+type AlertResultFilter = 'all' | 'success' | 'failure';
+type ScheduledTab = 'plans' | 'alerts' | 'report' | 'feishu';
 const alertStatusLabel: Record<string, string> = {
   pending_review: '待复审',
   confirmed_issue: '确认问题',
@@ -65,7 +79,7 @@ const scheduleStatusColor: Record<string, string> = {
 const patrolGuideSteps = [
   { title: '准备渠道', description: '先在渠道管理里建好候选渠道，确认模型、Base URL 和 Key 能正常请求。' },
   { title: '新建巡检计划', description: '只选择待测渠道和执行间隔，系统固定跑 Signature 互通和真实模型请求。' },
-  { title: '查看判断依据', description: '告警会返回 run、report、result、message id 和 source/relay 响应 ID。' },
+  { title: '查看判断依据', description: '告警会返回 run、report、message id、request id 和 source/relay 响应 ID。' },
   { title: '复审处理', description: '根据疑似 AWS、逆向或 Signature 不互通等标签确认问题，必要时重发飞书通知。' },
 ];
 
@@ -83,12 +97,12 @@ const patrolParameterFaq = [
   {
     key: 'model_request',
     label: '真实模型请求看什么？',
-    children: '系统发送 thinking temperature 探针，记录 message id、协议、endpoint 和 result id，用于判断 AWS/Bedrock、Claude/Anthropic 或中间层改写。',
+    children: '系统发送 thinking temperature 探针，记录 message id、request id、协议和 endpoint，用于判断 AWS/Bedrock、Claude/Anthropic 或中间层改写。',
   },
   {
     key: 'alert_ids',
     label: '告警里的 ID 有什么用？',
-    children: 'run_id 和 report_id 用来查看完整报告；model_request_result_id 对应原始请求/响应；message id 和 source/relay id 用来判断响应来源特征。',
+    children: 'run_id 和 report_id 用来查看完整报告；message id、request id 和 source/relay id 用来判断响应来源特征。',
   },
 ];
 
@@ -106,56 +120,22 @@ function runWindowText(schedule: Pick<ScheduledChannelTest, 'run_window_start' |
   return `${schedule.run_window_start}-${schedule.run_window_end} 北京时间`;
 }
 
-function evidenceText(alert: ChannelAlert) {
-  const evidence = alert.evidence_summary ?? {};
-  const hint = evidence.detected_provider_hint ? String(evidence.detected_provider_hint) : '';
-  const resultId = evidence.model_request_result_id ? `result ${String(evidence.model_request_result_id)}` : '';
-  const messageId = evidence.model_request_message_id || evidence.signature_relay_message_id ? `msg ${String(evidence.model_request_message_id ?? evidence.signature_relay_message_id)}` : '';
-  const requestId = evidence.model_request_request_id || evidence.signature_relay_request_id ? `req ${String(evidence.model_request_request_id ?? evidence.signature_relay_request_id)}` : '';
-  const ids = [resultId, messageId, requestId].filter(Boolean).join(' · ');
-  return [hint, ids].filter(Boolean).join(' · ') || '-';
-}
-
 function alertChannelText(alert: ChannelAlert, channelName?: string | null) {
   const evidence = alert.evidence_summary ?? {};
   const name = evidence.channel_name ? String(evidence.channel_name) : channelName;
   const model = evidence.channel_model_name ? String(evidence.channel_model_name) : '';
-  return { label: channelLabel(name, alert.channel_id), model };
-}
-
-function alertErrorText(alert: ChannelAlert) {
-  const evidence = alert.evidence_summary ?? {};
-  if (evidence.error_message) return String(evidence.error_message);
-  const modelRequests = Array.isArray(evidence.model_requests) ? evidence.model_requests : [];
-  const modelError = modelRequests.find((item) => item && typeof item === 'object' && item.error)?.error;
-  if (modelError) return String(modelError);
-  if (evidence.signature_reason) return String(evidence.signature_reason);
-  const explanations = Array.isArray(evidence.label_explanations) ? evidence.label_explanations.filter(Boolean) : [];
-  if (explanations.length) {
-    return explanations
-      .map((item) => typeof item === 'string' ? item : item && typeof item === 'object' && 'description' in item ? String(item.description) : '')
-      .filter(Boolean)
-      .slice(0, 2)
-      .join('；');
-  }
-  return scorelessAlertMessage(alert.message);
-}
-
-function scorelessAlertMessage(value?: string | null) {
-  const text = (value ?? '').trim();
-  if (!text) return '渠道自动巡检异常';
-  return text
-    .replace(/：评级\s*[A-E]，得分\s*\d+(?:\.\d+)?/g, '：自动巡检异常')
-    .replace(/评级\s*[A-E][，,]?\s*/g, '')
-    .replace(/得分\s*\d+(?:\.\d+)?/g, '')
-    .replace(/\s+/g, ' ')
-    .replace(/[ ，,]+$/g, '')
-    || '渠道自动巡检异常';
-}
-
-function channelLabel(name?: string | null, id?: string | null) {
-  if (name && id) return `${name} (${id})`;
-  return name || id || '-';
+  return {
+    label: formatProviderChannelDisplayName(
+      {
+        id: evidence.channel_id ? String(evidence.channel_id) : alert.channel_id,
+        name,
+        providerType: typeof evidence.channel_provider_type === 'string' ? evidence.channel_provider_type : undefined,
+        accountType: typeof evidence.channel_account_type === 'string' ? evidence.channel_account_type : undefined,
+      },
+      alert.channel_id,
+    ),
+    model,
+  };
 }
 
 function probeSummary(schedule: ScheduledChannelTest) {
@@ -193,36 +173,132 @@ function alertRangeToParams(range: AlertTimeRange) {
   };
 }
 
+function paramValue(params: URLSearchParams, key: string, fallback: string, allowed: readonly string[]) {
+  const value = params.get(key);
+  return value && allowed.includes(value) ? value : fallback;
+}
+
+function rangeFromParams(params: URLSearchParams): AlertTimeRange {
+  const from = params.get('alert_from');
+  const to = params.get('alert_to');
+  if (!from && !to) return null;
+  const start = from ? dayjs(from) : null;
+  const end = to ? dayjs(to) : null;
+  return [start?.isValid() ? start : null, end?.isValid() ? end : null];
+}
+
+function setSearchParamValue(params: URLSearchParams, key: string, value?: string | null) {
+  const trimmed = value?.trim();
+  if (trimmed) params.set(key, trimmed);
+  else params.delete(key);
+}
+
+function bulkDeleteMessage(entity: string, result: { deleted: number; missing: string[] }) {
+  const missing = result.missing ?? [];
+  if (result.deleted > 0 && missing.length === 0) {
+    message.success(`已删除 ${result.deleted} ${entity}`);
+    return;
+  }
+  if (result.deleted > 0) {
+    message.warning(`已删除 ${result.deleted} ${entity}，${missing.length} 个未命中：${missing.join('、')}`);
+    return;
+  }
+  message.warning(`未删除任何${entity}，${missing.length ? `未命中：${missing.join('、')}` : '所选项不存在或已被删除'}`);
+}
+
+function matchesAlertResultFilter(alert: ChannelAlert, filter: AlertResultFilter) {
+  if (filter === 'all') return true;
+  const successStatuses = new Set(['false_positive', 'resolved']);
+  return filter === 'success' ? successStatuses.has(alert.status) : !successStatuses.has(alert.status);
+}
+
+function alertSummaryCell(alert: ChannelAlert, channelName?: string | null) {
+  const channel = alertChannelText(alert, channelName);
+  const completedAt = alertProbeCompletedAt(alert);
+  const messageId = alertResponseId(alert);
+  const requestId = alertRequestId(alert);
+  const source = alertProbeSource(alert);
+  const channelId = alertChannelId(alert);
+  const channelModel = alertChannelModel(alert);
+  return (
+    <Space direction="vertical" size={2}>
+      <Typography.Text strong>{channel.label}</Typography.Text>
+      {channel.model || channelModel ? <Typography.Text type="secondary">{channel.model || channelModel}</Typography.Text> : null}
+      <Typography.Text>{alertProbeTitle(alert)}</Typography.Text>
+      <Typography.Text type="secondary">{formatDateTime(completedAt) || formatDateTime(alert.created_at) || '-'}</Typography.Text>
+      <Typography.Text type="secondary">
+        {channelId || '-'} · {source || '-'}
+      </Typography.Text>
+      <Typography.Text type="secondary">
+        Message ID：{messageId || '-'} · Request ID：{requestId || '-'}
+      </Typography.Text>
+    </Space>
+  );
+}
+
 export default function ScheduledTests() {
   const queryClient = useQueryClient();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const selectedAlertId = searchParams.get('alert');
-  const initialTab = searchParams.get('tab') === 'report' ? 'report' : searchParams.get('tab') === 'feishu' ? 'feishu' : selectedAlertId ? 'alerts' : 'plans';
+  const queryTab = paramValue(searchParams, 'tab', selectedAlertId ? 'alerts' : 'plans', ['plans', 'alerts', 'report', 'feishu']) as ScheduledTab;
   const [scheduleForm] = Form.useForm<ScheduleFormValues>();
   const [reviewForm] = Form.useForm<ReviewFormValues>();
   const [feishuForm] = Form.useForm<FeishuFormValues>();
   const [editingSchedule, setEditingSchedule] = useState<ScheduledChannelTest | null>(null);
   const [reviewingAlert, setReviewingAlert] = useState<ChannelAlert | null>(null);
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
-  const [alertStatus, setAlertStatus] = useState<string>('pending_review');
-  const [alertIdQuery, setAlertIdQuery] = useState('');
-  const [alertTimeRange, setAlertTimeRange] = useState<AlertTimeRange>(null);
+  const [alertStatus, setAlertStatus] = useState<string>(() => paramValue(searchParams, 'alert_status', 'pending_review', ['pending_review', 'confirmed_issue', 'false_positive', 'resolved', 'all']));
+  const [alertResultFilter, setAlertResultFilter] = useState<AlertResultFilter>(() => paramValue(searchParams, 'alert_result', 'failure', ['failure', 'success', 'all']) as AlertResultFilter);
+  const [alertIdQuery, setAlertIdQuery] = useState(() => searchParams.get('alert_query') ?? '');
+  const [alertTimeRange, setAlertTimeRange] = useState<AlertTimeRange>(() => rangeFromParams(searchParams));
   const [selectedAlertRowKeys, setSelectedAlertRowKeys] = useState<Key[]>([]);
+  const [selectedRecentAlertRowKeys, setSelectedRecentAlertRowKeys] = useState<Key[]>([]);
   const [deletingAlertId, setDeletingAlertId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState(initialTab);
+  const [resendingAlertIds, setResendingAlertIds] = useState<Set<string>>(() => new Set());
+  const [openAlertLog, setOpenAlertLog] = useState<ChannelAlert | null>(null);
+  const [activeTab, setActiveTab] = useState<ScheduledTab>(queryTab);
   const [reportRange, setReportRange] = useState('7d');
   const [runningScheduleId, setRunningScheduleId] = useState<string | null>(null);
   const [deletingScheduleId, setDeletingScheduleId] = useState<string | null>(null);
   const runWindowEnabled = Form.useWatch('run_window_enabled', scheduleForm);
+  const deferredAlertIdQuery = useDeferredValue(alertIdQuery);
   const reportDates = useMemo(() => reportRangeToDates(reportRange), [reportRange]);
   const alertDateFilters = useMemo(() => alertRangeToParams(alertTimeRange), [alertTimeRange]);
-  const trimmedAlertIdQuery = alertIdQuery.trim();
+  const trimmedAlertIdQuery = deferredAlertIdQuery.trim();
   const needsPlanData = activeTab === 'plans';
   const needsAlertData = activeTab === 'alerts';
+
+  useEffect(() => {
+    const nextTab = paramValue(searchParams, 'tab', selectedAlertId ? 'alerts' : 'plans', ['plans', 'alerts', 'report', 'feishu']) as ScheduledTab;
+    setActiveTab(nextTab);
+    setAlertStatus(paramValue(searchParams, 'alert_status', 'pending_review', ['pending_review', 'confirmed_issue', 'false_positive', 'resolved', 'all']));
+    setAlertResultFilter(paramValue(searchParams, 'alert_result', 'failure', ['failure', 'success', 'all']) as AlertResultFilter);
+    setAlertIdQuery(searchParams.get('alert_query') ?? '');
+    setAlertTimeRange(rangeFromParams(searchParams));
+  }, [searchParams, selectedAlertId]);
+
+  useEffect(() => {
+    const next = new URLSearchParams(searchParams);
+    activeTab === 'plans' ? next.delete('tab') : next.set('tab', activeTab);
+    alertStatus === 'pending_review' ? next.delete('alert_status') : next.set('alert_status', alertStatus);
+    alertResultFilter === 'failure' ? next.delete('alert_result') : next.set('alert_result', alertResultFilter);
+    setSearchParamValue(next, 'alert_query', alertIdQuery);
+    setSearchParamValue(next, 'alert_from', alertTimeRange?.[0]?.toISOString());
+    setSearchParamValue(next, 'alert_to', alertTimeRange?.[1]?.toISOString());
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+  }, [activeTab, alertIdQuery, alertResultFilter, alertStatus, alertTimeRange, searchParams, setSearchParams]);
 
   const schedules = useQuery({
     queryKey: ['scheduledTests'],
     queryFn: api.scheduledTests,
+    enabled: needsPlanData,
+    refetchInterval: activeTab === 'plans' ? 5000 : false,
+  });
+  const schedulerHealth = useQuery({
+    queryKey: ['scheduledTestsHealth'],
+    queryFn: api.scheduledTestsHealth,
     enabled: needsPlanData,
     refetchInterval: activeTab === 'plans' ? 5000 : false,
   });
@@ -252,6 +328,7 @@ export default function ScheduledTests() {
 
   const channelById = useMemo(() => new Map((channels.data ?? []).map((channel) => [channel.id, channel])), [channels.data]);
   const candidateChannels = useMemo(() => (channels.data ?? []).filter(isCandidateChannel), [channels.data]);
+  const openAlertLogChannel = openAlertLog ? alertChannelText(openAlertLog, channelById.get(openAlertLog.channel_id)?.name).label : '';
 
   useEffect(() => {
     if (!feishuSetting.data) return;
@@ -279,7 +356,7 @@ export default function ScheduledTests() {
   });
 
   const updateSchedule = useMutation({
-    mutationFn: ({ id, payload }: { id: string; payload: Partial<ScheduledChannelTest> }) => api.updateScheduledTest(id, payload),
+    mutationFn: ({ id, payload }: { id: string; payload: Partial<ScheduledChannelTestCreate> }) => api.updateScheduledTest(id, payload),
     onSuccess: async () => {
       message.success('自动巡检计划已更新');
       setScheduleModalOpen(false);
@@ -325,6 +402,8 @@ export default function ScheduledTests() {
     onSuccess: async (_, id) => {
       message.success('告警已删除');
       setSelectedAlertRowKeys((keys) => keys.filter((key) => key !== id));
+      setSelectedRecentAlertRowKeys((keys) => keys.filter((key) => key !== id));
+      setOpenAlertLog((alert) => (alert?.id === id ? null : alert));
       await queryClient.invalidateQueries({ queryKey: ['alerts'] });
       await queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
     },
@@ -334,9 +413,12 @@ export default function ScheduledTests() {
 
   const deleteAlerts = useMutation({
     mutationFn: api.deleteAlerts,
-    onSuccess: async (result) => {
-      message.success(`已删除 ${result.deleted} 条告警`);
+    onSuccess: async (result, ids) => {
+      const deletedIds = new Set(ids.filter((id) => !result.missing.includes(id)));
+      bulkDeleteMessage('条告警', result);
       setSelectedAlertRowKeys([]);
+      setSelectedRecentAlertRowKeys([]);
+      setOpenAlertLog((alert) => (alert && deletedIds.has(alert.id) ? null : alert));
       await queryClient.invalidateQueries({ queryKey: ['alerts'] });
       await queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
     },
@@ -345,11 +427,21 @@ export default function ScheduledTests() {
 
   const resend = useMutation({
     mutationFn: api.resendAlertNotification,
+    onMutate: (id) => {
+      setResendingAlertIds((ids) => new Set(ids).add(id));
+    },
     onSuccess: async () => {
       message.success('已重新发送通知');
       await queryClient.invalidateQueries({ queryKey: ['alerts'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: (_data, _error, id) => {
+      setResendingAlertIds((ids) => {
+        const next = new Set(ids);
+        next.delete(id);
+        return next;
+      });
+    },
   });
 
   const saveFeishu = useMutation({
@@ -416,7 +508,7 @@ export default function ScheduledTests() {
   }
 
   async function submitSchedule(values: ScheduleFormValues) {
-    const payload: Partial<ScheduledChannelTest> = {
+    const basePayload = {
       name: values.name,
       channel_id: values.channel_id,
       interval_minutes: values.interval_minutes,
@@ -426,11 +518,11 @@ export default function ScheduledTests() {
       test_scope: 'scheduled_probe' as const,
     };
     if (editingSchedule) {
-      updateSchedule.mutate({ id: editingSchedule.id, payload });
+      updateSchedule.mutate({ id: editingSchedule.id, payload: basePayload });
       return;
     }
     createSchedule.mutate({
-      ...payload,
+      ...basePayload,
       repeat_count: 1,
       concurrency: 1,
       use_mock: false,
@@ -472,6 +564,15 @@ export default function ScheduledTests() {
     deleteAlerts.mutate(ids);
   }
 
+  function deleteSelectedRecentAlerts() {
+    const ids = selectedRecentAlertRowKeys.map(String);
+    if (!ids.length) {
+      message.warning('请先选择最近异常');
+      return;
+    }
+    deleteAlerts.mutate(ids);
+  }
+
   function submitFeishu(values: FeishuFormValues) {
     const webhookUrl = values.webhook_url?.trim();
     const webhookSecret = values.webhook_secret?.trim();
@@ -494,19 +595,39 @@ export default function ScheduledTests() {
   }
 
   function clearAlertFilters() {
+    setAlertStatus('pending_review');
     setAlertIdQuery('');
     setAlertTimeRange(null);
+    setAlertResultFilter('failure');
   }
 
-  const planError = needsPlanData ? schedules.error ?? channels.error : null;
+  function openAlertLogDrawer(alert: ChannelAlert) {
+    setOpenAlertLog(alert);
+  }
+
+  function closeAlertLogDrawer() {
+    setOpenAlertLog(null);
+  }
+
+  const planError = needsPlanData ? schedules.error ?? schedulerHealth.error ?? channels.error : null;
   const alertError = needsAlertData ? alerts.error ?? channels.error : null;
   const reportError = activeTab === 'report' ? smartReport.error : null;
   const feishuError = activeTab === 'feishu' ? feishuSetting.error : null;
   const error = planError ?? alertError ?? reportError ?? feishuError;
   const hasError = Boolean(error);
   const channelSummaries = smartReport.data?.channel_summaries ?? [];
-  const recentAlerts = smartReport.data?.recent_alerts ?? [];
+  const filteredAlerts = useMemo(() => {
+    return (alerts.data ?? []).filter((alert) => matchesAlertResultFilter(alert, alertResultFilter));
+  }, [alertResultFilter, alerts.data]);
+  const hasAlertFilters = Boolean(trimmedAlertIdQuery) || alertStatus !== 'all' || Boolean(alertTimeRange) || alertResultFilter !== 'all';
+  const recentAlerts = useMemo(() => {
+    return (smartReport.data?.recent_alerts ?? []).filter((alert) => matchesAlertResultFilter(alert, alertResultFilter));
+  }, [alertResultFilter, smartReport.data?.recent_alerts]);
 
+  useEffect(() => {
+    const visibleIds = new Set(recentAlerts.map((alert) => alert.id));
+    setSelectedRecentAlertRowKeys((keys) => keys.filter((key) => visibleIds.has(String(key))));
+  }, [recentAlerts]);
   return (
     <Space direction="vertical" size={20} style={{ width: '100%' }} className="page-stack">
       {hasError ? (
@@ -521,7 +642,7 @@ export default function ScheduledTests() {
 
       <Tabs
         activeKey={activeTab}
-        onChange={setActiveTab}
+        onChange={(key) => setActiveTab(key as ScheduledTab)}
         items={[
           {
             key: 'plans',
@@ -554,11 +675,11 @@ export default function ScheduledTests() {
                     </div>
                     <div className="patrol-preset-preview">
                       <strong>MODEL REQUEST</strong>
-                      <small>真实模型请求：记录 message id、协议、endpoint、result id。</small>
+                      <small>真实模型请求：记录 message id、request id、协议和 endpoint。</small>
                     </div>
                     <div className="patrol-preset-preview">
                       <strong>告警证据</strong>
-                      <small>返回 run/report/result/message/source/relay 等定位 ID。</small>
+                      <small>返回 run/report/message/request/source/relay 等定位 ID。</small>
                     </div>
                   </div>
                 </section>
@@ -567,6 +688,28 @@ export default function ScheduledTests() {
                   extra={<Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>}
                   bordered={false}
                 >
+                  <Row gutter={[12, 12]} className="scheduler-health-row">
+                    <Col xs={24} sm={12} lg={6}>
+                      <Card bordered={false}>
+                        <Statistic title="调度器" value={schedulerHealth.data?.enabled ? '启用' : '停用'} valueStyle={{ color: schedulerHealth.data?.enabled ? '#067647' : '#667085' }} />
+                      </Card>
+                    </Col>
+                    <Col xs={24} sm={12} lg={6}>
+                      <Card bordered={false}>
+                        <Statistic title="运行中 / 排队" value={`${schedulerHealth.data?.running_schedule_count ?? 0} / ${schedulerHealth.data?.queued_schedule_count ?? 0}`} />
+                      </Card>
+                    </Col>
+                    <Col xs={24} sm={12} lg={6}>
+                      <Card bordered={false}>
+                        <Statistic title="疑似卡住" value={schedulerHealth.data?.stale_schedule_count ?? 0} valueStyle={{ color: schedulerHealth.data?.stale_schedule_count ? '#b42318' : '#067647' }} />
+                      </Card>
+                    </Col>
+                    <Col xs={24} sm={12} lg={6}>
+                      <Card bordered={false}>
+                        <Statistic title="最近心跳" value={formatDateTime(schedulerHealth.data?.last_tick_at) || '-'} />
+                      </Card>
+                    </Col>
+                  </Row>
                   <Table
                     rowKey="id"
                     loading={schedules.isLoading || channels.isLoading}
@@ -618,11 +761,14 @@ export default function ScheduledTests() {
                       },
                       {
                         title: '状态',
-                        width: 150,
+                        width: 210,
                         render: (_, schedule) => (
                           <Space direction="vertical" size={4}>
                             <Tag color={schedule.enabled ? 'green' : 'default'}>{schedule.enabled ? '启用' : '停用'}</Tag>
-                            <Tag color={scheduleStatusColor[schedule.last_status ?? 'idle'] ?? 'default'}>{schedule.last_status ?? 'idle'}</Tag>
+                            <Tag color={schedule.is_stale ? 'red' : scheduleStatusColor[schedule.last_status ?? 'idle'] ?? 'default'}>{schedule.is_stale ? 'stale' : schedule.last_status ?? 'idle'}</Tag>
+                            {schedule.locked_until ? <Typography.Text type={schedule.is_stale ? 'danger' : 'secondary'}>锁至 {formatDateTime(schedule.locked_until)}</Typography.Text> : null}
+                            {schedule.last_started_at ? <Typography.Text type="secondary">开始 {formatDateTime(schedule.last_started_at)}</Typography.Text> : null}
+                            {schedule.last_finished_at ? <Typography.Text type="secondary">完成 {formatDateTime(schedule.last_finished_at)}</Typography.Text> : null}
                           </Space>
                         ),
                       },
@@ -647,7 +793,10 @@ export default function ScheduledTests() {
                             <Button icon={<Edit3 size={15} />} onClick={() => openEditSchedule(schedule)}>编辑</Button>
                             <Popconfirm
                               title="删除自动巡检计划"
-                              description="历史告警会保留，但不再关联该计划。"
+                              description="删除后该计划不再自动执行；历史告警、巡检日志和原始证据会保留。确定删除吗？"
+                              okText="删除"
+                              okButtonProps={{ danger: true }}
+                              cancelText="取消"
                               onConfirm={() => {
                                 setDeletingScheduleId(schedule.id);
                                 deleteSchedule.mutate(schedule.id);
@@ -692,7 +841,7 @@ export default function ScheduledTests() {
             value={alertIdQuery}
             onChange={(event) => setAlertIdQuery(event.target.value)}
             onSearch={(value) => setAlertIdQuery(value)}
-            placeholder="输入 request_id / message_id / result_id / run_id / report_id"
+            placeholder="输入 request_id / message_id / run_id / report_id"
             style={{ width: 420, maxWidth: '100%' }}
           />
           <DatePicker.RangePicker
@@ -702,10 +851,20 @@ export default function ScheduledTests() {
             allowClear
             style={{ width: 380, maxWidth: '100%' }}
           />
+          <Select
+            value={alertResultFilter}
+            onChange={setAlertResultFilter}
+            style={{ width: 150 }}
+            options={[
+              { value: 'failure', label: '失败优先' },
+              { value: 'success', label: '成功' },
+              { value: 'all', label: '全部' },
+            ]}
+          />
           <Button onClick={clearAlertFilters}>清空</Button>
           <Popconfirm
             title="删除已选告警"
-            description={`将删除 ${selectedAlertRowKeys.length} 条告警，巡检日志和原始证据会保留。确定删除吗？`}
+            description={`将删除 ${selectedAlertRowKeys.length} 条复审告警；巡检日志、报告和原始证据会保留。确定删除吗？`}
             okText="删除"
             okButtonProps={{ danger: true }}
             cancelText="取消"
@@ -720,7 +879,8 @@ export default function ScheduledTests() {
         <Table
           rowKey="id"
           loading={alerts.isLoading || channels.isLoading}
-          dataSource={alerts.data ?? []}
+          dataSource={filteredAlerts}
+          locale={{ emptyText: alerts.isLoading || channels.isLoading ? '正在加载复审告警' : hasAlertFilters ? <Empty description="当前筛选条件下无告警" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : <Empty description="暂无复审告警" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           rowSelection={{
             selectedRowKeys: selectedAlertRowKeys,
             onChange: setSelectedAlertRowKeys,
@@ -728,34 +888,26 @@ export default function ScheduledTests() {
           }}
           rowClassName={(alert) => (alert.id === selectedAlertId ? 'highlight-table-row' : '')}
           pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 980 }}
+          scroll={{ x: 1360 }}
           expandable={{
             expandedRowRender: (alert) => {
-              const evidence = alert.evidence_summary ?? {};
               return (
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  <Space direction="vertical" size={4}>
-                    <Typography.Text strong>错误信息</Typography.Text>
-                    <Typography.Text>{alertErrorText(alert)}</Typography.Text>
-                  </Space>
                   <Space wrap>
                     {(alert.trigger_labels?.length ? alert.trigger_labels : ['无异常标签']).map((label) => (
                       <Tag color={label === '无异常标签' ? 'default' : 'red'} key={label}>{label}</Tag>
                     ))}
                   </Space>
-                  <Space direction="vertical" size={4}>
-                    <Typography.Text strong>判断依据</Typography.Text>
-                    <Typography.Text>{evidenceText(alert)}</Typography.Text>
-                    <Typography.Text type="secondary">
-                      run: {alert.run_id} · report: {alert.report_id} · result: {String(evidence.model_request_result_id ?? '-')} · message: {String(evidence.model_request_message_id ?? '-')} · request: {String(evidence.model_request_request_id ?? '-')}
-                    </Typography.Text>
-                    <Typography.Text type="secondary">
-                      source: {String(evidence.signature_source_message_id ?? '-')} · relay: {String(evidence.signature_relay_message_id ?? '-')}
-                    </Typography.Text>
+                  <Typography.Text type="secondary">
+                    渠道：{alertChannelText(alert, channelById.get(alert.channel_id)?.name).label} · 异常探针：{alertProbeTitle(alert)} · 时间：{formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) || '-'}
+                  </Typography.Text>
+                  <Space wrap>
+                    <Button icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
+                    <Link to={`/runs/${alert.run_id}`}>查看报告</Link>
+                    {alert.notification_error ? (
+                      <Typography.Text type="danger">飞书发送错误：{alert.notification_error}</Typography.Text>
+                    ) : null}
                   </Space>
-                  {alert.notification_error ? (
-                    <Typography.Text type="danger">飞书发送错误：{alert.notification_error}</Typography.Text>
-                  ) : null}
                 </Space>
               );
             },
@@ -777,7 +929,12 @@ export default function ScheduledTests() {
             {
               title: '巡检结果',
               width: 120,
-              render: () => <Tag color="red">错误</Tag>,
+              render: (_, alert) => <Tag color={alertOutcomeColor(alert.status)}>{alertOutcomeLabel(alert.status)}</Tag>,
+            },
+            {
+              title: '异常探针 / 时间点 / ID',
+              width: 360,
+              render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)?.name),
             },
             {
               title: '复审状态',
@@ -785,7 +942,7 @@ export default function ScheduledTests() {
               render: (_, alert) => <Tag color={alertStatusColor[alert.status] ?? 'default'}>{alertStatusLabel[alert.status] ?? alert.status}</Tag>,
             },
             {
-              title: '创建时间',
+              title: '告警创建时间',
               width: 190,
               render: (_, alert) => formatDateTime(alert.created_at),
             },
@@ -808,10 +965,17 @@ export default function ScheduledTests() {
                 <Space wrap>
                   <Link to={`/runs/${alert.run_id}`}>查看详情</Link>
                   {alert.status === 'pending_review' ? <Button type="primary" onClick={() => openReview(alert)}>复审</Button> : <Button onClick={() => openReview(alert)}>更新复审</Button>}
-                  <Button icon={<RefreshCw size={15} />} loading={resend.isPending} onClick={() => resend.mutate(alert.id)}>重发</Button>
+                  <Button
+                    icon={<RefreshCw size={15} />}
+                    loading={resendingAlertIds.has(alert.id)}
+                    disabled={resendingAlertIds.has(alert.id)}
+                    onClick={() => resend.mutate(alert.id)}
+                  >
+                    重发
+                  </Button>
                   <Popconfirm
                     title="删除告警"
-                    description="只删除这条复审告警，巡检日志和原始证据会保留。确定删除吗？"
+                    description="只删除这条复审告警；巡检日志、报告和原始证据会保留。确定删除吗？"
                     okText="删除"
                     okButtonProps={{ danger: true }}
                     cancelText="取消"
@@ -869,7 +1033,23 @@ export default function ScheduledTests() {
                       pagination={{ pageSize: 8 }}
                       scroll={{ x: 900 }}
                       columns={[
-                        { title: '渠道', dataIndex: 'channel_name', width: 240 },
+                        {
+                          title: '渠道',
+                          width: 260,
+                          render: (_, item) => (
+                            <Space direction="vertical" size={2}>
+                              <Typography.Text strong>
+                                {formatProviderChannelDisplayName({
+                                  id: item.channel_id,
+                                  name: item.channel_name,
+                                  providerType: item.channel_provider_type,
+                                  accountType: item.channel_account_type,
+                                }, item.channel_id)}
+                              </Typography.Text>
+                              {item.channel_model_name ? <Typography.Text type="secondary">{item.channel_model_name}</Typography.Text> : null}
+                            </Space>
+                          ),
+                        },
                         { title: '巡检次数', dataIndex: 'run_count', width: 110 },
                         { title: '错误数', dataIndex: 'alert_count', width: 100, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
                         { title: '待复审', dataIndex: 'pending_review_count', width: 100 },
@@ -886,11 +1066,45 @@ export default function ScheduledTests() {
                   {smartReport.isLoading ? (
                     <div className="smart-report-empty">正在加载最近异常</div>
                   ) : recentAlerts.length ? (
+                    <Space wrap style={{ marginBottom: 12 }}>
+                      <Select
+                        value={alertResultFilter}
+                        onChange={setAlertResultFilter}
+                        style={{ width: 150 }}
+                        options={[
+                          { value: 'failure', label: '失败优先' },
+                          { value: 'success', label: '成功' },
+                          { value: 'all', label: '全部' },
+                        ]}
+                      />
+                      <Popconfirm
+                        title="删除已选最近异常"
+                        description={`将删除当前可见列表中已选的 ${selectedRecentAlertRowKeys.length} 条告警记录；巡检日志、报告和原始证据会保留。确定删除吗？`}
+                        okText="删除"
+                        okButtonProps={{ danger: true }}
+                        cancelText="取消"
+                        disabled={!selectedRecentAlertRowKeys.length}
+                        onConfirm={deleteSelectedRecentAlerts}
+                      >
+                        <Button danger icon={<Trash2 size={15} />} disabled={!selectedRecentAlertRowKeys.length} loading={deleteAlerts.isPending}>
+                          删除已选
+                        </Button>
+                      </Popconfirm>
+                      <Typography.Text type="secondary">已选 {selectedRecentAlertRowKeys.length} / 当前可见 {recentAlerts.length}</Typography.Text>
+                    </Space>
+                  ) : null}
+                  {smartReport.isLoading ? (
+                    <div className="smart-report-empty">正在加载最近异常</div>
+                  ) : recentAlerts.length ? (
                     <Table
                       rowKey="id"
                       dataSource={recentAlerts}
                       pagination={false}
-                      scroll={{ x: 1120 }}
+                      scroll={{ x: 1460 }}
+                      rowSelection={{
+                        selectedRowKeys: selectedRecentAlertRowKeys,
+                        onChange: setSelectedRecentAlertRowKeys,
+                      }}
                       columns={[
                         {
                           title: '渠道',
@@ -905,16 +1119,35 @@ export default function ScheduledTests() {
                             );
                           },
                         },
-                        { title: '错误信息', dataIndex: 'message', width: 340, render: (value: string | null, alert) => alertErrorText({ ...alert, message: value }) },
-                        { title: '定位信息', width: 300, render: (_, alert) => evidenceText(alert) },
-                        { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Tag color={alertStatusColor[value] ?? 'default'}>{alertStatusLabel[value] ?? value}</Tag> },
-                        { title: '创建时间', dataIndex: 'created_at', width: 180, render: formatDateTime },
-                        { title: '操作', width: 120, render: (_, alert) => <Link to={`/runs/${alert.run_id}`}>查看报告</Link> },
+                        { title: '结果', width: 110, render: (_, alert) => <Tag color={alertOutcomeColor(alert.status)}>{alertOutcomeLabel(alert.status)}</Tag> },
+                        { title: '异常探针 / 时间点 / ID', width: 360, render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)?.name) },
+                        { title: '告警创建时间', dataIndex: 'created_at', width: 180, render: (_, alert) => formatDateTime(alert.created_at) },
+                        { title: 'Request ID', width: 210, render: (_, alert) => <Typography.Text copyable={{ text: alertRequestId(alert) }}>{alertRequestId(alert) || '-'}</Typography.Text> },
+                        {
+                          title: '操作',
+                          width: 230,
+                          fixed: 'right',
+                          render: (_, alert) => (
+                            <Space wrap>
+                              <Button type="link" icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
+                              <Popconfirm
+                                title="删除最近异常"
+                                description="只删除这条告警记录；巡检日志、报告和原始证据会保留。确定删除吗？"
+                                okText="删除"
+                                okButtonProps={{ danger: true }}
+                                cancelText="取消"
+                                onConfirm={() => deleteOneAlert(alert)}
+                              >
+                                <Button danger icon={<Trash2 size={15} />} loading={deletingAlertId === alert.id}>删除</Button>
+                              </Popconfirm>
+                            </Space>
+                          ),
+                        },
                       ]}
                     />
                   ) : (
                     <div className="smart-report-empty">
-                      <Empty description="暂无异常告警" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                      <Empty description={alertResultFilter === 'failure' ? '暂无失败告警' : '当前筛选条件下无异常告警'} image={Empty.PRESENTED_IMAGE_SIMPLE} />
                     </div>
                   )}
                 </Card>
@@ -1070,7 +1303,7 @@ export default function ScheduledTests() {
           <Form.Item label="待测渠道" name="channel_id" rules={[{ required: true, message: '请选择待测渠道' }]}>
             <Select
               placeholder="选择候选或负样本渠道"
-              options={candidateChannels.map((channel) => ({ value: channel.id, label: `${channel.name} (${roleLabel(channel.role, taxonomy.data)} / ${channel.model_name ?? '未配置模型'})` }))}
+              options={candidateChannels.map((channel) => ({ value: channel.id, label: `${formatChannelDisplayName(channel)} (${roleLabel(channel.role, taxonomy.data)} / ${channel.model_name ?? '未配置模型'})` }))}
             />
           </Form.Item>
           <Form.Item label="执行间隔（分钟）" name="interval_minutes" rules={[{ required: true }]}>
@@ -1137,6 +1370,8 @@ export default function ScheduledTests() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <AlertLogDrawer alert={openAlertLog} channel={openAlertLogChannel} onClose={closeAlertLogDrawer} />
     </Space>
   );
 }

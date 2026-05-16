@@ -95,6 +95,27 @@ def _ensure_run_baseline_columns() -> None:
             connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN run_window_start VARCHAR(5)"))
         if "run_window_end" not in scheduled_columns:
             connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN run_window_end VARCHAR(5)"))
+        if "locked_by" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN locked_by VARCHAR(100)"))
+        if "locked_until" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN locked_until DATETIME"))
+        if "last_queued_at" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN last_queued_at DATETIME"))
+        if "last_started_at" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN last_started_at DATETIME"))
+        if "last_finished_at" not in scheduled_columns:
+            connection.execute(text("ALTER TABLE scheduled_channel_tests ADD COLUMN last_finished_at DATETIME"))
+
+    if "channel_alerts" not in tables:
+        return
+    alert_columns = {column["name"] for column in inspector.get_columns("channel_alerts")}
+    with engine.begin() as connection:
+        if "dedupe_key" not in alert_columns:
+            connection.execute(text("ALTER TABLE channel_alerts ADD COLUMN dedupe_key VARCHAR(200)"))
+        if "notification_attempt_count" not in alert_columns:
+            connection.execute(text("ALTER TABLE channel_alerts ADD COLUMN notification_attempt_count INTEGER NOT NULL DEFAULT 0"))
+        if "last_notification_attempt_at" not in alert_columns:
+            connection.execute(text("ALTER TABLE channel_alerts ADD COLUMN last_notification_attempt_at DATETIME"))
 
 
 def get_db() -> Generator[Session, None, None]:
