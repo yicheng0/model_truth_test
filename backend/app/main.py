@@ -178,6 +178,11 @@ def cors_origins() -> list[str]:
 
 
 allowed_origins = cors_origins()
+
+
+def ensure_seed_data_when_empty(db: Session, model: type) -> None:
+    if not db.scalar(select(func.count()).select_from(model)):
+        seed_demo_data(db)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -473,6 +478,7 @@ async def validation_exception_handler(_request: Request, exc: RequestValidation
 
 @app.get("/api/channels", response_model=list[ChannelRead])
 def list_channels(db: Session = Depends(get_db)) -> list[Channel]:
+    ensure_seed_data_when_empty(db, Channel)
     return list(db.scalars(select(Channel).order_by(Channel.role, Channel.name)).all())
 
 
@@ -597,6 +603,7 @@ async def channel_models(channel_id: str, db: Session = Depends(get_db)) -> list
 
 @app.get("/api/suites", response_model=list[TestSuiteRead])
 def list_suites(db: Session = Depends(get_db)) -> list[TestSuite]:
+    ensure_seed_data_when_empty(db, TestSuite)
     return list(db.scalars(select(TestSuite).where(TestSuite.id != MANUAL_PROBE_SUITE_ID).order_by(TestSuite.name)).all())
 
 
@@ -680,6 +687,7 @@ def get_test_suite_coverage(suite_id: str, db: Session = Depends(get_db)) -> dic
 
 @app.get("/api/suites/{suite_id}/cases", response_model=list[TestCaseRead])
 def list_cases(suite_id: str, db: Session = Depends(get_db)) -> list[TestCase]:
+    ensure_seed_data_when_empty(db, TestCase)
     return list(
         db.scalars(
             select(TestCase)
@@ -691,6 +699,7 @@ def list_cases(suite_id: str, db: Session = Depends(get_db)) -> list[TestCase]:
 
 @app.get("/api/test-cases", response_model=list[TestCaseRead])
 def list_test_cases_alias(suite_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> list[TestCase]:
+    ensure_seed_data_when_empty(db, TestCase)
     stmt = select(TestCase).order_by(TestCase.sort_order, TestCase.module, TestCase.id)
     if suite_id:
         stmt = stmt.where(TestCase.suite_id == suite_id)

@@ -482,6 +482,30 @@ def test_restored_fixture_does_not_include_api_keys() -> None:
         assert "api_key" not in (channel.get("auth_config") or {})
 
 
+def test_list_endpoints_self_heal_empty_seed_tables() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        for model in [ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
+            db.execute(delete(model))
+        db.commit()
+
+    with TestClient(app) as client:
+        channels = client.get("/api/channels")
+        suites = client.get("/api/suites")
+        cases = client.get("/api/test-cases")
+
+    assert channels.status_code == 200
+    assert suites.status_code == 200
+    assert cases.status_code == 200
+    assert len(channels.json()) == 12
+    assert len(suites.json()) == 2
+    assert len(cases.json()) == 45
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Channel)) == 12
+        assert db.scalar(select(func.count()).select_from(TestSuiteModel)) == 3
+        assert db.scalar(select(func.count()).select_from(TestCaseModel)) == 106
+
+
 def test_seed_demo_data_preserves_custom_default_suite_cases() -> None:
     reset_database()
     with SessionLocal() as db:
