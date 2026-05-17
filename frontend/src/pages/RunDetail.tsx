@@ -433,7 +433,11 @@ export default function RunDetail() {
 
   const percent = data?.run.total_jobs ? Math.round((data.run.completed_jobs / data.run.total_jobs) * 100) : 0;
   const sampleReturnedRows = rows.filter((row) => row.sample).length;
-  const returnedRows = isSamplingRun ? sampleReturnedRows : rows.filter((row) => row.official && row.candidate).length;
+  const arenaReturnedSamples = isArenaRun ? data?.run.completed_jobs ?? 0 : 0;
+  const arenaExpectedSamples = isArenaRun ? data?.run.total_jobs ?? 0 : 0;
+  const returnedRows = isSamplingRun ? sampleReturnedRows : isArenaRun ? arenaReturnedSamples : rows.filter((row) => row.official && row.candidate).length;
+  const expectedRows = isArenaRun ? arenaExpectedSamples : rows.length;
+  const arenaRankingIsLive = isArenaRun && (data?.run.status === 'pending' || data?.run.status === 'running');
   const comparedRows = rows.filter((row) => row.comparison).length;
   const riskyRows = rows.filter((row) => (row.comparison?.final_score ?? 100) < 70).length;
   const averageScore = rows.length
@@ -571,7 +575,7 @@ export default function RunDetail() {
               <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>
                 {data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}
               </Descriptions.Item>
-              <Descriptions.Item label="已返回题目">{returnedRows} / {rows.length}</Descriptions.Item>
+              <Descriptions.Item label={isArenaRun ? '已返回样本' : '已返回题目'}>{returnedRows} / {expectedRows}</Descriptions.Item>
               {isPatrolRun ? (
                 <Descriptions.Item label="巡检计划">{data.run.scheduled_test_id ?? '-'}</Descriptions.Item>
               ) : isSamplingRun ? (
@@ -849,6 +853,14 @@ export default function RunDetail() {
           </div>
           {arenaChartData.length ? (
             <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              {arenaRankingIsLive ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="运行中临时排名"
+                  description={`当前排名只基于已返回的 ${arenaReturnedSamples} / ${arenaExpectedSamples} 个 Arena 样本，最终结果以任务完成后为准。`}
+                />
+              ) : null}
               <div className="arena-explain-grid">
                 <section className="arena-explain-panel">
                   <Typography.Text className="section-kicker">LEADER</Typography.Text>

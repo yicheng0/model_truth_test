@@ -4322,6 +4322,62 @@ def test_execute_run_stops_remaining_jobs_when_canceled(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_arena_run_reports_progress_and_completes_all_jobs(monkeypatch) -> None:
+    reset_database()
+
+    async def scenario() -> str:
+        call_count = 0
+
+        async def live_like_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
+            nonlocal call_count
+            call_count += 1
+            await asyncio.sleep(0.01)
+            return {
+                "content_text": f"{channel.name}:{case.id}:{attempt}",
+                "raw_request": {},
+                "raw_response": {},
+                "latency_ms": 10,
+                "first_token_ms": 5,
+            }
+
+        monkeypatch.setattr("app.services.invoke_channel", live_like_invoke)
+
+        with SessionLocal() as db:
+            suite_id = db.scalar(select(TestSuiteModel.id))
+            run = create_run(
+                db,
+                RunCreate(
+                    name="arena progress run",
+                    suite_id=suite_id,
+                    channel_ids={"candidate": ["third_party_demo", "negative_sample"]},
+                    repeat_count=1,
+                    concurrency=2,
+                    mode="arena_comparison",
+                    test_scope="quick",
+                    use_mock=False,
+                ),
+            )
+            run_id = run.id
+
+        await asyncio.wait_for(execute_run(SessionLocal, run_id, use_mock=False, arena_config={"judge_mode": "direct_score"}), timeout=10)
+
+        with SessionLocal() as db:
+            run = db.get(Run, run_id)
+            result_count = db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id))
+            summary = db.execute(select(Run.completed_jobs, Run.total_jobs).where(Run.id == run_id)).one()
+
+        assert call_count > 0
+        assert run is not None
+        assert run.status == "completed"
+        assert run.finished_at is not None
+        assert run.completed_jobs == run.total_jobs
+        assert summary.completed_jobs == summary.total_jobs
+        assert result_count == run.total_jobs
+        return run_id
+
+    asyncio.run(scenario())
+
+
 def test_run_create_rejects_out_of_range_repeat_count_and_concurrency() -> None:
     reset_database()
     with TestClient(app) as client:

@@ -1764,10 +1764,17 @@ async def execute_run(
             return
 
         _completed_jobs = 0
-        _BATCH_SIZE = 20
 
         def add_result(case: TestCase, channel: Channel, attempt: int, normalized: dict[str, Any]) -> None:
             db.add(_result_from_normalized(run.id, case, channel, attempt, normalized))
+
+        def record_completed_jobs(count: int = 1) -> None:
+            nonlocal _completed_jobs
+            if count <= 0:
+                return
+            _completed_jobs = min(run.total_jobs or _completed_jobs + count, _completed_jobs + count)
+            run.completed_jobs = _completed_jobs
+            db.commit()
 
         async def cancel_active_tasks(tasks: set[asyncio.Task[tuple[TestCase, Channel, int, dict[str, Any]]]]) -> None:
             for pending_task in tasks:
@@ -1839,18 +1846,20 @@ async def execute_run(
                     normalized = await invoke_channel(channel, preflight_case, 1, credentials, use_mock=False)
                     if normalized.get("error"):
                         failed_preflight_channel_ids.add(channel.id)
+                        failed_count = 0
                         for case in cases:
                             for attempt in range(1, run.repeat_count + 1):
                                 failure = channel_preflight_failure_response(channel, case, attempt, normalized)
                                 add_result(case, channel, attempt, failure)
-                        db.commit()
+                                failed_count += 1
+                        record_completed_jobs(failed_count)
                         continue
                     resolved_protocol = normalized.get("request_protocol")
                     if isinstance(resolved_protocol, str) and resolved_protocol != REQUEST_PROTOCOL_AUTO:
                         resolved_protocol_by_channel[channel.id] = resolved_protocol
                     add_result(preflight_case, channel, 1, normalized)
                     preflight_result_keys.add((preflight_case.id, channel.id, 1))
-                    db.commit()
+                    record_completed_jobs()
 
                 jobs = [
                     (case, channel, attempt)
@@ -1909,10 +1918,7 @@ async def execute_run(
                         finish_canceled_run()
                         return
                     add_result(case, channel, attempt, normalized)
-                    _completed_jobs += 1
-                    if _completed_jobs % _BATCH_SIZE == 0:
-                        run.completed_jobs = _completed_jobs
-                        db.commit()
+                    record_completed_jobs()
                     logger.debug("run_progress run_id=%s job=%d/%d case=%s channel=%s", run_id, _completed_jobs, run.total_jobs, case.id, channel.id)
 
             if not refresh_active_run():
