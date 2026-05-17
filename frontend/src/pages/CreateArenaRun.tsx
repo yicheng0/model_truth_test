@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Collapse, Form, Input, Select, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Form, Input, Tag, Typography, message } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
-import { buildRuntimeCredentials, formatChannelDisplayName } from '../channelCredentials';
+import { isCandidateChannel } from '../channelPresets';
+import { buildRuntimeCredentials } from '../channelCredentials';
 import type { Channel, TestSuite } from '../types';
 import {
   ChannelMultiSelect,
@@ -19,18 +19,10 @@ type CreateArenaValues = {
   name: string;
   suite_id: string;
   arena_channel_ids?: string[];
-  judge_channel_id?: string;
-  judge_mode?: string;
-  rubric_preset?: string;
-  judge_rubric?: string;
   runtime_credentials?: Record<string, RuntimeCredentialValues>;
 };
 
-const rubricPresets = {
-  balanced: 'Score answer quality, instruction following, safety, protocol stability, and useful completeness.',
-  reference_match: 'Prefer answers that match the expected task intent, required facts, constraints, and reference-style output.',
-  concise_stable: 'Prefer concise, stable, low-error answers with clear structure and minimal unnecessary verbosity.',
-};
+const defaultArenaRubric = 'Score answer quality, instruction following, safety, protocol stability, and useful completeness.';
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
@@ -43,13 +35,11 @@ export default function CreateArenaRun() {
   const navigate = useNavigate();
   const watchedSuiteId = Form.useWatch('suite_id', form);
   const watchedArenaChannelIds = Form.useWatch('arena_channel_ids', form) ?? [];
-  const watchedRubricPreset = Form.useWatch('rubric_preset', form) ?? 'balanced';
   const suites = useQuery<TestSuite[]>({ queryKey: ['suites'], queryFn: api.suites });
   const channels = useQuery<Channel[]>({ queryKey: ['channels'], queryFn: api.channels });
   const builtInSuite = useMemo(() => getDefaultSuite(suites.data), [suites.data]);
   const selectedSuiteId = watchedSuiteId ?? builtInSuite?.id;
   const cases = useQuery({ queryKey: ['cases', selectedSuiteId], queryFn: () => api.cases(selectedSuiteId), enabled: Boolean(selectedSuiteId) });
-  const referenceChannels = useMemo(() => (channels.data ?? []).filter(isReferenceChannel), [channels.data]);
   const candidateChannels = useMemo(() => (channels.data ?? []).filter(isCandidateChannel), [channels.data]);
   const credentialChannels = useMemo(() => selectedChannels(channels.data, watchedArenaChannelIds), [channels.data, watchedArenaChannelIds]);
   const selectedArenaChannels = useMemo(
@@ -75,17 +65,13 @@ export default function CreateArenaRun() {
         return;
       }
       const runtimeCredentials = buildRuntimeCredentials(credentialChannels, values.runtime_credentials);
-      const judgeRubric =
-        values.rubric_preset === 'custom'
-          ? values.judge_rubric?.trim() || null
-          : rubricPresets[(values.rubric_preset as keyof typeof rubricPresets) || 'balanced'];
       const run = await api.startArenaRun({
         name: values.name,
         suite_id: suiteId,
         candidate_channel_ids: values.arena_channel_ids ?? [],
-        judge_channel_id: values.judge_channel_id || null,
-        judge_mode: values.judge_mode || 'direct_score',
-        judge_rubric: judgeRubric,
+        judge_channel_id: null,
+        judge_mode: 'direct_score',
+        judge_rubric: defaultArenaRubric,
         repeat_count: 1,
         concurrency: 1,
         test_scope: 'quick',
@@ -144,7 +130,7 @@ export default function CreateArenaRun() {
             <div><strong>同题两两比较</strong><span>每道题里候选渠道互相比样本分，赢得胜场，最终形成胜率。</span></div>
           </div>
         </div>
-        <Form form={form} layout="vertical" onFinish={submit} initialValues={{ judge_mode: 'direct_score', rubric_preset: 'balanced' }}>
+        <Form form={form} layout="vertical" onFinish={submit}>
           <Form.Item label="任务名" name="name" rules={[{ required: true }]}>
             <Input size="large" placeholder="Sonnet 4.5 候选渠道 Arena 排名" />
           </Form.Item>
@@ -183,66 +169,12 @@ export default function CreateArenaRun() {
             <div><span>两两组合</span><strong>{estimatedPairCount}</strong></div>
             <div><span>预计样本对比</span><strong>{cases.isLoading ? '-' : estimatedCasePairs}</strong></div>
           </div>
-          <Collapse
-            className="arena-advanced"
-            items={[
-              {
-                key: 'judge',
-                label: '高级评分设置',
-                children: (
-                  <>
-                    <Alert
-                      type="info"
-                      showIcon
-                      message="当前 Arena 主要使用本地自动评分证据"
-                      description="当前主要使用系统自动评分。这里的评分标准会写入证据和报告解释口径，便于阅读结果；本次不会强制调用外部 Judge。"
-                      style={{ marginBottom: 16 }}
-                    />
-                    <div className="benchmark-config-grid">
-                      <Form.Item label="解释口径" name="rubric_preset">
-                        <Select
-                          options={[
-                            { value: 'balanced', label: '综合质量（推荐）' },
-                            { value: 'reference_match', label: '参考一致性' },
-                            { value: 'concise_stable', label: '简洁稳定' },
-                            { value: 'custom', label: '自定义评分标准' },
-                          ]}
-                        />
-                      </Form.Item>
-                      <Form.Item label="Judge 渠道" name="judge_channel_id">
-                        <Select
-                          allowClear
-                          showSearch
-                          placeholder="可选，默认使用本地确定性评分"
-                          optionFilterProp="label"
-                          options={referenceChannels.map((channel) => ({ value: channel.id, label: formatChannelDisplayName(channel), disabled: !channel.enabled }))}
-                        />
-                      </Form.Item>
-                      <Form.Item label="Judge 模式" name="judge_mode">
-                        <Select
-                          options={[
-                            { value: 'direct_score', label: '直接评分' },
-                            { value: 'reference_match', label: '参考答案一致性' },
-                          ]}
-                        />
-                      </Form.Item>
-                    </div>
-                    {watchedRubricPreset === 'custom' ? (
-                      <Form.Item
-                        label="自定义评分标准"
-                        name="judge_rubric"
-                        rules={[{ required: true, message: '请输入自定义评分标准，或选择一个预设评分标准' }]}
-                      >
-                        <Input.TextArea
-                          rows={3}
-                          placeholder="例如：优先选择事实准确、步骤完整、严格遵循系统约束且没有编造内容的回答。"
-                        />
-                      </Form.Item>
-                    ) : null}
-                  </>
-                ),
-              },
-            ]}
+          <Alert
+            type="info"
+            showIcon
+            message="评分方式已自动设置"
+            description="本次 Arena 会使用系统本地自动评分，不需要额外选择评审渠道或评分模式。结果页会展示排名、胜负矩阵和关键分歧样本。"
+            style={{ marginTop: 16, marginBottom: 16 }}
           />
           <div className="arena-next-steps">
             <Tag color="purple">结果页会展示排名、胜负矩阵和关键分歧样本</Tag>
