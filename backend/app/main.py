@@ -373,7 +373,15 @@ def system_usage(
 
 @app.post("/api/system/cleanup-run-logs", response_model=RunLogCleanupRead)
 def cleanup_run_logs(dry_run: bool = Query(False), db: Session = Depends(get_db)) -> RunLogCleanupRead:
-    candidate_run_ids, skipped_baseline_runs, active_runs = _cleanup_candidate_run_ids(db)
+    try:
+        candidate_run_ids, skipped_baseline_runs, active_runs = _cleanup_candidate_run_ids(db)
+    except Exception:
+        db.rollback()
+        logger.warning("cleanup_run_logs: failed to collect candidate runs", exc_info=True)
+        if dry_run:
+            active_runs = int(db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0)
+            return RunLogCleanupRead(dry_run=True, skipped_running_runs=active_runs)
+        raise
     if not candidate_run_ids:
         return RunLogCleanupRead(
             dry_run=dry_run,
@@ -384,19 +392,31 @@ def cleanup_run_logs(dry_run: bool = Query(False), db: Session = Depends(get_db)
     def count_for(model: type, field) -> int:  # noqa: ANN001
         return int(db.scalar(select(func.count()).select_from(model).where(field.in_(candidate_run_ids))) or 0)
 
-    scheduled_refs = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(candidate_run_ids))).all())
-    payload = RunLogCleanupRead(
-        dry_run=dry_run,
-        deleted_runs=len(candidate_run_ids),
-        deleted_run_channels=count_for(RunChannel, RunChannel.run_id),
-        deleted_results=count_for(Result, Result.run_id),
-        deleted_comparisons=count_for(Comparison, Comparison.run_id),
-        deleted_reports=count_for(Report, Report.run_id),
-        deleted_alerts=count_for(ChannelAlert, ChannelAlert.run_id),
-        cleared_scheduled_last_run_refs=len(scheduled_refs),
-        skipped_running_runs=active_runs,
-        skipped_baseline_runs=skipped_baseline_runs,
-    )
+    try:
+        scheduled_refs = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(candidate_run_ids))).all())
+        payload = RunLogCleanupRead(
+            dry_run=dry_run,
+            deleted_runs=len(candidate_run_ids),
+            deleted_run_channels=count_for(RunChannel, RunChannel.run_id),
+            deleted_results=count_for(Result, Result.run_id),
+            deleted_comparisons=count_for(Comparison, Comparison.run_id),
+            deleted_reports=count_for(Report, Report.run_id),
+            deleted_alerts=count_for(ChannelAlert, ChannelAlert.run_id),
+            cleared_scheduled_last_run_refs=len(scheduled_refs),
+            skipped_running_runs=active_runs,
+            skipped_baseline_runs=skipped_baseline_runs,
+        )
+    except Exception:
+        db.rollback()
+        logger.warning("cleanup_run_logs: failed to build cleanup summary", exc_info=True)
+        if dry_run:
+            return RunLogCleanupRead(
+                dry_run=True,
+                deleted_runs=len(candidate_run_ids),
+                skipped_running_runs=active_runs,
+                skipped_baseline_runs=skipped_baseline_runs,
+            )
+        raise
     if dry_run:
         return payload
 

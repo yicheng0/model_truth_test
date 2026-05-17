@@ -251,6 +251,43 @@ def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
     assert {"enabled", "instance_id", "stale_schedule_count", "queued_schedule_count", "running_schedule_count", "next_due_at"} <= set(payload)
 
 
+def test_scheduled_tests_list_tolerates_bad_probe_evidence() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = create_run(db, RunCreate(name="bad scheduled probe", suite_id=suite_id, use_mock=True))
+        run.status = "completed"
+        run.scheduled_test_id = "bad_schedule"
+        report = Report(
+            id="bad_probe_report",
+            run_id=run.id,
+            channel_id="third_party_demo",
+            final_score=0,
+            grade="E",
+            evidence=["legacy bad evidence"],
+        )
+        schedule = ScheduledChannelTest(
+            id="bad_schedule",
+            channel_id="third_party_demo",
+            suite_id=suite_id,
+            baseline_snapshot_id="missing_baseline_for_bad_schedule",
+            name="bad schedule",
+            last_run_id=run.id,
+            last_status="completed",
+        )
+        db.add(report)
+        db.add(schedule)
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/scheduled-tests")
+
+    assert response.status_code == 200
+    schedule_payload = next(item for item in response.json() if item["id"] == "bad_schedule")
+    assert schedule_payload["latest_report_id"] == "bad_probe_report"
+    assert schedule_payload["latest_probe_summary"] is not None
+
+
 def test_startup_seed_removes_stale_default_cases_without_crashing() -> None:
     reset_database()
     with SessionLocal() as db:
@@ -3614,6 +3651,28 @@ def test_cleanup_run_logs_dry_run_does_not_delete_data() -> None:
     with SessionLocal() as db:
         assert db.get(Run, run_id) is not None
         assert db.get(Result, "dry_res") is not None
+
+
+def test_cleanup_run_logs_dry_run_falls_back_when_summary_fails(monkeypatch) -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = create_run(db, RunCreate(name="dry cleanup fallback run", suite_id=suite_id, use_mock=True))
+        run.status = "completed"
+        db.commit()
+
+    def fail_count(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("count failed")
+
+    monkeypatch.setattr("app.main._cleanup_candidate_run_ids", fail_count)
+
+    with TestClient(app) as client:
+        response = client.post("/api/system/cleanup-run-logs?dry_run=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dry_run"] is True
+    assert payload["deleted_runs"] == 0
 
 
 def test_cleanup_run_logs_removes_terminal_run_logs_and_keeps_configs() -> None:

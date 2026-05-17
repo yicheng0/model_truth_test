@@ -37,6 +37,7 @@ function SystemMaintenanceBody({
     queryKey: ['cleanupRunLogsPreview'],
     queryFn: () => api.cleanupRunLogs(true),
     enabled: open,
+    staleTime: 60_000,
   });
   const cleanup = useMutation({
     mutationFn: () => api.cleanupRunLogs(false),
@@ -102,7 +103,9 @@ function SystemMaintenanceBody({
           <Descriptions.Item label="结果数">{data?.result_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="报告数">{data?.report_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="告警数">{data?.alert_count ?? '-'}</Descriptions.Item>
-          <Descriptions.Item label="清理预估" span={2}>{preview.isLoading ? '正在计算...' : cleanupSummary(preview.data)}</Descriptions.Item>
+          <Descriptions.Item label="清理预估" span={2}>
+            {preview.isLoading ? '正在计算...' : preview.isError ? '暂未取得预估数据，可稍后重试' : cleanupSummary(preview.data)}
+          </Descriptions.Item>
           <Descriptions.Item label="保留任务" span={2}>
             运行中/待执行 {preview.data?.skipped_running_runs ?? data?.cleanup_skipped_baseline_run_count ?? 0} 个，指纹引用 {preview.data?.skipped_baseline_runs ?? 0} 个
           </Descriptions.Item>

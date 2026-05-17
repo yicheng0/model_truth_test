@@ -40,6 +40,24 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('keeps cleanup preview available even when the dry-run result is missing', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'Internal server error' }), {
+        status: 500,
+        statusText: 'Internal Server Error',
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await expect(api.cleanupRunLogs(true)).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 500,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/system/cleanup-run-logs?dry_run=true', expect.objectContaining({ method: 'POST' }));
+    fetchMock.mockRestore();
+  });
+
   it('updates channel taxonomy settings with the expected endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

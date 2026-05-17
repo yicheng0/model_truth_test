@@ -235,23 +235,35 @@ def recover_stale_scheduled_tests(db: Session, *, now: datetime | None = None) -
 
 def scheduled_tests_health(db: Session) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    recover_stale_scheduled_tests(db, now=now)
+    try:
+        recover_stale_scheduled_tests(db, now=now)
+    except Exception:
+        db.rollback()
+        logger.warning("scheduled_tests_health: stale schedule recovery failed", exc_info=True)
     schedules = list(db.scalars(select(ScheduledChannelTest)).all())
     enabled = [schedule for schedule in schedules if schedule.enabled]
-    stale = [
-        schedule
-        for schedule in schedules
-        if schedule.last_status in {"queued", "running"} and schedule.locked_until and _as_utc(schedule.locked_until) <= now
-    ]
-    next_due = min([_as_utc(schedule.next_run_at) for schedule in enabled if schedule.next_run_at], default=None)
+    stale_schedule_count = 0
+    next_due_candidates: list[datetime] = []
+    for schedule in enabled:
+        try:
+            if schedule.next_run_at:
+                next_due_candidates.append(_as_utc(schedule.next_run_at))
+        except Exception:
+            logger.warning("scheduled_tests_health: invalid next_run_at schedule_id=%s", schedule.id, exc_info=True)
+    for schedule in schedules:
+        try:
+            if schedule.last_status in {"queued", "running"} and schedule.locked_until and _as_utc(schedule.locked_until) <= now:
+                stale_schedule_count += 1
+        except Exception:
+            logger.warning("scheduled_tests_health: invalid locked_until schedule_id=%s", schedule.id, exc_info=True)
     return {
         "enabled": scheduler_enabled(),
         "instance_id": SCHEDULER_INSTANCE_ID,
         "last_tick_at": SCHEDULER_LAST_TICK_AT,
-        "stale_schedule_count": len(stale),
+        "stale_schedule_count": stale_schedule_count,
         "queued_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "queued"),
         "running_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "running"),
-        "next_due_at": next_due,
+        "next_due_at": min(next_due_candidates, default=None),
     }
 
 
@@ -2641,25 +2653,15 @@ def scoreless_alert_message(value: str | None) -> str:
 
 def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -> dict[str, Any]:
     if not scheduled.last_run_id:
-        return {
-            "latest_report_id": None,
-            "latest_grade": None,
-            "latest_score": None,
-            "latest_probe_summary": None,
-        }
+        return empty_scheduled_probe_summary()
     report = db.scalar(
         select(Report)
         .where(Report.run_id == scheduled.last_run_id, Report.channel_id == scheduled.channel_id)
         .order_by(Report.created_at.desc())
     )
     if not report:
-        return {
-            "latest_report_id": None,
-            "latest_grade": None,
-            "latest_score": None,
-            "latest_probe_summary": None,
-        }
-    evidence = report.evidence or {}
+        return empty_scheduled_probe_summary()
+    evidence = report.evidence if isinstance(report.evidence, dict) else {}
     model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
     model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
     if not model_requests and model_request:
@@ -2745,13 +2747,32 @@ def _probe_summary_status(item: dict[str, Any]) -> str:
     return "error" if labels else "ok"
 
 
+def empty_scheduled_probe_summary() -> dict[str, Any]:
+    return {
+        "latest_report_id": None,
+        "latest_grade": None,
+        "latest_score": None,
+        "latest_probe_summary": None,
+    }
+
+
 def scheduled_channel_test_read(db: Session, scheduled: ScheduledChannelTest) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    is_stale = bool(
-        scheduled.last_status in {"queued", "running"}
-        and scheduled.locked_until
-        and _as_utc(scheduled.locked_until) <= now
-    )
+    try:
+        is_stale = bool(
+            scheduled.last_status in {"queued", "running"}
+            and scheduled.locked_until
+            and _as_utc(scheduled.locked_until) <= now
+        )
+    except Exception:
+        logger.warning("scheduled_channel_test_read: invalid locked_until schedule_id=%s", scheduled.id, exc_info=True)
+        is_stale = False
+    try:
+        probe_summary = scheduled_test_probe_summary(db, scheduled)
+    except Exception:
+        db.rollback()
+        logger.warning("scheduled_channel_test_read: probe summary failed schedule_id=%s", scheduled.id, exc_info=True)
+        probe_summary = empty_scheduled_probe_summary()
     return {
         "id": scheduled.id,
         "name": scheduled.name,
@@ -2784,7 +2805,7 @@ def scheduled_channel_test_read(db: Session, scheduled: ScheduledChannelTest) ->
         "last_error": scheduled.last_error,
         "created_at": scheduled.created_at,
         "updated_at": scheduled.updated_at,
-        **scheduled_test_probe_summary(db, scheduled),
+        **probe_summary,
     }
 
 

@@ -610,6 +610,19 @@ export default function ScheduledTests() {
     setOpenAlertLog(null);
   }
 
+  function refetchActiveTabData() {
+    if (activeTab === 'plans') {
+      return Promise.all([schedules.refetch(), channels.refetch(), taxonomy.refetch(), schedulerHealth.refetch()]);
+    }
+    if (activeTab === 'alerts') {
+      return Promise.all([alerts.refetch(), channels.refetch()]);
+    }
+    if (activeTab === 'report') {
+      return Promise.all([smartReport.refetch(), channels.refetch()]);
+    }
+    return Promise.all([feishuSetting.refetch()]);
+  }
+
   const planError = needsPlanData ? schedules.error ?? channels.error : null;
   const alertError = needsAlertData ? alerts.error ?? channels.error : null;
   const reportError = activeTab === 'report' ? smartReport.error : null;
@@ -638,7 +651,7 @@ export default function ScheduledTests() {
           showIcon
           message="自动巡检数据加载失败"
           description={getErrorMessage(error)}
-          action={<Button onClick={() => Promise.all([schedules.refetch(), alerts.refetch(), channels.refetch(), smartReport.refetch(), feishuSetting.refetch()])}>重试</Button>}
+          action={<Button onClick={refetchActiveTabData}>重试</Button>}
         />
       ) : null}
 
