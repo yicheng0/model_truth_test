@@ -25,7 +25,7 @@ NEW_COLUMNS = (
     sa.Column("run_window_end", sa.String(length=5), nullable=True),
     sa.Column("alert_grade_threshold", sa.String(length=2), nullable=False, server_default=sa.text("'D'")),
     sa.Column("alert_score_threshold", sa.Float(), nullable=True),
-    sa.Column("alert_red_flags_enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+    sa.Column("alert_red_flags_enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
     sa.Column("quiet_minutes", sa.Integer(), nullable=False, server_default=sa.text("0")),
     sa.Column("max_retries", sa.Integer(), nullable=False, server_default=sa.text("0")),
     sa.Column("retry_interval_minutes", sa.Integer(), nullable=False, server_default=sa.text("5")),

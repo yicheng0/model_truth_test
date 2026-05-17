@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import importlib.util
 import json
 import uuid
 from pathlib import Path
@@ -19,6 +20,8 @@ import httpx
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, delete, func, inspect, select, text
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.schema import CreateColumn
 from sqlalchemy.orm import close_all_sessions, sessionmaker
 
 from app.database import SessionLocal, engine, init_db
@@ -27,6 +30,12 @@ from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, 
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
 from app.restored_seed import restored_seed_data
 from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, score_result, seed_demo_data, smart_patrol_daily_text, suite_fingerprint
+
+_backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
+_backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
+assert _backfill_spec and _backfill_spec.loader
+scheduled_tests_backfill = importlib.util.module_from_spec(_backfill_spec)
+_backfill_spec.loader.exec_module(scheduled_tests_backfill)
 
 
 ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
@@ -318,6 +327,13 @@ def test_scheduled_tests_schema_backfill_migration_adds_missing_columns(tmp_path
         "last_started_at",
         "last_finished_at",
     } <= columns
+
+
+def test_scheduled_tests_backfill_boolean_default_is_postgres_compatible() -> None:
+    column = next(item for item in scheduled_tests_backfill.NEW_COLUMNS if item.name == "alert_red_flags_enabled")
+    ddl = str(CreateColumn(column).compile(dialect=postgresql.dialect()))
+    assert "DEFAULT true" in ddl
+    assert "DEFAULT 1" not in ddl
 
 
 def test_scheduled_tests_list_tolerates_bad_probe_evidence() -> None:
