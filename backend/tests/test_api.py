@@ -2221,6 +2221,55 @@ def test_list_alerts_filters_by_any_locator_id_and_time_range() -> None:
     assert response.json() == []
 
 
+def test_list_alerts_tolerates_legacy_malformed_alert_fields() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        assert alert is not None
+        alert.trigger_labels = {"legacy": "identity_mismatch"}
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/alerts", params={"status": "pending_review"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload
+    assert payload[0]["trigger_labels"] == ["{'legacy': 'identity_mismatch'}"]
+
+
+def test_smart_patrol_report_tolerates_legacy_malformed_alert_fields() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        assert alert is not None
+        alert.trigger_labels = {"legacy": "identity_mismatch"}
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/scheduled-tests/report")
+        markdown = client.get("/api/scheduled-tests/report.md")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recent_alerts"]
+    assert payload["recent_alerts"][0]["trigger_labels"] == ["{'legacy': 'identity_mismatch'}"]
+    assert markdown.status_code == 200
+    assert "智能巡检汇总报告" in markdown.text
+
+
 def test_scheduled_test_rejects_reference_channel() -> None:
     reset_database()
     with TestClient(app) as client:

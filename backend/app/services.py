@@ -2836,24 +2836,30 @@ def scheduled_channel_test_read(db: Session, scheduled: ScheduledChannelTest) ->
 
 
 def channel_alert_read(db: Session, alert: ChannelAlert) -> dict[str, Any]:
+    evidence_summary: dict[str, Any] | None = None
+    try:
+        evidence_summary = alert_evidence_summary(db, alert)
+    except Exception:
+        logger.warning("Failed to build alert evidence summary for %s", alert.id, exc_info=True)
+        db.rollback()
     return {
         "id": alert.id,
         "scheduled_test_id": alert.scheduled_test_id,
         "run_id": alert.run_id,
         "report_id": alert.report_id,
         "channel_id": alert.channel_id,
-        "status": alert.status,
-        "severity": alert.severity,
-        "grade": alert.grade,
-        "final_score": alert.final_score,
-        "trigger_labels": alert.trigger_labels,
+        "status": alert.status or "pending_review",
+        "severity": alert.severity or "high",
+        "grade": alert.grade or "E",
+        "final_score": _safe_float(alert.final_score),
+        "trigger_labels": _safe_string_list(alert.trigger_labels),
         "message": alert.message,
         "dedupe_key": alert.dedupe_key,
-        "notification_status": alert.notification_status,
+        "notification_status": alert.notification_status or "pending",
         "notification_error": alert.notification_error,
-        "notification_attempt_count": alert.notification_attempt_count,
+        "notification_attempt_count": int(alert.notification_attempt_count or 0),
         "last_notification_attempt_at": alert.last_notification_attempt_at,
-        "evidence_summary": alert_evidence_summary(db, alert),
+        "evidence_summary": evidence_summary,
         "notified_at": alert.notified_at,
         "reviewer_name": alert.reviewer_name,
         "review_note": alert.review_note,
@@ -2861,6 +2867,21 @@ def channel_alert_read(db: Session, alert: ChannelAlert) -> dict[str, Any]:
         "created_at": alert.created_at,
         "updated_at": alert.updated_at,
     }
+
+
+def _safe_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    if value is None:
+        return []
+    return [str(value)]
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: str, scheduled_id: str | None = None) -> list[ChannelAlert]:
@@ -3159,6 +3180,13 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
     )
 
     trend = _smart_patrol_trend(runs, alerts)
+    recent_alerts = []
+    for alert in alerts[:10]:
+        try:
+            recent_alerts.append(channel_alert_read(db, alert))
+        except Exception:
+            logger.warning("Failed to serialize recent patrol alert %s", getattr(alert, "id", None), exc_info=True)
+            db.rollback()
     return {
         "from_at": from_at,
         "to_at": to_at,
@@ -3174,7 +3202,7 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
             for channel_id, channel in channels.items()
         },
         "channel_summaries": channel_summaries,
-        "recent_alerts": alerts[:10],
+        "recent_alerts": recent_alerts,
         "trend": trend,
     }
 
@@ -3243,7 +3271,7 @@ def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
         for item in report["channel_summaries"][:8]
     ) or "- 暂无渠道巡检数据"
     alert_lines = "\n".join(
-        f"- {channel_names.get(alert.channel_id, alert.channel_id)}：{scoreless_alert_message(alert.message or alert.channel_id)}"
+        f"- {channel_names.get(alert.get('channel_id'), alert.get('channel_id'))}：{scoreless_alert_message(alert.get('message') or alert.get('channel_id'))}"
         for alert in report["recent_alerts"][:8]
     ) or "- 暂无错误告警"
     return f"""# 智能巡检汇总报告
