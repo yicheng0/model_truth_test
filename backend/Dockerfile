@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY alembic.ini .
 COPY alembic ./alembic
+COPY scripts ./scripts
 
 RUN useradd -m -u 1000 app && chown -R app:app /app
 
