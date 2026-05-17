@@ -1092,16 +1092,6 @@ def seed_demo_data(db: Session) -> None:
             suite.visibility = default_suite()["visibility"]
     case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == default_suite()["id"])).all()}
     default_case_data = default_cases()
-    default_case_ids = {case_data["id"] for case_data in default_case_data}
-    stale_case_ids = [case_id for case_id in case_by_id if case_id not in default_case_ids]
-    if stale_case_ids:
-        db.execute(delete(BaselineResult).where(BaselineResult.test_case_id.in_(stale_case_ids)))
-        db.execute(delete(Result).where(Result.test_case_id.in_(stale_case_ids)))
-        db.execute(delete(Comparison).where(Comparison.test_case_id.in_(stale_case_ids)))
-        db.execute(delete(TestCase).where(TestCase.id.in_(stale_case_ids)))
-        db.commit()
-        db.expunge_all()
-        case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == default_suite()["id"])).all()}
 
     for case_data in default_case_data:
         case = case_by_id.get(case_data["id"])

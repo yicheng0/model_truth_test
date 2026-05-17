@@ -1,4 +1,7 @@
 import { Save } from "lucide-react";
+import { useState } from "react";
+import { setAdminApiKey } from "../api";
+import { useAdminAccess } from "../adminAccess";
 import { Section } from "../components/Section";
 
 const weights = [
@@ -14,6 +17,14 @@ const weights = [
 ];
 
 export function SettingsPage() {
+  const { adminKey, isAdminMode, updateAdminKey } = useAdminAccess();
+  const [draftAdminKey, setDraftAdminKey] = useState(adminKey);
+
+  function saveAdminKey() {
+    setAdminApiKey(draftAdminKey);
+    updateAdminKey(draftAdminKey);
+  }
+
   return (
     <div className="page">
       <header className="page-header">
@@ -28,6 +39,20 @@ export function SettingsPage() {
             {["claude-sonnet-4-5", "anthropic.claude-sonnet-4-5-v1:0", "claude-opus-4-1", "claude-haiku-4-5"].map((model) => (
               <label key={model} className="check-row"><input type="checkbox" defaultChecked />{model}</label>
             ))}
+          </div>
+        </Section>
+        <Section title="管理员模式" actions={<button className="primary-button" type="button" onClick={saveAdminKey}><Save size={16} />保存</button>}>
+          <div className="setting-list">
+            <label>
+              <span>管理员密钥</span>
+              <input
+                type="password"
+                value={draftAdminKey}
+                placeholder="输入 ADMIN_API_KEY 后启用删除和清理"
+                onChange={(event) => setDraftAdminKey(event.target.value)}
+              />
+            </label>
+            <small>{isAdminMode ? "已启用管理员操作" : "未启用管理员操作"}</small>
           </div>
         </Section>
         <Section title="评分权重" actions={<button className="primary-button" type="button"><Save size={16} />保存</button>}>

@@ -5,6 +5,7 @@ import dayjs, { type Dayjs } from 'dayjs';
 import { BarChart3, Bell, CalendarClock, Edit3, Eye, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
+import { useAdminAccess } from '../adminAccess';
 import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../channelCredentials';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
@@ -237,6 +238,7 @@ function alertSummaryCell(alert: ChannelAlert, channelName?: string | null) {
 }
 
 export default function ScheduledTests() {
+  const { isAdminMode } = useAdminAccess();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedAlertId = searchParams.get('alert');
@@ -851,19 +853,21 @@ export default function ScheduledTests() {
                               </Button>
                             </Tooltip>
                             <Button icon={<Edit3 size={15} />} onClick={() => openEditSchedule(schedule)}>编辑</Button>
-                            <Popconfirm
-                              title="删除自动巡检计划"
-                              description="删除后该计划不再自动执行；历史告警、巡检日志和原始证据会保留。确定删除吗？"
-                              okText="删除"
-                              okButtonProps={{ danger: true }}
-                              cancelText="取消"
-                              onConfirm={() => {
-                                setDeletingScheduleId(schedule.id);
-                                deleteSchedule.mutate(schedule.id);
-                              }}
-                            >
-                              <Button danger icon={<Trash2 size={15} />} loading={deletingScheduleId === schedule.id}>删除</Button>
-                            </Popconfirm>
+                            {isAdminMode ? (
+                              <Popconfirm
+                                title="删除自动巡检计划"
+                                description="删除后该计划不再自动执行；历史告警、巡检日志和原始证据会保留。确定删除吗？"
+                                okText="删除"
+                                okButtonProps={{ danger: true }}
+                                cancelText="取消"
+                                onConfirm={() => {
+                                  setDeletingScheduleId(schedule.id);
+                                  deleteSchedule.mutate(schedule.id);
+                                }}
+                              >
+                                <Button danger icon={<Trash2 size={15} />} loading={deletingScheduleId === schedule.id}>删除</Button>
+                              </Popconfirm>
+                            ) : null}
                           </Space>
                         ),
                       },
@@ -922,19 +926,21 @@ export default function ScheduledTests() {
             ]}
           />
           <Button onClick={clearAlertFilters}>清空</Button>
-          <Popconfirm
-            title="删除已选告警"
-            description={`将删除 ${selectedAlertRowKeys.length} 条复审告警；巡检日志、报告和原始证据会保留。确定删除吗？`}
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            cancelText="取消"
-            disabled={!selectedAlertRowKeys.length}
-            onConfirm={deleteSelectedAlerts}
-          >
-            <Button danger icon={<Trash2 size={15} />} disabled={!selectedAlertRowKeys.length} loading={deleteAlerts.isPending}>
-              删除已选
-            </Button>
-          </Popconfirm>
+          {isAdminMode ? (
+            <Popconfirm
+              title="删除已选告警"
+              description={`将删除 ${selectedAlertRowKeys.length} 条复审告警；巡检日志、报告和原始证据会保留。确定删除吗？`}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+              disabled={!selectedAlertRowKeys.length}
+              onConfirm={deleteSelectedAlerts}
+            >
+              <Button danger icon={<Trash2 size={15} />} disabled={!selectedAlertRowKeys.length} loading={deleteAlerts.isPending}>
+                删除已选
+              </Button>
+            </Popconfirm>
+          ) : null}
         </Space>
         <Table
           rowKey="id"
@@ -1033,16 +1039,18 @@ export default function ScheduledTests() {
                   >
                     重发
                   </Button>
-                  <Popconfirm
-                    title="删除告警"
-                    description="只删除这条复审告警；巡检日志、报告和原始证据会保留。确定删除吗？"
-                    okText="删除"
-                    okButtonProps={{ danger: true }}
-                    cancelText="取消"
-                    onConfirm={() => deleteOneAlert(alert)}
-                  >
-                    <Button danger icon={<Trash2 size={15} />} loading={deletingAlertId === alert.id}>删除</Button>
-                  </Popconfirm>
+                  {isAdminMode ? (
+                    <Popconfirm
+                      title="删除告警"
+                      description="只删除这条复审告警；巡检日志、报告和原始证据会保留。确定删除吗？"
+                      okText="删除"
+                      okButtonProps={{ danger: true }}
+                      cancelText="取消"
+                      onConfirm={() => deleteOneAlert(alert)}
+                    >
+                      <Button danger icon={<Trash2 size={15} />} loading={deletingAlertId === alert.id}>删除</Button>
+                    </Popconfirm>
+                  ) : null}
                 </Space>
               ),
             },
@@ -1137,19 +1145,21 @@ export default function ScheduledTests() {
                           { value: 'all', label: '全部' },
                         ]}
                       />
-                      <Popconfirm
-                        title="删除已选最近异常"
-                        description={`将删除当前可见列表中已选的 ${selectedRecentAlertRowKeys.length} 条告警记录；巡检日志、报告和原始证据会保留。确定删除吗？`}
-                        okText="删除"
-                        okButtonProps={{ danger: true }}
-                        cancelText="取消"
-                        disabled={!selectedRecentAlertRowKeys.length}
-                        onConfirm={deleteSelectedRecentAlerts}
-                      >
-                        <Button danger icon={<Trash2 size={15} />} disabled={!selectedRecentAlertRowKeys.length} loading={deleteAlerts.isPending}>
-                          删除已选
-                        </Button>
-                      </Popconfirm>
+                      {isAdminMode ? (
+                        <Popconfirm
+                          title="删除已选最近异常"
+                          description={`将删除当前可见列表中已选的 ${selectedRecentAlertRowKeys.length} 条告警记录；巡检日志、报告和原始证据会保留。确定删除吗？`}
+                          okText="删除"
+                          okButtonProps={{ danger: true }}
+                          cancelText="取消"
+                          disabled={!selectedRecentAlertRowKeys.length}
+                          onConfirm={deleteSelectedRecentAlerts}
+                        >
+                          <Button danger icon={<Trash2 size={15} />} disabled={!selectedRecentAlertRowKeys.length} loading={deleteAlerts.isPending}>
+                            删除已选
+                          </Button>
+                        </Popconfirm>
+                      ) : null}
                       <Typography.Text type="secondary">已选 {selectedRecentAlertRowKeys.length} / 当前可见 {recentAlerts.length}</Typography.Text>
                     </Space>
                   ) : null}
@@ -1190,16 +1200,18 @@ export default function ScheduledTests() {
                           render: (_, alert) => (
                             <Space wrap>
                               <Button type="link" icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
-                              <Popconfirm
-                                title="删除最近异常"
-                                description="只删除这条告警记录；巡检日志、报告和原始证据会保留。确定删除吗？"
-                                okText="删除"
-                                okButtonProps={{ danger: true }}
-                                cancelText="取消"
-                                onConfirm={() => deleteOneAlert(alert)}
-                              >
-                                <Button danger icon={<Trash2 size={15} />} loading={deletingAlertId === alert.id}>删除</Button>
-                              </Popconfirm>
+                              {isAdminMode ? (
+                                <Popconfirm
+                                  title="删除最近异常"
+                                  description="只删除这条告警记录；巡检日志、报告和原始证据会保留。确定删除吗？"
+                                  okText="删除"
+                                  okButtonProps={{ danger: true }}
+                                  cancelText="取消"
+                                  onConfirm={() => deleteOneAlert(alert)}
+                                >
+                                  <Button danger icon={<Trash2 size={15} />} loading={deletingAlertId === alert.id}>删除</Button>
+                                </Popconfirm>
+                              ) : null}
                             </Space>
                           ),
                         },

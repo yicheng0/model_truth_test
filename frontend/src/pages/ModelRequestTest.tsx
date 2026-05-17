@@ -4,6 +4,7 @@ import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Popconfirm
 import { Link } from 'react-router-dom';
 import { BrainCircuit, Bug, Search, Send, Shuffle, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { useAdminAccess } from '../adminAccess';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { Channel, ModelRequestTestResult } from '../types';
@@ -204,6 +205,7 @@ function parseExtraParams(value?: string) {
 }
 
 export default function ModelRequestTest() {
+  const { isAdminMode } = useAdminAccess();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<ModelRequestForm>();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
@@ -552,18 +554,20 @@ export default function ModelRequestTest() {
                   ].filter(Boolean).join('；')
             }
           />
-          <Popconfirm
-            title="删除本次组合日志"
-            description={`会删除本次组合测试产生的 ${comboResults.length} 条任务日志。确定删除吗？`}
-            okText="删除"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-            onConfirm={deleteComboResult}
-          >
-            <Button danger icon={<Trash2 size={15} />} loading={deleteComboRuns.isPending}>
-              删除本次组合日志
-            </Button>
-          </Popconfirm>
+          {isAdminMode ? (
+            <Popconfirm
+              title="删除本次组合日志"
+              description={`会删除本次组合测试产生的 ${comboResults.length} 条任务日志。确定删除吗？`}
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={deleteComboResult}
+            >
+              <Button danger icon={<Trash2 size={15} />} loading={deleteComboRuns.isPending}>
+                删除本次组合日志
+              </Button>
+            </Popconfirm>
+          ) : null}
           <div className="signature-sim-grid">
             {comboResults.map(({ key, title, payload }) => {
               const labels = payload.result.labels ?? [];
@@ -590,18 +594,20 @@ export default function ModelRequestTest() {
                     <Descriptions.Item label="Endpoint">{payload.provider_endpoint || '-'}</Descriptions.Item>
                     <Descriptions.Item label="错误摘要">{error || '未返回错误'}</Descriptions.Item>
                   </Descriptions>
-                  <Popconfirm
-                    title="删除该探针日志"
-                    description="会删除该探针产生的任务和结果。确定删除吗？"
-                    okText="删除"
-                    cancelText="取消"
-                    okButtonProps={{ danger: true }}
-                    onConfirm={() => deleteSingleResult(payload)}
-                  >
-                    <Button danger icon={<Trash2 size={15} />} loading={deleteProbeRun.isPending && deleteProbeRun.variables === payload.run.id} style={{ marginTop: 12 }}>
-                      删除该日志
-                    </Button>
-                  </Popconfirm>
+                  {isAdminMode ? (
+                    <Popconfirm
+                      title="删除该探针日志"
+                      description="会删除该探针产生的任务和结果。确定删除吗？"
+                      okText="删除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => deleteSingleResult(payload)}
+                    >
+                      <Button danger icon={<Trash2 size={15} />} loading={deleteProbeRun.isPending && deleteProbeRun.variables === payload.run.id} style={{ marginTop: 12 }}>
+                        删除该日志
+                      </Button>
+                    </Popconfirm>
+                  ) : null}
                 </Card>
               );
             })}
@@ -627,18 +633,20 @@ export default function ModelRequestTest() {
               <Descriptions.Item label="模型">{String(normalizedValue(result, 'provider_model') ?? '-')}</Descriptions.Item>
               <Descriptions.Item label="延迟">{String(normalizedValue(result, 'latency_ms') ?? '-')} ms</Descriptions.Item>
             </Descriptions>
-            <Popconfirm
-              title="删除本次请求日志"
-              description="会删除本次真实请求生成的任务、结果和日志。确定删除吗？"
-              okText="删除"
-              cancelText="取消"
-              okButtonProps={{ danger: true }}
-              onConfirm={() => deleteSingleResult(result)}
-            >
-              <Button danger icon={<Trash2 size={15} />} loading={deleteProbeRun.isPending && deleteProbeRun.variables === result.run.id} style={{ marginTop: 16 }}>
-                删除本次请求日志
-              </Button>
-            </Popconfirm>
+            {isAdminMode ? (
+              <Popconfirm
+                title="删除本次请求日志"
+                description="会删除本次真实请求生成的任务、结果和日志。确定删除吗？"
+                okText="删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => deleteSingleResult(result)}
+              >
+                <Button danger icon={<Trash2 size={15} />} loading={deleteProbeRun.isPending && deleteProbeRun.variables === result.run.id} style={{ marginTop: 16 }}>
+                  删除本次请求日志
+                </Button>
+              </Popconfirm>
+            ) : null}
           </Card>
 
           {result.result.normalized_response?.error ? (

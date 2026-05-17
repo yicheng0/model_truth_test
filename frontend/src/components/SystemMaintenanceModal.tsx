@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Descriptions, Modal, Popconfirm, Progress, Space, Statistic, message } from 'antd';
 import { DatabaseZap } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { useAdminAccess } from '../adminAccess';
 import type { RunLogCleanupResult } from '../types';
 
 function formatBytes(value?: number | null) {
@@ -28,6 +29,7 @@ function SystemMaintenanceBody({
   open: boolean;
 }) {
   const queryClient = useQueryClient();
+  const { isAdminMode } = useAdminAccess();
   const usage = useQuery({
     queryKey: ['systemUsage'],
     queryFn: api.systemUsage,
@@ -36,7 +38,7 @@ function SystemMaintenanceBody({
   const preview = useQuery({
     queryKey: ['cleanupRunLogsPreview'],
     queryFn: () => api.cleanupRunLogs(true),
-    enabled: open,
+    enabled: open && isAdminMode,
     staleTime: 60_000,
   });
   const cleanup = useMutation({
@@ -55,7 +57,7 @@ function SystemMaintenanceBody({
   });
 
   const data = usage.data;
-  const cleanupDisabled = cleanup.isPending || !preview.data?.deleted_runs;
+  const cleanupDisabled = !isAdminMode || cleanup.isPending || !preview.data?.deleted_runs;
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -75,6 +77,14 @@ function SystemMaintenanceBody({
           message="清理预估加载失败"
           description={getErrorMessage(preview.error)}
           action={<Button onClick={() => preview.refetch()}>重试</Button>}
+        />
+      ) : null}
+      {!isAdminMode ? (
+        <Alert
+          type="info"
+          showIcon
+          message="管理员模式未启用"
+          description="日志清理属于破坏性操作，需要在本浏览器配置管理员密钥后才能预估和执行。"
         />
       ) : null}
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -104,7 +114,7 @@ function SystemMaintenanceBody({
           <Descriptions.Item label="报告数">{data?.report_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="告警数">{data?.alert_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="清理预估" span={2}>
-            {preview.isLoading ? '正在计算...' : preview.isError ? '暂未取得预估数据，可稍后重试' : cleanupSummary(preview.data)}
+            {!isAdminMode ? '管理员模式未启用' : preview.isLoading ? '正在计算...' : preview.isError ? '暂未取得预估数据，可稍后重试' : cleanupSummary(preview.data)}
           </Descriptions.Item>
           <Descriptions.Item label="保留任务" span={2}>
             运行中/待执行 {preview.data?.skipped_running_runs ?? data?.cleanup_skipped_baseline_run_count ?? 0} 个，指纹引用 {preview.data?.skipped_baseline_runs ?? 0} 个

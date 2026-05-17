@@ -5,6 +5,7 @@ import { Alert, Button, Card, Empty, Input, Popconfirm, Select, Space, Table, Ta
 import { BarChart3, FileText, GitCompare, Search, Trash2 } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
+import { useAdminAccess } from '../adminAccess';
 import { formatDateTime } from '../time';
 import type { Report, ReportSummary, RunMode } from '../types';
 
@@ -76,6 +77,7 @@ function normalizedLabels(report: ReportSummary) {
 
 export default function ReportsPage() {
   const navigate = useNavigate();
+  const { isAdminMode } = useAdminAccess();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const reports = useQuery({ queryKey: ['reportSummaries'], queryFn: api.reportSummaries });
@@ -251,19 +253,21 @@ export default function ReportsPage() {
           <Button icon={<GitCompare size={16} />} disabled={!canCompare} onClick={compareSelected}>
             对比已选
           </Button>
-          <Popconfirm
-            title="删除已选报告"
-            description={`将删除 ${selectedRowKeys.length} 份报告及其关联告警；检测任务和原始结果会保留。确定删除吗？`}
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            cancelText="取消"
-            disabled={!selectedRowKeys.length}
-            onConfirm={deleteSelected}
-          >
-            <Button danger icon={<Trash2 size={15} />} disabled={!selectedRowKeys.length} loading={deleteMany.isPending}>
-              删除已选
-            </Button>
-          </Popconfirm>
+          {isAdminMode ? (
+            <Popconfirm
+              title="删除已选报告"
+              description={`将删除 ${selectedRowKeys.length} 份报告及其关联告警；检测任务和原始结果会保留。确定删除吗？`}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+              disabled={!selectedRowKeys.length}
+              onConfirm={deleteSelected}
+            >
+              <Button danger icon={<Trash2 size={15} />} disabled={!selectedRowKeys.length} loading={deleteMany.isPending}>
+                删除已选
+              </Button>
+            </Popconfirm>
+          ) : null}
           <Typography.Text type="secondary">已选 {selectedRowKeys.length} / 当前筛选 {filtered.length}</Typography.Text>
         </Space>
         <Table
@@ -345,21 +349,23 @@ export default function ReportsPage() {
                   <Link to={`/reports/${report.report_id}`} className="table-action-link">
                     <BarChart3 size={15} /> 查看
                   </Link>
-                  <Popconfirm
-                    title="删除报告"
-                    description="将删除这份报告及其关联告警；检测任务和原始结果会保留。确定删除吗？"
-                    okText="删除"
-                    okButtonProps={{ danger: true }}
-                    cancelText="取消"
-                    onConfirm={() => {
-                      setDeletingReportId(report.report_id);
-                      deleteOne.mutate(report.report_id);
-                    }}
-                  >
-                    <Button danger icon={<Trash2 size={15} />} loading={deletingReportId === report.report_id}>
-                      删除
-                    </Button>
-                  </Popconfirm>
+                  {isAdminMode ? (
+                    <Popconfirm
+                      title="删除报告"
+                      description="将删除这份报告及其关联告警；检测任务和原始结果会保留。确定删除吗？"
+                      okText="删除"
+                      okButtonProps={{ danger: true }}
+                      cancelText="取消"
+                      onConfirm={() => {
+                        setDeletingReportId(report.report_id);
+                        deleteOne.mutate(report.report_id);
+                      }}
+                    >
+                      <Button danger icon={<Trash2 size={15} />} loading={deletingReportId === report.report_id}>
+                        删除
+                      </Button>
+                    </Popconfirm>
+                  ) : null}
                 </Space>
               ),
             },

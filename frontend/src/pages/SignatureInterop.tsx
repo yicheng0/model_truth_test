@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Descriptions, Form, Popconfirm, Select, Space, Steps, Switch, Table, Tag, Typography, message } from 'antd';
 import { Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { useAdminAccess } from '../adminAccess';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { Channel, SignatureInteropResult } from '../types';
@@ -66,6 +67,7 @@ function resultTone(result: SignatureInteropResult) {
 }
 
 export default function SignatureInterop() {
+  const { isAdminMode } = useAdminAccess();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<{ source_channel_id: string; relay_channel_id: string; stream?: boolean }>();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
@@ -270,7 +272,7 @@ export default function SignatureInterop() {
               <Descriptions.Item label="Relay endpoint" span={2}>{result.relay_endpoint}</Descriptions.Item>
               <Descriptions.Item label="Signature 前缀" span={2}>{result.signature_prefixes.join(', ')}</Descriptions.Item>
             </Descriptions>
-            {result.run?.id ? (
+            {result.run?.id && isAdminMode ? (
               <Popconfirm
                 title="删除本次检测日志"
                 description="会删除本次 Signature 检测生成的任务、结果和日志。确定删除吗？"

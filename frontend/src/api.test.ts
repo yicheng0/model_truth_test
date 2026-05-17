@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ApiError, api, getErrorMessage } from './api';
+import { ApiError, api, getAdminApiKey, getErrorMessage, setAdminApiKey } from './api';
 
 describe('api request handling', () => {
   it('uses readable FastAPI detail messages for failures', async () => {
@@ -87,6 +87,37 @@ describe('api request handling', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith('/api/system/cleanup-run-logs?dry_run=true', expect.objectContaining({ method: 'POST' }));
+    fetchMock.mockRestore();
+  });
+
+  it('adds the admin key to destructive requests when configured', async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+      removeItem: (key: string) => {
+        storage.delete(key);
+      },
+    });
+    setAdminApiKey('test-admin-key');
+    expect(getAdminApiKey()).toBe('test-admin-key');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ deleted: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.deleteRun('run_1');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/runs/run_1',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: expect.objectContaining({ 'X-Admin-Key': 'test-admin-key' }),
+      }),
+    );
+    setAdminApiKey('');
+    vi.unstubAllGlobals();
     fetchMock.mockRestore();
   });
 

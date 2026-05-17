@@ -198,6 +198,14 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def require_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
+    expected = os.getenv("ADMIN_API_KEY", "").strip()
+    if not expected:
+        raise HTTPException(status_code=403, detail="Admin API key is not configured")
+    if x_admin_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next) -> Response:
     if RATE_LIMIT_PER_MINUTE <= 0:
@@ -372,7 +380,11 @@ def system_usage(
 
 
 @app.post("/api/system/cleanup-run-logs", response_model=RunLogCleanupRead)
-def cleanup_run_logs(dry_run: bool = Query(False), db: Session = Depends(get_db)) -> RunLogCleanupRead:
+def cleanup_run_logs(
+    dry_run: bool = Query(False),
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> RunLogCleanupRead:
     try:
         candidate_run_ids, skipped_baseline_runs, active_runs = _cleanup_candidate_run_ids(db)
     except Exception:
@@ -502,7 +514,11 @@ def update_channel(channel_id: str, data: ChannelUpdate, db: Session = Depends(g
 
 
 @app.delete("/api/channels/{channel_id}")
-def remove_channel(channel_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+def remove_channel(
+    channel_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
     channel = db.get(Channel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -709,7 +725,11 @@ def update_test_case_alias(case_id: str, data: TestCaseUpdate, db: Session = Dep
 
 
 @app.delete("/api/test-cases/{case_id}")
-def remove_test_case_alias(case_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+def remove_test_case_alias(
+    case_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
     case = db.get(TestCase, case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Test case not found")
@@ -862,7 +882,11 @@ def update_baseline(baseline_id: str, data: BaselineSnapshotUpdate, db: Session 
 
 
 @app.delete("/api/baselines/{baseline_id}")
-def delete_baseline(baseline_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+def delete_baseline(
+    baseline_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
     snapshot = db.get(BaselineSnapshot, baseline_id)
     if not snapshot:
         raise HTTPException(status_code=404, detail="Baseline not found")
@@ -1060,7 +1084,11 @@ def update_scheduled_test(scheduled_id: str, data: ScheduledChannelTestUpdate, d
 
 
 @app.delete("/api/scheduled-tests/{scheduled_id}")
-def delete_scheduled_test(scheduled_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+def delete_scheduled_test(
+    scheduled_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
     scheduled = db.get(ScheduledChannelTest, scheduled_id)
     if not scheduled:
         raise HTTPException(status_code=404, detail="Scheduled test not found")
@@ -1126,7 +1154,11 @@ def get_alert(alert_id: str, db: Session = Depends(get_db)) -> dict[str, object]
 
 
 @app.delete("/api/alerts/{alert_id}")
-def delete_alert(alert_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+def delete_alert(
+    alert_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
     alert = db.get(ChannelAlert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -1136,7 +1168,11 @@ def delete_alert(alert_id: str, db: Session = Depends(get_db)) -> dict[str, bool
 
 
 @app.post("/api/alerts/bulk-delete")
-def bulk_delete_alerts(data: BulkDeleteRequest, db: Session = Depends(get_db)) -> dict[str, object]:
+def bulk_delete_alerts(
+    data: BulkDeleteRequest,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
     if not data.ids:
         return {"deleted": 0, "missing": []}
     existing_ids = set(db.scalars(select(ChannelAlert.id).where(ChannelAlert.id.in_(data.ids))).all())
@@ -1275,7 +1311,11 @@ def cancel_run_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, st
 
 
 @app.delete("/api/runs/{run_id}")
-def delete_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+def delete_run(
+    run_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
     run = db.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -1375,6 +1415,7 @@ def _delete_report_by_id(db: Session, report_id: str) -> bool:
 @app.post("/api/reports/bulk-delete")
 def bulk_delete_reports(
     payload: dict[str, list[str]] = Body(...),
+    _admin: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     report_ids = [str(item).strip() for item in payload.get("ids", []) if str(item).strip()]
@@ -1392,7 +1433,11 @@ def bulk_delete_reports(
 
 
 @app.delete("/api/reports/{report_id}")
-def delete_report_alias(report_id: str, db: Session = Depends(get_db)) -> dict[str, bool]:
+def delete_report_alias(
+    report_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
     if not _delete_report_by_id(db, report_id):
         raise HTTPException(status_code=404, detail="Report not found")
     db.commit()

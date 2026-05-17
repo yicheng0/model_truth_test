@@ -12,6 +12,7 @@ os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 os.environ.setdefault("SKIP_BUILTIN_CHANNEL_CLEANUP", "1")
 os.environ.setdefault("AUTO_SCHEDULER_ENABLED", "false")
 os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "0")
+os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 
 from fastapi.testclient import TestClient
 import httpx
@@ -25,6 +26,9 @@ from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
 from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, score_result, seed_demo_data, smart_patrol_daily_text, suite_fingerprint
+
+
+ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
 
 
 def reset_database() -> None:
@@ -464,6 +468,31 @@ def test_seed_demo_data_restores_default_channels_only_when_empty() -> None:
     assert channels[0].auth_config == {"api_key": "keep-me"}
 
 
+def test_seed_demo_data_preserves_custom_default_suite_cases() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        db.add(
+            TestCaseModel(
+                id="custom_default_suite_case",
+                suite_id="claude_full_35",
+                module="custom",
+                sort_order=9999,
+                title="Custom default suite case",
+                prompt="Keep this user-authored case.",
+                request_params={},
+                scoring_rules={},
+                is_hidden=False,
+                enabled=True,
+            )
+        )
+        db.commit()
+        seed_demo_data(db)
+        custom_case = db.get(TestCaseModel, "custom_default_suite_case")
+
+    assert custom_case is not None
+    assert custom_case.prompt == "Keep this user-authored case."
+
+
 def test_init_db_does_not_delete_existing_builtin_channel() -> None:
     reset_database()
     with SessionLocal() as db:
@@ -620,8 +649,8 @@ def test_report_delete_removes_report_and_linked_alerts_only() -> None:
         assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.report_id == report_id)) == 1
 
     with TestClient(app) as client:
-        deleted = client.delete(f"/api/reports/{report_id}")
-        missing = client.delete("/api/reports/missing_report")
+        deleted = client.delete(f"/api/reports/{report_id}", headers=ADMIN_HEADERS)
+        missing = client.delete("/api/reports/missing_report", headers=ADMIN_HEADERS)
 
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True}
@@ -631,6 +660,29 @@ def test_report_delete_removes_report_and_linked_alerts_only() -> None:
         assert db.get(Run, run_id) is not None
         assert db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id)) == result_count
         assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.report_id == report_id)) == 0
+
+
+def test_destructive_endpoints_require_admin_key() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        run = client.post(
+            "/api/runs",
+            json={
+                "name": "admin key check",
+                "suite_id": suite_id,
+                "channel_ids": {"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
+                "repeat_count": 1,
+                "concurrency": 1,
+                "use_mock": True,
+            },
+        ).json()
+
+        forbidden = client.delete(f"/api/runs/{run['id']}")
+        cleanup_forbidden = client.post("/api/system/cleanup-run-logs?dry_run=true")
+
+    assert forbidden.status_code in {401, 403}
+    assert cleanup_forbidden.status_code in {401, 403}
 
 
 def test_report_bulk_delete_returns_deleted_count_and_missing_ids() -> None:
@@ -644,7 +696,7 @@ def test_report_bulk_delete_returns_deleted_count_and_missing_ids() -> None:
         report_ids = list(db.scalars(select(Report.id).where(Report.run_id.in_([first_run_id, second_run_id]))).all())
 
     with TestClient(app) as client:
-        response = client.post("/api/reports/bulk-delete", json={"ids": [*report_ids, "missing_report"]})
+        response = client.post("/api/reports/bulk-delete", json={"ids": [*report_ids, "missing_report"]}, headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     assert response.json()["deleted"] == len(report_ids)
@@ -670,8 +722,8 @@ def test_alert_delete_removes_alert_only() -> None:
         report_id = report.id
 
     with TestClient(app) as client:
-        deleted = client.delete(f"/api/alerts/{alert_id}")
-        missing = client.delete("/api/alerts/missing_alert")
+        deleted = client.delete(f"/api/alerts/{alert_id}", headers=ADMIN_HEADERS)
+        missing = client.delete("/api/alerts/missing_alert", headers=ADMIN_HEADERS)
 
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True}
@@ -695,7 +747,7 @@ def test_alert_bulk_delete_returns_deleted_count_and_missing_ids() -> None:
         alert_ids = list(db.scalars(select(ChannelAlert.id).where(ChannelAlert.run_id.in_([first_run_id, second_run_id]))).all())
 
     with TestClient(app) as client:
-        response = client.post("/api/alerts/bulk-delete", json={"ids": [*alert_ids, "missing_alert"]})
+        response = client.post("/api/alerts/bulk-delete", json={"ids": [*alert_ids, "missing_alert"]}, headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     assert response.json()["deleted"] == len(alert_ids)
@@ -1410,7 +1462,7 @@ def test_unreferenced_baseline_snapshot_can_be_deleted_with_results() -> None:
     reset_database()
     with TestClient(app) as client:
         _suite_id, _run, snapshot = create_ready_baseline(client, "delete me")
-        delete_response = client.delete(f"/api/baselines/{snapshot['id']}")
+        delete_response = client.delete(f"/api/baselines/{snapshot['id']}", headers=ADMIN_HEADERS)
         get_response = client.get(f"/api/baselines/{snapshot['id']}")
 
     with SessionLocal() as db:
@@ -1437,7 +1489,7 @@ def test_delete_baseline_snapshot_rejects_candidate_eval_reference() -> None:
                 "use_mock": True,
             },
         )
-        delete_response = client.delete(f"/api/baselines/{snapshot['id']}")
+        delete_response = client.delete(f"/api/baselines/{snapshot['id']}", headers=ADMIN_HEADERS)
 
     assert eval_response.status_code == 200
     assert delete_response.status_code == 409
@@ -1458,7 +1510,7 @@ def test_delete_baseline_snapshot_rejects_scheduled_test_reference() -> None:
                 "test_scope": "full",
             },
         )
-        delete_response = client.delete(f"/api/baselines/{snapshot['id']}")
+        delete_response = client.delete(f"/api/baselines/{snapshot['id']}", headers=ADMIN_HEADERS)
 
     assert schedule_response.status_code == 200
     assert delete_response.status_code == 409
@@ -1479,7 +1531,7 @@ def test_delete_source_run_rejects_when_generated_baseline_is_referenced() -> No
                 "use_mock": True,
             },
         )
-        delete_response = client.delete(f"/api/runs/{run['id']}")
+        delete_response = client.delete(f"/api/runs/{run['id']}", headers=ADMIN_HEADERS)
 
     assert eval_response.status_code == 200
     assert delete_response.status_code == 409
@@ -2702,7 +2754,7 @@ def test_signature_interop_rejects_source_without_signature(monkeypatch) -> None
     assert "缺少 signature" in payload["reason"]
 
     with TestClient(app) as client:
-        delete_response = client.delete(f"/api/runs/{payload['run']['id']}")
+        delete_response = client.delete(f"/api/runs/{payload['run']['id']}", headers=ADMIN_HEADERS)
 
     assert delete_response.status_code == 200
     with SessionLocal() as db:
@@ -3631,7 +3683,7 @@ def test_running_run_must_be_canceled_before_delete() -> None:
         run_id = run.id
 
     with TestClient(app) as client:
-        blocked = client.delete(f"/api/runs/{run_id}")
+        blocked = client.delete(f"/api/runs/{run_id}", headers=ADMIN_HEADERS)
         canceled = client.post(f"/api/runs/{run_id}/cancel")
 
     assert blocked.status_code == 409
@@ -3706,7 +3758,7 @@ def test_cleanup_run_logs_dry_run_does_not_delete_data() -> None:
         run_id = run.id
 
     with TestClient(app) as client:
-        response = client.post("/api/system/cleanup-run-logs?dry_run=true")
+        response = client.post("/api/system/cleanup-run-logs?dry_run=true", headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     payload = response.json()
@@ -3731,7 +3783,7 @@ def test_cleanup_run_logs_dry_run_falls_back_when_summary_fails(monkeypatch) -> 
     monkeypatch.setattr("app.main._cleanup_candidate_run_ids", fail_count)
 
     with TestClient(app) as client:
-        response = client.post("/api/system/cleanup-run-logs?dry_run=true")
+        response = client.post("/api/system/cleanup-run-logs?dry_run=true", headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     payload = response.json()
@@ -3762,7 +3814,7 @@ def test_cleanup_run_logs_removes_terminal_run_logs_and_keeps_configs() -> None:
         run_id = run.id
 
     with TestClient(app) as client:
-        response = client.post("/api/system/cleanup-run-logs")
+        response = client.post("/api/system/cleanup-run-logs", headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     payload = response.json()
@@ -3803,7 +3855,7 @@ def test_cleanup_run_logs_skips_running_and_baseline_source_runs() -> None:
         baseline_run_id = baseline_source.id
 
     with TestClient(app) as client:
-        response = client.post("/api/system/cleanup-run-logs")
+        response = client.post("/api/system/cleanup-run-logs", headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     payload = response.json()

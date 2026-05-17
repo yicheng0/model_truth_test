@@ -4,6 +4,7 @@ import { Alert, Button, Card, Empty, Popconfirm, Progress, Space, Table, Tag, To
 import { Link } from 'react-router-dom';
 import { BarChart3, CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2, Trophy } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { useAdminAccess } from '../adminAccess';
 import { extractPatrolEvidence, formatPatrolChannel, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
@@ -350,6 +351,7 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
 }
 
 export default function Runs() {
+  const { isAdminMode } = useAdminAccess();
   const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [cancelingId, setCancelingId] = useState<string | null>(null);
@@ -447,24 +449,26 @@ export default function Runs() {
             </Button>
           </Popconfirm>
         ) : null}
-        <Popconfirm
-          title="删除检测任务"
-          description="会同时删除该任务的结果、对比和报告。确定删除吗？"
-          okText="删除"
-          cancelText="取消"
-          okButtonProps={{ danger: true }}
-          disabled={run.status === 'running'}
-          onConfirm={() => deleteRun(run)}
-        >
-          <Button
-            danger
-            icon={<Trash2 size={15} />}
-            loading={deletingId === run.id}
+        {isAdminMode ? (
+          <Popconfirm
+            title="删除检测任务"
+            description="会同时删除该任务的结果、对比和报告。确定删除吗？"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
             disabled={run.status === 'running'}
+            onConfirm={() => deleteRun(run)}
           >
-            删除
-          </Button>
-        </Popconfirm>
+            <Button
+              danger
+              icon={<Trash2 size={15} />}
+              loading={deletingId === run.id}
+              disabled={run.status === 'running'}
+            >
+              删除
+            </Button>
+          </Popconfirm>
+        ) : null}
       </Space>
     ),
   };
@@ -599,7 +603,7 @@ export default function Runs() {
       <Card
         className="patrol-log-card"
         title={<span className="card-title-with-icon"><CalendarClock size={18} />自动巡检日志</span>}
-        extra={
+        extra={isAdminMode ? (
           <Popconfirm
             title="删除已选巡检日志"
             description={`将删除 ${deletableSelectedPatrolRuns.length} 条已选日志及其结果、报告和关联告警。运行中日志会跳过。确定删除吗？`}
@@ -613,7 +617,7 @@ export default function Runs() {
               删除已选
             </Button>
           </Popconfirm>
-        }
+        ) : null}
         bordered={false}
       >
         <Table
@@ -688,25 +692,27 @@ export default function Runs() {
                       </Button>
                     </Popconfirm>
                   ) : null}
-                  <Popconfirm
-                    title="删除检测任务"
-                    description="会同时删除该任务的结果、对比和报告。确定删除吗？"
-                    okText="删除"
-                    cancelText="取消"
-                    okButtonProps={{ danger: true }}
-                    disabled={run.status === 'running'}
-                    onConfirm={() => deleteRun(run)}
-                  >
-                    <Button
-                      size="small"
-                      danger
-                      icon={<Trash2 size={14} />}
-                      loading={deletingId === run.id}
+                  {isAdminMode ? (
+                    <Popconfirm
+                      title="删除检测任务"
+                      description="会同时删除该任务的结果、对比和报告。确定删除吗？"
+                      okText="删除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
                       disabled={run.status === 'running'}
+                      onConfirm={() => deleteRun(run)}
                     >
-                      删除
-                    </Button>
-                  </Popconfirm>
+                      <Button
+                        size="small"
+                        danger
+                        icon={<Trash2 size={14} />}
+                        loading={deletingId === run.id}
+                        disabled={run.status === 'running'}
+                      >
+                        删除
+                      </Button>
+                    </Popconfirm>
+                  ) : null}
                 </Space>
               )
             },

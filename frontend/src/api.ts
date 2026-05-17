@@ -41,6 +41,7 @@ import type {
 } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
+const ADMIN_KEY_STORAGE_KEY = 'apipro.adminApiKey';
 
 type ArenaRunCreatePayload = {
   name: string;
@@ -116,15 +117,42 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export function getAdminApiKey() {
+  try {
+    return localStorage.getItem(ADMIN_KEY_STORAGE_KEY)?.trim() ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function setAdminApiKey(value: string) {
+  try {
+    const key = value.trim();
+    if (key) localStorage.setItem(ADMIN_KEY_STORAGE_KEY, key);
+    else localStorage.removeItem(ADMIN_KEY_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures; the API will reject destructive calls without the header.
+  }
+}
+
+export function hasAdminApiKey() {
+  return Boolean(getAdminApiKey());
+}
+
+function adminHeaders(): HeadersInit {
+  const key = getAdminApiKey();
+  return key ? { 'X-Admin-Key': key } : {};
+}
+
 export const api = {
   health: () => request<{ status: string }>('/api/health'),
   systemUsage: () => request<SystemUsage>('/api/system/usage'),
-  cleanupRunLogs: (dryRun = false) => request<RunLogCleanupResult>(`/api/system/cleanup-run-logs${dryRun ? '?dry_run=true' : ''}`, { method: 'POST' }),
+  cleanupRunLogs: (dryRun = false) => request<RunLogCleanupResult>(`/api/system/cleanup-run-logs${dryRun ? '?dry_run=true' : ''}`, { method: 'POST', headers: adminHeaders() }),
   channels: () => request<Channel[]>('/api/channels'),
   createChannel: (payload: ChannelCreate) => request<Channel>('/api/channels', { method: 'POST', body: JSON.stringify(payload) }),
   updateChannel: (id: string, payload: Partial<ChannelCreate>) =>
     request<Channel>(`/api/channels/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  deleteChannel: (id: string) => request<{ deleted: boolean }>(`/api/channels/${id}`, { method: 'DELETE' }),
+  deleteChannel: (id: string) => request<{ deleted: boolean }>(`/api/channels/${id}`, { method: 'DELETE', headers: adminHeaders() }),
   healthCheck: (id: string) => request<Record<string, unknown>>(`/api/channels/${id}/health-check`, { method: 'POST' }),
   signatureInteropTest: (payload: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) =>
     request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),
@@ -143,7 +171,7 @@ export const api = {
   cases: (suiteId?: string) => request<TestCase[]>(suiteId ? `/api/suites/${suiteId}/cases` : '/api/test-cases'),
   createCase: (payload: TestCaseCreate) => request<TestCase>('/api/test-cases', { method: 'POST', body: JSON.stringify(payload) }),
   updateCase: (id: string, payload: Partial<TestCaseCreate>) => request<TestCase>(`/api/test-cases/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  deleteCase: (id: string) => request<{ deleted: boolean }>(`/api/test-cases/${id}`, { method: 'DELETE' }),
+  deleteCase: (id: string) => request<{ deleted: boolean }>(`/api/test-cases/${id}`, { method: 'DELETE', headers: adminHeaders() }),
   runs: () => request<Run[]>('/api/runs'),
   run: (runId: string) => request<Run>(`/api/runs/${runId}`),
   runResults: (runId: string) => request<RunResults>(`/api/runs/${runId}/results`),
@@ -157,7 +185,7 @@ export const api = {
   buildBaseline: (payload: BaselineBuildCreate) => request<Run>('/api/baselines/build', { method: 'POST', body: JSON.stringify(payload) }),
   validateBaseline: (id: string) => request<BaselineSnapshot>(`/api/baselines/${id}/validate`, { method: 'POST' }),
   updateBaseline: (id: string, payload: { name: string }) => request<BaselineSnapshot>(`/api/baselines/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  deleteBaseline: (id: string) => request<{ deleted: boolean }>(`/api/baselines/${id}`, { method: 'DELETE' }),
+  deleteBaseline: (id: string) => request<{ deleted: boolean }>(`/api/baselines/${id}`, { method: 'DELETE', headers: adminHeaders() }),
   scheduledTests: () => request<ScheduledChannelTest[]>('/api/scheduled-tests'),
   scheduledTestsHealth: async () => {
     try {
@@ -170,7 +198,7 @@ export const api = {
   createScheduledTest: (payload: ScheduledChannelTestCreate) => request<ScheduledChannelTest>('/api/scheduled-tests', { method: 'POST', body: JSON.stringify(payload) }),
   updateScheduledTest: (id: string, payload: Partial<ScheduledChannelTestCreate>) =>
     request<ScheduledChannelTest>(`/api/scheduled-tests/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  deleteScheduledTest: (id: string) => request<{ deleted: boolean }>(`/api/scheduled-tests/${id}`, { method: 'DELETE' }),
+  deleteScheduledTest: (id: string) => request<{ deleted: boolean }>(`/api/scheduled-tests/${id}`, { method: 'DELETE', headers: adminHeaders() }),
   runScheduledTestNow: (id: string) => request<ScheduledChannelTest>(`/api/scheduled-tests/${id}/run-now`, { method: 'POST' }),
   alerts: (filters?: string | AlertFilters) => {
     if (typeof filters === 'string') {
@@ -180,8 +208,8 @@ export const api = {
   },
   reviewAlert: (id: string, payload: { status: string; reviewer_name: string; review_note?: string }) =>
     request<ChannelAlert>(`/api/alerts/${id}/review`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  deleteAlert: (id: string) => request<{ deleted: boolean }>(`/api/alerts/${id}`, { method: 'DELETE' }),
-  deleteAlerts: (ids: string[]) => request<{ deleted: number; missing: string[] }>('/api/alerts/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  deleteAlert: (id: string) => request<{ deleted: boolean }>(`/api/alerts/${id}`, { method: 'DELETE', headers: adminHeaders() }),
+  deleteAlerts: (ids: string[]) => request<{ deleted: number; missing: string[] }>('/api/alerts/bulk-delete', { method: 'POST', headers: adminHeaders(), body: JSON.stringify({ ids }) }),
   resendAlertNotification: (id: string) => request<ChannelAlert>(`/api/alerts/${id}/resend-notification`, { method: 'POST' }),
   feishuBroadcastSetting: () => request<FeishuBroadcastSetting>('/api/settings/feishu-broadcast'),
   updateFeishuBroadcastSetting: (payload: FeishuBroadcastUpdate) =>
@@ -208,15 +236,15 @@ export const api = {
   createRun: (payload: RunCreate) =>
     request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
   cancelRun: (id: string) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
-  deleteRun: (id: string) => request<{ deleted: boolean }>(`/api/runs/${id}`, { method: 'DELETE' }),
+  deleteRun: (id: string) => request<{ deleted: boolean }>(`/api/runs/${id}`, { method: 'DELETE', headers: adminHeaders() }),
   runProgress: (id: string) => request<{ percent: number; status: string; completed_jobs: number; total_jobs: number }>(`/api/runs/${id}/progress`),
   results: (runId: string) => request<Result[]>(`/api/runs/${runId}/raw-results`),
   comparisons: (runId: string) => request<Comparison[]>(`/api/runs/${runId}/comparisons`),
   reports: () => request<Report[]>('/api/reports'),
   reportSummaries: () => request<ReportSummary[]>('/api/reports/summary'),
   reportDetail: (id: string) => request<ReportDetail>(`/api/reports/${id}/detail`),
-  deleteReport: (id: string) => request<{ deleted: boolean }>(`/api/reports/${id}`, { method: 'DELETE' }),
-  deleteReports: (ids: string[]) => request<{ deleted: number; missing: string[] }>('/api/reports/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  deleteReport: (id: string) => request<{ deleted: boolean }>(`/api/reports/${id}`, { method: 'DELETE', headers: adminHeaders() }),
+  deleteReports: (ids: string[]) => request<{ deleted: number; missing: string[] }>('/api/reports/bulk-delete', { method: 'POST', headers: adminHeaders(), body: JSON.stringify({ ids }) }),
   compareReports: (ids: string[]) => request<ReportCompare>(`/api/reports/compare?ids=${encodeURIComponent(ids.join(','))}`),
   finalize: (runId: string) => request<{ status: string }>(`/api/runs/${runId}/finalize`, { method: 'POST' }),
   reportUrl: (runId: string) => `${API_BASE}/api/runs/${runId}/report.md`,

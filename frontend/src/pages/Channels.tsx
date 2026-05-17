@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Collapse, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import { Edit3, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api';
+import { useAdminAccess } from '../adminAccess';
 import {
   accountTypeLabel,
   accountTypeOptions,
@@ -69,6 +70,7 @@ const requestProtocolOptions = [
 
 export default function Channels() {
   const queryClient = useQueryClient();
+  const { isAdminMode } = useAdminAccess();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const pendingAlerts = useQuery({ queryKey: ['alerts', 'pending_review'], queryFn: () => api.alerts('pending_review') });
   const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
@@ -379,18 +381,20 @@ export default function Channels() {
                   <Button icon={<Edit3 size={15} />} onClick={() => openEdit(channel)}>
                     编辑
                   </Button>
-                  <Popconfirm
-                    title="删除渠道"
-                    description="删除后不会再出现在新测评任务中。确定删除吗？"
-                    okText="删除"
-                    cancelText="取消"
-                    okButtonProps={{ danger: true }}
-                    onConfirm={() => remove.mutate(channel.id)}
-                  >
-                    <Button danger icon={<Trash2 size={15} />} loading={remove.isPending}>
-                      删除
-                    </Button>
-                  </Popconfirm>
+                  {isAdminMode ? (
+                    <Popconfirm
+                      title="删除渠道"
+                      description="删除后不会再出现在新测评任务中。确定删除吗？"
+                      okText="删除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => remove.mutate(channel.id)}
+                    >
+                      <Button danger icon={<Trash2 size={15} />} loading={remove.isPending}>
+                        删除
+                      </Button>
+                    </Popconfirm>
+                  ) : null}
                 </Space>
               ),
             },

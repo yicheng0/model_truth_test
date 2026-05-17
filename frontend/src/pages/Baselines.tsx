@@ -4,6 +4,7 @@ import { Alert, Button, Card, Descriptions, Form, Input, Modal, Popconfirm, Spac
 import { Link } from 'react-router-dom';
 import { Edit3, Eye, RefreshCcw, Trash2 } from 'lucide-react';
 import { ApiError, api, getErrorMessage } from '../api';
+import { useAdminAccess } from '../adminAccess';
 import { formatDateTime } from '../time';
 import type { BaselineResult, BaselineSnapshot, Channel, TestSuite } from '../types';
 
@@ -23,6 +24,7 @@ function responseSnippet(result: BaselineResult) {
 }
 
 export default function Baselines() {
+  const { isAdminMode } = useAdminAccess();
   const queryClient = useQueryClient();
   const [editingBaseline, setEditingBaseline] = useState<BaselineSnapshot | null>(null);
   const [viewingBaseline, setViewingBaseline] = useState<BaselineSnapshot | null>(null);
@@ -167,24 +169,26 @@ export default function Baselines() {
                       onClick={() => validate.mutate(baseline.id)}
                     />
                   </Tooltip>
-                  <Popconfirm
-                    title="删除渠道指纹"
-                    description="只允许删除未被对比任务或自动巡检引用的渠道指纹。确定删除吗？"
-                    okText="删除"
-                    cancelText="取消"
-                    okButtonProps={{ danger: true }}
-                    onConfirm={() => deleteBaseline.mutate(baseline.id)}
-                  >
-                    <Tooltip title="删除">
-                      <Button
-                        aria-label="删除"
-                        danger
-                        icon={<Trash2 size={15} />}
-                        loading={deleteBaseline.isPending && deleteBaseline.variables === baseline.id}
-                        size="small"
-                      />
-                    </Tooltip>
-                  </Popconfirm>
+                  {isAdminMode ? (
+                    <Popconfirm
+                      title="删除渠道指纹"
+                      description="只允许删除未被对比任务或自动巡检引用的渠道指纹。确定删除吗？"
+                      okText="删除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => deleteBaseline.mutate(baseline.id)}
+                    >
+                      <Tooltip title="删除">
+                        <Button
+                          aria-label="删除"
+                          danger
+                          icon={<Trash2 size={15} />}
+                          loading={deleteBaseline.isPending && deleteBaseline.variables === baseline.id}
+                          size="small"
+                        />
+                      </Tooltip>
+                    </Popconfirm>
+                  ) : null}
                 </div>
               ),
             },
