@@ -4,6 +4,7 @@ import os
 import asyncio
 import importlib.util
 import json
+import math
 import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.orm import close_all_sessions, sessionmaker
 
+from app import database as database_module
 from app.database import SessionLocal, engine, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
@@ -335,6 +337,124 @@ def test_scheduled_tests_backfill_boolean_default_is_postgres_compatible() -> No
     ddl = str(CreateColumn(column).compile(dialect=postgresql.dialect()))
     assert "DEFAULT true" in ddl
     assert "DEFAULT 1" not in ddl
+
+
+def test_scheduled_tests_backfill_adds_alert_dedupe_key_column(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy_alerts.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    engine_for_legacy = create_engine(database_url, connect_args={"check_same_thread": False})
+    previous_database_url = os.environ.get("DATABASE_URL")
+    try:
+        with engine_for_legacy.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE channel_alerts (
+                    id VARCHAR PRIMARY KEY NOT NULL,
+                    scheduled_test_id VARCHAR,
+                    run_id VARCHAR NOT NULL,
+                    report_id VARCHAR NOT NULL,
+                    channel_id VARCHAR NOT NULL,
+                    status VARCHAR(30) NOT NULL,
+                    severity VARCHAR(20) NOT NULL,
+                    grade VARCHAR(2) NOT NULL,
+                    final_score FLOAT,
+                    trigger_labels JSON,
+                    message TEXT,
+                    notification_status VARCHAR(30) NOT NULL,
+                    notification_error TEXT,
+                    notification_attempt_count INTEGER NOT NULL,
+                    last_notification_attempt_at DATETIME,
+                    notified_at DATETIME,
+                    reviewer_name VARCHAR(100),
+                    review_note TEXT,
+                    reviewed_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+                """
+            )
+
+        os.environ["DATABASE_URL"] = database_url
+        cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+        cfg.set_main_option("sqlalchemy.url", database_url)
+        command.upgrade(cfg, "head")
+
+        columns = {column["name"] for column in inspect(engine_for_legacy).get_columns("channel_alerts")}
+        indexes = {index["name"] for index in inspect(engine_for_legacy).get_indexes("channel_alerts")}
+    finally:
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+
+    assert "dedupe_key" in columns
+    assert "ix_channel_alerts_dedupe_key" in indexes
+
+
+def test_init_db_repairs_head_database_missing_alert_dedupe_key(tmp_path: Path, monkeypatch) -> None:
+    database_path = tmp_path / "head_missing_alert_column.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    legacy_engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE alembic_version (
+                version_num VARCHAR(32) NOT NULL,
+                CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+            )
+            """
+        )
+        connection.exec_driver_sql("INSERT INTO alembic_version (version_num) VALUES ('8c2e7db1f4a3')")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE channel_alerts (
+                id VARCHAR PRIMARY KEY NOT NULL,
+                scheduled_test_id VARCHAR,
+                run_id VARCHAR NOT NULL,
+                report_id VARCHAR NOT NULL,
+                channel_id VARCHAR NOT NULL,
+                status VARCHAR(30) NOT NULL,
+                severity VARCHAR(20) NOT NULL,
+                grade VARCHAR(2) NOT NULL,
+                final_score FLOAT,
+                trigger_labels JSON,
+                message TEXT,
+                notification_status VARCHAR(30) NOT NULL,
+                notification_error TEXT,
+                notification_attempt_count INTEGER NOT NULL,
+                last_notification_attempt_at DATETIME,
+                notified_at DATETIME,
+                reviewer_name VARCHAR(100),
+                review_note TEXT,
+                reviewed_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+            )
+            """
+        )
+
+    previous_url = database_module.DATABASE_URL
+    previous_engine = database_module.engine
+    previous_session_local = database_module.SessionLocal
+    patched_engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    patched_session = sessionmaker(bind=patched_engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    monkeypatch.setattr(database_module, "DATABASE_URL", database_url)
+    monkeypatch.setattr(database_module, "engine", patched_engine)
+    monkeypatch.setattr(database_module, "SessionLocal", patched_session)
+    try:
+        database_module.init_db()
+        columns = {column["name"] for column in inspect(patched_engine).get_columns("channel_alerts")}
+        indexes = {index["name"] for index in inspect(patched_engine).get_indexes("channel_alerts")}
+    finally:
+        monkeypatch.setattr(database_module, "DATABASE_URL", previous_url)
+        monkeypatch.setattr(database_module, "engine", previous_engine)
+        monkeypatch.setattr(database_module, "SessionLocal", previous_session_local)
+        patched_engine.dispose()
+
+    assert "dedupe_key" in columns
+    assert "notification_attempt_count" in columns
+    assert "last_notification_attempt_at" in columns
+    assert "ix_channel_alerts_dedupe_key" in indexes
 
 
 def test_scheduled_tests_list_tolerates_bad_probe_evidence() -> None:
@@ -2313,6 +2433,43 @@ def test_list_alerts_tolerates_legacy_malformed_alert_fields() -> None:
     assert payload[0]["trigger_labels"] == ["{'legacy': 'identity_mismatch'}"]
 
 
+def test_list_alerts_sanitizes_non_finite_alert_values() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        assert alert is not None
+        report = db.get(Report, alert.report_id)
+        assert report is not None
+        alert.final_score = float("inf")
+        report.evidence = {
+            "labels": ["identity_mismatch"],
+            "model_requests": [
+                {
+                    "title": "bad numeric evidence",
+                    "score": float("inf"),
+                    "completed_at": "2026-05-17T00:00:00+00:00",
+                }
+            ],
+        }
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/alerts", params={"status": "pending_review"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload
+    assert payload[0]["final_score"] == 0.0
+    assert payload[0]["evidence_summary"]["model_requests"][0]["score"] is None
+    assert payload[0]["evidence_summary"]["model_requests"][0]["completed_at"] == "2026-05-17T00:00:00+00:00"
+
+
 def test_smart_patrol_report_tolerates_legacy_malformed_alert_fields() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -2337,6 +2494,36 @@ def test_smart_patrol_report_tolerates_legacy_malformed_alert_fields() -> None:
     assert payload["recent_alerts"][0]["trigger_labels"] == ["{'legacy': 'identity_mismatch'}"]
     assert markdown.status_code == 200
     assert "智能巡检汇总报告" in markdown.text
+
+
+def test_smart_patrol_report_sanitizes_non_finite_alert_values() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        assert alert is not None
+        report = db.get(Report, alert.report_id)
+        assert report is not None
+        alert.final_score = -math.inf
+        report.evidence = {
+            "labels": ["identity_mismatch"],
+            "model_requests": [{"title": "bad report evidence", "score": math.nan}],
+        }
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/scheduled-tests/report")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recent_alerts"]
+    assert payload["recent_alerts"][0]["final_score"] == 0.0
+    assert payload["recent_alerts"][0]["evidence_summary"]["model_requests"][0]["score"] is None
 
 
 def test_scheduled_test_rejects_reference_channel() -> None:

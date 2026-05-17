@@ -6,7 +6,8 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine
+from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy.schema import CreateColumn
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
@@ -29,6 +30,51 @@ def _alembic_config() -> Config:
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     command.upgrade(_alembic_config(), "head")
+    repair_schema()
+
+
+def repair_schema() -> None:
+    inspector = inspect(engine)
+    if "channel_alerts" not in inspector.get_table_names():
+        return
+
+    alert_columns = {column["name"] for column in inspector.get_columns("channel_alerts")}
+    with engine.begin() as connection:
+        for column in _missing_channel_alert_columns(alert_columns):
+            ddl = str(CreateColumn(column).compile(dialect=engine.dialect))
+            connection.execute(text(f"ALTER TABLE channel_alerts ADD COLUMN {ddl}"))
+
+    inspector = inspect(engine)
+    alert_indexes = {index["name"] for index in inspector.get_indexes("channel_alerts")}
+    if "ix_channel_alerts_dedupe_key" not in alert_indexes:
+        with engine.begin() as connection:
+            if engine.dialect.name == "sqlite":
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_channel_alerts_dedupe_key ON channel_alerts (dedupe_key)"))
+            else:
+                connection.execute(text("CREATE INDEX ix_channel_alerts_dedupe_key ON channel_alerts (dedupe_key)"))
+
+
+def _missing_channel_alert_columns(existing_columns: set[str]) -> list:
+    expected = {
+        "dedupe_key": String(200),
+        "notification_attempt_count": Integer(),
+        "last_notification_attempt_at": DateTime(timezone=True),
+        "notified_at": DateTime(timezone=True),
+        "reviewer_name": String(100),
+        "review_note": Text(),
+        "reviewed_at": DateTime(timezone=True),
+    }
+    return [
+        _column_for_alert_repair(name, type_)
+        for name, type_ in expected.items()
+        if name not in existing_columns
+    ]
+
+
+def _column_for_alert_repair(name: str, type_) -> object:  # noqa: ANN001
+    if name == "notification_attempt_count":
+        return Column(name, type_, nullable=False, server_default=text("0"))
+    return Column(name, type_, nullable=True)
 
 
 def get_db() -> Generator[Session, None, None]:

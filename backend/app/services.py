@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -2859,7 +2860,7 @@ def channel_alert_read(db: Session, alert: ChannelAlert) -> dict[str, Any]:
         "notification_error": alert.notification_error,
         "notification_attempt_count": int(alert.notification_attempt_count or 0),
         "last_notification_attempt_at": alert.last_notification_attempt_at,
-        "evidence_summary": evidence_summary,
+        "evidence_summary": _json_safe_value(evidence_summary) if evidence_summary is not None else None,
         "notified_at": alert.notified_at,
         "reviewer_name": alert.reviewer_name,
         "review_note": alert.review_note,
@@ -2879,9 +2880,24 @@ def _safe_string_list(value: Any) -> list[str]:
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return default
+    return number if math.isfinite(number) else default
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(item) for item in value]
+    return str(value)
 
 
 async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: str, scheduled_id: str | None = None) -> list[ChannelAlert]:

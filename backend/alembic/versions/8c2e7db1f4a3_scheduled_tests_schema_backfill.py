@@ -19,6 +19,7 @@ depends_on = None
 
 
 TABLE_NAME = "scheduled_channel_tests"
+ALERT_TABLE_NAME = "channel_alerts"
 
 NEW_COLUMNS = (
     sa.Column("run_window_start", sa.String(length=5), nullable=True),
@@ -41,28 +42,60 @@ NEW_INDEXES = (
     ("ix_scheduled_channel_tests_locked_until", ("locked_until",)),
 )
 
+ALERT_COLUMNS = (
+    sa.Column("dedupe_key", sa.String(length=200), nullable=True),
+)
+
+ALERT_INDEXES = (
+    ("ix_channel_alerts_dedupe_key", ("dedupe_key",)),
+)
+
 
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = inspect(bind)
-    if TABLE_NAME not in inspector.get_table_names():
-        return
+    table_names = set(inspector.get_table_names())
 
-    existing_columns = {column["name"] for column in inspector.get_columns(TABLE_NAME)}
-    for column in NEW_COLUMNS:
-        if column.name not in existing_columns:
-            op.add_column(TABLE_NAME, column)
+    if TABLE_NAME in table_names:
+        existing_columns = {column["name"] for column in inspector.get_columns(TABLE_NAME)}
+        for column in NEW_COLUMNS:
+            if column.name not in existing_columns:
+                op.add_column(TABLE_NAME, column)
 
-    existing_indexes = {index["name"] for index in inspector.get_indexes(TABLE_NAME)}
-    for index_name, columns in NEW_INDEXES:
-        if index_name not in existing_indexes:
-            op.create_index(index_name, TABLE_NAME, list(columns))
+        existing_indexes = {index["name"] for index in inspector.get_indexes(TABLE_NAME)}
+        for index_name, columns in NEW_INDEXES:
+            if index_name not in existing_indexes:
+                op.create_index(index_name, TABLE_NAME, list(columns))
+
+    if ALERT_TABLE_NAME in table_names:
+        existing_alert_columns = {column["name"] for column in inspector.get_columns(ALERT_TABLE_NAME)}
+        for column in ALERT_COLUMNS:
+            if column.name not in existing_alert_columns:
+                op.add_column(ALERT_TABLE_NAME, column)
+
+        existing_alert_indexes = {index["name"] for index in inspector.get_indexes(ALERT_TABLE_NAME)}
+        for index_name, columns in ALERT_INDEXES:
+            if index_name not in existing_alert_indexes:
+                op.create_index(index_name, ALERT_TABLE_NAME, list(columns))
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     inspector = inspect(bind)
-    if TABLE_NAME not in inspector.get_table_names():
+    table_names = set(inspector.get_table_names())
+
+    if ALERT_TABLE_NAME in table_names:
+        existing_alert_indexes = {index["name"] for index in inspector.get_indexes(ALERT_TABLE_NAME)}
+        for index_name, columns in reversed(ALERT_INDEXES):
+            if index_name in existing_alert_indexes:
+                op.drop_index(index_name, table_name=ALERT_TABLE_NAME)
+
+        existing_alert_columns = {column["name"] for column in inspector.get_columns(ALERT_TABLE_NAME)}
+        for column in reversed(ALERT_COLUMNS):
+            if column.name in existing_alert_columns:
+                op.drop_column(ALERT_TABLE_NAME, column.name)
+
+    if TABLE_NAME not in table_names:
         return
 
     existing_indexes = {index["name"] for index in inspector.get_indexes(TABLE_NAME)}
