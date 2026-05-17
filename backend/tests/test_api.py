@@ -15,7 +15,10 @@ os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "0")
 
 from fastapi.testclient import TestClient
 import httpx
-from sqlalchemy import delete, func, select
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, delete, func, inspect, select, text
+from sqlalchemy.orm import sessionmaker
 
 from app.database import SessionLocal, engine, init_db
 from app.main import app, cors_origins
@@ -249,6 +252,67 @@ def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
     payload = response.json()
     assert payload["instance_id"]
     assert {"enabled", "instance_id", "stale_schedule_count", "queued_schedule_count", "running_schedule_count", "next_due_at"} <= set(payload)
+
+
+def test_scheduled_tests_schema_backfill_migration_adds_missing_columns(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    engine_for_legacy = create_engine(database_url, connect_args={"check_same_thread": False})
+    legacy_session = sessionmaker(bind=engine_for_legacy, autoflush=False, autocommit=False, expire_on_commit=False)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    try:
+        with engine_for_legacy.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE scheduled_channel_tests (
+                    id VARCHAR PRIMARY KEY NOT NULL,
+                    channel_id VARCHAR NOT NULL,
+                    suite_id VARCHAR NOT NULL,
+                    baseline_snapshot_id VARCHAR NOT NULL,
+                    name VARCHAR(200) NOT NULL,
+                    enabled BOOLEAN NOT NULL,
+                    interval_minutes INTEGER NOT NULL,
+                    test_scope VARCHAR(30) NOT NULL,
+                    repeat_count INTEGER NOT NULL,
+                    concurrency INTEGER NOT NULL,
+                    use_mock BOOLEAN NOT NULL,
+                    next_run_at DATETIME,
+                    last_run_id VARCHAR,
+                    last_status VARCHAR(30),
+                    last_error TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+                )
+                """
+            )
+
+        os.environ["DATABASE_URL"] = database_url
+        cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+        cfg.set_main_option("sqlalchemy.url", database_url)
+        command.upgrade(cfg, "head")
+
+        columns = {column["name"] for column in inspect(engine_for_legacy).get_columns("scheduled_channel_tests")}
+    finally:
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+
+    assert {
+        "run_window_start",
+        "run_window_end",
+        "alert_grade_threshold",
+        "alert_score_threshold",
+        "alert_red_flags_enabled",
+        "quiet_minutes",
+        "max_retries",
+        "retry_interval_minutes",
+        "locked_by",
+        "locked_until",
+        "last_queued_at",
+        "last_started_at",
+        "last_finished_at",
+    } <= columns
 
 
 def test_scheduled_tests_list_tolerates_bad_probe_evidence() -> None:
