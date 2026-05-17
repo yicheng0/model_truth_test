@@ -8,7 +8,8 @@ import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../channelCredentials';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
-import type { Channel, ChannelAlert, ChannelAlertStatus, FeishuBroadcastUpdate, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
+import type { Channel, ChannelAlert, ChannelAlertStatus, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
+import { buildFeishuBroadcastUpdate, type FeishuBroadcastFormValues } from './feishuBroadcast';
 import {
   alertChannelId,
   alertChannelModel,
@@ -38,12 +39,8 @@ type ReviewFormValues = {
   review_note?: string;
 };
 
-type FeishuFormValues = {
+type FeishuFormValues = FeishuBroadcastFormValues & {
   enabled: boolean;
-  webhook_url?: string;
-  webhook_secret?: string;
-  clear_webhook_secret?: boolean;
-  app_base_url?: string;
   alert_broadcast_enabled: boolean;
   daily_report_enabled: boolean;
   daily_report_time: Dayjs | null;
@@ -574,24 +571,12 @@ export default function ScheduledTests() {
     deleteAlerts.mutate(ids);
   }
 
-  function submitFeishu(values: FeishuFormValues) {
-    const webhookUrl = values.webhook_url?.trim();
-    const webhookSecret = values.webhook_secret?.trim();
-    if (values.enabled && !feishuSetting.data?.webhook_configured && !webhookUrl) {
+  function submitFeishu(values: FeishuBroadcastFormValues) {
+    const { payload, missingWebhook } = buildFeishuBroadcastUpdate(values, Boolean(feishuSetting.data?.webhook_configured));
+    if (missingWebhook) {
       message.error('请先填写飞书机器人 Webhook');
       return;
     }
-    const payload: FeishuBroadcastUpdate = {
-      enabled: values.enabled,
-      clear_webhook_secret: values.clear_webhook_secret,
-      app_base_url: values.app_base_url?.trim() || null,
-      alert_broadcast_enabled: values.alert_broadcast_enabled,
-      daily_report_enabled: values.daily_report_enabled,
-      daily_report_time: values.daily_report_time?.format('HH:mm') ?? '09:00',
-      timezone: values.timezone,
-    };
-    if (webhookUrl) payload.webhook_url = webhookUrl;
-    if (webhookSecret) payload.webhook_secret = webhookSecret;
     saveFeishu.mutate(payload);
   }
 
@@ -1291,7 +1276,7 @@ export default function ScheduledTests() {
                           },
                         ]}
                       >
-                        <Input.Password placeholder={feishuSetting.data?.webhook_preview ?? 'https://open.feishu.cn/open-apis/bot/v2/hook/...'} />
+                        <Input placeholder={feishuSetting.data?.webhook_preview ?? 'https://open.feishu.cn/open-apis/bot/v2/hook/...'} />
                         <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
                           在飞书群添加自定义机器人后复制 Webhook；已配置过时留空会保留原值。
                         </Typography.Text>
