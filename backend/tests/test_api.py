@@ -29,7 +29,7 @@ from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
 from app.restored_seed import restored_seed_data
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, score_result, seed_demo_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -454,7 +454,7 @@ def test_reset_database_clears_custom_state_and_restores_defaults() -> None:
     assert all(channel.id != "temp_channel" for channel in default_channels)
 
 
-def test_seed_demo_data_restores_missing_fixture_channels_without_overwriting_existing_secrets() -> None:
+def test_seed_demo_data_uses_minimal_defaults_without_restored_fixture_side_effects() -> None:
     init_db()
     with SessionLocal() as db:
         for model in [ChannelTaxonomySetting, FeishuBroadcastSetting, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
@@ -463,8 +463,9 @@ def test_seed_demo_data_restores_missing_fixture_channels_without_overwriting_ex
         seed_demo_data(db)
         channels = db.scalars(select(Channel).order_by(Channel.id)).all()
 
-    assert len(channels) == 12
-    assert {channel.id for channel in channels} >= {"anthropic_official", "aws_bedrock", "third_party_demo", "negative_sample", "ch_c9c59513013b"}
+    assert len(channels) == 6
+    assert {channel.id for channel in channels} >= {"anthropic_official", "aws_bedrock", "third_party_demo", "negative_sample"}
+    assert all(channel.id != "ch_c9c59513013b" for channel in channels)
     assert all("api_key" not in (channel.auth_config_encrypted or {}) for channel in channels)
 
     with SessionLocal() as db:
@@ -485,7 +486,7 @@ def test_seed_demo_data_restores_missing_fixture_channels_without_overwriting_ex
         seed_demo_data(db)
         channels = db.scalars(select(Channel).order_by(Channel.id)).all()
 
-    assert {channel.id for channel in channels} >= {"custom_channel", "anthropic_official", "ch_c9c59513013b"}
+    assert {channel.id for channel in channels} == {"custom_channel"}
     assert db.get(Channel, "custom_channel").auth_config == {"api_key": "keep-me"}
 
 
@@ -513,13 +514,13 @@ def test_list_endpoints_self_heal_empty_seed_tables() -> None:
     assert channels.status_code == 200
     assert suites.status_code == 200
     assert cases.status_code == 200
-    assert len(channels.json()) == 12
-    assert len(suites.json()) == 2
-    assert len(cases.json()) == 45
+    assert len(channels.json()) == 6
+    assert len(suites.json()) == 1
+    assert len(cases.json()) == 32
     with SessionLocal() as db:
-        assert db.scalar(select(func.count()).select_from(Channel)) == 12
-        assert db.scalar(select(func.count()).select_from(TestSuiteModel)) == 3
-        assert db.scalar(select(func.count()).select_from(TestCaseModel)) == 106
+        assert db.scalar(select(func.count()).select_from(Channel)) == 6
+        assert db.scalar(select(func.count()).select_from(TestSuiteModel)) == 1
+        assert db.scalar(select(func.count()).select_from(TestCaseModel)) == 32
 
 
 def test_public_reseed_restores_missing_seed_data_without_admin_key_or_secret_overwrite() -> None:
@@ -550,9 +551,9 @@ def test_public_reseed_restores_missing_seed_data_without_admin_key_or_secret_ov
     assert response.status_code == 200
     assert status_after.status_code == 200
     assert response.json()["ok"] is True
-    assert status_after.json()["channels"] == 13
-    assert status_after.json()["test_suites"] == 3
-    assert status_after.json()["test_cases"] == 106
+    assert status_after.json()["channels"] == 1
+    assert status_after.json()["test_suites"] == 1
+    assert status_after.json()["test_cases"] == 32
     with SessionLocal() as db:
         assert db.get(Channel, "custom_channel").auth_config == {"api_key": "keep-me"}
         assert all("api_key" not in (channel.auth_config_encrypted or {}) for channel in db.scalars(select(Channel).where(Channel.id != "custom_channel")).all())
@@ -773,6 +774,50 @@ def test_destructive_endpoints_require_admin_key() -> None:
 
     assert forbidden.status_code in {401, 403}
     assert cleanup_forbidden.status_code in {401, 403}
+
+
+def test_regular_delete_allows_missing_admin_key_when_unconfigured(monkeypatch) -> None:
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        run = client.post(
+            "/api/runs",
+            json={
+                "name": "delete without admin key",
+                "suite_id": suite_id,
+                "channel_ids": {"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
+                "repeat_count": 1,
+                "concurrency": 1,
+                "use_mock": True,
+            },
+        ).json()
+
+        deleted = client.delete(f"/api/runs/{run['id']}")
+        cleanup_forbidden = client.post("/api/system/cleanup-run-logs?dry_run=true")
+
+    assert deleted.status_code == 200
+    assert cleanup_forbidden.status_code == 403
+
+
+def test_cleanup_restored_fixture_removes_extra_seed_data_without_referenced_channels() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        inserted = seed_restored_fixture_data(db)
+        assert inserted["test_cases"] > 0
+        assert db.get(Channel, "openai_compat_demo") is not None
+
+    with TestClient(app) as client:
+        response = client.post("/api/reseed/cleanup-restored-fixture")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["deleted_cases"] > 0
+    assert payload["deleted_channels"] > 0
+    with SessionLocal() as db:
+        fixture = restored_seed_data()
+        assert db.get(TestCaseModel, fixture["test_cases"][0]["id"]) is None
+        assert db.get(Channel, "openai_compat_demo") is None
 
 
 def test_report_bulk_delete_returns_deleted_count_and_missing_ids() -> None:

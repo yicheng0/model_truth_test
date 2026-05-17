@@ -1125,7 +1125,8 @@ def _case_sample_group(case: TestCase, group_by: str) -> str:
 def seed_demo_data(db: Session) -> None:
     _logger = logging.getLogger(__name__)
     _logger.info("Seed: checking and creating built-in data if missing")
-    seed_missing_channels(db, [template.model_dump() for template in default_channel_templates()])
+    if not db.scalar(select(func.count()).select_from(Channel)):
+        seed_missing_channels(db, [template.model_dump() for template in default_channel_templates()])
     suite_id = default_suite()["id"]
     if not db.scalar(select(TestSuite).where(TestSuite.id == suite_id)):
         create_suite(db, TestSuiteCreate(**default_suite()))
@@ -1143,7 +1144,6 @@ def seed_demo_data(db: Session) -> None:
     if created_cases:
         db.commit()
         _logger.info("Seed: created %d missing built-in cases for suite %s", created_cases, suite_id)
-    seed_restored_fixture_data(db)
     _logger.info("Seed: complete")
 
 

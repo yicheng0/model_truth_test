@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from .database import DATABASE_URL, SessionLocal, get_db, init_db
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .restored_seed import restored_seed_data
 from .schemas import (
     BaselineBuildCreate,
     BaselineResultRead,
@@ -215,6 +216,14 @@ def _client_ip(request: Request) -> str:
 def require_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
     expected = os.getenv("ADMIN_API_KEY", "").strip()
     if not expected:
+        return
+    if x_admin_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_configured_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
+    expected = os.getenv("ADMIN_API_KEY", "").strip()
+    if not expected:
         raise HTTPException(status_code=403, detail="Admin API key is not configured")
     if x_admin_key != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -396,7 +405,7 @@ def system_usage(
 @app.post("/api/system/cleanup-run-logs", response_model=RunLogCleanupRead)
 def cleanup_run_logs(
     dry_run: bool = Query(False),
-    _admin: None = Depends(require_admin),
+    _admin: None = Depends(require_configured_admin),
     db: Session = Depends(get_db),
 ) -> RunLogCleanupRead:
     try:
@@ -456,6 +465,73 @@ def cleanup_run_logs(
     db.execute(delete(Run).where(Run.id.in_(candidate_run_ids)))
     db.commit()
     return payload
+
+
+def _channel_has_references(db: Session, channel_id: str) -> bool:
+    checks = [
+        select(RunChannel.id).where(RunChannel.channel_id == channel_id).limit(1),
+        select(Result.id).where(Result.channel_id == channel_id).limit(1),
+        select(Comparison.id).where(Comparison.candidate_channel_id == channel_id).limit(1),
+        select(Report.id).where(Report.channel_id == channel_id).limit(1),
+        select(ChannelAlert.id).where(ChannelAlert.channel_id == channel_id).limit(1),
+        select(ScheduledChannelTest.id).where(ScheduledChannelTest.channel_id == channel_id).limit(1),
+        select(BaselineResult.id).where(BaselineResult.channel_id == channel_id).limit(1),
+    ]
+    return any(db.scalar(stmt) is not None for stmt in checks)
+
+
+@app.post("/api/reseed/cleanup-restored-fixture")
+def cleanup_restored_fixture(db: Session = Depends(get_db)) -> dict[str, object]:
+    data = restored_seed_data()
+    fixture_case_ids = [str(item["id"]) for item in data["test_cases"] if item.get("id")]
+    fixture_suite_ids = [str(item["id"]) for item in data["test_suites"] if item.get("id")]
+    fixture_channel_ids = [str(item["id"]) for item in data["channels"] if item.get("id")]
+    deleted_cases = 0
+    deleted_suites = 0
+    deleted_channels = 0
+    skipped_channels: list[dict[str, str]] = []
+
+    for case_id in fixture_case_ids:
+        case = db.get(TestCase, case_id)
+        if not case:
+            continue
+        db.execute(delete(Result).where(Result.test_case_id == case_id))
+        db.execute(delete(Comparison).where(Comparison.test_case_id == case_id))
+        db.execute(delete(BaselineResult).where(BaselineResult.test_case_id == case_id))
+        db.delete(case)
+        deleted_cases += 1
+
+    for suite_id in fixture_suite_ids:
+        suite = db.get(TestSuite, suite_id)
+        if not suite:
+            continue
+        has_cases = db.scalar(select(TestCase.id).where(TestCase.suite_id == suite_id).limit(1))
+        has_runs = db.scalar(select(Run.id).where(Run.suite_id == suite_id).limit(1))
+        if has_cases or has_runs:
+            continue
+        db.delete(suite)
+        deleted_suites += 1
+
+    for channel_id in fixture_channel_ids:
+        channel = db.get(Channel, channel_id)
+        if not channel:
+            continue
+        if (channel.auth_config or {}).get("api_key"):
+            skipped_channels.append({"id": channel_id, "reason": "has_api_key"})
+            continue
+        if _channel_has_references(db, channel_id):
+            skipped_channels.append({"id": channel_id, "reason": "referenced"})
+            continue
+        db.delete(channel)
+        deleted_channels += 1
+
+    db.commit()
+    return {
+        "deleted_cases": deleted_cases,
+        "deleted_suites": deleted_suites,
+        "deleted_channels": deleted_channels,
+        "skipped_channels": skipped_channels,
+    }
 
 
 @app.exception_handler(Exception)

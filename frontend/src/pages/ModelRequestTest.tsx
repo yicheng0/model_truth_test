@@ -4,7 +4,6 @@ import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Popconfirm
 import { Link } from 'react-router-dom';
 import { BrainCircuit, Bug, Search, Send, Shuffle, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { useAdminAccess } from '../adminAccess';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { Channel, ModelRequestTestResult } from '../types';
@@ -205,7 +204,6 @@ function parseExtraParams(value?: string) {
 }
 
 export default function ModelRequestTest() {
-  const { isAdminMode } = useAdminAccess();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<ModelRequestForm>();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
@@ -554,7 +552,7 @@ export default function ModelRequestTest() {
                   ].filter(Boolean).join('；')
             }
           />
-          {isAdminMode ? (
+          {(
             <Popconfirm
               title="删除本次组合日志"
               description={`会删除本次组合测试产生的 ${comboResults.length} 条任务日志。确定删除吗？`}
@@ -567,7 +565,7 @@ export default function ModelRequestTest() {
                 删除本次组合日志
               </Button>
             </Popconfirm>
-          ) : null}
+          )}
           <div className="signature-sim-grid">
             {comboResults.map(({ key, title, payload }) => {
               const labels = payload.result.labels ?? [];
@@ -594,7 +592,7 @@ export default function ModelRequestTest() {
                     <Descriptions.Item label="Endpoint">{payload.provider_endpoint || '-'}</Descriptions.Item>
                     <Descriptions.Item label="错误摘要">{error || '未返回错误'}</Descriptions.Item>
                   </Descriptions>
-                  {isAdminMode ? (
+                  {(
                     <Popconfirm
                       title="删除该探针日志"
                       description="会删除该探针产生的任务和结果。确定删除吗？"
@@ -607,7 +605,7 @@ export default function ModelRequestTest() {
                         删除该日志
                       </Button>
                     </Popconfirm>
-                  ) : null}
+                  )}
                 </Card>
               );
             })}
@@ -633,7 +631,7 @@ export default function ModelRequestTest() {
               <Descriptions.Item label="模型">{String(normalizedValue(result, 'provider_model') ?? '-')}</Descriptions.Item>
               <Descriptions.Item label="延迟">{String(normalizedValue(result, 'latency_ms') ?? '-')} ms</Descriptions.Item>
             </Descriptions>
-            {isAdminMode ? (
+            {(
               <Popconfirm
                 title="删除本次请求日志"
                 description="会删除本次真实请求生成的任务、结果和日志。确定删除吗？"
@@ -646,12 +644,12 @@ export default function ModelRequestTest() {
                   删除本次请求日志
                 </Button>
               </Popconfirm>
-            ) : null}
+            )}
           </Card>
 
           {result.result.normalized_response?.error ? (
             <Alert type="error" showIcon message="渠道请求失败" description={String(result.result.normalized_response.error)} />
-          ) : null}
+            ) : null}
 
           {isExpectedErrorProbe ? (
             <Alert
@@ -664,7 +662,7 @@ export default function ModelRequestTest() {
                   : `评分 ${result.result.score}，标签：${resultLabels.length ? resultLabels.join(', ') : '无'}。该渠道返回了正常 message 或非预期错误，说明中间层可能丢弃、改写或未保留原生校验。`
               }
             />
-          ) : null}
+            ) : null}
 
           {expectedErrorFailed && hasBedrockSourceFeatures ? (
             <Alert

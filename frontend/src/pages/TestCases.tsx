@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Collapse, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
 import { Download, Edit3, Plus, Shuffle, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
-import { useAdminAccess } from '../adminAccess';
 import type { SamplePlanCreate, TestCase, TestCaseCreate, TestSuite } from '../types';
 
 type CaseFormValues = {
@@ -67,7 +66,6 @@ function suiteName(suites: TestSuite[] | undefined, id: string) {
 }
 
 export default function TestCases() {
-  const { isAdminMode } = useAdminAccess();
   const queryClient = useQueryClient();
   const suites = useQuery({ queryKey: ['suites'], queryFn: api.suites });
   const cases = useQuery({ queryKey: ['cases'], queryFn: () => api.cases() });
@@ -553,7 +551,7 @@ export default function TestCases() {
                   <Button icon={<Edit3 size={15} />} onClick={() => openEdit(record)}>
                     编辑
                   </Button>
-                  {isAdminMode ? (
+                  {(
                     <Popconfirm
                       title="删除测试题目"
                       description="删除后不会再参与新检测任务。确定删除吗？"
@@ -566,7 +564,7 @@ export default function TestCases() {
                         删除
                       </Button>
                     </Popconfirm>
-                  ) : null}
+                  )}
                 </Space>
               ),
             },
