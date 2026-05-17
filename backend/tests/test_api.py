@@ -29,6 +29,7 @@ from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
 from app.restored_seed import restored_seed_data
+from app.suite_seed import default_cases
 from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
@@ -439,7 +440,7 @@ def test_reset_database_clears_custom_state_and_restores_defaults() -> None:
 
     assert suite is not None
     assert suite.version == "2026.05-representative-32"
-    assert len(default_channels) == 12
+    assert len(default_channels) == 6
     assert {channel.id for channel in default_channels} >= {
         "anthropic_official",
         "aws_bedrock",
@@ -447,10 +448,8 @@ def test_reset_database_clears_custom_state_and_restores_defaults() -> None:
         "negative_sample",
         "openai_compat_demo",
         "third_party_demo",
-        "ch_c9c59513013b",
-        "9335-tokenflow-aws",
     }
-    assert default_case_count == 43
+    assert default_case_count == 32
     assert all(channel.id != "temp_channel" for channel in default_channels)
 
 
@@ -803,9 +802,11 @@ def test_regular_delete_allows_missing_admin_key_when_unconfigured(monkeypatch) 
 def test_cleanup_restored_fixture_removes_extra_seed_data_without_referenced_channels() -> None:
     reset_database()
     with SessionLocal() as db:
+        default_ids = {case["id"] for case in default_cases()}
         inserted = seed_restored_fixture_data(db)
         assert inserted["test_cases"] > 0
         assert db.get(Channel, "openai_compat_demo") is not None
+        assert db.scalar(select(func.count()).select_from(TestCaseModel).where(TestCaseModel.id.in_(default_ids))) == len(default_ids)
 
     with TestClient(app) as client:
         response = client.post("/api/reseed/cleanup-restored-fixture")
@@ -814,10 +815,33 @@ def test_cleanup_restored_fixture_removes_extra_seed_data_without_referenced_cha
     payload = response.json()
     assert payload["deleted_cases"] > 0
     assert payload["deleted_channels"] > 0
+    assert payload["skipped_default_cases"] == 32
     with SessionLocal() as db:
         fixture = restored_seed_data()
-        assert db.get(TestCaseModel, fixture["test_cases"][0]["id"]) is None
+        default_ids = {case["id"] for case in default_cases()}
+        assert db.scalar(select(func.count()).select_from(TestCaseModel).where(TestCaseModel.id.in_(default_ids))) == len(default_ids)
+        fixture_extra_id = next(item["id"] for item in fixture["test_cases"] if item["id"] not in default_ids)
+        assert db.get(TestCaseModel, fixture_extra_id) is None
+        assert db.get(TestSuiteModel, "claude_full_35") is not None
         assert db.get(Channel, "openai_compat_demo") is None
+
+
+def test_reseed_restores_default_cases_after_fixture_cleanup_bug() -> None:
+    reset_database()
+    default_ids = {case["id"] for case in default_cases()}
+    with SessionLocal() as db:
+        db.execute(delete(TestCaseModel).where(TestCaseModel.id.in_(default_ids)))
+        db.commit()
+        assert db.scalar(select(func.count()).select_from(TestCaseModel).where(TestCaseModel.id.in_(default_ids))) == 0
+
+    with TestClient(app) as client:
+        response = client.post("/api/reseed")
+        cases = client.get("/api/test-cases")
+
+    assert response.status_code == 200
+    assert cases.status_code == 200
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(TestCaseModel).where(TestCaseModel.id.in_(default_ids))) == len(default_ids)
 
 
 def test_report_bulk_delete_returns_deleted_count_and_missing_ids() -> None:

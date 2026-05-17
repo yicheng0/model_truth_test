@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from .database import DATABASE_URL, SessionLocal, get_db, init_db
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .restored_seed import restored_seed_data
+from .suite_seed import DEFAULT_SUITE_ID, default_cases
 from .schemas import (
     BaselineBuildCreate,
     BaselineResultRead,
@@ -190,7 +191,13 @@ def ensure_seed_data_when_empty(db: Session, model: type | None = None) -> None:
     channels_empty = not db.scalar(select(func.count()).select_from(Channel))
     suites_empty = not db.scalar(select(func.count()).select_from(TestSuite))
     model_empty = bool(model and not db.scalar(select(func.count()).select_from(model)))
-    if model_empty or (channels_empty and suites_empty):
+    default_case_ids = [case["id"] for case in default_cases()]
+    default_suite_missing = db.get(TestSuite, DEFAULT_SUITE_ID) is None
+    default_cases_missing = bool(
+        default_case_ids
+        and db.scalar(select(func.count()).select_from(TestCase).where(TestCase.id.in_(default_case_ids))) < len(default_case_ids)
+    )
+    if model_empty or (channels_empty and suites_empty) or default_suite_missing or default_cases_missing:
         logger.warning("Core tables empty — triggering emergency re-seed")
         seed_demo_data(db)
 app.add_middleware(
@@ -483,13 +490,15 @@ def _channel_has_references(db: Session, channel_id: str) -> bool:
 @app.post("/api/reseed/cleanup-restored-fixture")
 def cleanup_restored_fixture(db: Session = Depends(get_db)) -> dict[str, object]:
     data = restored_seed_data()
-    fixture_case_ids = [str(item["id"]) for item in data["test_cases"] if item.get("id")]
-    fixture_suite_ids = [str(item["id"]) for item in data["test_suites"] if item.get("id")]
+    default_case_ids = {str(item["id"]) for item in default_cases() if item.get("id")}
+    fixture_case_ids = [str(item["id"]) for item in data["test_cases"] if item.get("id") and str(item["id"]) not in default_case_ids]
+    fixture_suite_ids = [str(item["id"]) for item in data["test_suites"] if item.get("id") and str(item["id"]) != DEFAULT_SUITE_ID]
     fixture_channel_ids = [str(item["id"]) for item in data["channels"] if item.get("id")]
     deleted_cases = 0
     deleted_suites = 0
     deleted_channels = 0
     skipped_channels: list[dict[str, str]] = []
+    skipped_cases = len(default_case_ids.intersection({str(item["id"]) for item in data["test_cases"] if item.get("id")}))
 
     for case_id in fixture_case_ids:
         case = db.get(TestCase, case_id)
@@ -531,6 +540,7 @@ def cleanup_restored_fixture(db: Session = Depends(get_db)) -> dict[str, object]
         "deleted_suites": deleted_suites,
         "deleted_channels": deleted_channels,
         "skipped_channels": skipped_channels,
+        "skipped_default_cases": skipped_cases,
     }
 
 
