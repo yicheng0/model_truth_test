@@ -11,7 +11,6 @@ import { formatDateTime } from '../time';
 import type { Channel, ChannelAlert, ChannelAlertStatus, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
 import { buildFeishuBroadcastUpdate, type FeishuBroadcastFormValues } from './feishuBroadcast';
 import {
-  alertChannelId,
   alertChannelModel,
   alertOutcomeColor,
   alertOutcomeLabel,
@@ -117,13 +116,24 @@ function runWindowText(schedule: Pick<ScheduledChannelTest, 'run_window_start' |
   return `${schedule.run_window_start}-${schedule.run_window_end} 北京时间`;
 }
 
-function alertChannelText(alert: ChannelAlert, channelName?: string | null) {
+function alertChannelText(alert: ChannelAlert, channel?: Channel | null) {
   const evidence = alert.evidence_summary ?? {};
-  const name = channelName ?? alert.channel_id;
+  const name = channel?.name ?? (typeof evidence.channel_name === 'string' ? evidence.channel_name : alert.channel_id);
+  const displayId = formatProviderChannelDisplayName(
+    {
+      id: channel?.id ?? alert.channel_id,
+      name,
+      provider_type: channel?.provider_type,
+      auth_config: channel?.auth_config,
+      providerType: typeof evidence.channel_provider_type === 'string' ? evidence.channel_provider_type : undefined,
+      accountType: typeof evidence.channel_account_type === 'string' ? evidence.channel_account_type : undefined,
+    },
+    alert.channel_id,
+  );
   const model = evidence.channel_model_name ? String(evidence.channel_model_name) : '';
   return {
     name,
-    id: alert.channel_id,
+    displayId,
     model,
   };
 }
@@ -202,13 +212,12 @@ function matchesAlertResultFilter(alert: ChannelAlert, filter: AlertResultFilter
   return filter === 'success' ? successStatuses.has(alert.status) : !successStatuses.has(alert.status);
 }
 
-function alertSummaryCell(alert: ChannelAlert, channelName?: string | null) {
-  const channel = alertChannelText(alert, channelName);
+function alertSummaryCell(alert: ChannelAlert, channelRecord?: Channel | null) {
+  const channel = alertChannelText(alert, channelRecord);
   const completedAt = alertProbeCompletedAt(alert);
   const messageId = alertResponseId(alert);
   const requestId = alertRequestId(alert);
   const source = alertProbeSource(alert);
-  const channelId = alertChannelId(alert);
   const channelModel = alertChannelModel(alert);
   return (
     <Space direction="vertical" size={2}>
@@ -217,7 +226,7 @@ function alertSummaryCell(alert: ChannelAlert, channelName?: string | null) {
       <Typography.Text>{alertProbeTitle(alert)}</Typography.Text>
       <Typography.Text type="secondary">{formatDateTime(completedAt) || formatDateTime(alert.created_at) || '-'}</Typography.Text>
       <Typography.Text type="secondary">
-        {channelId || '-'} · {source || '-'}
+        {channel.displayId || '-'} · {source || '-'}
       </Typography.Text>
       <Typography.Text type="secondary">
         Message ID：{messageId || '-'} · Request ID：{requestId || '-'}
@@ -319,7 +328,7 @@ export default function ScheduledTests() {
 
   const channelById = useMemo(() => new Map((channels.data ?? []).map((channel) => [channel.id, channel])), [channels.data]);
   const candidateChannels = useMemo(() => (channels.data ?? []).filter(isCandidateChannel), [channels.data]);
-  const openAlertLogChannel = openAlertLog ? alertChannelText(openAlertLog, channelById.get(openAlertLog.channel_id)?.name).name : '';
+  const openAlertLogChannel = openAlertLog ? alertChannelText(openAlertLog, channelById.get(openAlertLog.channel_id)) : null;
 
   useEffect(() => {
     if (!feishuSetting.data) return;
@@ -941,7 +950,7 @@ export default function ScheduledTests() {
                     ))}
                   </Space>
                   <Typography.Text type="secondary">
-                    渠道：{alertChannelText(alert, channelById.get(alert.channel_id)?.name).name} · 异常探针：{alertProbeTitle(alert)} · 时间：{formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) || '-'}
+                    渠道：{alertChannelText(alert, channelById.get(alert.channel_id)).displayId} · 异常探针：{alertProbeTitle(alert)} · 时间：{formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) || '-'}
                   </Typography.Text>
                   <Space wrap>
                     <Button icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
@@ -959,10 +968,10 @@ export default function ScheduledTests() {
               title: '渠道',
               width: 280,
               render: (_, alert) => {
-                const channel = alertChannelText(alert, channelById.get(alert.channel_id)?.name);
+                const channel = alertChannelText(alert, channelById.get(alert.channel_id));
                 return (
                   <Space direction="vertical" size={4}>
-                    <Typography.Text strong>{channel.name}</Typography.Text>
+                    <Typography.Text strong>{channel.displayId}</Typography.Text>
                     {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
                   </Space>
                 );
@@ -976,7 +985,7 @@ export default function ScheduledTests() {
             {
               title: '异常探针 / 时间点 / ID',
               width: 360,
-              render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)?.name),
+              render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)),
             },
             {
               title: '复审状态',
@@ -1080,19 +1089,23 @@ export default function ScheduledTests() {
                         {
                           title: '渠道',
                           width: 260,
-                          render: (_, item) => (
-                            <Space direction="vertical" size={2}>
-                              <Typography.Text strong>
-                                {formatProviderChannelDisplayName({
-                                  id: item.channel_id,
-                                  name: item.channel_name,
-                                  providerType: item.channel_provider_type,
-                                  accountType: item.channel_account_type,
-                                }, item.channel_id)}
-                              </Typography.Text>
-                              {item.channel_model_name ? <Typography.Text type="secondary">{item.channel_model_name}</Typography.Text> : null}
-                            </Space>
-                          ),
+                          render: (_, item) => {
+                            const channel = channelById.get(item.channel_id);
+                            const displayId = channel
+                              ? formatChannelDisplayName(channel)
+                              : formatProviderChannelDisplayName({
+                                id: item.channel_id,
+                                name: item.channel_name,
+                                providerType: item.channel_provider_type,
+                                accountType: item.channel_account_type,
+                              }, item.channel_id);
+                            return (
+                              <Space direction="vertical" size={2}>
+                                <Typography.Text strong>{displayId}</Typography.Text>
+                                {item.channel_model_name ? <Typography.Text type="secondary">{item.channel_model_name}</Typography.Text> : null}
+                              </Space>
+                            );
+                          },
                         },
                         { title: '巡检次数', dataIndex: 'run_count', width: 110 },
                         { title: '错误数', dataIndex: 'alert_count', width: 100, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
@@ -1156,17 +1169,17 @@ export default function ScheduledTests() {
                           title: '渠道',
                           width: 250,
                           render: (_, alert) => {
-                            const channel = alertChannelText(alert, channelById.get(alert.channel_id)?.name);
+                            const channel = alertChannelText(alert, channelById.get(alert.channel_id));
                             return (
                               <Space direction="vertical" size={2}>
-                                <Typography.Text strong>{channel.name}</Typography.Text>
+                                <Typography.Text strong>{channel.displayId}</Typography.Text>
                                 {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
                               </Space>
                             );
                           },
                         },
                         { title: '结果', width: 110, render: (_, alert) => <Tag color={alertOutcomeColor(alert.status)}>{alertOutcomeLabel(alert.status)}</Tag> },
-                        { title: '异常探针 / 时间点 / ID', width: 360, render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)?.name) },
+                        { title: '异常探针 / 时间点 / ID', width: 360, render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
                         { title: '告警创建时间', dataIndex: 'created_at', width: 180, render: (_, alert) => formatDateTime(alert.created_at) },
                         { title: 'Request ID', width: 210, render: (_, alert) => <Typography.Text copyable={{ text: alertRequestId(alert) }}>{alertRequestId(alert) || '-'}</Typography.Text> },
                         {
@@ -1419,7 +1432,12 @@ export default function ScheduledTests() {
         </Form>
       </Modal>
 
-      <AlertLogDrawer alert={openAlertLog} channel={openAlertLogChannel} onClose={closeAlertLogDrawer} />
+      <AlertLogDrawer
+        alert={openAlertLog}
+        channelName={openAlertLogChannel?.name ?? ''}
+        channelDisplayId={openAlertLogChannel?.displayId ?? ''}
+        onClose={closeAlertLogDrawer}
+      />
     </Space>
   );
 }

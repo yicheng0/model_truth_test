@@ -87,7 +87,7 @@ describe('scheduled alert log helpers', () => {
         probeCompletedAt: '2026-05-16 10:19:30',
         probeTitle: 'Web Search tool',
         channel: alertChannelDisplay(alert, '风雨'),
-        channelId: '9029-tokenflow-aws',
+        channelId: '9029-风雨-aws',
         channelModel: 'claude-sonnet',
         probeSource: 'api / openai_chat_completions',
         resultId: 'result_123',
@@ -102,7 +102,7 @@ describe('scheduled alert log helpers', () => {
         probeCompletedAt: '2026-05-16 10:19:30',
         probeTitle: 'Web Search tool',
         channel: alertChannelDisplay(alert, '风雨'),
-        channelId: '9029-tokenflow-aws',
+        channelId: '9029-风雨-aws',
         channelModel: 'claude-sonnet',
         probeSource: 'api / openai_chat_completions',
         resultId: 'result_123',
@@ -110,7 +110,7 @@ describe('scheduled alert log helpers', () => {
         requestId: 'req_789',
         error: '接口超时',
       }),
-    ).toContain('渠道 ID：9029-tokenflow-aws');
+    ).toContain('渠道 ID：9029-风雨-aws');
   });
 
   it('falls back to model request errors and labels', () => {

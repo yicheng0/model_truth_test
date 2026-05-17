@@ -315,12 +315,9 @@ export default function Channels() {
               dataIndex: 'name',
               width: 240,
               render: (_name: string, channel) => (
-                <Space direction="vertical" size={2}>
-                  <Space size={6} wrap>
-                    <strong>{formatChannelDisplayName(channel)}</strong>
-                    {channel.is_reference ? <Tag color="blue">指纹源</Tag> : <Tag color="purple">待测</Tag>}
-                  </Space>
-                  <Typography.Text type="secondary">{channel.id}</Typography.Text>
+                <Space size={6} wrap>
+                  <strong>{formatChannelDisplayName(channel)}</strong>
+                  {channel.is_reference ? <Tag color="blue">指纹源</Tag> : <Tag color="purple">待测</Tag>}
                 </Space>
               ),
             },

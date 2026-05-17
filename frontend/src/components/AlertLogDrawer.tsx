@@ -17,7 +17,8 @@ import { formatDateTime } from '../time';
 
 type AlertLogDrawerProps = {
   alert: ChannelAlert | null;
-  channel: string;
+  channelName: string;
+  channelDisplayId: string;
   onClose: () => void;
 };
 
@@ -26,23 +27,24 @@ async function copyText(text: string, successText: string) {
   message.success(successText);
 }
 
-export default function AlertLogDrawer({ alert, channel, onClose }: AlertLogDrawerProps) {
+export default function AlertLogDrawer({ alert, channelName, channelDisplayId, onClose }: AlertLogDrawerProps) {
   const requestId = alert ? alertRequestId(alert) : '';
   const messageId = alert ? alertResponseId(alert) : '';
   const error = alert ? alertErrorText(alert) : '';
   const alertCreatedAt = alert ? formatDateTime(alert.created_at) : '';
   const probeCompletedAt = alert ? formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) : '';
   const probeTitle = alert ? alertProbeTitle(alert) : '';
-  const channelId = alert ? alertChannelId(alert) : '';
+  const internalChannelId = alert ? alertChannelId(alert) : '';
   const channelModel = alert ? alertChannelModel(alert) : '';
   const probeSource = alert ? alertProbeSource(alert) : '';
   const resultId = alert ? alertResultId(alert) : '';
+  const displayedChannelId = channelDisplayId || internalChannelId;
   const logText = alertLogText({
     alertCreatedAt,
     probeCompletedAt,
     probeTitle,
-    channel: channel || channelId,
-    channelId,
+    channel: channelName || displayedChannelId,
+    channelId: displayedChannelId,
     channelModel,
     probeSource,
     resultId,
@@ -65,8 +67,8 @@ export default function AlertLogDrawer({ alert, channel, onClose }: AlertLogDraw
             <Descriptions.Item label="告警创建时间">{alertCreatedAt || '-'}</Descriptions.Item>
             <Descriptions.Item label="探针完成时间">{probeCompletedAt || '-'}</Descriptions.Item>
             <Descriptions.Item label="异常探针">{probeTitle || '-'}</Descriptions.Item>
-            <Descriptions.Item label="渠道">{channel || '-'}</Descriptions.Item>
-            <Descriptions.Item label="渠道 ID">{channelId || '-'}</Descriptions.Item>
+            <Descriptions.Item label="渠道">{channelName || '-'}</Descriptions.Item>
+            <Descriptions.Item label="渠道 ID">{displayedChannelId || '-'}</Descriptions.Item>
             <Descriptions.Item label="渠道模型">{channelModel || '-'}</Descriptions.Item>
             <Descriptions.Item label="探针来源">{probeSource || '-'}</Descriptions.Item>
             <Descriptions.Item label="Result ID">
