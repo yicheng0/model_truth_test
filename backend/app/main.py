@@ -141,7 +141,11 @@ async def lifespan(_app: FastAPI):
     )
     init_db()
     with SessionLocal() as db:
-        seed_demo_data(db)
+        try:
+            seed_demo_data(db)
+            logger.info("Seed data initialized successfully")
+        except Exception:
+            logger.exception("Seed data initialization failed — app will continue but data may be incomplete")
     scheduler_task = None
     if os.getenv("AUTO_SCHEDULER_ENABLED", "true").lower() not in {"0", "false", "no"}:
         scheduler_task = asyncio.create_task(scheduled_test_loop(SessionLocal))
@@ -180,8 +184,13 @@ def cors_origins() -> list[str]:
 allowed_origins = cors_origins()
 
 
-def ensure_seed_data_when_empty(db: Session, model: type) -> None:
-    if not db.scalar(select(func.count()).select_from(model)):
+def ensure_seed_data_when_empty(db: Session, model: type | None = None) -> None:
+    """Re-seed when a requested seed table is empty or a fresh DB missed lifespan seed."""
+    channels_empty = not db.scalar(select(func.count()).select_from(Channel))
+    suites_empty = not db.scalar(select(func.count()).select_from(TestSuite))
+    model_empty = bool(model and not db.scalar(select(func.count()).select_from(model)))
+    if model_empty or (channels_empty and suites_empty):
+        logger.warning("Core tables empty — triggering emergency re-seed")
         seed_demo_data(db)
 app.add_middleware(
     CORSMiddleware,

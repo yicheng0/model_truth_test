@@ -609,6 +609,7 @@ def seed_missing_channels(db: Session, channel_data: list[dict[str, Any]]) -> in
 
 
 def seed_restored_fixture_data(db: Session) -> dict[str, int]:
+    _logger = logging.getLogger(__name__)
     data = restored_seed_data()
     inserted = {
         "channels": seed_missing_channels(db, data["channels"]),
@@ -619,36 +620,22 @@ def seed_restored_fixture_data(db: Session) -> dict[str, int]:
         suite_id = suite_data.get("id")
         if not suite_id:
             continue
-        suite = db.get(TestSuite, suite_id)
-        if suite is None:
+        if db.get(TestSuite, suite_id) is None:
             create_suite(db, TestSuiteCreate(**suite_data))
             inserted["test_suites"] += 1
-            continue
-        suite.name = suite_data["name"]
-        suite.description = suite_data.get("description")
-        suite.version = suite_data.get("version")
-        suite.visibility = suite_data.get("visibility") or "public"
 
     for case_data in data["test_cases"]:
         case_id = case_data.get("id")
         if not case_id:
             continue
-        case = db.get(TestCase, case_id)
-        if case is None:
+        if db.get(TestCase, case_id) is None:
             create_case(db, TestCaseCreate(**case_data))
             inserted["test_cases"] += 1
-            continue
-        case.suite_id = case_data["suite_id"]
-        case.module = case_data["module"]
-        case.sort_order = case_data.get("sort_order", 1000)
-        case.title = case_data["title"]
-        case.prompt = case_data["prompt"]
-        case.system_prompt = case_data.get("system_prompt")
-        case.request_params = case_data.get("request_params") or {}
-        case.scoring_rules = case_data.get("scoring_rules") or {}
-        case.is_hidden = case_data.get("is_hidden", False)
-        case.enabled = case_data.get("enabled", True)
-    db.commit()
+
+    if any(inserted.values()):
+        db.commit()
+        _logger.info("Seed: restored fixture data — channels=%d suites=%d cases=%d",
+                     inserted["channels"], inserted["test_suites"], inserted["test_cases"])
     return inserted
 
 
@@ -1136,36 +1123,28 @@ def _case_sample_group(case: TestCase, group_by: str) -> str:
 
 
 def seed_demo_data(db: Session) -> None:
+    _logger = logging.getLogger(__name__)
+    _logger.info("Seed: checking and creating built-in data if missing")
     seed_missing_channels(db, [template.model_dump() for template in default_channel_templates()])
-    if not db.scalar(select(TestSuite).where(TestSuite.id == default_suite()["id"])):
+    suite_id = default_suite()["id"]
+    if not db.scalar(select(TestSuite).where(TestSuite.id == suite_id)):
         create_suite(db, TestSuiteCreate(**default_suite()))
+        _logger.info("Seed: created built-in suite %s", suite_id)
     else:
-        suite = db.get(TestSuite, default_suite()["id"])
-        if suite:
-            suite.name = default_suite()["name"]
-            suite.description = default_suite()["description"]
-            suite.version = default_suite()["version"]
-            suite.visibility = default_suite()["visibility"]
-    case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == default_suite()["id"])).all()}
+        _logger.info("Seed: built-in suite %s already exists, skipping update", suite_id)
+    case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == suite_id)).all()}
     default_case_data = default_cases()
-
+    created_cases = 0
     for case_data in default_case_data:
-        case = case_by_id.get(case_data["id"])
-        if case is None:
-            case_by_id[case_data["id"]] = create_case(db, TestCaseCreate(**case_data))
+        if case_data["id"] in case_by_id:
             continue
-        case.module = case_data["module"]
-        if "sort_order" in case_data:
-            case.sort_order = case_data["sort_order"]
-        case.title = case_data["title"]
-        case.prompt = case_data["prompt"]
-        case.system_prompt = case_data.get("system_prompt")
-        case.request_params = case_data.get("request_params") or {}
-        case.scoring_rules = case_data.get("scoring_rules") or {}
-        case.is_hidden = case_data.get("is_hidden", False)
-        case.enabled = case_data.get("enabled", True)
-    db.commit()
+        case_by_id[case_data["id"]] = create_case(db, TestCaseCreate(**case_data))
+        created_cases += 1
+    if created_cases:
+        db.commit()
+        _logger.info("Seed: created %d missing built-in cases for suite %s", created_cases, suite_id)
     seed_restored_fixture_data(db)
+    _logger.info("Seed: complete")
 
 
 def create_run(db: Session, data: RunCreate) -> Run:
