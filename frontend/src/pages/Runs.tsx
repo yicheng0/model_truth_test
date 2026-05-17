@@ -1,4 +1,4 @@
-import { useMemo, useState, type Key } from 'react';
+import { useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Empty, Popconfirm, Progress, Space, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
@@ -353,6 +353,7 @@ export default function Runs() {
   const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [cancelingId, setCancelingId] = useState<string | null>(null);
+  const [selectedNormalRowKeys, setSelectedNormalRowKeys] = useState<Key[]>([]);
   const [selectedPatrolRowKeys, setSelectedPatrolRowKeys] = useState<Key[]>([]);
   const runs = useQuery({
     queryKey: ['runs'],
@@ -362,14 +363,29 @@ export default function Runs() {
 
   const remove = useMutation({
     mutationFn: api.deleteRun,
-    onSuccess: async () => {
+    onSuccess: async (_, runId) => {
       message.success('任务已删除');
-      setSelectedPatrolRowKeys((keys) => keys.filter((key) => key !== deletingId));
+      setSelectedNormalRowKeys((keys) => keys.filter((key) => key !== runId));
+      setSelectedPatrolRowKeys((keys) => keys.filter((key) => key !== runId));
       await queryClient.invalidateQueries({ queryKey: ['runs'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
     onSettled: () => setDeletingId(null),
+  });
+  const deleteNormalRuns = useMutation({
+    mutationFn: async (ids: string[]) => {
+      const settled = await Promise.allSettled(ids.map((id) => api.deleteRun(id)));
+      const failed = settled.filter((item) => item.status === 'rejected').length;
+      return { deleted: ids.length - failed, failed };
+    },
+    onSuccess: async (result) => {
+      message.success(result.failed ? `已删除 ${result.deleted} 条任务，${result.failed} 条删除失败` : `已删除 ${result.deleted} 条任务`);
+      setSelectedNormalRowKeys([]);
+      await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
   });
   const deletePatrolRuns = useMutation({
     mutationFn: async (ids: string[]) => {
@@ -407,11 +423,35 @@ export default function Runs() {
 
   const { normalRuns, patrolRuns } = useMemo(() => splitRunsByPatrol(runs.data ?? []), [runs.data]);
   const normalRunGroups = useMemo(() => groupRunsByChannel(normalRuns), [normalRuns]);
+  const selectedNormalRuns = useMemo(
+    () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
+    [normalRuns, selectedNormalRowKeys],
+  );
+  const deletableSelectedNormalRuns = selectedNormalRuns.filter((run) => run.status !== 'running');
   const selectedPatrolRuns = useMemo(
     () => patrolRuns.filter((run) => selectedPatrolRowKeys.includes(run.id)),
     [patrolRuns, selectedPatrolRowKeys],
   );
   const deletableSelectedPatrolRuns = selectedPatrolRuns.filter((run) => run.status !== 'running');
+
+  useEffect(() => {
+    const normalIds = new Set(normalRuns.map((run) => run.id));
+    const patrolIds = new Set(patrolRuns.map((run) => run.id));
+    setSelectedNormalRowKeys((keys) => keys.filter((key) => normalIds.has(String(key))));
+    setSelectedPatrolRowKeys((keys) => keys.filter((key) => patrolIds.has(String(key))));
+  }, [normalRuns, patrolRuns]);
+
+  function deleteSelectedNormalRuns() {
+    if (!selectedNormalRowKeys.length) {
+      message.warning('请先选择检测任务');
+      return;
+    }
+    if (!deletableSelectedNormalRuns.length) {
+      message.warning('运行中的检测任务不能删除');
+      return;
+    }
+    deleteNormalRuns.mutate(deletableSelectedNormalRuns.map((run) => run.id));
+  }
 
   function deleteSelectedPatrolRuns() {
     if (!selectedPatrolRowKeys.length) {
@@ -511,6 +551,22 @@ export default function Runs() {
             style={{ marginBottom: 16 }}
           />
           ) : null}
+        <Space wrap style={{ width: '100%', marginBottom: 16 }}>
+          <Popconfirm
+            title="删除已选检测任务"
+            description={`将删除 ${deletableSelectedNormalRuns.length} 条已选任务及其结果、对比和报告。运行中任务会跳过。确定删除吗？`}
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            disabled={!deletableSelectedNormalRuns.length}
+            onConfirm={deleteSelectedNormalRuns}
+          >
+            <Button danger icon={<Trash2 size={15} />} disabled={!deletableSelectedNormalRuns.length} loading={deleteNormalRuns.isPending}>
+              删除已选
+            </Button>
+          </Popconfirm>
+          <Typography.Text type="secondary">已选 {selectedNormalRuns.length} / 可删除 {deletableSelectedNormalRuns.length}</Typography.Text>
+        </Space>
         <Table
           rowKey="key"
           loading={runs.isLoading}
@@ -525,6 +581,28 @@ export default function Runs() {
                 size="small"
                 pagination={false}
                 dataSource={group.runs}
+                rowSelection={{
+                  selectedRowKeys: selectedNormalRowKeys,
+                  onSelect: (run, selected) => {
+                    setSelectedNormalRowKeys((keys) => {
+                      if (selected) return keys.includes(run.id) ? keys : [...keys, run.id];
+                      return keys.filter((key) => key !== run.id);
+                    });
+                  },
+                  onSelectAll: (selected, _selectedRows, changeRows) => {
+                    const changedIds = new Set(changeRows.map((run) => run.id));
+                    setSelectedNormalRowKeys((keys) => {
+                      if (selected) {
+                        const next = new Set(keys.map(String));
+                        changedIds.forEach((id) => next.add(id));
+                        return Array.from(next);
+                      }
+                      return keys.filter((key) => !changedIds.has(String(key)));
+                    });
+                  },
+                  getCheckboxProps: (run) => ({ disabled: run.status === 'running' }),
+                  preserveSelectedRowKeys: true,
+                }}
                 scroll={{ x: 1160 }}
                 columns={[
                   { title: '任务', dataIndex: 'name', width: 240 },
