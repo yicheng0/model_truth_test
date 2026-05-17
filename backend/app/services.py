@@ -45,6 +45,7 @@ from .schemas import (
     TestSuiteCreate,
     TestSuiteRead,
 )
+from .restored_seed import restored_seed_data
 from .suite_seed import default_cases, default_suite
 
 SCHEDULE_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -596,6 +597,61 @@ def seed_default_channels_if_empty(db: Session) -> None:
         create_channel(db, template)
 
 
+def seed_missing_channels(db: Session, channel_data: list[dict[str, Any]]) -> int:
+    inserted = 0
+    for item in channel_data:
+        channel_id = item.get("id")
+        if not channel_id or db.get(Channel, channel_id):
+            continue
+        create_channel(db, ChannelCreate(**item))
+        inserted += 1
+    return inserted
+
+
+def seed_restored_fixture_data(db: Session) -> dict[str, int]:
+    data = restored_seed_data()
+    inserted = {
+        "channels": seed_missing_channels(db, data["channels"]),
+        "test_suites": 0,
+        "test_cases": 0,
+    }
+    for suite_data in data["test_suites"]:
+        suite_id = suite_data.get("id")
+        if not suite_id:
+            continue
+        suite = db.get(TestSuite, suite_id)
+        if suite is None:
+            create_suite(db, TestSuiteCreate(**suite_data))
+            inserted["test_suites"] += 1
+            continue
+        suite.name = suite_data["name"]
+        suite.description = suite_data.get("description")
+        suite.version = suite_data.get("version")
+        suite.visibility = suite_data.get("visibility") or "public"
+
+    for case_data in data["test_cases"]:
+        case_id = case_data.get("id")
+        if not case_id:
+            continue
+        case = db.get(TestCase, case_id)
+        if case is None:
+            create_case(db, TestCaseCreate(**case_data))
+            inserted["test_cases"] += 1
+            continue
+        case.suite_id = case_data["suite_id"]
+        case.module = case_data["module"]
+        case.sort_order = case_data.get("sort_order", 1000)
+        case.title = case_data["title"]
+        case.prompt = case_data["prompt"]
+        case.system_prompt = case_data.get("system_prompt")
+        case.request_params = case_data.get("request_params") or {}
+        case.scoring_rules = case_data.get("scoring_rules") or {}
+        case.is_hidden = case_data.get("is_hidden", False)
+        case.enabled = case_data.get("enabled", True)
+    db.commit()
+    return inserted
+
+
 def _clean_auth_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
     cleaned: dict[str, Any] = {}
     for key, value in (config or {}).items():
@@ -1080,7 +1136,7 @@ def _case_sample_group(case: TestCase, group_by: str) -> str:
 
 
 def seed_demo_data(db: Session) -> None:
-    seed_default_channels_if_empty(db)
+    seed_missing_channels(db, [template.model_dump() for template in default_channel_templates()])
     if not db.scalar(select(TestSuite).where(TestSuite.id == default_suite()["id"])):
         create_suite(db, TestSuiteCreate(**default_suite()))
     else:
@@ -1109,6 +1165,7 @@ def seed_demo_data(db: Session) -> None:
         case.is_hidden = case_data.get("is_hidden", False)
         case.enabled = case_data.get("enabled", True)
     db.commit()
+    seed_restored_fixture_data(db)
 
 
 def create_run(db: Session, data: RunCreate) -> Run:

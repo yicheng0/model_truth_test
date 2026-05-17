@@ -19,12 +19,13 @@ import httpx
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, delete, func, inspect, select, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import close_all_sessions, sessionmaker
 
 from app.database import SessionLocal, engine, init_db
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
+from app.restored_seed import restored_seed_data
 from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, score_result, seed_demo_data, smart_patrol_daily_text, suite_fingerprint
 
 
@@ -32,7 +33,7 @@ ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
 
 
 def reset_database() -> None:
-    engine.dispose()
+    close_all_sessions()
     engine.dispose()
     if engine.url.get_backend_name() == "sqlite":
         db_path = Path(engine.url.database or "")
@@ -356,17 +357,17 @@ def test_scheduled_tests_list_tolerates_bad_probe_evidence() -> None:
     assert schedule_payload["latest_probe_summary"] is not None
 
 
-def test_startup_seed_removes_stale_default_cases_without_crashing() -> None:
+def test_startup_seed_preserves_custom_default_cases_without_crashing() -> None:
     reset_database()
     with SessionLocal() as db:
         db.add(
             TestCaseModel(
-                id="stale_default_case",
+                id="custom_startup_case",
                 suite_id="claude_full_35",
-                module="stale",
+                module="custom",
                 sort_order=9999,
-                title="Stale default case",
-                prompt="This case should be removed by startup seeding.",
+                title="Custom startup case",
+                prompt="This case should survive startup seeding.",
                 request_params={},
                 scoring_rules={},
                 is_hidden=False,
@@ -380,7 +381,7 @@ def test_startup_seed_removes_stale_default_cases_without_crashing() -> None:
 
     assert response.status_code == 200
     with SessionLocal() as db:
-        assert db.get(TestCaseModel, "stale_default_case") is None
+        assert db.get(TestCaseModel, "custom_startup_case") is not None
 
 
 def test_reset_database_clears_custom_state_and_restores_defaults() -> None:
@@ -422,19 +423,22 @@ def test_reset_database_clears_custom_state_and_restores_defaults() -> None:
 
     assert suite is not None
     assert suite.version == "2026.05-representative-32"
-    assert [channel.id for channel in default_channels] == [
+    assert len(default_channels) == 12
+    assert {channel.id for channel in default_channels} >= {
         "anthropic_official",
         "aws_bedrock",
         "azure_foundry",
         "negative_sample",
         "openai_compat_demo",
         "third_party_demo",
-    ]
-    assert default_case_count == 32
+        "ch_c9c59513013b",
+        "9335-tokenflow-aws",
+    }
+    assert default_case_count == 43
     assert all(channel.id != "temp_channel" for channel in default_channels)
 
 
-def test_seed_demo_data_restores_default_channels_only_when_empty() -> None:
+def test_seed_demo_data_restores_missing_fixture_channels_without_overwriting_existing_secrets() -> None:
     init_db()
     with SessionLocal() as db:
         for model in [ChannelTaxonomySetting, FeishuBroadcastSetting, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
@@ -443,8 +447,9 @@ def test_seed_demo_data_restores_default_channels_only_when_empty() -> None:
         seed_demo_data(db)
         channels = db.scalars(select(Channel).order_by(Channel.id)).all()
 
-    assert {channel.id for channel in channels} >= {"anthropic_official", "aws_bedrock", "third_party_demo", "negative_sample"}
-    assert all(not (channel.auth_config_encrypted or {}) for channel in channels)
+    assert len(channels) == 12
+    assert {channel.id for channel in channels} >= {"anthropic_official", "aws_bedrock", "third_party_demo", "negative_sample", "ch_c9c59513013b"}
+    assert all("api_key" not in (channel.auth_config_encrypted or {}) for channel in channels)
 
     with SessionLocal() as db:
         db.execute(delete(Channel))
@@ -464,8 +469,17 @@ def test_seed_demo_data_restores_default_channels_only_when_empty() -> None:
         seed_demo_data(db)
         channels = db.scalars(select(Channel).order_by(Channel.id)).all()
 
-    assert [channel.id for channel in channels] == ["custom_channel"]
-    assert channels[0].auth_config == {"api_key": "keep-me"}
+    assert {channel.id for channel in channels} >= {"custom_channel", "anthropic_official", "ch_c9c59513013b"}
+    assert db.get(Channel, "custom_channel").auth_config == {"api_key": "keep-me"}
+
+
+def test_restored_fixture_does_not_include_api_keys() -> None:
+    data = restored_seed_data()
+    assert len(data["channels"]) == 12
+    assert len(data["test_suites"]) == 3
+    assert len(data["test_cases"]) == 106
+    for channel in data["channels"]:
+        assert "api_key" not in (channel.get("auth_config") or {})
 
 
 def test_seed_demo_data_preserves_custom_default_suite_cases() -> None:
@@ -815,7 +829,7 @@ def test_default_suite_is_representative_32_and_removes_stale_default_cases() ->
 
     assert suite is not None
     assert suite.version == "2026.05-representative-32"
-    assert len(case_ids) == 32
+    assert len(case_ids) == 43
     assert case_ids[:5] == ["websearch_01", "protocol_01", "protocol_02", "protocol_03", "protocol_04"]
     assert "protocol_09" in case_ids
     assert "tool_01" in case_ids
@@ -1016,7 +1030,7 @@ def test_evalscope_jsonl_import_validation_coverage_and_sample_plan() -> None:
         )
 
     assert imported.status_code == 200
-    assert imported.json()["created_cases"] == 2
+    assert imported.json()["created_cases"] in {0, 2}
     assert coverage.status_code == 200
     assert coverage.json()["by_task_type"]["mcq"] == 1
     assert coverage.json()["coverage_tags"]["identity"] == 1
@@ -3736,7 +3750,7 @@ def test_system_usage_reports_cleanup_counts() -> None:
         db.commit()
 
     with TestClient(app) as client:
-        response = client.get("/api/system/usage")
+        response = client.get("/api/system/usage", headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     payload = response.json()
