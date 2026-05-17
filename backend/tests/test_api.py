@@ -506,6 +506,42 @@ def test_list_endpoints_self_heal_empty_seed_tables() -> None:
         assert db.scalar(select(func.count()).select_from(TestCaseModel)) == 106
 
 
+def test_public_reseed_restores_missing_seed_data_without_admin_key_or_secret_overwrite() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        for model in [ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
+            db.execute(delete(model))
+        db.commit()
+        create_channel(
+            db,
+            ChannelCreate(
+                id="custom_channel",
+                name="Custom Channel",
+                provider_type="third_party_anthropic",
+                role="candidate",
+                base_url="https://custom.example/v1",
+                model_name="claude-custom",
+                auth_config={"api_key": "keep-me"},
+            ),
+        )
+
+    with TestClient(app) as client:
+        status_before = client.get("/api/seed-status")
+        response = client.post("/api/reseed")
+        status_after = client.get("/api/seed-status")
+
+    assert status_before.status_code == 200
+    assert response.status_code == 200
+    assert status_after.status_code == 200
+    assert response.json()["ok"] is True
+    assert status_after.json()["channels"] == 13
+    assert status_after.json()["test_suites"] == 3
+    assert status_after.json()["test_cases"] == 106
+    with SessionLocal() as db:
+        assert db.get(Channel, "custom_channel").auth_config == {"api_key": "keep-me"}
+        assert all("api_key" not in (channel.auth_config_encrypted or {}) for channel in db.scalars(select(Channel).where(Channel.id != "custom_channel")).all())
+
+
 def test_seed_demo_data_preserves_custom_default_suite_cases() -> None:
     reset_database()
     with SessionLocal() as db:

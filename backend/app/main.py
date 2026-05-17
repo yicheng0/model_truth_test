@@ -1510,12 +1510,7 @@ def get_report_markdown_alias(report_id: str, db: Session = Depends(get_db)) -> 
     return {"id": report.id, "markdown": report.markdown}
 
 
-@app.get("/api/admin/seed-status")
-def admin_seed_status(
-    _admin: None = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> dict[str, object]:
-    """Return current seed data counts for diagnostics."""
+def seed_status_payload(db: Session) -> dict[str, object]:
     return {
         "channels": db.scalar(select(func.count()).select_from(Channel)),
         "test_suites": db.scalar(select(func.count()).select_from(TestSuite)),
@@ -1524,25 +1519,41 @@ def admin_seed_status(
     }
 
 
+def reseed_payload(db: Session) -> dict[str, object]:
+    before = seed_status_payload(db)
+    try:
+        seed_demo_data(db)
+    except Exception as exc:
+        logger.exception("Seed recovery failed")
+        raise HTTPException(status_code=500, detail=f"Reseed failed: {exc}") from exc
+    return {"ok": True, "before": before, "after": seed_status_payload(db)}
+
+
+@app.get("/api/seed-status")
+def public_seed_status(db: Session = Depends(get_db)) -> dict[str, object]:
+    """Return current seed data counts for diagnostics."""
+    return seed_status_payload(db)
+
+
+@app.post("/api/reseed")
+def public_reseed(db: Session = Depends(get_db)) -> dict[str, object]:
+    """Create missing built-in seed data without deleting or overwriting existing rows."""
+    return reseed_payload(db)
+
+
+@app.get("/api/admin/seed-status")
+def admin_seed_status(
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Return current seed data counts for diagnostics."""
+    return seed_status_payload(db)
+
+
 @app.post("/api/admin/reseed")
 def admin_reseed(
     _admin: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     """Re-run seed to create any missing built-in data."""
-    before_channels = db.scalar(select(func.count()).select_from(Channel))
-    before_suites = db.scalar(select(func.count()).select_from(TestSuite))
-    before_cases = db.scalar(select(func.count()).select_from(TestCase))
-    try:
-        seed_demo_data(db)
-        after_channels = db.scalar(select(func.count()).select_from(Channel))
-        after_suites = db.scalar(select(func.count()).select_from(TestSuite))
-        after_cases = db.scalar(select(func.count()).select_from(TestCase))
-    except Exception as exc:
-        logger.exception("Admin reseed failed")
-        raise HTTPException(status_code=500, detail=f"Reseed failed: {exc}") from exc
-    return {
-        "ok": True,
-        "before": {"channels": before_channels, "suites": before_suites, "cases": before_cases},
-        "after": {"channels": after_channels, "suites": after_suites, "cases": after_cases},
-    }
+    return reseed_payload(db)
