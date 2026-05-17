@@ -65,7 +65,52 @@ describe('scheduled alert log helpers', () => {
       },
     };
 
-    expect(alertChannelDisplay(alert)).toBe('9335-阿宝-aws_bedrock');
+    expect(alertChannelDisplay(alert, '阿宝')).toBe('阿宝');
+  });
+
+  it('prefers the channel record name over evidence channel_name', () => {
+    const alert: ChannelAlert = {
+      ...baseAlert,
+      channel_id: '9029-tokenflow-aws',
+      evidence_summary: {
+        channel_id: '9029-tokenflow-aws',
+        channel_name: '9029-风雨-aws_bedrock',
+        channel_account_type: 'aws',
+        channel_provider_type: 'aws_bedrock',
+      },
+    };
+
+    expect(alertChannelDisplay(alert, '风雨')).toBe('风雨');
+    expect(
+      alertLogText({
+        alertCreatedAt: '2026-05-16 10:20:30',
+        probeCompletedAt: '2026-05-16 10:19:30',
+        probeTitle: 'Web Search tool',
+        channel: alertChannelDisplay(alert, '风雨'),
+        channelId: '9029-tokenflow-aws',
+        channelModel: 'claude-sonnet',
+        probeSource: 'api / openai_chat_completions',
+        resultId: 'result_123',
+        messageId: 'msg_123',
+        requestId: 'req_789',
+        error: '接口超时',
+      }),
+    ).toContain('渠道：风雨');
+    expect(
+      alertLogText({
+        alertCreatedAt: '2026-05-16 10:20:30',
+        probeCompletedAt: '2026-05-16 10:19:30',
+        probeTitle: 'Web Search tool',
+        channel: alertChannelDisplay(alert, '风雨'),
+        channelId: '9029-tokenflow-aws',
+        channelModel: 'claude-sonnet',
+        probeSource: 'api / openai_chat_completions',
+        resultId: 'result_123',
+        messageId: 'msg_123',
+        requestId: 'req_789',
+        error: '接口超时',
+      }),
+    ).toContain('渠道 ID：9029-tokenflow-aws');
   });
 
   it('falls back to model request errors and labels', () => {

@@ -1,5 +1,4 @@
 import type { ChannelAlert } from './types';
-import { formatProviderChannelDisplayName } from './channelCredentials';
 
 type AlertEvidence = Record<string, unknown>;
 
@@ -108,16 +107,7 @@ export function alertChannelModel(alert: ChannelAlert): string {
 }
 
 export function alertChannelDisplay(alert: ChannelAlert, channelName?: string | null) {
-  const evidence = getEvidence(alert);
-  return formatProviderChannelDisplayName(
-    {
-      id: firstText(evidence.channel_id, alert.channel_id),
-      name: firstText(evidence.channel_name, channelName),
-      providerType: firstText(evidence.channel_provider_type, evidence.model_request_channel_provider_type),
-      accountType: firstText(evidence.channel_account_type, evidence.model_request_channel_account_type),
-    },
-    alert.channel_id,
-  );
+  return firstText(channelName, alert.channel_id);
 }
 
 export function alertProbeEvidence(alert: ChannelAlert): Record<string, unknown> | null {

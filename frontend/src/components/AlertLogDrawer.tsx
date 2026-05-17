@@ -3,7 +3,6 @@ import { ClipboardCopy } from 'lucide-react';
 import type { ChannelAlert } from '../types';
 import {
   alertChannelId,
-  alertChannelDisplay,
   alertChannelModel,
   alertErrorText,
   alertLogText,
@@ -38,12 +37,11 @@ export default function AlertLogDrawer({ alert, channel, onClose }: AlertLogDraw
   const channelModel = alert ? alertChannelModel(alert) : '';
   const probeSource = alert ? alertProbeSource(alert) : '';
   const resultId = alert ? alertResultId(alert) : '';
-  const channelDisplay = alert ? alertChannelDisplay(alert, channel) : channel;
   const logText = alertLogText({
     alertCreatedAt,
     probeCompletedAt,
     probeTitle,
-    channel: channelDisplay,
+    channel: channel || channelId,
     channelId,
     channelModel,
     probeSource,
@@ -67,7 +65,7 @@ export default function AlertLogDrawer({ alert, channel, onClose }: AlertLogDraw
             <Descriptions.Item label="告警创建时间">{alertCreatedAt || '-'}</Descriptions.Item>
             <Descriptions.Item label="探针完成时间">{probeCompletedAt || '-'}</Descriptions.Item>
             <Descriptions.Item label="异常探针">{probeTitle || '-'}</Descriptions.Item>
-            <Descriptions.Item label="渠道">{channelDisplay || '-'}</Descriptions.Item>
+            <Descriptions.Item label="渠道">{channel || '-'}</Descriptions.Item>
             <Descriptions.Item label="渠道 ID">{channelId || '-'}</Descriptions.Item>
             <Descriptions.Item label="渠道模型">{channelModel || '-'}</Descriptions.Item>
             <Descriptions.Item label="探针来源">{probeSource || '-'}</Descriptions.Item>

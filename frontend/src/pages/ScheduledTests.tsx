@@ -119,18 +119,11 @@ function runWindowText(schedule: Pick<ScheduledChannelTest, 'run_window_start' |
 
 function alertChannelText(alert: ChannelAlert, channelName?: string | null) {
   const evidence = alert.evidence_summary ?? {};
-  const name = evidence.channel_name ? String(evidence.channel_name) : channelName;
+  const name = channelName ?? alert.channel_id;
   const model = evidence.channel_model_name ? String(evidence.channel_model_name) : '';
   return {
-    label: formatProviderChannelDisplayName(
-      {
-        id: evidence.channel_id ? String(evidence.channel_id) : alert.channel_id,
-        name,
-        providerType: typeof evidence.channel_provider_type === 'string' ? evidence.channel_provider_type : undefined,
-        accountType: typeof evidence.channel_account_type === 'string' ? evidence.channel_account_type : undefined,
-      },
-      alert.channel_id,
-    ),
+    name,
+    id: alert.channel_id,
     model,
   };
 }
@@ -219,7 +212,7 @@ function alertSummaryCell(alert: ChannelAlert, channelName?: string | null) {
   const channelModel = alertChannelModel(alert);
   return (
     <Space direction="vertical" size={2}>
-      <Typography.Text strong>{channel.label}</Typography.Text>
+      <Typography.Text strong>{channel.name}</Typography.Text>
       {channel.model || channelModel ? <Typography.Text type="secondary">{channel.model || channelModel}</Typography.Text> : null}
       <Typography.Text>{alertProbeTitle(alert)}</Typography.Text>
       <Typography.Text type="secondary">{formatDateTime(completedAt) || formatDateTime(alert.created_at) || '-'}</Typography.Text>
@@ -326,7 +319,7 @@ export default function ScheduledTests() {
 
   const channelById = useMemo(() => new Map((channels.data ?? []).map((channel) => [channel.id, channel])), [channels.data]);
   const candidateChannels = useMemo(() => (channels.data ?? []).filter(isCandidateChannel), [channels.data]);
-  const openAlertLogChannel = openAlertLog ? alertChannelText(openAlertLog, channelById.get(openAlertLog.channel_id)?.name).label : '';
+  const openAlertLogChannel = openAlertLog ? alertChannelText(openAlertLog, channelById.get(openAlertLog.channel_id)?.name).name : '';
 
   useEffect(() => {
     if (!feishuSetting.data) return;
@@ -948,7 +941,7 @@ export default function ScheduledTests() {
                     ))}
                   </Space>
                   <Typography.Text type="secondary">
-                    渠道：{alertChannelText(alert, channelById.get(alert.channel_id)?.name).label} · 异常探针：{alertProbeTitle(alert)} · 时间：{formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) || '-'}
+                    渠道：{alertChannelText(alert, channelById.get(alert.channel_id)?.name).name} · 异常探针：{alertProbeTitle(alert)} · 时间：{formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) || '-'}
                   </Typography.Text>
                   <Space wrap>
                     <Button icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
@@ -969,7 +962,7 @@ export default function ScheduledTests() {
                 const channel = alertChannelText(alert, channelById.get(alert.channel_id)?.name);
                 return (
                   <Space direction="vertical" size={4}>
-                    <Typography.Text strong>{channel.label}</Typography.Text>
+                    <Typography.Text strong>{channel.name}</Typography.Text>
                     {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
                   </Space>
                 );
@@ -1166,7 +1159,7 @@ export default function ScheduledTests() {
                             const channel = alertChannelText(alert, channelById.get(alert.channel_id)?.name);
                             return (
                               <Space direction="vertical" size={2}>
-                                <Typography.Text strong>{channel.label}</Typography.Text>
+                                <Typography.Text strong>{channel.name}</Typography.Text>
                                 {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
                               </Space>
                             );
