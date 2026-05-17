@@ -1,4 +1,5 @@
 import { Form, Input, Select, Tag, Typography } from 'antd';
+import type { SelectProps } from 'antd';
 import type { Rule } from 'antd/es/form';
 import { formatChannelDisplayName, hasStoredApiKey } from '../channelCredentials';
 import type { Channel, TestSuite } from '../types';
@@ -56,7 +57,7 @@ export const atLeastTwoChannelsRule = (message: string): Rule => ({
   validator: (_, value: string[] = []) => (value.length >= 2 ? Promise.resolve() : Promise.reject(new Error(message))),
 });
 
-type ChannelSelectProps = {
+type ChannelSelectProps = Pick<SelectProps<string[]>, 'id' | 'onBlur' | 'onChange' | 'status' | 'value'> & {
   loading?: boolean;
   placeholder: string;
   channels: Channel[];
@@ -65,9 +66,18 @@ type ChannelSelectProps = {
   notFoundContent?: string;
 };
 
-export function ChannelMultiSelect({ loading, placeholder, channels, tag, showCredentialStatus, notFoundContent }: ChannelSelectProps) {
+export function ChannelMultiSelect({
+  loading,
+  placeholder,
+  channels,
+  tag,
+  showCredentialStatus,
+  notFoundContent,
+  ...selectProps
+}: ChannelSelectProps) {
   return (
     <Select
+      {...selectProps}
       mode="multiple"
       size="large"
       showSearch
