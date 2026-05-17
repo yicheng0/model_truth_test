@@ -58,6 +58,37 @@ export function accountTypeSlug(value?: string) {
   }
 }
 
+function accountTypeFromToken(value?: string | null) {
+  const text = (value ?? '').trim().toLowerCase();
+  switch (text) {
+    case 'kiro.claudecode':
+    case 'kiro-claudecode':
+    case 'kiro_claudecode':
+      return 'kiro.claudecode';
+    case 'aws':
+    case 'aws_bedrock':
+    case 'bedrock':
+      return 'aws';
+    case 'claude_code':
+    case 'claude-code':
+      return 'claude_code';
+    case 'claude':
+    case 'anthropic':
+      return 'claude';
+    case 'azure':
+    case 'azure_foundry':
+      return 'azure';
+    case 'vertex':
+    case 'vertex_ai':
+      return 'vertex';
+    case 'reverse':
+    case 'custom_provider':
+      return 'reverse';
+    default:
+      return '';
+  }
+}
+
 export function providerTypeForAccountType(value?: string) {
   switch (value) {
     case 'kiro.claudecode':
@@ -105,22 +136,67 @@ function nonEmptyText(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
 
+function channelNameTokens(name?: string | null) {
+  return nonEmptyText(name).split('-').map((part) => part.trim()).filter(Boolean);
+}
+
+export function inferChannelNumber(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
+  const rawId = nonEmptyText(channel?.id) || nonEmptyText(fallbackId);
+  const explicit = nonEmptyText(channel?.channel_number);
+  if (explicit) return explicit;
+  const fromId = parseTokenflowChannelNumber(rawId);
+  if (fromId) return fromId;
+  const [firstNameToken] = channelNameTokens(channel?.name);
+  return firstNameToken && /^[A-Za-z0-9_]+$/.test(firstNameToken) ? firstNameToken : '';
+}
+
+export function inferChannelAccountType(channel?: ChannelDisplayInput | null) {
+  const configured =
+    accountTypeFromToken(nonEmptyText(channel?.auth_config?.account_type)) ||
+    accountTypeFromToken(nonEmptyText(channel?.accountType)) ||
+    accountTypeFromToken(nonEmptyText(channel?.account_type)) ||
+    accountTypeFromToken(nonEmptyText(channel?.providerType)) ||
+    accountTypeFromToken(nonEmptyText(channel?.provider_type));
+  const tokens = channelNameTokens(channel?.name);
+  if (tokens.length > 1) {
+    for (let index = tokens.length - 1; index >= 0; index -= 1) {
+      const accountType = accountTypeFromToken(tokens[index]);
+      if (accountType && accountType !== defaultAccountType) return accountType;
+    }
+  }
+  return configured;
+}
+
+export function normalizeChannelNickname(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
+  const rawName = nonEmptyText(channel?.name);
+  if (!rawName) return '';
+  const channelNumber = inferChannelNumber(channel, fallbackId);
+  const accountType = inferChannelAccountType(channel);
+  const accountTypeDisplay = accountTypeSlug(accountType);
+  const tokens = channelNameTokens(rawName);
+  if (!tokens.length) return '';
+  const cleaned = tokens.filter((token, index) => {
+    if (index === 0 && channelNumber && token === channelNumber) return false;
+    const normalized = token.toLowerCase();
+    if (normalized === 'tokenflow' || normalized === 'relay') return false;
+    if (normalized === 'claude' && accountType && accountType !== 'claude') return false;
+    if (accountTypeFromToken(token) === accountType) return false;
+    if (accountTypeDisplay && normalized === accountTypeDisplay) return false;
+    return true;
+  });
+  return cleaned.join('-');
+}
+
 export function channelDisplayAccountType(channel?: ChannelDisplayInput | null) {
-  return (
-    nonEmptyText(channel?.auth_config?.account_type) ||
-    nonEmptyText(channel?.accountType) ||
-    nonEmptyText(channel?.account_type) ||
-    nonEmptyText(channel?.providerType) ||
-    nonEmptyText(channel?.provider_type)
-  );
+  return inferChannelAccountType(channel);
 }
 
 export function formatChannelDisplayName(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
   const rawId = nonEmptyText(channel?.id) || nonEmptyText(fallbackId);
-  const channelNumber = nonEmptyText(channel?.channel_number) || parseTokenflowChannelNumber(rawId);
-  const name = nonEmptyText(channel?.name);
+  const channelNumber = inferChannelNumber(channel, fallbackId);
+  const name = normalizeChannelNickname(channel, fallbackId);
   const accountType = channelDisplayAccountType(channel);
-  const parts = [channelNumber, name, accountType].filter(Boolean);
+  const parts = [channelNumber, name, accountType ? accountTypeSlug(accountType) : ''].filter(Boolean);
   if (parts.length) return parts.join('-');
   return rawId || '-';
 }

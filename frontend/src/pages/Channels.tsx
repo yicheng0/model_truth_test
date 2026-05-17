@@ -11,7 +11,10 @@ import {
   buildTokenflowApiKey,
   buildTokenflowChannelId,
   defaultAccountType,
+  inferChannelAccountType,
+  inferChannelNumber,
   isValidChannelNumber,
+  normalizeChannelNickname,
   parseTokenflowChannelNumber,
   providerTypeForAccountType,
 } from '../channelCredentials';
@@ -47,7 +50,8 @@ function channelRequestProtocol(channel: Channel) {
 
 function channelAccountType(channel: Channel) {
   const value = channel.auth_config?.account_type;
-  return typeof value === 'string' && value.trim() ? value : defaultAccountType;
+  if (typeof value === 'string' && value.trim()) return value;
+  return inferChannelAccountType(channel) || defaultAccountType;
 }
 
 function channelApiKeyMode(channel: Channel) {
@@ -172,8 +176,8 @@ export default function Channels() {
     setEditing(channel);
     setFetchedModels([]);
     editForm.setFieldsValue({
-      name: channel.name,
-      channel_number: parseTokenflowChannelNumber(channel.id),
+      name: normalizeChannelNickname(channel, channel.id) || channel.name,
+      channel_number: inferChannelNumber(channel, channel.id) || parseTokenflowChannelNumber(channel.id),
       model_name: channel.model_name ? [channel.model_name] : [],
       base_url: channel.base_url ?? '',
       api_key: '',
@@ -188,9 +192,16 @@ export default function Channels() {
     const modelName = firstSelectValue(values.model_name);
     const accountType = values.account_type || defaultAccountType;
     const channelNumber = values.channel_number?.trim();
+    const name = normalizeChannelNickname({
+      id: existing?.id,
+      name: values.name,
+      channel_number: channelNumber,
+      account_type: accountType,
+      auth_config: existing?.auth_config,
+    }) || values.name.trim();
     return {
       ...(existing || !channelNumber ? {} : { id: buildTokenflowChannelId(channelNumber, accountType) }),
-      name: values.name.trim(),
+      name,
       provider_type: providerTypeForAccountType(accountType),
       is_reference: values.is_reference ?? false,
       enabled: values.enabled,
