@@ -40,6 +40,38 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('treats upstream scheduled health failures as unavailable diagnostics', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>', {
+        status: 502,
+        statusText: 'Bad Gateway',
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    );
+
+    await expect(api.scheduledTestsHealth()).resolves.toBeNull();
+
+    fetchMock.mockRestore();
+  });
+
+  it('hides raw upstream html from generic API failures', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>', {
+        status: 502,
+        statusText: 'Bad Gateway',
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    );
+
+    await expect(api.systemUsage()).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 502,
+      message: '请求失败，请稍后重试',
+    });
+
+    fetchMock.mockRestore();
+  });
+
   it('keeps cleanup preview available even when the dry-run result is missing', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ detail: 'Internal server error' }), {

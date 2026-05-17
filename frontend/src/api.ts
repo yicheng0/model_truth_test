@@ -95,14 +95,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!response.ok) {
-    const text = await response.text();
-    let message = text || response.statusText;
-    try {
-      const payload = JSON.parse(text) as { detail?: unknown; message?: unknown };
-      const detail = payload.detail ?? payload.message;
-      message = typeof detail === 'string' ? detail : JSON.stringify(detail);
-    } catch {
-      // Keep the raw response text when the API does not return JSON.
+    const contentType = response.headers.get('content-type') ?? '';
+    let message = response.status >= 500 ? '请求失败，请稍后重试' : response.statusText || '请求失败，请稍后重试';
+    if (contentType.includes('application/json')) {
+      try {
+        const payload = (await response.json()) as { detail?: unknown; message?: unknown };
+        const detail = payload.detail ?? payload.message;
+        if (typeof detail === 'string' && detail.trim()) {
+          message = detail;
+        } else if (detail !== undefined) {
+          message = JSON.stringify(detail);
+        }
+      } catch {
+        // Keep the fallback message when the API does not return valid JSON.
+      }
     }
     throw new ApiError(message || response.statusText, response.status);
   }
@@ -157,7 +163,7 @@ export const api = {
     try {
       return await request<ScheduledTestsHealth>('/api/scheduled-tests/health');
     } catch (error) {
-      if (error instanceof ApiError && error.status === 404) return null;
+      if (error instanceof ApiError && (error.status === 404 || error.status >= 500)) return null;
       throw error;
     }
   },

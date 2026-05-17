@@ -628,8 +628,7 @@ export default function ScheduledTests() {
   const reportError = activeTab === 'report' ? smartReport.error : null;
   const feishuError = activeTab === 'feishu' ? feishuSetting.error : null;
   const schedulerHealthError = needsPlanData ? schedulerHealth.error : null;
-  const error = planError ?? alertError ?? reportError ?? feishuError;
-  const hasError = Boolean(error);
+  const pageError = planError ?? alertError ?? reportError ?? feishuError;
   const channelSummaries = smartReport.data?.channel_summaries ?? [];
   const filteredAlerts = useMemo(() => {
     return (alerts.data ?? []).filter((alert) => matchesAlertResultFilter(alert, alertResultFilter));
@@ -645,12 +644,12 @@ export default function ScheduledTests() {
   }, [recentAlerts]);
   return (
     <Space direction="vertical" size={20} style={{ width: '100%' }} className="page-stack">
-      {hasError ? (
+      {pageError ? (
         <Alert
           type="error"
           showIcon
           message="自动巡检数据加载失败"
-          description={getErrorMessage(error)}
+          description={getErrorMessage(pageError)}
           action={<Button onClick={refetchActiveTabData}>重试</Button>}
         />
       ) : null}
