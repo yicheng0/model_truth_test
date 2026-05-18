@@ -687,6 +687,9 @@ export type ScheduledChannelTest = {
     labels?: string[];
     label_explanations?: Array<{ label: string; description: string }>;
     detected_provider_hint?: string | null;
+    classification_status?: 'claude' | 'aws_resource' | 'anomaly' | string | null;
+    classification_label?: string | null;
+    classification_reason?: string | null;
   } | null;
   created_at?: string | null;
   updated_at?: string | null;

@@ -15,6 +15,7 @@ import {
   alertChannelModel,
   alertOutcomeColor,
   alertOutcomeLabel,
+  alertErrorText,
   alertProbeCompletedAt,
   alertProbeSource,
   alertProbeTitle,
@@ -128,13 +129,18 @@ function probeSummary(schedule: ScheduledChannelTest) {
   if (!summary) {
     return <Tag color="default">未巡检</Tag>;
   }
+  const classificationStatus = summary.classification_status;
+  const classificationLabel = summary.classification_label;
   const modelRequests = summary.model_requests?.length ? summary.model_requests : summary.model_request ? [summary.model_request] : [];
   const signature = summary.signature_interop ?? {};
   const labels = summary.labels ?? [];
   const blockingLabels = labels.filter((label) => label !== 'patrol_probe_passed' && label !== 'provider_error_variant');
   const hasModelError = modelRequests.some((item) => item.status === 'error' || Boolean(item.error) || (item.labels ?? []).some((label) => label !== 'provider_error_variant'));
   const hasSignatureError = signature.status === 'fail';
-  const isFailed = schedule.last_status === 'failed' || hasModelError || hasSignatureError || blockingLabels.length > 0;
+  const isFailed = classificationStatus === 'anomaly' || schedule.last_status === 'failed' || hasModelError || hasSignatureError || blockingLabels.length > 0;
+  if (classificationStatus === 'claude' || classificationStatus === 'aws_resource') {
+    return <Tag color={classificationStatus === 'aws_resource' ? 'green' : 'blue'}>{classificationLabel || (classificationStatus === 'aws_resource' ? 'AWS 资源' : 'Claude 渠道')}</Tag>;
+  }
   const tooltip = schedule.last_run_id ? '点开自动巡检日志查看探针详情' : undefined;
   return (
     <Tooltip title={tooltip || undefined}>
@@ -933,7 +939,7 @@ export default function ScheduledTests() {
                     ))}
                   </Space>
                   <Typography.Text type="secondary">
-                    渠道：{alertChannelText(alert, channelById.get(alert.channel_id)).displayId} · 异常探针：{alertProbeTitle(alert)} · 时间：{formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) || '-'}
+                    渠道：{alertChannelText(alert, channelById.get(alert.channel_id)).displayId} · 判定：{alertErrorText(alert)} · 时间：{formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) || '-'}
                   </Typography.Text>
                   <Space wrap>
                     <Button icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>

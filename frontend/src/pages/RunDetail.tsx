@@ -136,12 +136,14 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
     return <Empty description="暂无巡检证据" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
   }
   const signature = evidence.signature;
+  const classificationText = evidence.classificationLabel || (evidence.classificationStatus === 'aws_resource' ? 'AWS 资源' : evidence.classificationStatus === 'claude' ? 'Claude 渠道' : '');
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div className="channel-pair-grid">
         <div className="monitor-stat-card"><span>真实请求探针</span><strong>{evidence.modelRequests.length}</strong></div>
         <div className="monitor-stat-card"><span>Signature</span><strong><Tag color={evidenceStatusColor(signature?.status)}>{signature?.status ?? '待确认'}</Tag></strong></div>
       </div>
+      {classificationText ? <Typography.Text type="secondary">判定：{classificationText}{evidence.classificationReason ? `，${evidence.classificationReason}` : ''}</Typography.Text> : null}
       {evidence.modelRequests[0] ? (
         <Typography.Text type="secondary">
           Message ID：{evidence.modelRequests[0].messageId ?? '-'} · Request ID：{evidence.modelRequests[0].requestId ?? '-'}

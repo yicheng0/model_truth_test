@@ -51,6 +51,9 @@ export type PatrolEvidence = {
   labels: string[];
   labelExplanations: Record<string, string>;
   detectedProviderHint?: string | null;
+  classificationStatus?: string | null;
+  classificationLabel?: string | null;
+  classificationReason?: string | null;
   modelRequests: PatrolModelRequestEvidence[];
   signature?: PatrolSignatureEvidence | null;
 };
@@ -98,6 +101,9 @@ export function extractPatrolEvidence(results: RunResults): PatrolEvidence | nul
     labels: asStringArray(evidence.labels),
     labelExplanations: asLabelExplanationRecord(evidence.label_explanations),
     detectedProviderHint: asNullableString(evidence.detected_provider_hint),
+    classificationStatus: asNullableString(evidence.classification_status),
+    classificationLabel: asNullableString(evidence.classification_label),
+    classificationReason: asNullableString(evidence.classification_reason),
     modelRequests: hydratedModelRequests,
     signature: normalizeSignature(asRecord(evidence.signature_interop)),
   };

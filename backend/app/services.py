@@ -2353,15 +2353,18 @@ def build_scheduled_probe_report(
     if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok"):
         labels.add("signature_interop_failed")
     probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
-    score = min(probe_scores) if probe_scores else (result.score if isinstance(result, Result) else 0)
-    if labels.intersection({"thinking_temperature_not_rejected", "web_search_not_rejected", "thinking_adaptive_enabled_not_rejected", "unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}):
-        score = min(score, 40)
-    if "signature_interop_failed" in labels:
-        score = min(score, 60)
-    if not labels and len(model_requests) == len(SCHEDULED_MODEL_REQUEST_PROBES) and score >= 90 and signature_result and signature_result.get("ok"):
+    raw_score = min(probe_scores) if probe_scores else (result.score if isinstance(result, Result) else 0)
+    classification = scheduled_probe_classification(model_requests, signature_evidence, sorted(labels), raw_score)
+    score = classification["score"]
+    classification_status = str(classification["status"])
+    classification_label = str(classification["label"])
+    classification_reason = str(classification["reason"])
+    if classification_status == "aws_resource" and "patrol_probe_passed" not in labels:
         labels.add("patrol_probe_passed")
+    if classification_status == "claude" and "patrol_probe_claude" not in labels:
+        labels.add("patrol_probe_claude")
     grade = capped_grade_from_score(score, sorted(labels))
-    provider_hint = scheduled_provider_hint(model_payload, signature_evidence, sorted(labels))
+    provider_hint = classification_label
     primary_request = next((item for item in model_requests if item.get("key") == "thinking_temperature"), model_requests[0] if model_requests else {})
     evidence = {
         "labels": sorted(labels),
@@ -2371,9 +2374,12 @@ def build_scheduled_probe_report(
         "model_requests": model_requests,
         "signature_interop": signature_evidence,
         "detected_provider_hint": provider_hint,
+        "classification_status": classification_status,
+        "classification_label": classification_label,
+        "classification_reason": classification_reason,
         "test_scope": "scheduled_probe",
     }
-    summary = f"自动巡检完成：{provider_hint}。"
+    summary = f"自动巡检完成：{classification_label}。{classification_reason}"
     existing = db.scalar(select(Report).where(Report.run_id == run_id, Report.channel_id == scheduled.channel_id))
     if existing:
         report = existing
@@ -2467,6 +2473,8 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
     ) or "| - | - | - | - | - | - | - | - | - | - |"
     signature = evidence.get("signature_interop") or {}
     signature_time = signature.get("completed_at") or signature.get("created_at") or evidence.get("completed_at") or "-"
+    classification_label = evidence.get("classification_label") or evidence.get("detected_provider_hint") or "未分类"
+    classification_reason = evidence.get("classification_reason") or "-"
     return f"""# {channel.name} - 自动巡检资源报告
 
 ## 基本信息
@@ -2474,6 +2482,8 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
 - 渠道：{channel.name}
 - 渠道 ID：{channel.id}
 - 声称模型：{channel.model_name or "未配置"}
+- 判定：{classification_label}
+- 判定说明：{classification_reason}
 - 评级：{grade}
 - 总分：{score:.1f} / 100
 - 结论：{summary}
@@ -2509,9 +2519,85 @@ def _probe_status_text(item: dict[str, Any]) -> str:
     return "异常" if labels else "正常"
 
 
-def scheduled_provider_hint(model_payload: dict[str, Any] | None, signature_evidence: dict[str, Any], labels: list[str]) -> str:
+EXPECTED_CLAUDE_PROBE_LABELS = {"provider_error_variant", "unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}
+BLOCKING_SCHEDULED_PROBE_LABELS = {
+    "thinking_temperature_not_rejected",
+    "web_search_not_rejected",
+    "thinking_adaptive_enabled_not_rejected",
+    "signature_interop_failed",
+}
+
+
+def scheduled_probe_classification(
+    model_requests: list[dict[str, Any]],
+    signature_evidence: dict[str, Any],
+    labels: list[str],
+    score: float,
+) -> dict[str, Any]:
+    label_set = set(labels)
+    normalized_score = _safe_float(score)
+    if _has_expected_claude_probe(model_requests, label_set):
+        return {
+            "status": "claude",
+            "label": "Claude 渠道",
+            "reason": "探针命中 Claude/Anthropic 原生参数拒绝形态，不按异常告警处理。",
+            "score": max(normalized_score, 95),
+        }
+    if _scheduled_probe_all_passed(model_requests, signature_evidence, normalized_score, label_set):
+        return {
+            "status": "aws_resource",
+            "label": "AWS 资源",
+            "reason": "三项自动巡检探针均通过，资源按 AWS 路径处理。",
+            "score": max(normalized_score, 95),
+        }
+    if label_set.intersection(BLOCKING_SCHEDULED_PROBE_LABELS) or label_set.intersection({"unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}):
+        normalized_score = min(normalized_score, 40)
+    if "signature_interop_failed" in label_set:
+        normalized_score = min(normalized_score, 60)
+    return {
+        "status": "anomaly",
+        "label": scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels),
+        "reason": "巡检探针未命中预期 Claude/AWS 资源形态，需要复审。",
+        "score": normalized_score,
+    }
+
+
+def _has_expected_claude_probe(model_requests: list[dict[str, Any]], labels: set[str]) -> bool:
+    if "provider_error_variant" in labels:
+        return True
+    for item in model_requests:
+        item_labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
+        error = str(item.get("error") or "").lower()
+        if item_labels.intersection(EXPECTED_CLAUDE_PROBE_LABELS):
+            if "temperature" in error and "thinking" in error:
+                return True
+            if item_labels == {"provider_error_variant"}:
+                return True
+    return False
+
+
+def _scheduled_probe_all_passed(
+    model_requests: list[dict[str, Any]],
+    signature_evidence: dict[str, Any],
+    score: float,
+    labels: set[str],
+) -> bool:
+    expected_keys = {str(probe["key"]) for probe in SCHEDULED_MODEL_REQUEST_PROBES}
+    request_keys = {str(item.get("key") or "") for item in model_requests}
+    if expected_keys - request_keys:
+        return False
+    if labels - {"patrol_probe_passed"}:
+        return False
+    if any(item.get("error") for item in model_requests):
+        return False
+    if any(_safe_float(item.get("score"), 0) < 90 for item in model_requests):
+        return False
+    return score >= 90
+
+
+def scheduled_provider_hint_from_evidence(model_requests: list[dict[str, Any]], signature_evidence: dict[str, Any], labels: list[str]) -> str:
     types = [
-        " ".join(str(item.get("message_channel_type") or "") for item in _scheduled_model_request_evidence(model_payload)),
+        " ".join(str(item.get("message_channel_type") or "") for item in model_requests),
         str(signature_evidence.get("source_message_channel_type") or ""),
         str(signature_evidence.get("relay_message_channel_type") or ""),
     ]
@@ -2525,6 +2611,10 @@ def scheduled_provider_hint(model_payload: dict[str, Any] | None, signature_evid
     if "thinking_temperature_not_rejected" in labels or "signature_interop_failed" in labels:
         return "疑似逆向或中间层改写"
     return "来源特征不明确"
+
+
+def scheduled_provider_hint(model_payload: dict[str, Any] | None, signature_evidence: dict[str, Any], labels: list[str]) -> str:
+    return scheduled_provider_hint_from_evidence(_scheduled_model_request_evidence(model_payload), signature_evidence, labels)
 
 
 def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] | None:
@@ -2576,6 +2666,9 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
         "signature_relay_channel_account_type": signature.get("relay_channel_account_type"),
         "label_explanations": label_descriptions,
         "detected_provider_hint": evidence.get("detected_provider_hint"),
+        "classification_status": evidence.get("classification_status"),
+        "classification_label": evidence.get("classification_label"),
+        "classification_reason": evidence.get("classification_reason"),
     }
 
 
@@ -2668,6 +2761,13 @@ def _json_contains_query(value: Any, normalized_query: str) -> bool:
 
 
 def alert_error_message(evidence: dict[str, Any], labels: list[str] | None = None, fallback: str | None = None) -> str:
+    classification_label = evidence.get("classification_label")
+    classification_reason = evidence.get("classification_reason")
+    classification_status = evidence.get("classification_status")
+    if classification_status in {"claude", "aws_resource"}:
+        label = str(classification_label or "自动巡检结果")
+        reason = str(classification_reason or "")
+        return f"{label}：{reason}" if reason else label
     model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
     model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
     for item in [model_request, *[entry for entry in model_requests if isinstance(entry, dict)]]:
@@ -2712,6 +2812,9 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
     if not report:
         return empty_scheduled_probe_summary()
     evidence = report.evidence if isinstance(report.evidence, dict) else {}
+    classification_status = evidence.get("classification_status")
+    classification_label = evidence.get("classification_label")
+    classification_reason = evidence.get("classification_reason")
     model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
     model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
     if not model_requests and model_request:
@@ -2728,6 +2831,9 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
         "latest_grade": report.grade,
         "latest_score": report.final_score,
         "latest_probe_summary": {
+            "classification_status": classification_status,
+            "classification_label": classification_label,
+            "classification_reason": classification_reason,
             "model_request": {
                 "status": _probe_summary_status(model_request),
                 "channel_id": model_request.get("channel_id") or model_channel_id,
@@ -2977,6 +3083,10 @@ def report_labels(report: Report) -> list[str]:
 
 def report_needs_alert(report: Report, labels: list[str] | None = None, scheduled: ScheduledChannelTest | None = None) -> bool:
     labels = labels if labels is not None else report_labels(report)
+    evidence = report.evidence if isinstance(report.evidence, dict) else {}
+    classification_status = evidence.get("classification_status")
+    if scheduled and scheduled.test_scope == "scheduled_probe" and classification_status in {"claude", "aws_resource"}:
+        return False
     if scheduled and scheduled.test_scope == "scheduled_probe":
         return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels)) or (report.final_score < 90 and bool(labels))
     if not scheduled:

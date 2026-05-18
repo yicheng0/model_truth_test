@@ -130,6 +130,30 @@ describe('scheduled alert log helpers', () => {
     expect(alertProbeTitle(alert)).toBe('模型请求');
   });
 
+  it('uses classification text for claude and aws_resource alerts', () => {
+    const claudeAlert: ChannelAlert = {
+      ...baseAlert,
+      evidence_summary: {
+        classification_status: 'claude',
+        classification_label: 'Claude 渠道',
+        classification_reason: '探针命中 Claude/Anthropic 原生参数拒绝形态，不按异常告警处理。',
+      },
+    };
+    const awsAlert: ChannelAlert = {
+      ...baseAlert,
+      evidence_summary: {
+        classification_status: 'aws_resource',
+        classification_label: 'AWS 资源',
+        classification_reason: '三项自动巡检探针均通过，资源按 AWS 路径处理。',
+      },
+    };
+
+    expect(alertProbeTitle(claudeAlert)).toBe('Claude 渠道');
+    expect(alertErrorText(claudeAlert)).toContain('Claude 渠道');
+    expect(alertProbeTitle(awsAlert)).toBe('AWS 资源');
+    expect(alertErrorText(awsAlert)).toContain('AWS 资源');
+  });
+
   it('selects the failing probe and its completed time from multiple model requests', () => {
     const alert: ChannelAlert = {
       ...baseAlert,

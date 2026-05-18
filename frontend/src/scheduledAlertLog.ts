@@ -65,6 +65,14 @@ function scorelessAlertMessage(value?: string | null): string {
     || '渠道自动巡检异常';
 }
 
+function classificationLabel(evidence: AlertEvidence): string {
+  const status = asText(evidence.classification_status);
+  const label = asText(evidence.classification_label);
+  if (status === 'claude') return label || 'Claude 渠道';
+  if (status === 'aws_resource') return label || 'AWS 资源';
+  return '';
+}
+
 function modelRequestHasBlockingLabel(record: Record<string, unknown>): boolean {
   const labels = Array.isArray(record.labels) ? record.labels : [];
   return labels.some((label) => typeof label === 'string' && label && label !== 'provider_error_variant' && label !== 'patrol_probe_passed');
@@ -117,6 +125,8 @@ export function alertProbeEvidence(alert: ChannelAlert): Record<string, unknown>
 
 export function alertProbeTitle(alert: ChannelAlert): string {
   const evidence = getEvidence(alert);
+  const classification = classificationLabel(evidence);
+  if (classification) return classification;
   const request = alertProbeEvidence(alert);
   const signatureReason = asText(evidence.signature_reason);
   if (!request && signatureReason) return 'Thinking Signature 互通';
@@ -191,6 +201,11 @@ export function alertProbeSource(alert: ChannelAlert): string {
 
 export function alertErrorText(alert: ChannelAlert): string {
   const evidence = getEvidence(alert);
+  const classification = classificationLabel(evidence);
+  if (classification) {
+    const reason = asText(evidence.classification_reason);
+    return reason ? `${classification}：${reason}` : classification;
+  }
   const errorMessage = asText(evidence.error_message);
   if (errorMessage) return errorMessage;
 
@@ -216,7 +231,7 @@ export function alertLogText(input: AlertLogTextInput) {
   return [
     `告警创建时间：${input.alertCreatedAt || '-'}`,
     `探针完成时间：${input.probeCompletedAt || '-'}`,
-    `异常探针：${input.probeTitle || '-'}`,
+    `判定：${input.probeTitle || '-'}`,
     `渠道：${input.channel || '-'}`,
     `渠道 ID：${input.channelId || '-'}`,
     `渠道模型：${input.channelModel || '-'}`,

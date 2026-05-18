@@ -3979,6 +3979,103 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert "Thinking Signature 互通" in markdown
 
 
+def test_scheduled_probe_classifies_expected_claude_error_without_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="D", score=30, labels=["provider_error_variant", "unexpected_error_response"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        schedule_row = db.get(ScheduledChannelTest, schedule["id"])
+        assert schedule_row is not None
+        schedule_row.last_run_id = run_id
+        report.evidence = {
+            "labels": ["provider_error_variant", "unexpected_error_response"],
+            "red_flags": [],
+            "test_scope": "scheduled_probe",
+            "classification_status": "claude",
+            "classification_label": "Claude 渠道",
+            "classification_reason": "探针命中 Claude/Anthropic 原生参数拒绝形态，不按异常告警处理。",
+            "model_request": {
+                "key": "thinking_temperature",
+                "title": "Thinking temperature 冲突",
+                "labels": ["provider_error_variant", "unexpected_error_response"],
+                "error": "temperature may only be set to 1 when thinking is enabled",
+            },
+            "model_requests": [
+                {
+                    "key": "thinking_temperature",
+                    "title": "Thinking temperature 冲突",
+                    "labels": ["provider_error_variant", "unexpected_error_response"],
+                    "error": "temperature may only be set to 1 when thinking is enabled",
+                }
+            ],
+            "signature_interop": {"ok": False},
+        }
+        db.add(schedule_row)
+        db.commit()
+
+    alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+    with TestClient(app) as client:
+        updated_schedule = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+        pending_alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    assert alerts == []
+    assert updated_schedule["latest_probe_summary"]["classification_status"] == "claude"
+    assert updated_schedule["latest_probe_summary"]["classification_label"] == "Claude 渠道"
+    assert pending_alerts == []
+
+
+def test_scheduled_probe_classifies_all_passed_as_aws_resource_without_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="A", score=98, labels=["patrol_probe_passed"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        schedule_row = db.get(ScheduledChannelTest, schedule["id"])
+        assert schedule_row is not None
+        schedule_row.last_run_id = run_id
+        report.evidence = {
+            "labels": ["patrol_probe_passed"],
+            "red_flags": [],
+            "test_scope": "scheduled_probe",
+            "classification_status": "aws_resource",
+            "classification_label": "AWS 资源",
+            "classification_reason": "三项自动巡检探针均通过，资源按 AWS 路径处理。",
+            "model_request": {
+                "key": "thinking_temperature",
+                "title": "Thinking temperature 冲突",
+                "labels": [],
+                "score": 100,
+            },
+            "model_requests": [
+                {"key": "thinking_temperature", "title": "Thinking temperature 冲突", "labels": [], "score": 100},
+                {"key": "web_search", "title": "Web Search tool", "labels": [], "score": 100},
+                {"key": "thinking_adaptive_enabled", "title": "thinking.adaptive.enabled", "labels": [], "score": 100},
+            ],
+            "signature_interop": {"ok": True},
+        }
+        db.add(schedule_row)
+        db.commit()
+
+    alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+    with TestClient(app) as client:
+        updated_schedule = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+        pending_alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    assert alerts == []
+    assert updated_schedule["latest_probe_summary"]["classification_status"] == "aws_resource"
+    assert updated_schedule["latest_probe_summary"]["classification_label"] == "AWS 资源"
+    assert pending_alerts == []
+
+
 def test_scheduled_signature_source_uses_fingerprint_source_channel(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     captured: dict[str, str] = {}
