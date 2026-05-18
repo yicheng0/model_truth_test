@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractPatrolEvidence, formatPatrolChannel, splitRunsByPatrol } from './runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, splitRunsByPatrol } from './runsUtils';
 import type { Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -383,5 +383,22 @@ describe('runs utilities', () => {
 
     expect(evidence?.modelRequests[0].channelAccountType).toBe('aws');
     expect(formatPatrolChannel({ id: '8890-tokenflow-aws', name: '鬼手', accountType: 'aws' }, '8890-tokenflow-aws')).toBe('8890-鬼手-aws');
+  });
+
+  it('classifies native rejection probe status as parameter unsupported', () => {
+    expect(
+      patrolProbeStatusText({
+        status: 'error',
+        labels: ['provider_error_variant'],
+        error: "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'",
+      }),
+    ).toBe('参数不支持');
+    expect(
+      patrolProbeStatusColor({
+        status: 'error',
+        labels: ['provider_error_variant'],
+        error: "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'",
+      }),
+    ).toBe('gold');
   });
 });

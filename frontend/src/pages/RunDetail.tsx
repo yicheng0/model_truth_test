@@ -32,6 +32,8 @@ import {
   numberValue,
   payloadRequestId,
   prettyJson,
+  patrolProbeStatusColor,
+  patrolProbeStatusText,
   responseSnippet,
   responseText,
   riskTone,
@@ -162,7 +164,7 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
         }}
         columns={[
           { title: '参数探针', width: 220, render: (_, item) => <strong>{item.title ?? item.key ?? '真实模型请求'}</strong> },
-          { title: '状态', width: 110, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag> },
+          { title: '状态', width: 110, render: (_, item) => <Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag> },
           { title: '时间', width: 190, render: (_, item) => formatDateTime(item.completedAt ?? item.createdAt) },
           { title: '渠道类型', dataIndex: 'messageChannelType', width: 180, render: (value) => value ?? '-' },
           { title: '协议', dataIndex: 'requestProtocol', width: 150, render: (value) => value ?? '-' },
@@ -632,7 +634,7 @@ export default function RunDetail() {
             locale={{ emptyText: <Empty description="暂无参数探针日志" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
             columns={[
               { title: '探针', dataIndex: 'title', width: 200 },
-              { title: '状态', width: 110, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag> },
+              { title: '状态', width: 110, render: (_, item) => <Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag> },
               { title: '渠道', width: 220, render: (_, item) => channelLabel(item.channelName, item.channelId) },
               { title: '渠道类型', dataIndex: 'channelType', width: 340, render: (value) => value ?? '-' },
               {
@@ -667,7 +669,7 @@ export default function RunDetail() {
             {manualProbeRows.map((item) => (
               <Card key={item.key} title={item.title} bordered={false}>
                 <Descriptions bordered size="small" column={1}>
-                  <Descriptions.Item label="状态">{item.status === 'ok' ? '正确' : '异常'}</Descriptions.Item>
+                  <Descriptions.Item label="状态"><Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag></Descriptions.Item>
                   <Descriptions.Item label="渠道">{channelLabel(item.channelName, item.channelId)}</Descriptions.Item>
                   <Descriptions.Item label="渠道类型">{item.channelType}</Descriptions.Item>
                   <Descriptions.Item label="Message ID">{item.messageId ? <Typography.Text code copyable>{item.messageId}</Typography.Text> : '-'}</Descriptions.Item>

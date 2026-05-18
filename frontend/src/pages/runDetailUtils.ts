@@ -49,6 +49,8 @@ export type ManualProbeRow = {
   score?: number;
 };
 
+export type PatrolProbeStatusItem = Pick<ManualProbeRow, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'>;
+
 export type ArenaRankingRow = {
   key: string;
   rank: number;
@@ -205,6 +207,28 @@ export function compactText(value?: string | null, limit = 180) {
 export function channelLabel(name?: string | null, id?: string | null) {
   if (name && id) return `${name} (${id})`;
   return name || id || '-';
+}
+
+export function patrolProbeStatusText(item?: PatrolProbeStatusItem | null) {
+  if (item?.status === 'ok') return '正确';
+  const labels = item?.labels ?? [];
+  const errorText = [item?.error, item?.responseText, item?.rawResponseText]
+    .filter((value): value is string => typeof value === 'string' && Boolean(value))
+    .join(' ')
+    .toLowerCase();
+  const isNativeRejection = labels.includes('provider_error_variant') || /400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool/.test(errorText);
+  return isNativeRejection ? '参数不支持' : '异常';
+}
+
+export function patrolProbeStatusColor(item?: PatrolProbeStatusItem | null) {
+  if (item?.status === 'ok') return 'green';
+  const labels = item?.labels ?? [];
+  const errorText = [item?.error, item?.responseText, item?.rawResponseText]
+    .filter((value): value is string => typeof value === 'string' && Boolean(value))
+    .join(' ')
+    .toLowerCase();
+  const isNativeRejection = labels.includes('provider_error_variant') || /400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool/.test(errorText);
+  return isNativeRejection ? 'gold' : 'red';
 }
 
 export function manualProbeChannelType(channel?: Channel, taxonomy?: ChannelTaxonomySetting | null) {

@@ -213,6 +213,12 @@ export function alertErrorText(alert: ChannelAlert): string {
   if (request) {
     const error = firstText(request.error);
     const title = firstText(request.title, request.key);
+    const errorText = firstText(error, asText(request.responseText), asText(request.rawResponseText)).toLowerCase();
+    const labels = Array.isArray(request.labels) ? request.labels : [];
+    const isNativeRejection = labels.includes('provider_error_variant') || /400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool/.test(errorText);
+    if (isNativeRejection) {
+      return title ? `${title}：参数不支持` : '参数不支持';
+    }
     if (error) return title ? `${title}：${error}` : error;
     if (modelRequestHasBlockingLabel(request)) return title ? `${title}：探针触发异常标签` : '探针触发异常标签';
   }

@@ -154,6 +154,24 @@ describe('scheduled alert log helpers', () => {
     expect(alertErrorText(awsAlert)).toContain('AWS 资源');
   });
 
+  it('maps native rejection evidence to parameter unsupported wording', () => {
+    const alert: ChannelAlert = {
+      ...baseAlert,
+      evidence_summary: {
+        model_requests: [
+          {
+            title: 'Thinking temperature 冲突',
+            request_id: 'req_456',
+            labels: ['provider_error_variant'],
+            error: "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'",
+          },
+        ],
+      },
+    };
+
+    expect(alertErrorText(alert)).toBe('Thinking temperature 冲突：参数不支持');
+  });
+
   it('selects the failing probe and its completed time from multiple model requests', () => {
     const alert: ChannelAlert = {
       ...baseAlert,
