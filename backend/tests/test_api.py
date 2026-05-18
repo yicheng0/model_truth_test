@@ -3875,6 +3875,45 @@ def test_scheduled_alert_notification_uses_error_message(monkeypatch) -> None:
     assert "Result ID：" not in text
 
 
+def test_scheduled_alert_notification_uses_stable_patrol_channel_name(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        channel_response = client.post(
+            "/api/channels",
+            json={
+                "id": "9407-tokenflow-claude",
+                "name": "9407-ogog-claude-claude",
+                "provider_type": "anthropic",
+                "role": "candidate",
+                "model_name": "claude-sonnet-4-6",
+                "auth_config": {"account_type": "claude"},
+                "enabled": True,
+            },
+        )
+        assert channel_response.status_code == 200
+        schedule = create_legacy_patrol_schedule(client, channel_id="9407-tokenflow-claude")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    with SessionLocal() as db:
+        run = db.get(Run, run_id)
+        assert run is not None
+        run.name = "9407-ogog-claude - 自动巡检资源"
+        db.commit()
+
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        setting = get_or_create_feishu_setting(db)
+        text = feishu_text_payload(alert, db, setting)["content"]["text"] if alert else ""
+
+    assert alert is not None
+    assert "渠道：9407-ogog-claude（9407-tokenflow-claude）" in text
+    assert "任务：9407-ogog-claude - 自动巡检资源" in text
+    assert "渠道：9407-ogog-claude-claude" not in text
+
+
 def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()

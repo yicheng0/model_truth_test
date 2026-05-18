@@ -1649,9 +1649,26 @@ def patrol_channel_display_name(channel: Channel | None, fallback_name: str | No
     channel_id = (channel.id if channel else "") or ""
     match = re.match(r"^(.+)-tokenflow-[A-Za-z0-9-]+$", channel_id)
     display_id = match.group(1) if match else ""
-    channel_name = (channel.name if channel else "") or (fallback_name or "")
+    raw_channel_name = (channel.name if channel else "") or (fallback_name or "")
     account_type = ((channel.auth_config or {}).get("account_type") if channel else None) or ""
-    parts = [display_id, channel_name, account_type]
+
+    account_type_slug = str(account_type).strip().lower().replace("_", "-")
+    tokens = [part.strip() for part in raw_channel_name.split("-") if part.strip()]
+    cleaned_tokens = []
+    for index, token in enumerate(tokens):
+        normalized = token.strip().lower().replace("_", "-")
+        if index == 0 and display_id and token == display_id:
+            continue
+        if normalized in {"tokenflow", "relay"}:
+            continue
+        if account_type_slug and normalized == account_type_slug:
+            continue
+        if normalized == "claude" and account_type_slug and account_type_slug != "claude":
+            continue
+        cleaned_tokens.append(token)
+
+    channel_name = "-".join(cleaned_tokens) or raw_channel_name
+    parts = [display_id, channel_name, account_type_slug or account_type]
     formatted = "-".join(str(part).strip() for part in parts if str(part).strip())
     return formatted or (channel_name or fallback_name or channel_id or "-")
 
@@ -3102,6 +3119,7 @@ async def send_feishu_test_message(db: Session) -> dict[str, Any]:
 def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadcastSetting) -> dict[str, Any]:
     channel = db.get(Channel, alert.channel_id)
     run = db.get(Run, alert.run_id)
+    channel_display_name = patrol_channel_display_name(channel, alert.channel_id)
     app_base_url = (setting.app_base_url or "").strip().rstrip("/")
     run_link = f"{app_base_url}/runs/{alert.run_id}" if app_base_url else f"/runs/{alert.run_id}"
     review_link = f"{app_base_url}/scheduled-tests?alert={alert.id}" if app_base_url else f"/scheduled-tests?alert={alert.id}"
@@ -3112,7 +3130,7 @@ def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadca
     detail = evidence.get("error_message") or scoreless_alert_message(alert.message)
     text = (
         "Claude 渠道自动巡检发现异常\n"
-        f"渠道：{channel.name if channel else alert.channel_id}（{alert.channel_id}）\n"
+        f"渠道：{channel_display_name}（{alert.channel_id}）\n"
         f"模型：{channel.model_name if channel else '-'}\n"
         f"任务：{run.name if run else alert.run_id}\n"
         f"错误：{detail}\n"
