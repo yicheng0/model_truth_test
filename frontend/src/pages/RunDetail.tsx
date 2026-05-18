@@ -136,7 +136,7 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
     return <Empty description="暂无巡检证据" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
   }
   const signature = evidence.signature;
-  const classificationText = evidence.classificationLabel || (evidence.classificationStatus === 'aws_resource' ? 'AWS 资源' : evidence.classificationStatus === 'claude' ? 'Claude 渠道' : '');
+  const classificationText = evidence.classificationLabel || (evidence.classificationStatus === 'aws_resource' ? 'AWS 资源' : evidence.classificationStatus === 'claude' ? 'Claude 资源' : '');
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div className="channel-pair-grid">

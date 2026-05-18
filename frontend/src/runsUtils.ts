@@ -244,6 +244,25 @@ export function formatPatrolChannel(channel?: PatrolChannel | Channel | null, fa
   }, fallbackId);
 }
 
+export function isPatrolNativeParameterRejection(item?: Pick<PatrolModelRequestEvidence, 'labels' | 'error' | 'responseText' | 'rawResponseText'> | null) {
+  if (!item) return false;
+  if (item.labels?.includes('provider_error_variant')) return true;
+  const text = [item.error, item.responseText, item.rawResponseText].filter(Boolean).join(' ').toLowerCase();
+  return /400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool/.test(text);
+}
+
+export function patrolProbeStatusText(item?: Pick<PatrolModelRequestEvidence, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'> | null) {
+  if (item?.status === 'ok') return '正确';
+  if (isPatrolNativeParameterRejection(item)) return '参数不支持';
+  return '异常';
+}
+
+export function patrolProbeStatusColor(item?: Pick<PatrolModelRequestEvidence, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'> | null) {
+  if (item?.status === 'ok') return 'green';
+  if (isPatrolNativeParameterRejection(item)) return 'gold';
+  return 'red';
+}
+
 function asLabelExplanationRecord(value: unknown): Record<string, string> {
   if (Array.isArray(value)) {
     return Object.fromEntries(

@@ -68,7 +68,7 @@ function scorelessAlertMessage(value?: string | null): string {
 function classificationLabel(evidence: AlertEvidence): string {
   const status = asText(evidence.classification_status);
   const label = asText(evidence.classification_label);
-  if (status === 'claude') return label || 'Claude 渠道';
+  if (status === 'claude') return label || 'Claude 资源';
   if (status === 'aws_resource') return label || 'AWS 资源';
   return '';
 }
@@ -204,7 +204,7 @@ export function alertErrorText(alert: ChannelAlert): string {
   const classification = classificationLabel(evidence);
   if (classification) {
     const reason = asText(evidence.classification_reason);
-    return reason ? `${classification}：${reason}` : classification;
+    return reason ? `${classification}，${reason}` : classification;
   }
   const errorMessage = asText(evidence.error_message);
   if (errorMessage) return errorMessage;

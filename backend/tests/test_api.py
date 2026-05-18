@@ -32,7 +32,7 @@ from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, 
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -1074,7 +1074,7 @@ def test_report_compare_rejects_mixed_modes() -> None:
     assert "modes must match" in response.json()["detail"]
 
 
-def test_default_suite_is_representative_32_and_removes_stale_default_cases() -> None:
+def test_default_suite_is_representative_32_and_keeps_custom_default_suite_cases() -> None:
     reset_database()
     with SessionLocal() as db:
         create_case(
@@ -1094,11 +1094,12 @@ def test_default_suite_is_representative_32_and_removes_stale_default_cases() ->
 
     assert suite is not None
     assert suite.version == "2026.05-representative-32"
-    assert len(case_ids) == 43
+    assert len(case_ids) == 33
     assert case_ids[:5] == ["websearch_01", "protocol_01", "protocol_02", "protocol_03", "protocol_04"]
     assert "protocol_09" in case_ids
     assert "tool_01" in case_ids
     assert {"format_08", "tool_08", "context_09", "knowledge_06", "code_05"}.issubset(case_ids)
+    assert "identity_03" in case_ids
     with SessionLocal() as db:
         quick_count = sum(
             1
@@ -3979,7 +3980,7 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert "Thinking Signature 互通" in markdown
 
 
-def test_scheduled_probe_classifies_expected_claude_error_without_alert(monkeypatch) -> None:
+def test_scheduled_probe_classifies_expected_claude_error_as_aws_resource_without_alert(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
     with TestClient(app) as client:
@@ -3996,9 +3997,9 @@ def test_scheduled_probe_classifies_expected_claude_error_without_alert(monkeypa
             "labels": ["provider_error_variant", "unexpected_error_response"],
             "red_flags": [],
             "test_scope": "scheduled_probe",
-            "classification_status": "claude",
-            "classification_label": "Claude 渠道",
-            "classification_reason": "探针命中 Claude/Anthropic 原生参数拒绝形态，不按异常告警处理。",
+            "classification_status": "aws_resource",
+            "classification_label": "AWS 资源",
+            "classification_reason": "三项自动巡检探针均命中 Bedrock/Claude 原生参数拒绝形态，资源按 AWS 路径处理。",
             "model_request": {
                 "key": "thinking_temperature",
                 "title": "Thinking temperature 冲突",
@@ -4024,9 +4025,38 @@ def test_scheduled_probe_classifies_expected_claude_error_without_alert(monkeypa
         pending_alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
 
     assert alerts == []
-    assert updated_schedule["latest_probe_summary"]["classification_status"] == "claude"
-    assert updated_schedule["latest_probe_summary"]["classification_label"] == "Claude 渠道"
+    assert updated_schedule["latest_probe_summary"]["classification_status"] == "aws_resource"
+    assert updated_schedule["latest_probe_summary"]["classification_label"] == "AWS 资源"
     assert pending_alerts == []
+
+
+def test_scheduled_probe_classification_returns_aws_resource_for_expected_error_shape() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {
+                "key": "thinking_temperature",
+                "labels": ["provider_error_variant", "unexpected_error_response"],
+                "error": "temperature may only be set to 1 when thinking is enabled",
+            },
+            {
+                "key": "web_search",
+                "labels": ["provider_error_variant", "unexpected_error_response"],
+                "error": "web search is not available",
+            },
+            {
+                "key": "thinking_adaptive_enabled",
+                "labels": ["provider_error_variant", "unexpected_error_response"],
+                "error": "enabled is not supported for output_config.effort",
+            },
+        ],
+        signature_evidence={"ok": False},
+        labels=["provider_error_variant", "unexpected_error_response"],
+        score=72,
+    )
+
+    assert result["status"] == "aws_resource"
+    assert result["label"] == "AWS 资源"
+    assert "AWS 路径" in result["reason"]
 
 
 def test_scheduled_probe_classifies_all_passed_as_aws_resource_without_alert(monkeypatch) -> None:

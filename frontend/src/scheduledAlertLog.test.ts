@@ -131,12 +131,12 @@ describe('scheduled alert log helpers', () => {
   });
 
   it('uses classification text for claude and aws_resource alerts', () => {
-    const claudeAlert: ChannelAlert = {
+    const awsExpectedErrorAlert: ChannelAlert = {
       ...baseAlert,
       evidence_summary: {
-        classification_status: 'claude',
-        classification_label: 'Claude 渠道',
-        classification_reason: '探针命中 Claude/Anthropic 原生参数拒绝形态，不按异常告警处理。',
+        classification_status: 'aws_resource',
+        classification_label: 'AWS 资源',
+        classification_reason: '三项自动巡检探针均命中 Bedrock/Claude 原生参数拒绝形态，资源按 AWS 路径处理。',
       },
     };
     const awsAlert: ChannelAlert = {
@@ -148,8 +148,8 @@ describe('scheduled alert log helpers', () => {
       },
     };
 
-    expect(alertProbeTitle(claudeAlert)).toBe('Claude 渠道');
-    expect(alertErrorText(claudeAlert)).toContain('Claude 渠道');
+    expect(alertProbeTitle(awsExpectedErrorAlert)).toBe('AWS 资源');
+    expect(alertErrorText(awsExpectedErrorAlert)).toBe('AWS 资源，三项自动巡检探针均命中 Bedrock/Claude 原生参数拒绝形态，资源按 AWS 路径处理。');
     expect(alertProbeTitle(awsAlert)).toBe('AWS 资源');
     expect(alertErrorText(awsAlert)).toContain('AWS 资源');
   });

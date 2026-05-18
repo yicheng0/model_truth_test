@@ -2538,9 +2538,9 @@ def scheduled_probe_classification(
     normalized_score = _safe_float(score)
     if _has_expected_claude_probe(model_requests, label_set):
         return {
-            "status": "claude",
-            "label": "Claude 渠道",
-            "reason": "探针命中 Claude/Anthropic 原生参数拒绝形态，不按异常告警处理。",
+            "status": "aws_resource",
+            "label": "AWS 资源",
+            "reason": "三项自动巡检探针均命中 Bedrock/Claude 原生参数拒绝形态，资源按 AWS 路径处理。",
             "score": max(normalized_score, 95),
         }
     if _scheduled_probe_all_passed(model_requests, signature_evidence, normalized_score, label_set):

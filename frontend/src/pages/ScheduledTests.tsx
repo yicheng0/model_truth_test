@@ -139,7 +139,7 @@ function probeSummary(schedule: ScheduledChannelTest) {
   const hasSignatureError = signature.status === 'fail';
   const isFailed = classificationStatus === 'anomaly' || schedule.last_status === 'failed' || hasModelError || hasSignatureError || blockingLabels.length > 0;
   if (classificationStatus === 'claude' || classificationStatus === 'aws_resource') {
-    return <Tag color={classificationStatus === 'aws_resource' ? 'green' : 'blue'}>{classificationLabel || (classificationStatus === 'aws_resource' ? 'AWS 资源' : 'Claude 渠道')}</Tag>;
+    return <Tag color={classificationStatus === 'aws_resource' ? 'green' : 'blue'}>{classificationLabel || (classificationStatus === 'aws_resource' ? 'AWS 资源' : 'Claude 资源')}</Tag>;
   }
   const tooltip = schedule.last_run_id ? '点开自动巡检日志查看探针详情' : undefined;
   return (
