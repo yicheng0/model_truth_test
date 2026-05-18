@@ -295,7 +295,6 @@ export default function RunDetail() {
   const patrolChannelName = data?.run.patrol_channel_name ?? patrolEvidence?.modelRequests[0]?.channelName ?? patrolEvidence?.signature?.relayChannelName ?? null;
   const patrolChannelId = data?.run.patrol_channel_id ?? patrolEvidence?.modelRequests[0]?.channelId ?? patrolEvidence?.signature?.relayChannelId ?? null;
   const patrolChannel = patrolChannelId ? channelById.get(patrolChannelId) : undefined;
-  const patrolTitle = patrolChannelName ? `${formatPatrolChannel(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)} - 自动巡检资源日志` : '自动巡检资源日志';
   const isSamplingRun = !isPatrolRun && data?.run.mode === 'baseline_build';
   const isPerformanceRun = !isPatrolRun && data?.run.mode === 'performance_benchmark';
   const isArenaRun = !isPatrolRun && data?.run.mode === 'arena_comparison';
@@ -537,80 +536,96 @@ export default function RunDetail() {
 
   return (
     <Space direction="vertical" size={20} style={{ width: '100%' }} className="page-stack">
-      <Card
-        title={<span style={{ fontSize: '20px', fontWeight: 700 }}>{data.run.name}</span>}
-        extra={
-          <Button
-            size="large"
-            href={data.reports.length ? api.reportUrl(data.run.id) : undefined}
-            target="_blank"
-            disabled={!data.reports.length}
-            style={{ fontWeight: 600 }}
-          >
-            导出 Markdown
-          </Button>
-        }
-        bordered={false}
-      >
-        {data.run.mode === 'manual_probe' ? (
-          <Alert
-            type={manualProbeIsCombo ? 'warning' : 'info'}
-            showIcon
-            message={manualProbeIsCombo ? '组合纯度检测日志' : '单项参数报错日志'}
-            description="这里只展示参数纯度探针、原生报错、message/request id 和原始响应，不显示 Arena 或性能诊断内容。"
-            style={{ marginBottom: 16 }}
-          />
-        ) : null}
-        <Descriptions column={{ xs: 1, sm: 2, md: 4 }} style={{ marginBottom: '18px' }}>
-          <Descriptions.Item label="状态">
-            <Tag color={data.run.status === 'completed' ? 'green' : data.run.status === 'failed' ? 'red' : 'gold'}>
-              {data.run.status}
-            </Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
-          <Descriptions.Item label="运行模式">{isPatrolRun ? '自动巡检' : runModeLabel(data.run.mode)}</Descriptions.Item>
-          {data.run.mode === 'manual_probe' ? (
-            manualProbeSummary.map((item) => (
-              <Descriptions.Item key={item.label} label={item.label}>{item.value}</Descriptions.Item>
-            ))
-          ) : (
-            <>
-              <Descriptions.Item label="检测范围">{isPatrolRun ? '巡检探针' : data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
-              <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>
-                {data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}
-              </Descriptions.Item>
-              <Descriptions.Item label={isArenaRun ? '已返回样本' : '已返回题目'}>{returnedRows} / {expectedRows}</Descriptions.Item>
-              {isPatrolRun ? (
-                <Descriptions.Item label="巡检计划">{data.run.scheduled_test_id ?? '-'}</Descriptions.Item>
-              ) : isSamplingRun ? (
-                <Descriptions.Item label="指纹源渠道">{sampleChannels.length}</Descriptions.Item>
-              ) : (
-                <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
-              )}
-            </>
-          )}
-        </Descriptions>
-        <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
-      </Card>
-
       {isPatrolRun ? (
-        <Card bordered={false} className="live-monitor-card">
+        <Card
+          bordered={false}
+          className="live-monitor-card"
+          extra={
+            <Button
+              size="large"
+              href={data.reports.length ? api.reportUrl(data.run.id) : undefined}
+              target="_blank"
+              disabled={!data.reports.length}
+              style={{ fontWeight: 600 }}
+            >
+              导出 Markdown
+            </Button>
+          }
+        >
           <div className="live-monitor-header">
             <div>
               <Typography.Text className="brand-kicker">SCHEDULED PATROL</Typography.Text>
-              <Typography.Title level={2}>{patrolTitle}</Typography.Title>
+              <Typography.Title level={2}>{data.run.name}</Typography.Title>
               <Typography.Paragraph>
                 这里只展示真实模型请求参数探针和 Thinking Signature 互通结果，不混入性能诊断或 Arena 排名视图。
               </Typography.Paragraph>
-              <Typography.Text type="secondary">
-                渠道：{formatPatrolChannel(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)}
-              </Typography.Text>
+              <Space wrap size={16}>
+                <Typography.Text type="secondary">
+                  渠道：{formatPatrolChannel(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)}
+                </Typography.Text>
+                <Typography.Text type="secondary">进度：{data.run.completed_jobs} / {data.run.total_jobs}</Typography.Text>
+              </Space>
             </div>
             <Tag color={data.run.status === 'running' ? 'processing' : 'default'}>{data.run.status}</Tag>
           </div>
+          <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
           <PatrolDetailPanel evidence={patrolEvidence} />
         </Card>
-      ) : data.run.mode === 'manual_probe' ? (
+      ) : (
+        <Card
+          title={<span style={{ fontSize: '20px', fontWeight: 700 }}>{data.run.name}</span>}
+          extra={
+            <Button
+              size="large"
+              href={data.reports.length ? api.reportUrl(data.run.id) : undefined}
+              target="_blank"
+              disabled={!data.reports.length}
+              style={{ fontWeight: 600 }}
+            >
+              导出 Markdown
+            </Button>
+          }
+          bordered={false}
+        >
+          {data.run.mode === 'manual_probe' ? (
+            <Alert
+              type={manualProbeIsCombo ? 'warning' : 'info'}
+              showIcon
+              message={manualProbeIsCombo ? '组合纯度检测日志' : '单项参数报错日志'}
+              description="这里只展示参数纯度探针、原生报错、message/request id 和原始响应，不显示 Arena 或性能诊断内容。"
+              style={{ marginBottom: 16 }}
+            />
+          ) : null}
+          <Descriptions column={{ xs: 1, sm: 2, md: 4 }} style={{ marginBottom: '18px' }}>
+            <Descriptions.Item label="状态">
+              <Tag color={data.run.status === 'completed' ? 'green' : data.run.status === 'failed' ? 'red' : 'gold'}>
+                {data.run.status}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="实时进度">{data.run.completed_jobs} / {data.run.total_jobs}</Descriptions.Item>
+            <Descriptions.Item label="运行模式">{runModeLabel(data.run.mode)}</Descriptions.Item>
+            {data.run.mode === 'manual_probe' ? (
+              manualProbeSummary.map((item) => (
+                <Descriptions.Item key={item.label} label={item.label}>{item.value}</Descriptions.Item>
+              ))
+            ) : (
+              <>
+                <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
+                <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>{data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}</Descriptions.Item>
+                <Descriptions.Item label={isArenaRun ? '已返回样本' : '已返回题目'}>{returnedRows} / {expectedRows}</Descriptions.Item>
+                {isSamplingRun ? (
+                  <Descriptions.Item label="指纹源渠道">{sampleChannels.length}</Descriptions.Item>
+                ) : (
+                  <Descriptions.Item label="高风险题目">{riskyRows}</Descriptions.Item>
+                )}
+              </>
+            )}
+          </Descriptions>
+          <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
+        </Card>
+      )}
+
+      {!isPatrolRun && data.run.mode === 'manual_probe' ? (
         <Card bordered={false} className="live-monitor-card">
           <div className="live-monitor-header">
             <div>
