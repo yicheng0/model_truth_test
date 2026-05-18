@@ -4,7 +4,7 @@ import { Alert, Button, Card, Empty, Popconfirm, Progress, Space, Table, Tag, To
 import { Link } from 'react-router-dom';
 import { BarChart3, CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2, Trophy } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { extractPatrolEvidence, formatPatrolChannel, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
 
@@ -139,10 +139,19 @@ function preferredDetailRun(runs: Run[]) {
 }
 
 function patrolResultState(evidence: PatrolEvidence) {
+  if (evidence.classificationStatus === 'claude' || evidence.classificationStatus === 'aws_resource') {
+    return 'ok';
+  }
   const blockingLabels = evidence.labels.filter((label) => label !== 'patrol_probe_passed' && label !== 'provider_error_variant');
   const hasModelError = evidence.modelRequests.some((item) => item.status === 'error' || item.status === 'fail' || Boolean(item.error) || item.labels.some((label) => label !== 'provider_error_variant'));
   const hasSignatureError = evidence.signature?.status === 'fail' || evidence.signature?.status === 'error';
   return blockingLabels.length || hasModelError || hasSignatureError ? 'error' : 'ok';
+}
+
+function patrolClassificationLabel(evidence: PatrolEvidence) {
+  if (evidence.classificationStatus === 'claude') return evidence.classificationLabel || 'Claude 资源';
+  if (evidence.classificationStatus === 'aws_resource') return evidence.classificationLabel || 'AWS 资源';
+  return '';
 }
 
 function patrolRunTitle(run: Run) {
@@ -200,6 +209,8 @@ function PatrolReviewCell({ run }: { run: Run }) {
   if (runResults.isError || !evidence) {
     return run.status === 'failed' ? <Tag color="red">需要复审</Tag> : <Tag color="default">-</Tag>;
   }
+  const classification = patrolClassificationLabel(evidence);
+  if (classification) return <Tag color="green">{classification}</Tag>;
   return patrolResultState(evidence) === 'error' ? <Tag color="red">需要复审</Tag> : <Tag color="default">-</Tag>;
 }
 
@@ -208,16 +219,18 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
   const resultState = patrolResultState(evidence);
   const primaryRequest = evidence.modelRequests[0];
   if (compact) {
+    const classification = patrolClassificationLabel(evidence);
     return (
       <Tooltip title="点开展开行或查看巡检详情查看探针日志">
-        <Tag color={resultState === 'ok' ? 'green' : 'red'}>{resultState === 'ok' ? '正确' : '异常'}</Tag>
+        <Tag color={resultState === 'ok' ? 'green' : 'red'}>{classification || (resultState === 'ok' ? '正确' : '异常')}</Tag>
       </Tooltip>
     );
   }
+  const classification = patrolClassificationLabel(evidence);
   return (
     <Space direction="vertical" size={4} style={{ width: '100%' }}>
       <Space wrap>
-        <Tag color={resultState === 'ok' ? 'green' : 'red'}>{resultState === 'ok' ? '正确' : '异常'}</Tag>
+        <Tag color={resultState === 'ok' ? 'green' : 'red'}>{classification || (resultState === 'ok' ? '正确' : '异常')}</Tag>
         {signature ? <Tag color={evidenceStatusColor(signature.status)}>Signature {signature.status ?? '待确认'}</Tag> : null}
       </Space>
       {primaryRequest ? (
@@ -233,7 +246,7 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
             {evidence.modelRequests.map((item) => (
               <div className="patrol-log-probe" key={item.key ?? item.resultId ?? item.title ?? 'probe'}>
                 <span>{item.title ?? item.key ?? '真实请求探针'}</span>
-                <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag>
+                <Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag>
                 <small>{formatPatrolChannel({ id: item.channelId, name: item.channelName, accountType: item.channelAccountType, providerType: item.channelProviderType }, item.channelId)}</small>
                 <small>time {formatDateTime(item.completedAt ?? item.createdAt)}</small>
                 <small>msg {compact ? compactId(item.messageId) : item.messageId ?? '-'}</small>
@@ -295,7 +308,7 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
         columns={[
           { title: '真实请求探针', width: 160, render: (_, item) => item.title ?? item.key ?? '真实模型请求' },
           { title: '渠道', width: 180, render: (_, item) => formatPatrolChannel({ id: item.channelId, name: item.channelName, accountType: item.channelAccountType, providerType: item.channelProviderType }, item.channelId) },
-          { title: '状态', width: 84, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '正确' : '异常'}</Tag> },
+          { title: '状态', width: 84, render: (_, item) => <Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag> },
           { title: '时间', width: 156, render: (_, item) => formatDateTime(item.completedAt ?? item.createdAt) },
           { title: 'Message ID', dataIndex: 'messageId', width: 126, render: (value) => <PatrolIdText value={value} /> },
           { title: 'Request ID', dataIndex: 'requestId', width: 126, render: (value) => <PatrolIdText value={value} /> },

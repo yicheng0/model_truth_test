@@ -3980,7 +3980,7 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert "Thinking Signature 互通" in markdown
 
 
-def test_scheduled_probe_classifies_expected_claude_error_as_aws_resource_without_alert(monkeypatch) -> None:
+def test_scheduled_probe_classifies_expected_claude_error_as_claude_resource_without_alert(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
     with TestClient(app) as client:
@@ -3997,9 +3997,9 @@ def test_scheduled_probe_classifies_expected_claude_error_as_aws_resource_withou
             "labels": ["provider_error_variant", "unexpected_error_response"],
             "red_flags": [],
             "test_scope": "scheduled_probe",
-            "classification_status": "aws_resource",
-            "classification_label": "AWS 资源",
-            "classification_reason": "三项自动巡检探针均命中 Bedrock/Claude 原生参数拒绝形态，资源按 AWS 路径处理。",
+            "classification_status": "claude",
+            "classification_label": "Claude 资源",
+            "classification_reason": "三项自动巡检探针均命中 Claude 原生参数拒绝形态，资源按 Claude 路径处理。",
             "model_request": {
                 "key": "thinking_temperature",
                 "title": "Thinking temperature 冲突",
@@ -4025,12 +4025,12 @@ def test_scheduled_probe_classifies_expected_claude_error_as_aws_resource_withou
         pending_alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
 
     assert alerts == []
-    assert updated_schedule["latest_probe_summary"]["classification_status"] == "aws_resource"
-    assert updated_schedule["latest_probe_summary"]["classification_label"] == "AWS 资源"
+    assert updated_schedule["latest_probe_summary"]["classification_status"] == "claude"
+    assert updated_schedule["latest_probe_summary"]["classification_label"] == "Claude 资源"
     assert pending_alerts == []
 
 
-def test_scheduled_probe_classification_returns_aws_resource_for_expected_error_shape() -> None:
+def test_scheduled_probe_classification_returns_claude_resource_for_expected_error_shape() -> None:
     result = scheduled_probe_classification(
         model_requests=[
             {
@@ -4054,9 +4054,9 @@ def test_scheduled_probe_classification_returns_aws_resource_for_expected_error_
         score=72,
     )
 
-    assert result["status"] == "aws_resource"
-    assert result["label"] == "AWS 资源"
-    assert "AWS 路径" in result["reason"]
+    assert result["status"] == "claude"
+    assert result["label"] == "Claude 资源"
+    assert "Claude 路径" in result["reason"]
 
 
 def test_scheduled_probe_classifies_all_passed_as_aws_resource_without_alert(monkeypatch) -> None:
