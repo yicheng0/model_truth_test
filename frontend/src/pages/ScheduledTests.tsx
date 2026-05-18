@@ -9,6 +9,7 @@ import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../c
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
 import type { Channel, ChannelAlert, ChannelAlertStatus, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
+import { buildScheduleBasePayload, intervalText, type ScheduleFormValues } from '../scheduledTestsUtils';
 import { buildFeishuBroadcastUpdate, type FeishuBroadcastFormValues } from './feishuBroadcast';
 import {
   alertChannelModel,
@@ -21,16 +22,6 @@ import {
   alertResponseId,
 } from '../scheduledAlertLog';
 import AlertLogDrawer from '../components/AlertLogDrawer';
-
-type ScheduleFormValues = {
-  name: string;
-  channel_id: string;
-  interval_minutes: number;
-  run_window_enabled?: boolean;
-  run_window_start?: string;
-  run_window_end?: string;
-  enabled: boolean;
-};
 
 type ReviewFormValues = {
   status: Exclude<ChannelAlertStatus, 'pending_review'>;
@@ -101,12 +92,6 @@ const patrolParameterFaq = [
     children: 'run_id 和 report_id 用来查看完整报告；message id、request id 和 source/relay id 用来判断响应来源特征。',
   },
 ];
-
-function intervalText(minutes: number) {
-  if (minutes % 1440 === 0) return `${minutes / 1440} 天`;
-  if (minutes % 60 === 0) return `${minutes / 60} 小时`;
-  return `${minutes} 分钟`;
-}
 
 function runWindowText(schedule: Pick<ScheduledChannelTest, 'run_window_start' | 'run_window_end'>) {
   if (!schedule.run_window_start || !schedule.run_window_end) return '全天';
@@ -508,15 +493,13 @@ export default function ScheduledTests() {
   }
 
   async function submitSchedule(values: ScheduleFormValues) {
-    const basePayload = {
-      name: values.name,
-      channel_id: values.channel_id,
-      interval_minutes: values.interval_minutes,
-      run_window_start: values.run_window_enabled ? values.run_window_start : null,
-      run_window_end: values.run_window_enabled ? values.run_window_end : null,
-      enabled: values.enabled,
-      test_scope: 'scheduled_probe' as const,
-    };
+    let basePayload;
+    try {
+      basePayload = buildScheduleBasePayload(values);
+    } catch (error) {
+      message.error(getErrorMessage(error));
+      return;
+    }
     if (editingSchedule) {
       updateSchedule.mutate({ id: editingSchedule.id, payload: basePayload });
       return;
@@ -1367,11 +1350,16 @@ export default function ScheduledTests() {
               options={candidateChannels.map((channel) => ({ value: channel.id, label: `${formatChannelDisplayName(channel)} (${roleLabel(channel.role, taxonomy.data)} / ${channel.model_name ?? '未配置模型'})` }))}
             />
           </Form.Item>
-          <Form.Item label="执行间隔（分钟）" name="interval_minutes" rules={[{ required: true }]}>
-            <InputNumber min={5} max={43200} style={{ width: 180 }} />
-            <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
-              日常建议 1440 分钟；刚接入或排查时可用 60 分钟。
-            </Typography.Text>
+          <Form.Item
+            label="执行间隔（分钟）"
+            name="interval_minutes"
+            rules={[
+              { required: true, message: '请输入执行间隔' },
+              { type: 'number', min: 5, max: 43200, message: '执行间隔需在 5 到 43200 分钟之间' },
+            ]}
+            extra="日常建议 1440 分钟；刚接入或排查时可用 60 分钟。"
+          >
+            <InputNumber min={5} max={43200} precision={0} style={{ width: 180 }} />
           </Form.Item>
           <Form.Item name="run_window_enabled" valuePropName="checked">
             <Checkbox>限制自动执行时间段</Checkbox>
