@@ -209,42 +209,55 @@ app.add_middleware(
 )
 
 # --- Rate limiting ---
-RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "100") or "100")
 _rate_limit_buckets: defaultdict[str, list[float]] = defaultdict(list)
 
 
+def _rate_limit_per_minute() -> int:
+    raw = os.getenv("RATE_LIMIT_PER_MINUTE", "100") or "100"
+    try:
+        return int(raw)
+    except ValueError:
+        return 100
+
+
+def _trust_proxy_headers() -> bool:
+    return os.getenv("TRUST_PROXY_HEADERS", "false").strip().lower() in {"1", "true", "yes"}
+
+
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    if _trust_proxy_headers():
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
 
+def _configured_admin_key() -> str:
+    return os.getenv("ADMIN_API_KEY", "").strip()
+
+
 def require_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
-    expected = os.getenv("ADMIN_API_KEY", "").strip()
-    if not expected:
-        return
-    if x_admin_key != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-def require_configured_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
-    expected = os.getenv("ADMIN_API_KEY", "").strip()
+    expected = _configured_admin_key()
     if not expected:
         raise HTTPException(status_code=403, detail="Admin API key is not configured")
     if x_admin_key != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def require_configured_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
+    require_admin(x_admin_key)
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next) -> Response:
-    if RATE_LIMIT_PER_MINUTE <= 0:
+    rate_limit_per_minute = _rate_limit_per_minute()
+    if rate_limit_per_minute <= 0:
         return await call_next(request)
     now = time_module.monotonic()
     ip = _client_ip(request)
     window = _rate_limit_buckets[ip]
     window[:] = [t for t in window if t > now - 60.0]
-    if len(window) >= RATE_LIMIT_PER_MINUTE:
+    if len(window) >= rate_limit_per_minute:
         return JSONResponse(status_code=429, content={"detail": "Too many requests"}, headers={"Retry-After": "60"})
     window.append(now)
     return await call_next(request)
@@ -488,7 +501,7 @@ def _channel_has_references(db: Session, channel_id: str) -> bool:
 
 
 @app.post("/api/reseed/cleanup-restored-fixture")
-def cleanup_restored_fixture(db: Session = Depends(get_db)) -> dict[str, object]:
+def cleanup_restored_fixture(_admin: None = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, object]:
     data = restored_seed_data()
     default_case_ids = {str(item["id"]) for item in default_cases() if item.get("id")}
     fixture_case_ids = [str(item["id"]) for item in data["test_cases"] if item.get("id") and str(item["id"]) not in default_case_ids]
@@ -1616,13 +1629,13 @@ def reseed_payload(db: Session) -> dict[str, object]:
 
 
 @app.get("/api/seed-status")
-def public_seed_status(db: Session = Depends(get_db)) -> dict[str, object]:
+def public_seed_status(_admin: None = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, object]:
     """Return current seed data counts for diagnostics."""
     return seed_status_payload(db)
 
 
 @app.post("/api/reseed")
-def public_reseed(db: Session = Depends(get_db)) -> dict[str, object]:
+def public_reseed(_admin: None = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, object]:
     """Create missing built-in seed data without deleting or overwriting existing rows."""
     return reseed_payload(db)
 

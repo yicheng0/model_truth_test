@@ -642,7 +642,7 @@ def test_list_endpoints_self_heal_empty_seed_tables() -> None:
         assert db.scalar(select(func.count()).select_from(TestCaseModel)) == 32
 
 
-def test_public_reseed_restores_missing_seed_data_without_admin_key_or_secret_overwrite() -> None:
+def test_admin_reseed_restores_missing_seed_data_without_secret_overwrite() -> None:
     reset_database()
     with SessionLocal() as db:
         for model in [ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
@@ -662,9 +662,9 @@ def test_public_reseed_restores_missing_seed_data_without_admin_key_or_secret_ov
         )
 
     with TestClient(app) as client:
-        status_before = client.get("/api/seed-status")
-        response = client.post("/api/reseed")
-        status_after = client.get("/api/seed-status")
+        status_before = client.get("/api/seed-status", headers=ADMIN_HEADERS)
+        response = client.post("/api/reseed", headers=ADMIN_HEADERS)
+        status_after = client.get("/api/seed-status", headers=ADMIN_HEADERS)
 
     assert status_before.status_code == 200
     assert response.status_code == 200
@@ -915,8 +915,34 @@ def test_regular_delete_allows_missing_admin_key_when_unconfigured(monkeypatch) 
         deleted = client.delete(f"/api/runs/{run['id']}")
         cleanup_forbidden = client.post("/api/system/cleanup-run-logs?dry_run=true")
 
-    assert deleted.status_code == 200
+    assert deleted.status_code == 403
     assert cleanup_forbidden.status_code == 403
+
+
+def test_seed_diagnostics_endpoints_require_admin_key_when_configured(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.setenv("ADMIN_API_KEY", "configured-admin-key")
+    with TestClient(app) as client:
+        seed_status = client.get("/api/seed-status")
+        reseed = client.post("/api/reseed")
+        cleanup_fixture = client.post("/api/reseed/cleanup-restored-fixture")
+
+    assert seed_status.status_code == 401
+    assert reseed.status_code == 401
+    assert cleanup_fixture.status_code == 401
+
+
+def test_seed_diagnostics_endpoints_reject_when_admin_key_missing(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    with TestClient(app) as client:
+        seed_status = client.get("/api/seed-status")
+        reseed = client.post("/api/reseed")
+        cleanup_fixture = client.post("/api/reseed/cleanup-restored-fixture")
+
+    assert seed_status.status_code == 403
+    assert reseed.status_code == 403
+    assert cleanup_fixture.status_code == 403
 
 
 def test_cleanup_restored_fixture_removes_extra_seed_data_without_referenced_channels() -> None:
@@ -929,7 +955,7 @@ def test_cleanup_restored_fixture_removes_extra_seed_data_without_referenced_cha
         assert db.scalar(select(func.count()).select_from(TestCaseModel).where(TestCaseModel.id.in_(default_ids))) == len(default_ids)
 
     with TestClient(app) as client:
-        response = client.post("/api/reseed/cleanup-restored-fixture")
+        response = client.post("/api/reseed/cleanup-restored-fixture", headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     payload = response.json()
@@ -955,8 +981,8 @@ def test_reseed_restores_default_cases_after_fixture_cleanup_bug() -> None:
         assert db.scalar(select(func.count()).select_from(TestCaseModel).where(TestCaseModel.id.in_(default_ids))) == 0
 
     with TestClient(app) as client:
-        response = client.post("/api/reseed")
-        cases = client.get("/api/test-cases")
+        response = client.post("/api/reseed", headers=ADMIN_HEADERS)
+        cases = client.get("/api/test-cases", headers=ADMIN_HEADERS)
 
     assert response.status_code == 200
     assert cases.status_code == 200
@@ -4626,6 +4652,13 @@ def test_baseline_build_rejects_out_of_range_repeat_count_and_concurrency() -> N
 def test_cors_origins_are_read_from_environment() -> None:
     os.environ["CORS_ORIGINS"] = "http://localhost:5173, https://example.com "
     assert cors_origins() == ["http://localhost:5173", "https://example.com"]
+
+
+def test_rate_limit_defaults_accept_invalid_configuration(monkeypatch) -> None:
+    from app import main as main_module
+
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "not-a-number")
+    assert main_module._rate_limit_per_minute() == 100
 
 
 def test_merged_channel_credentials_uses_stored_key_and_allows_runtime_override() -> None:
