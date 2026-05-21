@@ -3836,7 +3836,14 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
         )
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
-        error_message = _message_from_exception(exc)
+        resolved_protocol = protocol
+        endpoint = _provider_endpoint(channel, credentials, protocol)
+        source_exc = exc
+        if isinstance(exc, _AutoLiveCallNonRetryableError):
+            resolved_protocol = exc.protocol
+            endpoint = exc.endpoint
+            source_exc = exc.original_exc
+        error_message = _message_from_exception(source_exc)
         logger.warning("channel_call_failed channel=%s case=%s attempt=%d protocol=%s latency_ms=%d error=%s", channel.id, case.id, attempt, protocol, latency_ms, error_message[:200])
         return normalize_response(
             channel,
@@ -3849,7 +3856,7 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
             request_mode="live",
             request_attempted=True,
             provider_endpoint=endpoint,
-            request_protocol=protocol,
+            request_protocol=resolved_protocol,
         )
 
 
@@ -3911,6 +3918,8 @@ async def _auto_live_call(
         except Exception as exc:
             errors.append(f"{protocol} {endpoint or '-'}: {exc}")
             logger.debug("auto_protocol_probe_failed channel=%s protocol=%s error=%s", channel.id, protocol, str(exc)[:200])
+            if _is_non_retryable_live_error(exc):
+                raise _AutoLiveCallNonRetryableError(protocol, endpoint, exc) from exc
     raise RuntimeError("自动协议探测失败：" + "；".join(errors))
 
 
@@ -3991,6 +4000,22 @@ def _provider_endpoint(channel: Channel, credentials: dict[str, Any], protocol: 
     return _anthropic_messages_url(credentials.get("base_url") or channel.base_url)
 
 
+class _AutoLiveCallNonRetryableError(RuntimeError):
+    def __init__(self, protocol: str, endpoint: str | None, original_exc: Exception) -> None:
+        super().__init__(str(original_exc))
+        self.protocol = protocol
+        self.endpoint = endpoint
+        self.original_exc = original_exc
+
+
+def _is_non_retryable_live_error(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return False
+    status_code = getattr(response, "status_code", None)
+    return isinstance(status_code, int) and 400 <= status_code < 500
+
+
 def _missing_live_credentials(channel: Channel, credentials: dict[str, Any]) -> str | None:
     protocol = _request_protocol(channel, credentials)
     if protocol == REQUEST_PROTOCOL_AWS_BEDROCK:
@@ -4049,7 +4074,8 @@ def _message_from_exception(exc: Exception) -> str:
         status_code = getattr(response, "status_code", None)
         text = getattr(response, "text", "")
         if status_code or text:
-            return f"{status_code or 'error'} {text}".strip()
+            detail = str(text).strip() or str(exc).strip()
+            return f"{status_code or 'error'} {detail}".strip()
     return str(exc)
 
 

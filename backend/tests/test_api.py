@@ -3396,6 +3396,59 @@ def test_auto_protocol_falls_back_to_openai_compatible(monkeypatch) -> None:
     assert normalized["provider_endpoint"] == "https://api.wenwen-ai.com/v1/chat/completions"
 
 
+def test_auto_protocol_does_not_fallback_on_http_403(monkeypatch) -> None:
+    reset_database()
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 403
+
+    class Http403Error(RuntimeError):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+            self.response = FakeResponse()
+
+    async def forbidden_anthropic(channel, raw_request, credentials):  # noqa: ANN001
+        calls.append("anthropic")
+        raise Http403Error("forbidden")
+
+    async def fallback_openai(channel, raw_request, credentials):  # noqa: ANN001
+        calls.append("openai")
+        return {
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "model": channel.model_name,
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr("app.services._anthropic_compatible_call", forbidden_anthropic)
+    monkeypatch.setattr("app.services._openai_compatible_call", fallback_openai)
+
+    with SessionLocal() as db:
+        channel = Channel(
+            id="apipro_403",
+            name="APIPro 403",
+            provider_type="AWS官",
+            role="reference",
+            base_url="https://api.wenwen-ai.com/",
+            model_name="claude-test",
+            enabled=True,
+            auth_config_encrypted={"api_key": "test-key"},
+        )
+        db.add(channel)
+        db.commit()
+        case = db.get(TestCaseModel, "identity_02")
+        assert case is not None
+        normalized = asyncio.run(invoke_channel(channel, case, 1, {"api_key": "test-key"}, use_mock=False))
+
+    assert calls == ["anthropic"]
+    assert normalized["error"] == "403 forbidden"
+    assert normalized["request_protocol"] == "anthropic_messages"
+    assert normalized["request_attempted"] is True
+    assert normalized["content_text"] == ""
+
+
 def test_anthropic_request_passes_thinking_params(monkeypatch) -> None:
     reset_database()
     captured: dict[str, object] = {}
