@@ -2526,6 +2526,30 @@ BLOCKING_SCHEDULED_PROBE_LABELS = {
     "thinking_adaptive_enabled_not_rejected",
     "signature_interop_failed",
 }
+NATIVE_PARAMETER_UNSUPPORTED_PATTERN = re.compile(
+    r"400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool",
+    re.IGNORECASE,
+)
+
+
+def _probe_parameter_unsupported(item: dict[str, Any]) -> bool:
+    labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
+    if "provider_error_variant" in labels:
+        return True
+    error_text = " ".join(
+        str(item.get(field) or "")
+        for field in ("error", "response_text", "raw_response_text")
+        if str(item.get(field) or "").strip()
+    ).lower()
+    return bool(NATIVE_PARAMETER_UNSUPPORTED_PATTERN.search(error_text))
+
+
+def _scheduled_probe_all_parameter_unsupported(model_requests: list[dict[str, Any]]) -> bool:
+    expected_keys = {str(probe["key"]) for probe in SCHEDULED_MODEL_REQUEST_PROBES}
+    request_keys = {str(item.get("key") or "") for item in model_requests}
+    if request_keys != expected_keys:
+        return False
+    return all(_probe_parameter_unsupported(item) for item in model_requests)
 
 
 def scheduled_probe_classification(
@@ -2536,18 +2560,18 @@ def scheduled_probe_classification(
 ) -> dict[str, Any]:
     label_set = set(labels)
     normalized_score = _safe_float(score)
+    if _scheduled_probe_all_parameter_unsupported(model_requests):
+        return {
+            "status": "aws_resource",
+            "label": "AWS 资源",
+            "reason": "三项自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理。",
+            "score": max(normalized_score, 95),
+        }
     if _has_expected_claude_probe(model_requests, label_set):
         return {
             "status": "claude",
             "label": "Claude 资源",
             "reason": "三项自动巡检探针均命中 Claude 原生参数拒绝形态，资源按 Claude 路径处理。",
-            "score": max(normalized_score, 95),
-        }
-    if _scheduled_probe_all_passed(model_requests, signature_evidence, normalized_score, label_set):
-        return {
-            "status": "aws_resource",
-            "label": "AWS 资源",
-            "reason": "三项自动巡检探针均通过，资源按 AWS 路径处理。",
             "score": max(normalized_score, 95),
         }
     if label_set.intersection(BLOCKING_SCHEDULED_PROBE_LABELS) or label_set.intersection({"unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}):
@@ -2574,25 +2598,6 @@ def _has_expected_claude_probe(model_requests: list[dict[str, Any]], labels: set
             if item_labels == {"provider_error_variant"}:
                 return True
     return False
-
-
-def _scheduled_probe_all_passed(
-    model_requests: list[dict[str, Any]],
-    signature_evidence: dict[str, Any],
-    score: float,
-    labels: set[str],
-) -> bool:
-    expected_keys = {str(probe["key"]) for probe in SCHEDULED_MODEL_REQUEST_PROBES}
-    request_keys = {str(item.get("key") or "") for item in model_requests}
-    if expected_keys - request_keys:
-        return False
-    if labels - {"patrol_probe_passed"}:
-        return False
-    if any(item.get("error") for item in model_requests):
-        return False
-    if any(_safe_float(item.get("score"), 0) < 90 for item in model_requests):
-        return False
-    return score >= 90
 
 
 def scheduled_provider_hint_from_evidence(model_requests: list[dict[str, Any]], signature_evidence: dict[str, Any], labels: list[str]) -> str:
@@ -6206,7 +6211,7 @@ LABEL_EXPLANATIONS = {
     "thinking_adaptive_enabled_not_rejected": "thinking.adaptive.enabled 未被上游拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。",
     "thinking_adaptive_enabled_wrong_error": "上游返回了错误，但错误内容不是 thinking.adaptive.enabled 目标参数的原生拒绝。",
     "signature_source_missing": "未找到可用的参考 source 渠道，无法执行 Thinking Signature 互通检测。",
-    "provider_error_variant": "上游返回了等价的 thinking/temperature 原生约束错误，视为通过但保留差异标签。",
+    "provider_error_variant": "上游返回了等价的参数不支持原生约束错误，保留差异标签。",
     "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
 }
 

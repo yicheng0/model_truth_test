@@ -2733,6 +2733,35 @@ def test_channel_api_key_is_readable_and_updatable() -> None:
     assert cleared.json()["auth_config"] == {}
 
 
+def test_channel_delete_rejects_referenced_channel() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.delete("/api/channels/third_party_demo", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 409
+    assert "不能删除" in response.json()["detail"]
+
+
+def test_channel_delete_succeeds_for_unreferenced_channel() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/channels",
+            json={
+                "id": "temp_channel",
+                "name": "Temp Channel",
+                "provider_type": "customer_gateway",
+                "model_name": "claude-via-gateway",
+                "enabled": True,
+            },
+        )
+        deleted = client.delete("/api/channels/temp_channel", headers=ADMIN_HEADERS)
+
+    assert created.status_code == 200
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True}
+
+
 def test_runtime_credentials_merge_channel_api_key_and_per_run_override() -> None:
     channel = Channel(
         id="with_key",
@@ -4117,16 +4146,6 @@ def test_scheduled_probe_classification_returns_claude_resource_for_expected_err
                 "labels": ["provider_error_variant", "unexpected_error_response"],
                 "error": "temperature may only be set to 1 when thinking is enabled",
             },
-            {
-                "key": "web_search",
-                "labels": ["provider_error_variant", "unexpected_error_response"],
-                "error": "web search is not available",
-            },
-            {
-                "key": "thinking_adaptive_enabled",
-                "labels": ["provider_error_variant", "unexpected_error_response"],
-                "error": "enabled is not supported for output_config.effort",
-            },
         ],
         signature_evidence={"ok": False},
         labels=["provider_error_variant", "unexpected_error_response"],
@@ -4138,13 +4157,70 @@ def test_scheduled_probe_classification_returns_claude_resource_for_expected_err
     assert "Claude 路径" in result["reason"]
 
 
-def test_scheduled_probe_classifies_all_passed_as_aws_resource_without_alert(monkeypatch) -> None:
+def test_scheduled_probe_classification_returns_aws_resource_for_three_parameter_unsupported_probes() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {
+                "key": "thinking_temperature",
+                "labels": ["provider_error_variant"],
+                "error": "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'",
+            },
+            {
+                "key": "web_search",
+                "labels": ["provider_error_variant"],
+                "error": "web search is not available on this channel",
+            },
+            {
+                "key": "thinking_adaptive_enabled",
+                "labels": ["provider_error_variant"],
+                "error": "thinking.adaptive.enabled is not supported",
+            },
+        ],
+        signature_evidence={"ok": True},
+        labels=["provider_error_variant"],
+        score=82,
+    )
+
+    assert result["status"] == "aws_resource"
+    assert result["label"] == "AWS 资源"
+    assert "参数不支持" in result["reason"]
+
+
+def test_scheduled_probe_classifies_partial_parameter_unsupported_as_anomaly() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {
+                "key": "thinking_temperature",
+                "labels": [],
+                "error": "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'",
+            },
+            {
+                "key": "web_search",
+                "labels": [],
+                "error": "",
+            },
+            {
+                "key": "thinking_adaptive_enabled",
+                "labels": [],
+                "error": "",
+            },
+        ],
+        signature_evidence={"ok": True},
+        labels=[],
+        score=82,
+    )
+
+    assert result["status"] == "anomaly"
+    assert result["label"] == "来源特征不明确"
+
+
+def test_scheduled_probe_classifies_all_parameter_unsupported_as_aws_resource_without_alert(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
     with TestClient(app) as client:
         schedule = create_patrol_schedule(client, channel_id="negative_sample")
 
-    run_id = create_report_for_schedule(schedule, grade="A", score=98, labels=["patrol_probe_passed"])
+    run_id = create_report_for_schedule(schedule, grade="A", score=98, labels=["provider_error_variant"])
     with SessionLocal() as db:
         report = db.scalar(select(Report).where(Report.run_id == run_id))
         assert report is not None
@@ -4152,22 +4228,22 @@ def test_scheduled_probe_classifies_all_passed_as_aws_resource_without_alert(mon
         assert schedule_row is not None
         schedule_row.last_run_id = run_id
         report.evidence = {
-            "labels": ["patrol_probe_passed"],
+            "labels": ["provider_error_variant"],
             "red_flags": [],
             "test_scope": "scheduled_probe",
             "classification_status": "aws_resource",
             "classification_label": "AWS 资源",
-            "classification_reason": "三项自动巡检探针均通过，资源按 AWS 路径处理。",
+            "classification_reason": "三项自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理。",
             "model_request": {
                 "key": "thinking_temperature",
                 "title": "Thinking temperature 冲突",
-                "labels": [],
-                "score": 100,
+                "labels": ["provider_error_variant"],
+                "error": "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'",
             },
             "model_requests": [
-                {"key": "thinking_temperature", "title": "Thinking temperature 冲突", "labels": [], "score": 100},
-                {"key": "web_search", "title": "Web Search tool", "labels": [], "score": 100},
-                {"key": "thinking_adaptive_enabled", "title": "thinking.adaptive.enabled", "labels": [], "score": 100},
+                {"key": "thinking_temperature", "title": "Thinking temperature 冲突", "labels": ["provider_error_variant"], "error": "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'"},
+                {"key": "web_search", "title": "Web Search tool", "labels": ["provider_error_variant"], "error": "web search is not available on this channel"},
+                {"key": "thinking_adaptive_enabled", "title": "thinking.adaptive.enabled", "labels": ["provider_error_variant"], "error": "thinking.adaptive.enabled is not supported"},
             ],
             "signature_interop": {"ok": True},
         }

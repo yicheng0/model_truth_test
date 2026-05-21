@@ -7,6 +7,7 @@ import {
   accountTypeLabel,
   accountTypeOptions,
   buildChannelAuthConfig,
+  canonicalChannelName,
   formatChannelDisplayName,
   buildTokenflowApiKey,
   buildTokenflowChannelId,
@@ -14,7 +15,6 @@ import {
   inferChannelAccountType,
   inferChannelNumber,
   isValidChannelNumber,
-  normalizeChannelNickname,
   parseTokenflowChannelNumber,
   providerTypeForAccountType,
 } from '../channelCredentials';
@@ -86,7 +86,7 @@ export default function Channels() {
     account_type: Form.useWatch('account_type', createForm) || defaultAccountType,
   });
   const editDisplayName = formatChannelDisplayName({
-    channel_number: Form.useWatch('channel_number', editForm),
+    id: editing?.id,
     name: Form.useWatch('name', editForm),
     account_type: Form.useWatch('account_type', editForm) || defaultAccountType,
   }, editing?.id);
@@ -137,7 +137,11 @@ export default function Channels() {
       message.success('渠道已删除');
       await invalidate();
     },
+    onError: (error) => {
+      message.error(error instanceof Error ? error.message : '删除渠道失败');
+    },
   });
+  const [deletingChannelId, setDeletingChannelId] = useState<string | null>(null);
 
   const loadModels = useMutation({
     mutationFn: async (channel: Channel) => api.channelModels(channel.id),
@@ -176,7 +180,7 @@ export default function Channels() {
     setEditing(channel);
     setFetchedModels([]);
     editForm.setFieldsValue({
-      name: normalizeChannelNickname(channel, channel.id) || channel.name,
+      name: formatChannelDisplayName(channel, channel.id) || channel.name,
       channel_number: inferChannelNumber(channel, channel.id) || parseTokenflowChannelNumber(channel.id),
       model_name: channel.model_name ? [channel.model_name] : [],
       base_url: channel.base_url ?? '',
@@ -192,13 +196,13 @@ export default function Channels() {
     const modelName = firstSelectValue(values.model_name);
     const accountType = values.account_type || defaultAccountType;
     const channelNumber = values.channel_number?.trim();
-    const name = normalizeChannelNickname({
+    const name = canonicalChannelName({
       id: existing?.id,
       name: values.name,
-      channel_number: channelNumber,
+      channel_number: existing ? undefined : channelNumber,
       account_type: accountType,
       auth_config: existing?.auth_config,
-    }) || values.name.trim();
+    }, existing?.id) || values.name.trim();
     return {
       ...(existing || !channelNumber ? {} : { id: buildTokenflowChannelId(channelNumber, accountType) }),
       name,
@@ -394,9 +398,16 @@ export default function Channels() {
                       okText="删除"
                       cancelText="取消"
                       okButtonProps={{ danger: true }}
-                      onConfirm={() => remove.mutate(channel.id)}
+                      onConfirm={async () => {
+                        setDeletingChannelId(channel.id);
+                        try {
+                          await remove.mutateAsync(channel.id);
+                        } finally {
+                          setDeletingChannelId((current) => (current === channel.id ? null : current));
+                        }
+                      }}
                     >
-                      <Button danger icon={<Trash2 size={15} />} loading={remove.isPending}>
+                      <Button danger icon={<Trash2 size={15} />} loading={deletingChannelId === channel.id}>
                         删除
                       </Button>
                     </Popconfirm>

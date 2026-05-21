@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import DATABASE_URL, SessionLocal, get_db, init_db
@@ -627,6 +628,22 @@ def update_channel(channel_id: str, data: ChannelUpdate, db: Session = Depends(g
     return channel
 
 
+def _channel_delete_conflict_reason(db: Session, channel_id: str) -> str | None:
+    checks = [
+        (select(RunChannel.id).where(RunChannel.channel_id == channel_id).limit(1), '该渠道已被检测任务引用，不能删除'),
+        (select(Result.id).where(Result.channel_id == channel_id).limit(1), '该渠道已有检测结果，不能删除'),
+        (select(Comparison.id).where(Comparison.candidate_channel_id == channel_id).limit(1), '该渠道已被对比结果引用，不能删除'),
+        (select(Report.id).where(Report.channel_id == channel_id).limit(1), '该渠道已有报告引用，不能删除'),
+        (select(ChannelAlert.id).where(ChannelAlert.channel_id == channel_id).limit(1), '该渠道已有巡检告警引用，不能删除'),
+        (select(ScheduledChannelTest.id).where(ScheduledChannelTest.channel_id == channel_id).limit(1), '该渠道已被自动巡检计划引用，不能删除'),
+        (select(BaselineResult.id).where(BaselineResult.channel_id == channel_id).limit(1), '该渠道已有渠道指纹引用，不能删除'),
+    ]
+    for stmt, reason in checks:
+        if db.scalar(stmt) is not None:
+            return reason
+    return None
+
+
 @app.delete("/api/channels/{channel_id}")
 def remove_channel(
     channel_id: str,
@@ -636,8 +653,15 @@ def remove_channel(
     channel = db.get(Channel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    db.delete(channel)
-    db.commit()
+    conflict = _channel_delete_conflict_reason(db, channel_id)
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+    try:
+        db.delete(channel)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该渠道仍被其他记录引用，不能删除") from exc
     return {"deleted": True}
 
 

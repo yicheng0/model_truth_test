@@ -144,7 +144,7 @@ describe('scheduled alert log helpers', () => {
       evidence_summary: {
         classification_status: 'aws_resource',
         classification_label: 'AWS 资源',
-        classification_reason: '三项自动巡检探针均通过，资源按 AWS 路径处理。',
+        classification_reason: '三项自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理。',
       },
     };
 

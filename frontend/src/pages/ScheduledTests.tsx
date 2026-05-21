@@ -85,7 +85,7 @@ const patrolParameterFaq = [
   {
     key: 'model_request',
     label: '真实模型请求看什么？',
-    children: '系统发送 thinking temperature 探针，记录 message id、request id、协议和 endpoint，用于判断 AWS/Bedrock、Claude/Anthropic 或中间层改写。',
+    children: '系统发送 thinking temperature、web search、thinking.adaptive.enabled 三个探针，记录 message id、request id、协议和 endpoint，用于判断参数不支持、AWS/Bedrock、Claude/Anthropic 或中间层改写。',
   },
   {
     key: 'alert_ids',

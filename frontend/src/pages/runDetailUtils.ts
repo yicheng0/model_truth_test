@@ -1,5 +1,5 @@
 import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunMode, RunResults, TestCase } from '../types';
-import { accountTypeLabel } from '../channelCredentials';
+import { accountTypeLabel, formatChannelDisplayName } from '../channelCredentials';
 import { providerTypeLabel } from '../channelTaxonomy';
 import { formatPatrolChannel } from '../runsUtils';
 
@@ -33,6 +33,7 @@ export type ManualProbeRow = {
   title: string;
   status: string;
   channelName: string;
+  channelDisplayName?: string | null;
   channelId: string;
   channelType: string;
   resultId?: string | null;
@@ -205,8 +206,8 @@ export function compactText(value?: string | null, limit = 180) {
 }
 
 export function channelLabel(name?: string | null, id?: string | null) {
-  if (name && id) return `${name} (${id})`;
-  return name || id || '-';
+  if (name) return name;
+  return id || '-';
 }
 
 export function patrolProbeStatusText(item?: PatrolProbeStatusItem | null) {
@@ -234,7 +235,7 @@ export function patrolProbeStatusColor(item?: PatrolProbeStatusItem | null) {
 export function manualProbeChannelType(channel?: Channel, taxonomy?: ChannelTaxonomySetting | null) {
   if (!channel) return '-';
   return [
-    formatPatrolChannel({ id: channel.id, name: channel.name, accountType: channel.auth_config?.account_type, providerType: channel.provider_type }),
+    formatChannelDisplayName({ id: channel.id, name: channel.name, accountType: channel.auth_config?.account_type, providerType: channel.provider_type }),
     providerTypeLabel(channel.provider_type, taxonomy ?? undefined),
     accountTypeLabel(channel.auth_config?.account_type),
   ].filter(Boolean).join(' · ');

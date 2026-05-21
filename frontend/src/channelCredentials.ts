@@ -201,6 +201,10 @@ export function formatChannelDisplayName(channel?: ChannelDisplayInput | null, f
   return rawId || '-';
 }
 
+export function canonicalChannelName(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
+  return formatChannelDisplayName(channel, fallbackId);
+}
+
 export function formatProviderChannelDisplayName(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
   return formatChannelDisplayName(
     {

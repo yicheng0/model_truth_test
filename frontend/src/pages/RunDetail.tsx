@@ -227,12 +227,14 @@ function extractManualProbeRows(results: RunResults, cases: TestCase[], channels
       const channelId = result.channel_id;
       const channel = channels.get(channelId);
       const channelName = channel?.name ?? result.channel_id;
+      const channelDisplayName = formatChannelDisplayName(channel, result.channel_id);
       const status = result.score === 100 ? 'ok' : 'error';
       return {
         key: `${result.test_case_id}:${result.channel_id}:${result.attempt_index}:${index}`,
         title: caseItem?.title ?? result.test_case_id,
         status,
         channelName,
+        channelDisplayName,
         channelId,
         channelType: manualProbeChannelType(channel, taxonomy),
         resultId: result.id,
@@ -561,7 +563,7 @@ export default function RunDetail() {
               </Typography.Paragraph>
               <Space wrap size={16}>
                 <Typography.Text type="secondary">
-                  渠道：{formatPatrolChannel(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)}
+                  渠道：{formatChannelDisplayName(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)}
                 </Typography.Text>
                 <Typography.Text type="secondary">进度：{data.run.completed_jobs} / {data.run.total_jobs}</Typography.Text>
               </Space>
@@ -650,7 +652,7 @@ export default function RunDetail() {
             columns={[
               { title: '探针', dataIndex: 'title', width: 200 },
               { title: '状态', width: 110, render: (_, item) => <Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag> },
-              { title: '渠道', width: 220, render: (_, item) => channelLabel(item.channelName, item.channelId) },
+              { title: '渠道', width: 220, render: (_, item) => channelLabel(item.channelDisplayName ?? item.channelName, item.channelId) },
               { title: '渠道类型', dataIndex: 'channelType', width: 340, render: (value) => value ?? '-' },
               {
                 title: 'Message ID',
@@ -685,7 +687,7 @@ export default function RunDetail() {
               <Card key={item.key} title={item.title} bordered={false}>
                 <Descriptions bordered size="small" column={1}>
                   <Descriptions.Item label="状态"><Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag></Descriptions.Item>
-                  <Descriptions.Item label="渠道">{channelLabel(item.channelName, item.channelId)}</Descriptions.Item>
+                  <Descriptions.Item label="渠道">{channelLabel(item.channelDisplayName ?? item.channelName, item.channelId)}</Descriptions.Item>
                   <Descriptions.Item label="渠道类型">{item.channelType}</Descriptions.Item>
                   <Descriptions.Item label="Message ID">{item.messageId ? <Typography.Text code copyable>{item.messageId}</Typography.Text> : '-'}</Descriptions.Item>
                   <Descriptions.Item label="Request ID">{item.requestId ? <Typography.Text code copyable>{item.requestId}</Typography.Text> : '-'}</Descriptions.Item>
