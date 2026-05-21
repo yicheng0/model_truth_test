@@ -27,6 +27,10 @@ function canCancel(status: Run['status']) {
   return status === 'pending' || status === 'running';
 }
 
+function isTerminalRun(status: Run['status']) {
+  return status !== 'pending' && status !== 'running';
+}
+
 function progressCell(run: Run) {
   return (
     <Space direction="vertical" size={4} style={{ width: '100%' }}>
@@ -387,13 +391,10 @@ export default function Runs() {
     onSettled: () => setDeletingId(null),
   });
   const deleteNormalRuns = useMutation({
-    mutationFn: async (ids: string[]) => {
-      const settled = await Promise.allSettled(ids.map((id) => api.deleteRun(id)));
-      const failed = settled.filter((item) => item.status === 'rejected').length;
-      return { deleted: ids.length - failed, failed };
-    },
+    mutationFn: api.deleteRuns,
     onSuccess: async (result) => {
-      message.success(result.failed ? `已删除 ${result.deleted} 条任务，${result.failed} 条删除失败` : `已删除 ${result.deleted} 条任务`);
+      const failed = Object.keys(result.failed).length;
+      message.success(failed ? `已删除 ${result.deleted} 条任务，${failed} 条删除失败` : `已删除 ${result.deleted} 条任务`);
       setSelectedNormalRowKeys([]);
       await queryClient.invalidateQueries({ queryKey: ['runs'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
@@ -401,13 +402,10 @@ export default function Runs() {
     onError: (error) => message.error(getErrorMessage(error)),
   });
   const deletePatrolRuns = useMutation({
-    mutationFn: async (ids: string[]) => {
-      const settled = await Promise.allSettled(ids.map((id) => api.deleteRun(id)));
-      const failed = settled.filter((item) => item.status === 'rejected').length;
-      return { deleted: ids.length - failed, failed };
-    },
+    mutationFn: api.deleteRuns,
     onSuccess: async (result) => {
-      message.success(result.failed ? `已删除 ${result.deleted} 条日志，${result.failed} 条删除失败` : `已删除 ${result.deleted} 条日志`);
+      const failed = Object.keys(result.failed).length;
+      message.success(failed ? `已删除 ${result.deleted} 条日志，${failed} 条删除失败` : `已删除 ${result.deleted} 条日志`);
       setSelectedPatrolRowKeys([]);
       await queryClient.invalidateQueries({ queryKey: ['runs'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
@@ -445,7 +443,11 @@ export default function Runs() {
     () => patrolRuns.filter((run) => selectedPatrolRowKeys.includes(run.id)),
     [patrolRuns, selectedPatrolRowKeys],
   );
-  const deletableSelectedPatrolRuns = selectedPatrolRuns.filter((run) => run.status !== 'running');
+  const deletableSelectedPatrolRuns = selectedPatrolRuns.filter((run) => isTerminalRun(run.status));
+  const deletablePatrolRuns = useMemo(
+    () => patrolRuns.filter((run) => isTerminalRun(run.status)),
+    [patrolRuns],
+  );
 
   useEffect(() => {
     const normalIds = new Set(normalRuns.map((run) => run.id));
@@ -472,10 +474,18 @@ export default function Runs() {
       return;
     }
     if (!deletableSelectedPatrolRuns.length) {
-      message.warning('运行中的巡检日志不能删除');
+      message.warning('未结束的巡检日志不能删除');
       return;
     }
     deletePatrolRuns.mutate(deletableSelectedPatrolRuns.map((run) => run.id));
+  }
+
+  function deleteAllPatrolRuns() {
+    if (!deletablePatrolRuns.length) {
+      message.warning('暂无可删除的巡检日志');
+      return;
+    }
+    deletePatrolRuns.mutate(deletablePatrolRuns.map((run) => run.id));
   }
 
   const actionColumn = {
@@ -693,19 +703,34 @@ export default function Runs() {
         className="patrol-log-card"
         title={<span className="card-title-with-icon"><CalendarClock size={18} />自动巡检日志</span>}
         extra={(
-          <Popconfirm
-            title="删除已选巡检日志"
-            description={`将删除 ${deletableSelectedPatrolRuns.length} 条已选日志及其结果、报告和关联告警。运行中日志会跳过。确定删除吗？`}
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            cancelText="取消"
-            disabled={!deletableSelectedPatrolRuns.length}
-            onConfirm={deleteSelectedPatrolRuns}
-          >
-            <Button size="small" danger icon={<Trash2 size={14} />} disabled={!deletableSelectedPatrolRuns.length} loading={deletePatrolRuns.isPending}>
-              删除已选
-            </Button>
-          </Popconfirm>
+          <Space wrap>
+            <Popconfirm
+              title="删除已选巡检日志"
+              description={`将删除 ${deletableSelectedPatrolRuns.length} 条已选已结束日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+              disabled={!deletableSelectedPatrolRuns.length}
+              onConfirm={deleteSelectedPatrolRuns}
+            >
+              <Button size="small" danger icon={<Trash2 size={14} />} disabled={!deletableSelectedPatrolRuns.length} loading={deletePatrolRuns.isPending}>
+                删除已选
+              </Button>
+            </Popconfirm>
+            <Popconfirm
+              title="删除全部已结束巡检日志"
+              description={`将删除全部 ${deletablePatrolRuns.length} 条已结束巡检日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
+              okText="删除全部"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+              disabled={!deletablePatrolRuns.length}
+              onConfirm={deleteAllPatrolRuns}
+            >
+              <Button size="small" danger icon={<Trash2 size={14} />} disabled={!deletablePatrolRuns.length} loading={deletePatrolRuns.isPending}>
+                删除全部已结束
+              </Button>
+            </Popconfirm>
+          </Space>
         )}
         bordered={false}
       >
@@ -718,7 +743,7 @@ export default function Runs() {
           rowSelection={{
             selectedRowKeys: selectedPatrolRowKeys,
             onChange: setSelectedPatrolRowKeys,
-            getCheckboxProps: (run) => ({ disabled: run.status === 'running' }),
+            getCheckboxProps: (run) => ({ disabled: !isTerminalRun(run.status) }),
             preserveSelectedRowKeys: true,
           }}
           locale={{ emptyText: <Empty description="暂无自动巡检日志" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}

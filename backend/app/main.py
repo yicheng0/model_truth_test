@@ -1451,15 +1451,10 @@ def cancel_run_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, st
     return {"status": run.status}
 
 
-@app.delete("/api/runs/{run_id}")
-def delete_run(
-    run_id: str,
-    _admin: None = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> dict[str, bool]:
+def _delete_run_by_id(db: Session, run_id: str) -> bool:
     run = db.get(Run, run_id)
     if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+        return False
     if run.status == "running":
         raise HTTPException(status_code=409, detail="Running runs must be canceled before deletion")
     source_snapshots = list(db.scalars(select(BaselineSnapshot).where(BaselineSnapshot.source_run_id == run_id)).all())
@@ -1467,6 +1462,7 @@ def delete_run(
         conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
         if conflict:
             raise HTTPException(status_code=409, detail=conflict)
+    db.execute(delete(ChannelAlert).where(ChannelAlert.run_id == run_id))
     db.execute(delete(RunChannel).where(RunChannel.run_id == run_id))
     db.execute(delete(Result).where(Result.run_id == run_id))
     db.execute(delete(Comparison).where(Comparison.run_id == run_id))
@@ -1475,6 +1471,40 @@ def delete_run(
         db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
         db.delete(snapshot)
     db.delete(run)
+    return True
+
+
+@app.post("/api/runs/bulk-delete")
+def bulk_delete_runs(
+    data: BulkDeleteRequest,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    if not data.ids:
+        return {"deleted": 0, "missing": [], "failed": {}}
+    deleted = 0
+    missing: list[str] = []
+    failed: dict[str, str] = {}
+    for run_id in dict.fromkeys(str(item).strip() for item in data.ids if str(item).strip()):
+        try:
+            if _delete_run_by_id(db, run_id):
+                deleted += 1
+            else:
+                missing.append(run_id)
+        except HTTPException as exc:
+            failed[run_id] = str(exc.detail)
+    db.commit()
+    return {"deleted": deleted, "missing": missing, "failed": failed}
+
+
+@app.delete("/api/runs/{run_id}")
+def delete_run(
+    run_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    if not _delete_run_by_id(db, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
     db.commit()
     return {"deleted": True}
 

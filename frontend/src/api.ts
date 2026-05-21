@@ -237,6 +237,7 @@ export const api = {
     request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
   cancelRun: (id: string) => request<{ status: string }>(`/api/runs/${id}/cancel`, { method: 'POST' }),
   deleteRun: (id: string) => request<{ deleted: boolean }>(`/api/runs/${id}`, { method: 'DELETE', headers: adminHeaders() }),
+  deleteRuns: (ids: string[]) => request<{ deleted: number; missing: string[]; failed: Record<string, string> }>('/api/runs/bulk-delete', { method: 'POST', headers: adminHeaders(), body: JSON.stringify({ ids }) }),
   runProgress: (id: string) => request<{ percent: number; status: string; completed_jobs: number; total_jobs: number }>(`/api/runs/${id}/progress`),
   results: (runId: string) => request<Result[]>(`/api/runs/${runId}/raw-results`),
   comparisons: (runId: string) => request<Comparison[]>(`/api/runs/${runId}/comparisons`),

@@ -121,6 +121,37 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('bulk deletes runs with the admin key', async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+      removeItem: (key: string) => {
+        storage.delete(key);
+      },
+    });
+    setAdminApiKey('test-admin-key');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ deleted: 2, missing: [], failed: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.deleteRuns(['run_1', 'run_2']);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/runs/bulk-delete',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ 'X-Admin-Key': 'test-admin-key' }),
+        body: JSON.stringify({ ids: ['run_1', 'run_2'] }),
+      }),
+    );
+    setAdminApiKey('');
+    vi.unstubAllGlobals();
+    fetchMock.mockRestore();
+  });
+
   it('updates channel taxonomy settings with the expected endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

@@ -1061,6 +1061,60 @@ def test_alert_bulk_delete_returns_deleted_count_and_missing_ids() -> None:
         assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.id.in_(alert_ids))) == 0
 
 
+def test_run_delete_removes_linked_alerts() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+    with SessionLocal() as db:
+        report_id = db.scalar(select(Report.id).where(Report.run_id == run_id))
+        assert report_id is not None
+        assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.run_id == run_id)) == 1
+
+    with TestClient(app) as client:
+        response = client.delete(f"/api/runs/{run_id}", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True}
+    with SessionLocal() as db:
+        assert db.get(Run, run_id) is None
+        assert db.get(Report, report_id) is None
+        assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.run_id == run_id)) == 0
+
+
+def test_run_bulk_delete_returns_deleted_missing_and_failed() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    first_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    second_run_id = create_report_for_schedule(schedule, grade="D", score=60, labels=["protocol_drift"])
+    asyncio.run(create_alerts_for_run(SessionLocal, first_run_id, schedule["id"]))
+    with SessionLocal() as db:
+        second_run = db.get(Run, second_run_id)
+        assert second_run is not None
+        second_run.status = "running"
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runs/bulk-delete",
+            json={"ids": [first_run_id, second_run_id, "missing_run"]},
+            headers=ADMIN_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == 1
+    assert response.json()["missing"] == ["missing_run"]
+    assert response.json()["failed"] == {second_run_id: "Running runs must be canceled before deletion"}
+    with SessionLocal() as db:
+        assert db.get(Run, first_run_id) is None
+        assert db.get(Run, second_run_id) is not None
+        assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.run_id == first_run_id)) == 0
+
+
 def test_report_compare_rejects_mixed_modes() -> None:
     reset_database()
     with TestClient(app) as client:
