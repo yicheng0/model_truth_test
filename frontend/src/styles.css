@@ -1988,6 +1988,60 @@ textarea:focus-visible,
   background: rgba(22, 119, 255, 0.08) !important;
 }
 
+.claude-probe-table .ant-table-thead > tr > th,
+.claude-probe-table .ant-table-tbody > tr > td {
+  padding: 8px 10px !important;
+}
+
+.claude-probe-empty {
+  display: inline-block;
+  min-width: 10px;
+}
+
+.claude-probe-name {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.claude-probe-title {
+  min-width: 0;
+  max-width: 52%;
+  flex: 0 1 auto;
+}
+
+.claude-probe-key {
+  min-width: 0;
+  max-width: 48%;
+  flex: 1 1 auto;
+  font-family: "Fira Code", "Consolas", monospace;
+  font-size: 12px;
+}
+
+.claude-probe-id-stack {
+  width: 100%;
+  min-width: 0;
+}
+
+.claude-probe-id,
+.claude-probe-evidence {
+  max-width: 100%;
+}
+
+.claude-probe-tags {
+  max-width: 100%;
+}
+
+.claude-probe-tag.ant-tag {
+  max-width: 116px;
+  margin-inline-end: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
 .claude-multimodal-stack {
   display: grid;
   gap: 16px;
@@ -3040,6 +3094,7 @@ textarea:focus-visible,
   color: #172033;
   overflow-wrap: anywhere;
 }
+
 .patrol-focused-row > td {
   background: #fff6df !important;
 }

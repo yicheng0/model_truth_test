@@ -74,48 +74,70 @@ function sectionPercent(section: ClaudeCodeSection) {
   return Math.round((section.pass_count / section.probe_count) * 100);
 }
 
+function EmptyProbeValue() {
+  return <Typography.Text type="secondary" className="claude-probe-empty">-</Typography.Text>;
+}
+
+function ProbeNameCell({ title, probeKey }: { title: string; probeKey: string }) {
+  return (
+    <div className="claude-probe-name">
+      <Typography.Text strong className="claude-probe-title" ellipsis={{ tooltip: title }}>{title}</Typography.Text>
+      <Typography.Text type="secondary" className="claude-probe-key" ellipsis={{ tooltip: probeKey }}>{probeKey}</Typography.Text>
+    </div>
+  );
+}
+
 function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
   return (
     <Table<ClaudeCodeProbeResult>
+      className="claude-probe-table"
       rowKey="key"
       dataSource={probes}
       pagination={false}
       size="small"
-      scroll={{ x: 1180 }}
+      scroll={{ x: 980 }}
       columns={[
         {
           title: '测试项',
-          width: 220,
-          render: (_, item) => (
-            <Space direction="vertical" size={2}>
-              <Typography.Text strong>{item.title}</Typography.Text>
-              <Typography.Text type="secondary">{item.key}</Typography.Text>
-            </Space>
-          ),
+          width: 260,
+          render: (_, item) => <ProbeNameCell title={item.title} probeKey={item.key} />,
         },
-        { title: '结果', dataIndex: 'status', width: 100, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
-        { title: '权重', dataIndex: 'severity', width: 110, render: (value: string) => <Tag>{value}</Tag> },
-        { title: '分数', dataIndex: 'score', width: 90 },
+        { title: '结果', dataIndex: 'status', width: 82, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
+        { title: '权重', dataIndex: 'severity', width: 74, render: (value: string) => <Tag>{value}</Tag> },
+        { title: '分数', dataIndex: 'score', width: 64 },
         {
           title: 'Message / Request',
-          width: 260,
-          render: (_, item) => (
-            <Space direction="vertical" size={2}>
-              <Typography.Text copyable={item.message_id ? { text: item.message_id } : false}>{item.message_id || '-'}</Typography.Text>
-              <Typography.Text type="secondary" copyable={item.request_id ? { text: item.request_id } : false}>{item.request_id || '-'}</Typography.Text>
-            </Space>
-          ),
+          width: 150,
+          render: (_, item) => {
+            const rows = [
+              item.message_id ? (
+                <Typography.Text key="message" className="claude-probe-id" copyable={{ text: item.message_id }} ellipsis={{ tooltip: item.message_id }}>
+                  {item.message_id}
+                </Typography.Text>
+              ) : null,
+              item.request_id ? (
+                <Typography.Text key="request" type="secondary" className="claude-probe-id" copyable={{ text: item.request_id }} ellipsis={{ tooltip: item.request_id }}>
+                  {item.request_id}
+                </Typography.Text>
+              ) : null,
+            ].filter(Boolean);
+            return rows.length ? <Space direction="vertical" size={0} className="claude-probe-id-stack">{rows}</Space> : <EmptyProbeValue />;
+          },
         },
         {
           title: '标签',
-          width: 240,
-          render: (_, item) => item.labels.length ? item.labels.map((label) => <Tag key={label} color="orange">{label}</Tag>) : '-',
+          width: 140,
+          render: (_, item) => item.labels.length ? (
+            <Space size={[4, 4]} wrap className="claude-probe-tags">
+              {item.labels.map((label) => <Tag key={label} color="orange" className="claude-probe-tag" title={label}>{label}</Tag>)}
+            </Space>
+          ) : <EmptyProbeValue />,
         },
         {
           title: '证据摘要',
           dataIndex: 'evidence_excerpt',
-          width: 360,
-          render: (value: string | null | undefined) => <Typography.Text ellipsis={{ tooltip: value || undefined }}>{value || '-'}</Typography.Text>,
+          width: 300,
+          render: (value: string | null | undefined) => value ? <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: value }}>{value}</Typography.Text> : <EmptyProbeValue />,
         },
       ]}
     />
@@ -133,13 +155,8 @@ function JobProbeTable({ probes, currentKey }: { probes: ClaudeCodeJobProbe[]; c
       columns={[
         {
           title: '测试项',
-          width: 220,
-          render: (_, item) => (
-            <Space direction="vertical" size={2}>
-              <Typography.Text strong>{item.title}</Typography.Text>
-              <Typography.Text type="secondary">{item.key}</Typography.Text>
-            </Space>
-          ),
+          width: 260,
+          render: (_, item) => <ProbeNameCell title={item.title} probeKey={item.key} />,
         },
         { title: '状态', dataIndex: 'status', width: 110, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
         { title: '分数', dataIndex: 'score', width: 90 },
