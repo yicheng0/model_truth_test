@@ -8,6 +8,8 @@ import type {
   ChannelTaxonomySetting,
   ChannelTaxonomyUpdate,
   ClaudeCodeCheckResult,
+  ClaudeCodeHistoryDetail,
+  ClaudeCodeHistoryItem,
   ClaudeCodeJobCreate,
   ClaudeCodeJobStatus,
   ClaudeCodeCheckStatus,
@@ -173,6 +175,9 @@ export const api = {
     request<ClaudeCodeJobCreate>('/api/claude-code-test/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   claudeCodeRelayTestJob: (jobId: string) => request<ClaudeCodeJobStatus>(`/api/claude-code-test/jobs/${jobId}`),
   claudeCodeSourceChannels: () => request<ClaudeCodeSourceChannel[]>('/api/claude-code-test/source-channels'),
+  claudeCodeHistory: () => request<ClaudeCodeHistoryItem[]>('/api/claude-code-history'),
+  claudeCodeHistoryDetail: (id: string) => request<ClaudeCodeHistoryDetail>(`/api/claude-code-history/${id}`),
+  deleteClaudeCodeHistory: (id: string) => request<{ deleted: boolean }>(`/api/claude-code-history/${id}`, { method: 'DELETE', headers: adminHeaders() }),
   claudeCodeCheckStatus: () => request<ClaudeCodeCheckStatus>('/api/claude-code-check/status'),
   runClaudeCodeCheck: (payload: { model?: string | null; timeout_seconds: number; max_budget_usd: number }) =>
     request<ClaudeCodeCheckResult>('/api/claude-code-check/run', { method: 'POST', body: JSON.stringify(payload) }),

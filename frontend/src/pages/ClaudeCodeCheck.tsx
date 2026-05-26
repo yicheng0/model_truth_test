@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Descriptions, Form, Input, InputNumber, Progress, Select, Space, Statistic, Table, Tabs, Tag, Typography, message } from 'antd';
-import { Link } from 'react-router-dom';
-import { Play, RefreshCw, ShieldCheck, TerminalSquare } from 'lucide-react';
+import { Alert, Button, Card, Checkbox, Descriptions, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
-import type { ClaudeCodeCheckResult, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
+import type { ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
 
 type RelayFormValues = {
   base_url: string;
@@ -17,12 +16,6 @@ type RelayFormValues = {
   source_channel_id?: string;
   image_url?: string;
   include_expensive_context?: boolean;
-};
-
-type CliFormValues = {
-  model?: string;
-  timeout_seconds: number;
-  max_budget_usd: number;
 };
 
 const SECTION_DESCRIPTIONS: Record<string, string> = {
@@ -61,21 +54,10 @@ function riskColor(value?: string) {
   return 'default';
 }
 
-function resultAlertType(result: ClaudeCodeCheckResult): 'success' | 'warning' | 'error' {
-  if (result.ok) return 'success';
-  if (result.score >= 65) return 'warning';
-  return 'error';
-}
-
 function relayAlertType(result: ClaudeCodeTestResult): 'success' | 'warning' | 'error' {
   if (result.risk_level === 'low' || result.risk_level === 'medium') return 'success';
   if (result.risk_level === 'high') return 'warning';
   return 'error';
-}
-
-function excerptBlock(value?: string | null) {
-  if (!value?.trim()) return null;
-  return <pre className="json-block">{value}</pre>;
 }
 
 function probeCounts(probes: ClaudeCodeProbeResult[]) {
@@ -171,29 +153,225 @@ function JobProbeTable({ probes, currentKey }: { probes: ClaudeCodeJobProbe[]; c
   );
 }
 
+function probeDiagnosis(item: { status: string; labels?: string[]; evidence_excerpt?: string | null }) {
+  if (item.status === 'pass') return '测试通过，模型正确处理了该类输入。';
+  if (item.labels?.includes('request_failed')) return '请求被上游直接拒绝，优先检查该通道是否接受此类多模态请求体。';
+  if (item.labels?.includes('regex_keypoint_missing')) return '模型没有真正读到图片内容，更像把这次请求当成普通文本对话处理。';
+  if (item.labels?.some((label) => label.startsWith('missing:'))) return '模型返回了文字说明，但没有命中文档 marker，说明文档输入未按预期生效。';
+  return item.evidence_excerpt || '需要结合原始返回继续判断该通道的多模态兼容性。';
+}
+
+function PreviewPanel({ probe }: { probe: ClaudeCodeProbeResult | ClaudeCodeJobProbe }) {
+  const preview = probe.input_preview;
+  if (!preview) return null;
+  return (
+    <Space direction="vertical" size={12} className="full-width">
+      <div>
+        <Typography.Text strong>{preview.title}</Typography.Text>
+        {preview.summary ? <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>{preview.summary}</Typography.Paragraph> : null}
+      </div>
+      {preview.image_data_url ? <img className="claude-preview-image" src={preview.image_data_url} alt={preview.title} /> : null}
+      {preview.default_image_url ? (
+        <Space direction="vertical" size={8} className="full-width">
+          <img className="claude-preview-image" src={preview.default_image_url} alt="默认测试图" />
+          <Typography.Text type="secondary">默认测试图 URL</Typography.Text>
+          <Typography.Text copyable>{preview.default_image_url}</Typography.Text>
+        </Space>
+      ) : null}
+      {preview.actual_image_url ? (
+        <div>
+          <Typography.Text type="secondary">本次请求实际 URL</Typography.Text>
+          <div><Typography.Text copyable>{preview.actual_image_url}</Typography.Text></div>
+        </div>
+      ) : null}
+      {preview.document_marker ? (
+        <Space direction="vertical" size={8} className="full-width">
+          <Tag color="blue">{preview.document_marker}</Tag>
+          {preview.document_text ? <pre className="claude-preview-doc">{preview.document_text}</pre> : null}
+        </Space>
+      ) : null}
+    </Space>
+  );
+}
+
+function MultimodalProbeCards({ probes, currentKey }: { probes: Array<ClaudeCodeProbeResult | ClaudeCodeJobProbe>; currentKey?: string | null }) {
+  return (
+    <div className="claude-multimodal-stack">
+      {probes.map((probe) => (
+        <Card key={probe.key} bordered={false} className={probe.key === currentKey ? 'claude-multimodal-card claude-multimodal-card-active' : 'claude-multimodal-card'}>
+          <div className="claude-multimodal-layout">
+            <div className="claude-multimodal-diagnosis">
+              <Space direction="vertical" size={12} className="full-width">
+                <Space wrap>
+                  <Typography.Text strong>{probe.title}</Typography.Text>
+                  <Tag color={statusColor(probe.status)}>{statusLabel(probe.status)}</Tag>
+                  {'severity' in probe && probe.severity ? <Tag>{probe.severity}</Tag> : null}
+                  <Tag>得分 {probe.score}</Tag>
+                </Space>
+                <Typography.Paragraph>{probeDiagnosis(probe)}</Typography.Paragraph>
+                {probe.labels?.length ? <Space wrap>{probe.labels.map((label) => <Tag key={label} color="orange">{label}</Tag>)}</Space> : null}
+                <Descriptions bordered size="small" column={1}>
+                  <Descriptions.Item label="Message ID">{probe.message_id || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="Request ID">{probe.request_id || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="证据摘要">{probe.evidence_excerpt || ('detail' in probe ? probe.detail || '-' : '-')}</Descriptions.Item>
+                </Descriptions>
+              </Space>
+            </div>
+            <div className="claude-multimodal-preview">
+              <PreviewPanel probe={probe} />
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; meta?: ClaudeCodeHistoryDetail | null }) {
+  const allCounts = probeCounts(result.probes ?? []);
+  return (
+    <Space direction="vertical" size={18} className="full-width">
+      {meta ? (
+        <Alert
+          type="info"
+          showIcon
+          message={`历史证据 · ${meta.channel_label}`}
+          description={`保存于 ${meta.created_at ? formatDateTime(meta.created_at) : '-'}，Base URL ${meta.base_url}`}
+        />
+      ) : null}
+      <Alert
+        type={relayAlertType(result)}
+        showIcon
+        message={(
+          <Space wrap>
+            <span>{meta ? '历史检测结果' : '检测完成'}</span>
+            <Tag color={riskColor(result.risk_level)}>风险 {result.risk_level}</Tag>
+            <Tag color={result.ok ? 'green' : 'red'}>得分 {result.score}</Tag>
+          </Space>
+        )}
+        description={result.summary}
+      />
+      <div className="signature-sim-grid">
+        <Card bordered={false}><Statistic title="通过" value={allCounts.pass} valueStyle={{ color: '#15803d' }} /></Card>
+        <Card bordered={false}><Statistic title="失败" value={allCounts.fail} valueStyle={{ color: '#b91c1c' }} /></Card>
+        <Card bordered={false}><Statistic title="警告" value={allCounts.warning} valueStyle={{ color: '#c2410c' }} /></Card>
+        <Card bordered={false}><Statistic title="跳过" value={allCounts.skipped} /></Card>
+      </div>
+      <div className="claude-section-grid">
+        {(result.sections ?? []).map((section: ClaudeCodeSection) => (
+          <Card key={section.key} bordered={false} className="claude-section-card">
+            <Space direction="vertical" size={10} className="full-width">
+              <Space wrap className="claude-section-card-head">
+                <Typography.Text strong>{section.title}</Typography.Text>
+                <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
+                <Tag>得分 {section.score}</Tag>
+              </Space>
+              <Typography.Text type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Text>
+              <Progress percent={sectionPercent(section)} size="small" showInfo={false} status={section.status === 'fail' ? 'exception' : 'normal'} />
+              <Space wrap size={[6, 6]}>
+                <Tag color="green">通过 {section.pass_count}</Tag>
+                <Tag color="red">失败 {section.fail_count}</Tag>
+                <Tag color="orange">警告 {section.warning_count}</Tag>
+                <Tag>跳过 {section.skipped_count}</Tag>
+              </Space>
+            </Space>
+          </Card>
+        ))}
+      </div>
+      {(result.sections ?? []).map((section: ClaudeCodeSection) => {
+        const probes = section.probes ?? [];
+        return (
+          <Card
+            key={section.key}
+            title={(
+              <Space wrap>
+                <span>{section.title}</span>
+                <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
+                <Tag color="green">通过 {section.pass_count}</Tag>
+                <Tag color="red">失败 {section.fail_count}</Tag>
+                <Tag color="orange">警告 {section.warning_count}</Tag>
+                <Tag>得分 {section.score}</Tag>
+              </Space>
+            )}
+            bordered={false}
+          >
+            <Typography.Paragraph type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Paragraph>
+            {section.key === 'multimodal' ? <MultimodalProbeCards probes={probes} /> : <ProbeTable probes={probes} />}
+          </Card>
+        );
+      })}
+    </Space>
+  );
+}
+
+function HistoryCard({
+  item,
+  selected,
+  deleting,
+  onSelect,
+  onDelete,
+}: {
+  item: ClaudeCodeHistoryItem;
+  selected: boolean;
+  deleting: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <Card bordered size="small" className={selected ? 'claude-history-card claude-history-card-active' : 'claude-history-card'}>
+      <Space direction="vertical" size={10} className="full-width">
+        <Space wrap>
+          <Typography.Text strong>{item.model_name}</Typography.Text>
+          <Tag color={riskColor(item.risk_level)}>{item.risk_level}</Tag>
+          <Tag color={item.ok ? 'green' : 'red'}>{item.score}</Tag>
+        </Space>
+        <Typography.Text type="secondary">{item.channel_label}</Typography.Text>
+        <Typography.Text ellipsis={{ tooltip: item.base_url }}>{item.base_url}</Typography.Text>
+        <Typography.Text type="secondary">{item.created_at ? formatDateTime(item.created_at) : '-'}</Typography.Text>
+        <Space wrap>
+          <Tag color="red">失败 {item.fail_count}</Tag>
+          <Tag color="orange">警告 {item.warning_count}</Tag>
+          <Tag>总项 {item.probe_count}</Tag>
+        </Space>
+        <Typography.Paragraph type="secondary" ellipsis={{ rows: 2, tooltip: item.summary || undefined }} style={{ marginBottom: 0 }}>
+          {item.summary || '无摘要'}
+        </Typography.Paragraph>
+        <Space wrap>
+          <Button size="small" onClick={onSelect}>查看证据</Button>
+          <Popconfirm
+            title="删除 ClaudeCode 历史"
+            description="只会删除这条证据快照，不影响渠道或其它报告。确定删除吗？"
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            onConfirm={onDelete}
+          >
+            <Button size="small" danger icon={<Trash2 size={14} />} loading={deleting}>删除</Button>
+          </Popconfirm>
+        </Space>
+      </Space>
+    </Card>
+  );
+}
+
 export default function ClaudeCodeCheck() {
   const [relayForm] = Form.useForm<RelayFormValues>();
-  const [cliForm] = Form.useForm<CliFormValues>();
   const [relayResult, setRelayResult] = useState<ClaudeCodeTestResult | null>(null);
-  const [cliResult, setCliResult] = useState<ClaudeCodeCheckResult | null>(null);
   const [relayJobId, setRelayJobId] = useState<string | null>(null);
-  const [cliJobId, setCliJobId] = useState<string | null>(null);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
+  const [deletingHistoryId, setDeletingHistoryId] = useState<string | null>(null);
 
   const sources = useQuery<ClaudeCodeSourceChannel[]>({ queryKey: ['claudeCodeSourceChannels'], queryFn: api.claudeCodeSourceChannels });
-  const status = useQuery({ queryKey: ['claudeCodeCheckStatus'], queryFn: api.claudeCodeCheckStatus });
+  const history = useQuery<ClaudeCodeHistoryItem[]>({ queryKey: ['claudeCodeHistory'], queryFn: api.claudeCodeHistory });
+  const historyDetail = useQuery<ClaudeCodeHistoryDetail>({
+    queryKey: ['claudeCodeHistoryDetail', selectedHistoryId],
+    queryFn: () => api.claudeCodeHistoryDetail(selectedHistoryId!),
+    enabled: Boolean(selectedHistoryId),
+  });
   const relayJob = useQuery<ClaudeCodeJobStatus>({
     queryKey: ['claudeCodeRelayJob', relayJobId],
     queryFn: () => api.claudeCodeRelayTestJob(relayJobId!),
     enabled: Boolean(relayJobId),
-    refetchInterval: (query) => {
-      const payload = query.state.data;
-      return payload && (payload.status === 'completed' || payload.status === 'failed') ? false : 1000;
-    },
-  });
-  const cliJob = useQuery<ClaudeCodeJobStatus>({
-    queryKey: ['claudeCodeCliJob', cliJobId],
-    queryFn: () => api.claudeCodeCheckJob(cliJobId!),
-    enabled: Boolean(cliJobId),
     refetchInterval: (query) => {
       const payload = query.state.data;
       return payload && (payload.status === 'completed' || payload.status === 'failed') ? false : 1000;
@@ -213,25 +391,13 @@ export default function ClaudeCodeCheck() {
     if (!payload) return;
     if (payload.status === 'completed' && payload.result) {
       setRelayResult(payload.result as ClaudeCodeTestResult);
-      message.success('ClaudeCode 中转检测完成');
+      setSelectedHistoryId(null);
+      void history.refetch();
+      message.success('ClaudeCode 中转检测完成，证据已保存');
     } else if (payload.status === 'failed' && payload.error) {
       message.error(payload.error);
     }
-  }, [relayJob.data]);
-
-  useEffect(() => {
-    const payload = cliJob.data;
-    if (!payload) return;
-    if (payload.status === 'completed' && payload.result) {
-      setCliResult(payload.result as ClaudeCodeCheckResult);
-      void status.refetch();
-      const result = payload.result as ClaudeCodeCheckResult;
-      if (result.ok) message.success('Claude Code CLI 自检通过');
-      else message.warning('Claude Code CLI 自检未通过');
-    } else if (payload.status === 'failed' && payload.error) {
-      message.error(payload.error);
-    }
-  }, [cliJob.data, status]);
+  }, [relayJob.data, history]);
 
   const runRelayTest = useMutation({
     mutationFn: (values: RelayFormValues) => {
@@ -247,41 +413,30 @@ export default function ClaudeCodeCheck() {
       };
       return api.startClaudeCodeRelayTestJob(payload);
     },
-    onSuccess: (payload) => {
-      setRelayJobId(payload.job_id);
-    },
+    onSuccess: (payload) => setRelayJobId(payload.job_id),
     onError: (error) => message.error(getErrorMessage(error)),
   });
 
-  const runCliCheck = useMutation({
-    mutationFn: api.startClaudeCodeCheckJob,
-    onSuccess: (payload) => {
-      setCliJobId(payload.job_id);
+  const deleteHistory = useMutation({
+    mutationFn: api.deleteClaudeCodeHistory,
+    onSuccess: async (_, id) => {
+      message.success('历史记录已删除');
+      if (selectedHistoryId === id) setSelectedHistoryId(null);
+      await history.refetch();
     },
     onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: () => setDeletingHistoryId(null),
   });
 
   function submitRelay(values: RelayFormValues) {
     setRelayResult(null);
     setRelayJobId(null);
+    setSelectedHistoryId(null);
     runRelayTest.mutate(values);
   }
 
-  function submitCli(values: CliFormValues) {
-    setCliResult(null);
-    setCliJobId(null);
-    runCliCheck.mutate({
-      model: values.model?.trim() || null,
-      timeout_seconds: values.timeout_seconds,
-      max_budget_usd: values.max_budget_usd,
-    });
-  }
-
-  const statusData = status.data;
-  const canRunCli = Boolean(statusData?.available) && !runCliCheck.isPending && cliJob.data?.status !== 'running';
-  const allCounts = probeCounts(relayResult?.probes ?? []);
   const relayRunning = runRelayTest.isPending || relayJob.data?.status === 'queued' || relayJob.data?.status === 'running';
-  const cliRunning = runCliCheck.isPending || cliJob.data?.status === 'queued' || cliJob.data?.status === 'running';
+  const activeResult = selectedHistoryId ? historyDetail.data?.result_payload ?? null : relayResult;
 
   return (
     <Space direction="vertical" size={24} className="page-stack">
@@ -296,306 +451,149 @@ export default function ClaudeCodeCheck() {
         <Tag color="blue">临时凭据不落库</Tag>
       </div>
 
-      <Tabs
-        defaultActiveKey="relay"
-        items={[
-          {
-            key: 'relay',
-            label: '中转接口检测',
-            children: (
+      <div className="claude-page-layout">
+        <main className="claude-main-pane">
+          <Space direction="vertical" size={18} className="full-width">
+            <Card title={<span className="card-title-with-icon"><ShieldCheck size={18} />接口配置</span>} bordered={false}>
+              <Form
+                form={relayForm}
+                layout="vertical"
+                initialValues={{ provider_type: 'third_party_anthropic', request_protocol: 'auto', include_expensive_context: false }}
+                onFinish={submitRelay}
+              >
+                <div className="signature-config-grid">
+                  <Form.Item name="base_url" label="Base URL" rules={[{ required: true, message: '请输入 Base URL' }]}>
+                    <Input placeholder="https://relay.example/v1 或 https://relay.example/v1/messages" />
+                  </Form.Item>
+                  <Form.Item name="api_key" label="API Key" rules={[{ required: true, message: '请输入 API Key' }]}>
+                    <Input.Password placeholder="仅本次检测使用，不保存" autoComplete="off" />
+                  </Form.Item>
+                  <Form.Item name="model_name" label="模型名" rules={[{ required: true, message: '请输入模型名' }]}>
+                    <Input placeholder="claude-sonnet-4-5" />
+                  </Form.Item>
+                  <Form.Item name="request_protocol" label="请求协议">
+                    <Select
+                      options={[
+                        { value: 'auto', label: '自动探测' },
+                        { value: 'anthropic_messages', label: 'Anthropic Messages' },
+                        { value: 'openai_chat_completions', label: 'OpenAI Chat Completions' },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item name="provider_type" label="接口类型">
+                    <Select
+                      options={[
+                        { value: 'third_party_anthropic', label: 'Anthropic 兼容中转' },
+                        { value: 'third_party_openai_compatible', label: 'OpenAI 兼容中转' },
+                        { value: 'anthropic', label: 'Anthropic 官方' },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item name="source_channel_id" label="Signature Source 渠道">
+                    <Select allowClear loading={sources.isLoading} placeholder="可选；不选则自动找参考渠道" options={referenceOptions} />
+                  </Form.Item>
+                  <Form.Item name="image_url" label="图片 URL">
+                    <Input placeholder="可选；留空使用默认红色测试图" />
+                  </Form.Item>
+                </div>
+                <Space wrap>
+                  <Form.Item name="include_expensive_context" valuePropName="checked" style={{ marginBottom: 0 }}>
+                    <Checkbox>启用扩展上下文阶梯</Checkbox>
+                  </Form.Item>
+                  <Button type="primary" htmlType="submit" icon={<Play size={16} />} loading={runRelayTest.isPending}>
+                    开始 ClaudeCode 检测
+                  </Button>
+                  <Typography.Text type="secondary">API Key 只随本次请求发送，后端不写入渠道配置。</Typography.Text>
+                  <Typography.Text type="secondary">检测完成后会自动保存为右侧历史证据。</Typography.Text>
+                </Space>
+              </Form>
+            </Card>
+
+            {relayRunning && relayJob.data ? (
+              <Card bordered={false}>
+                <Space direction="vertical" size={12} className="full-width">
+                  <Typography.Text strong>正在运行中转接口组合检测</Typography.Text>
+                  <Progress percent={relayJob.data.percent} status="active" />
+                  <Typography.Text type="secondary">
+                    当前测试：{relayJob.data.current_title || '准备中'}，已完成 {relayJob.data.completed_count} / {relayJob.data.total_count}
+                  </Typography.Text>
+                </Space>
+              </Card>
+            ) : null}
+
+            {relayJob.data ? (
               <Space direction="vertical" size={18} className="full-width">
-                <Card title={<span className="card-title-with-icon"><ShieldCheck size={18} />接口配置</span>} bordered={false}>
-                  <Form
-                    form={relayForm}
-                    layout="vertical"
-                    initialValues={{ provider_type: 'third_party_anthropic', request_protocol: 'auto', include_expensive_context: false }}
-                    onFinish={submitRelay}
+                <div className="claude-section-grid">
+                  {(relayJob.data.sections ?? []).map((section) => (
+                    <Card key={section.key} bordered={false} className="claude-section-card">
+                      <Space direction="vertical" size={10} className="full-width">
+                        <Space wrap className="claude-section-card-head">
+                          <Typography.Text strong>{section.title}</Typography.Text>
+                          <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
+                          <Tag>得分 {section.score}</Tag>
+                        </Space>
+                        <Typography.Text type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Text>
+                        <Progress percent={section.probe_count ? Math.round((section.pass_count / section.probe_count) * 100) : 0} size="small" showInfo={false} status={section.status === 'fail' ? 'exception' : section.status === 'running' ? 'active' : 'normal'} />
+                        <Space wrap size={[6, 6]}>
+                          <Tag color="green">通过 {section.pass_count}</Tag>
+                          <Tag color="red">失败 {section.fail_count}</Tag>
+                          <Tag color="orange">警告 {section.warning_count}</Tag>
+                          <Tag>跳过 {section.skipped_count}</Tag>
+                        </Space>
+                      </Space>
+                    </Card>
+                  ))}
+                </div>
+                {(relayJob.data.sections ?? []).map((section) => (
+                  <Card
+                    key={section.key}
+                    title={(
+                      <Space wrap>
+                        <span>{section.title}</span>
+                        <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
+                      </Space>
+                    )}
+                    bordered={false}
                   >
-                    <div className="signature-config-grid">
-                      <Form.Item name="base_url" label="Base URL" rules={[{ required: true, message: '请输入 Base URL' }]}>
-                        <Input placeholder="https://relay.example/v1 或 https://relay.example/v1/messages" />
-                      </Form.Item>
-                      <Form.Item name="api_key" label="API Key" rules={[{ required: true, message: '请输入 API Key' }]}>
-                        <Input.Password placeholder="仅本次检测使用，不保存" autoComplete="off" />
-                      </Form.Item>
-                      <Form.Item name="model_name" label="模型名" rules={[{ required: true, message: '请输入模型名' }]}>
-                        <Input placeholder="claude-sonnet-4-5" />
-                      </Form.Item>
-                      <Form.Item name="request_protocol" label="请求协议">
-                        <Select
-                          options={[
-                            { value: 'auto', label: '自动探测' },
-                            { value: 'anthropic_messages', label: 'Anthropic Messages' },
-                            { value: 'openai_chat_completions', label: 'OpenAI Chat Completions' },
-                          ]}
-                        />
-                      </Form.Item>
-                      <Form.Item name="provider_type" label="接口类型">
-                        <Select
-                          options={[
-                            { value: 'third_party_anthropic', label: 'Anthropic 兼容中转' },
-                            { value: 'third_party_openai_compatible', label: 'OpenAI 兼容中转' },
-                            { value: 'anthropic', label: 'Anthropic 官方' },
-                          ]}
-                        />
-                      </Form.Item>
-                      <Form.Item name="source_channel_id" label="Signature Source 渠道">
-                        <Select allowClear loading={sources.isLoading} placeholder="可选；不选则自动找参考渠道" options={referenceOptions} />
-                      </Form.Item>
-                      <Form.Item name="image_url" label="图片 URL">
-                        <Input placeholder="可选；留空使用默认红色测试图" />
-                      </Form.Item>
-                    </div>
-                    <Space wrap>
-                      <Form.Item name="include_expensive_context" valuePropName="checked" style={{ marginBottom: 0 }}>
-                        <Checkbox>启用扩展上下文阶梯</Checkbox>
-                      </Form.Item>
-                      <Button type="primary" htmlType="submit" icon={<Play size={16} />} loading={runRelayTest.isPending}>
-                        开始 ClaudeCode 检测
-                      </Button>
-                      <Typography.Text type="secondary">API Key 只随本次请求发送，后端不写入渠道配置。</Typography.Text>
-                      <Typography.Text type="secondary">Source 渠道只用于 signature interop，不会覆盖待测 URL/Key。</Typography.Text>
-                    </Space>
-                  </Form>
-                </Card>
-
-                {relayRunning && relayJob.data ? (
-                  <Card bordered={false}>
-                    <Space direction="vertical" size={12} className="full-width">
-                      <Typography.Text strong>正在运行中转接口组合检测</Typography.Text>
-                      <Progress percent={relayJob.data.percent} status="active" />
-                      <Typography.Text type="secondary">
-                        当前测试：{relayJob.data.current_title || '准备中'}，已完成 {relayJob.data.completed_count} / {relayJob.data.total_count}
-                      </Typography.Text>
-                    </Space>
+                    <Typography.Paragraph type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Paragraph>
+                    {section.key === 'multimodal'
+                      ? <MultimodalProbeCards probes={section.probes} currentKey={relayJob.data?.current_key} />
+                      : <JobProbeTable probes={section.probes} currentKey={relayJob.data?.current_key} />}
                   </Card>
-                ) : null}
-
-                {relayJob.data ? (
-                  <Space direction="vertical" size={18} className="full-width">
-                    <div className="claude-section-grid">
-                      {(relayJob.data.sections ?? []).map((section) => (
-                        <Card key={section.key} bordered={false} className="claude-section-card">
-                          <Space direction="vertical" size={10} className="full-width">
-                            <Space wrap className="claude-section-card-head">
-                              <Typography.Text strong>{section.title}</Typography.Text>
-                              <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
-                              <Tag>得分 {section.score}</Tag>
-                            </Space>
-                            <Typography.Text type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Text>
-                            <Progress percent={section.probe_count ? Math.round((section.pass_count / section.probe_count) * 100) : 0} size="small" showInfo={false} status={section.status === 'fail' ? 'exception' : section.status === 'running' ? 'active' : 'normal'} />
-                            <Space wrap size={[6, 6]}>
-                              <Tag color="green">通过 {section.pass_count}</Tag>
-                              <Tag color="red">失败 {section.fail_count}</Tag>
-                              <Tag color="orange">警告 {section.warning_count}</Tag>
-                              <Tag>跳过 {section.skipped_count}</Tag>
-                            </Space>
-                          </Space>
-                        </Card>
-                      ))}
-                    </div>
-                    {(relayJob.data.sections ?? []).map((section) => (
-                      <Card
-                        key={section.key}
-                        title={(
-                          <Space wrap>
-                            <span>{section.title}</span>
-                            <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
-                          </Space>
-                        )}
-                        bordered={false}
-                      >
-                        <Typography.Paragraph type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Paragraph>
-                        <JobProbeTable probes={section.probes} currentKey={relayJob.data?.current_key} />
-                      </Card>
-                    ))}
-                  </Space>
-                ) : null}
-
-                {relayResult ? (
-                  <Space direction="vertical" size={18} className="full-width">
-                    <Alert
-                      type={relayAlertType(relayResult)}
-                      showIcon
-                      message={(
-                        <Space wrap>
-                          <span>检测完成</span>
-                          <Tag color={riskColor(relayResult.risk_level)}>风险 {relayResult.risk_level}</Tag>
-                          <Tag color={relayResult.ok ? 'green' : 'red'}>得分 {relayResult.score}</Tag>
-                        </Space>
-                      )}
-                      description={relayResult.summary}
-                    />
-                    <div className="signature-sim-grid">
-                      <Card bordered={false}><Statistic title="通过" value={allCounts.pass} valueStyle={{ color: '#15803d' }} /></Card>
-                      <Card bordered={false}><Statistic title="失败" value={allCounts.fail} valueStyle={{ color: '#b91c1c' }} /></Card>
-                      <Card bordered={false}><Statistic title="警告" value={allCounts.warning} valueStyle={{ color: '#c2410c' }} /></Card>
-                      <Card bordered={false}><Statistic title="跳过" value={allCounts.skipped} /></Card>
-                    </div>
-                    <div className="claude-section-grid">
-                      {(relayResult.sections ?? []).map((section: ClaudeCodeSection) => (
-                        <Card key={section.key} bordered={false} className="claude-section-card">
-                          <Space direction="vertical" size={10} className="full-width">
-                            <Space wrap className="claude-section-card-head">
-                              <Typography.Text strong>{section.title}</Typography.Text>
-                              <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
-                              <Tag>得分 {section.score}</Tag>
-                            </Space>
-                            <Typography.Text type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Text>
-                            <Progress
-                              percent={sectionPercent(section)}
-                              size="small"
-                              showInfo={false}
-                              status={section.status === 'fail' ? 'exception' : 'normal'}
-                            />
-                            <Space wrap size={[6, 6]}>
-                              <Tag color="green">通过 {section.pass_count}</Tag>
-                              <Tag color="red">失败 {section.fail_count}</Tag>
-                              <Tag color="orange">警告 {section.warning_count}</Tag>
-                              <Tag>跳过 {section.skipped_count}</Tag>
-                            </Space>
-                          </Space>
-                        </Card>
-                      ))}
-                    </div>
-                    {(relayResult.sections ?? []).map((section: ClaudeCodeSection) => {
-                      const probes = section.probes ?? [];
-                      return (
-                        <Card
-                          key={section.key}
-                          title={(
-                            <Space wrap>
-                              <span>{section.title}</span>
-                              <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
-                              <Tag color="green">通过 {section.pass_count}</Tag>
-                              <Tag color="red">失败 {section.fail_count}</Tag>
-                              <Tag color="orange">警告 {section.warning_count}</Tag>
-                              <Tag>得分 {section.score}</Tag>
-                            </Space>
-                          )}
-                          bordered={false}
-                        >
-                          <Typography.Paragraph type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Paragraph>
-                          <ProbeTable probes={probes} />
-                        </Card>
-                      );
-                    })}
-                  </Space>
-                ) : null}
+                ))}
               </Space>
-            ),
-          },
-          {
-            key: 'cli',
-            label: '本机 CLI 自检',
-            children: (
-              <Space direction="vertical" size={18} className="full-width">
-                <Card title={<span className="card-title-with-icon"><TerminalSquare size={18} />CLI 状态</span>} bordered={false}>
-                  <Space direction="vertical" size={16} className="full-width">
-                    {status.isError ? <Alert type="error" showIcon message="无法读取 Claude Code 状态" description={getErrorMessage(status.error)} /> : null}
-                    {statusData && !statusData.available ? (
-                      <Alert type="warning" showIcon message="Claude Code CLI 不可用" description={statusData.error || '请确认后端运行环境可以执行 claude --version。'} />
-                    ) : null}
-                    <Descriptions bordered size="small" column={2}>
-                      <Descriptions.Item label="命令">{statusData?.command ?? 'claude'}</Descriptions.Item>
-                      <Descriptions.Item label="版本">{statusData?.version ?? '-'}</Descriptions.Item>
-                      <Descriptions.Item label="路径" span={2}>{statusData?.command_path ?? '-'}</Descriptions.Item>
-                    </Descriptions>
-                    <Button icon={<RefreshCw size={16} />} onClick={() => status.refetch()} loading={status.isFetching}>
-                      刷新状态
-                    </Button>
-                    <Typography.Text type="secondary">
-                      这是本机 Claude Code CLI 自检，不需要 Base URL / API Key。远程中转请使用上方“中转接口检测”。
-                    </Typography.Text>
-                  </Space>
-                </Card>
+            ) : null}
 
-                <Card title="检测配置" bordered={false}>
-                  <Form form={cliForm} layout="vertical" initialValues={{ timeout_seconds: 180, max_budget_usd: 0.25 }} onFinish={submitCli}>
-                    <div className="signature-config-grid">
-                      <Form.Item name="model" label="模型别名或模型名">
-                        <Input placeholder="留空使用 Claude Code 默认模型，例如 sonnet" allowClear />
-                      </Form.Item>
-                      <Form.Item name="timeout_seconds" label="超时秒数" rules={[{ required: true, message: '请输入超时秒数' }]}>
-                        <InputNumber min={30} max={300} step={30} className="full-width" />
-                      </Form.Item>
-                      <Form.Item name="max_budget_usd" label="最大预算 USD" rules={[{ required: true, message: '请输入最大预算' }]}>
-                        <InputNumber min={0.01} max={1} step={0.01} precision={2} className="full-width" />
-                      </Form.Item>
-                    </div>
-                    <Space wrap>
-                      <Button type="primary" htmlType="submit" icon={<Play size={16} />} loading={runCliCheck.isPending} disabled={!canRunCli}>
-                        开始 CLI 自检
-                      </Button>
-                      <Typography.Text type="secondary">检测只会操作后端创建的临时目录，不会让 Claude Code 修改当前仓库。</Typography.Text>
-                    </Space>
-                  </Form>
-                </Card>
+            {historyDetail.isLoading && selectedHistoryId ? (
+              <Card bordered={false}><Typography.Text type="secondary">正在加载历史证据...</Typography.Text></Card>
+            ) : null}
+            {activeResult ? <ClaudeCodeResultView result={activeResult} meta={selectedHistoryId ? historyDetail.data : null} /> : null}
+          </Space>
+        </main>
 
-                {cliRunning && cliJob.data ? (
-                  <Card bordered={false}>
-                    <Space direction="vertical" size={12} className="full-width">
-                      <Typography.Text strong>正在运行 Claude Code 沙箱检测</Typography.Text>
-                      <Progress percent={cliJob.data.percent} status="active" />
-                      <Typography.Text type="secondary">
-                        当前步骤：{cliJob.data.current_title || '准备中'}，已完成 {cliJob.data.completed_count} / {cliJob.data.total_count}
-                      </Typography.Text>
-                    </Space>
-                  </Card>
-                ) : null}
-
-                {cliJob.data ? (
-                  <Card title="实时步骤" bordered={false}>
-                    <JobProbeTable probes={cliJob.data.checks} currentKey={cliJob.data.current_key} />
-                  </Card>
-                ) : null}
-
-                {cliResult ? (
-                  <Space direction="vertical" size={18} className="full-width">
-                    <Alert
-                      type={resultAlertType(cliResult)}
-                      showIcon
-                      message={`检测${cliResult.ok ? '通过' : '未通过'}：${cliResult.score} / 100 · Grade ${cliResult.grade}`}
-                      description={`耗时 ${cliResult.duration_ms} ms，版本 ${cliResult.version ?? '-'}。最终判定以沙箱文件变更和后端复跑测试为准。`}
-                    />
-                    <Card title="检测项" bordered={false}>
-                      <Table
-                        rowKey="key"
-                        dataSource={cliResult.checks}
-                        pagination={false}
-                        size="small"
-                        columns={[
-                          { title: '项目', dataIndex: 'title', width: 220 },
-                          { title: '状态', dataIndex: 'status', width: 100, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
-                          { title: '分数', dataIndex: 'score', width: 90 },
-                          { title: '详情', dataIndex: 'detail' },
-                        ]}
-                      />
-                    </Card>
-                    <Card title="运行信息" bordered={false}>
-                      <Descriptions bordered size="small" column={2}>
-                        <Descriptions.Item label="命令">{cliResult.command}</Descriptions.Item>
-                        <Descriptions.Item label="版本">{cliResult.version ?? '-'}</Descriptions.Item>
-                        <Descriptions.Item label="开始">{formatDateTime(cliResult.started_at)}</Descriptions.Item>
-                        <Descriptions.Item label="结束">{formatDateTime(cliResult.finished_at)}</Descriptions.Item>
-                        <Descriptions.Item label="路径" span={2}>{cliResult.command_path ?? '-'}</Descriptions.Item>
-                      </Descriptions>
-                    </Card>
-                    {cliResult.stdout_excerpt || cliResult.stderr_excerpt ? (
-                      <Card title="CLI 输出摘要" bordered={false}>
-                        <Space direction="vertical" size={16} className="full-width">
-                          {cliResult.stdout_excerpt ? <div><Typography.Text strong>stdout</Typography.Text>{excerptBlock(cliResult.stdout_excerpt)}</div> : null}
-                          {cliResult.stderr_excerpt ? <div><Typography.Text strong>stderr</Typography.Text>{excerptBlock(cliResult.stderr_excerpt)}</div> : null}
-                        </Space>
-                      </Card>
-                    ) : null}
-                  </Space>
-                ) : null}
-              </Space>
-            ),
-          },
-        ]}
-      />
+        <aside className="claude-history-pane">
+          <Card title={<span className="card-title-with-icon"><History size={18} />历史记录</span>} bordered={false}>
+            <Space direction="vertical" size={12} className="full-width">
+              {history.isError ? <Alert type="error" showIcon message="历史记录加载失败" description={getErrorMessage(history.error)} /> : null}
+              {history.isLoading ? <Typography.Text type="secondary">正在加载历史记录...</Typography.Text> : null}
+              {!history.isLoading && !(history.data?.length) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 ClaudeCode 证据历史" /> : null}
+              {(history.data ?? []).map((item) => (
+                <HistoryCard
+                  key={item.id}
+                  item={item}
+                  selected={selectedHistoryId === item.id}
+                  deleting={deletingHistoryId === item.id}
+                  onSelect={() => setSelectedHistoryId(item.id)}
+                  onDelete={() => {
+                    setDeletingHistoryId(item.id);
+                    deleteHistory.mutate(item.id);
+                  }}
+                />
+              ))}
+            </Space>
+          </Card>
+        </aside>
+      </div>
     </Space>
   );
 }

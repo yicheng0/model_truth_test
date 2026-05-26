@@ -5079,3 +5079,35 @@ def test_start_claude_code_cli_job_returns_job_id() -> None:
     payload = response.json()
     assert payload["job_id"]
     assert payload["status"] == "queued"
+
+
+def test_claude_code_multimodal_probe_payload_includes_input_preview() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    configs = _claude_code_probe_configs(None, False)
+    image_base64 = next(item for item in configs if item["key"] == "image_base64")
+    image_url = next(item for item in configs if item["key"] == "image_url")
+    document_input = next(item for item in configs if item["key"] == "document_input")
+
+    image_base64_payload = _claude_code_probe_payload(image_base64, None, {"content_text": "red"})
+    image_url_payload = _claude_code_probe_payload(image_url, None, {"content_text": "red"})
+    document_payload = _claude_code_probe_payload(document_input, None, {"content_text": "CC-DOC-742"})
+
+    assert image_base64_payload["input_preview"]["kind"] == "image_base64"
+    assert image_base64_payload["input_preview"]["image_data_url"].startswith("data:image/png;base64,")
+    assert image_url_payload["input_preview"]["kind"] == "image_url"
+    assert image_url_payload["input_preview"]["default_image_url"]
+    assert image_url_payload["input_preview"]["actual_image_url"]
+    assert document_payload["input_preview"]["kind"] == "document_text"
+    assert document_payload["input_preview"]["document_marker"] == "CC-DOC-742"
+
+
+def test_claude_code_history_list_and_missing_detail() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        listed = client.get("/api/claude-code-history")
+        missing = client.get("/api/claude-code-history/missing_item")
+
+    assert listed.status_code == 200
+    assert isinstance(listed.json(), list)
+    assert missing.status_code == 404

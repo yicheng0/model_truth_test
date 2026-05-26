@@ -262,3 +262,23 @@ class Report(Base):
     evidence: Mapped[dict | None] = mapped_column(JSON)
     markdown: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ClaudeCodeEvidence(Base):
+    __tablename__ = "claude_code_evidences"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    channel_label: Mapped[str] = mapped_column(String(200), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    model_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    request_protocol: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    source_channel_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    include_expensive_context: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(20), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

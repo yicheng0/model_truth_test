@@ -190,6 +190,16 @@ export type ClaudeCodeProbeResult = {
   request_protocol?: string | null;
   provider_endpoint?: string | null;
   evidence_excerpt?: string | null;
+  input_preview?: {
+    kind: 'image_base64' | 'image_url' | 'document_text' | string;
+    title: string;
+    summary?: string | null;
+    image_data_url?: string | null;
+    default_image_url?: string | null;
+    actual_image_url?: string | null;
+    document_text?: string | null;
+    document_marker?: string | null;
+  } | null;
 };
 
 export type ClaudeCodeSection = {
@@ -288,6 +298,16 @@ export type ClaudeCodeJobProbe = {
   request_protocol?: string | null;
   provider_endpoint?: string | null;
   evidence_excerpt?: string | null;
+  input_preview?: {
+    kind: 'image_base64' | 'image_url' | 'document_text' | string;
+    title: string;
+    summary?: string | null;
+    image_data_url?: string | null;
+    default_image_url?: string | null;
+    actual_image_url?: string | null;
+    document_text?: string | null;
+    document_marker?: string | null;
+  } | null;
 };
 
 export type ClaudeCodeJobSection = {
@@ -320,6 +340,40 @@ export type ClaudeCodeJobStatus = {
   checks: ClaudeCodeJobProbe[];
   result?: ClaudeCodeTestResult | ClaudeCodeCheckResult | null;
   error?: string | null;
+};
+
+export type ClaudeCodeHistoryItem = {
+  id: string;
+  channel_label: string;
+  base_url: string;
+  model_name: string;
+  provider_type: string;
+  score: number;
+  risk_level: 'low' | 'medium' | 'high' | 'critical' | string;
+  ok: boolean;
+  summary?: string | null;
+  probe_count: number;
+  fail_count: number;
+  warning_count: number;
+  created_at?: string | null;
+};
+
+export type ClaudeCodeHistoryDetail = {
+  id: string;
+  channel_label: string;
+  base_url: string;
+  model_name: string;
+  provider_type: string;
+  request_protocol?: string | null;
+  source_channel_id?: string | null;
+  image_url?: string | null;
+  include_expensive_context: boolean;
+  ok: boolean;
+  score: number;
+  risk_level: 'low' | 'medium' | 'high' | 'critical' | string;
+  summary?: string | null;
+  result_payload: ClaudeCodeTestResult;
+  created_at?: string | null;
 };
 
 export type TestSuite = {

@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from .database import DATABASE_URL, SessionLocal, get_db, init_db
 from .claude_code_check import claude_code_check_steps, claude_code_status, run_claude_code_check, run_claude_code_check_with_progress
-from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ClaudeCodeEvidence, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .restored_seed import restored_seed_data
 from .suite_seed import DEFAULT_SUITE_ID, default_cases
 from .schemas import (
@@ -37,6 +37,8 @@ from .schemas import (
     ChannelCreate,
     ChannelRead,
     ClaudeCodeCheckCreate,
+    ClaudeCodeEvidenceListItemRead,
+    ClaudeCodeEvidenceRead,
     ClaudeCodeJobCreateRead,
     ClaudeCodeJobStatusRead,
     ClaudeCodeCheckRead,
@@ -101,11 +103,14 @@ from .services import (
     channel_taxonomy_setting_read,
     channel_alert_read,
     create_alerts_for_run,
+    create_claude_code_evidence,
     create_claude_code_test,
     create_baseline_build,
     create_case,
     create_channel,
     claude_code_source_channels,
+    claude_code_evidence_detail,
+    claude_code_evidence_list,
     create_model_request_test,
     create_signature_interop_test,
     create_run,
@@ -379,6 +384,18 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
                 },
                 persist_results=False,
                 progress_callback=progress,
+            )
+            create_claude_code_evidence(
+                db,
+                channel_label=channel.name,
+                base_url=base_url,
+                model_name=model_name,
+                provider_type=channel.provider_type,
+                request_protocol=payload.request_protocol,
+                source_channel_id=payload.source_channel_id,
+                image_url=payload.image_url,
+                include_expensive_context=payload.include_expensive_context,
+                result_payload=result,
             )
         await _job_update(
             job_id,
@@ -1128,6 +1145,29 @@ def get_ephemeral_claude_code_test_job(job_id: str) -> dict[str, object]:
 @app.get("/api/claude-code-test/source-channels", response_model=list[ClaudeCodeSourceChannelRead])
 def list_claude_code_source_channels(db: Session = Depends(get_db)) -> list[dict[str, object]]:
     return claude_code_source_channels(db)
+
+
+@app.get("/api/claude-code-history", response_model=list[ClaudeCodeEvidenceListItemRead])
+def list_claude_code_history(db: Session = Depends(get_db)) -> list[dict[str, object]]:
+    return claude_code_evidence_list(db)
+
+
+@app.get("/api/claude-code-history/{evidence_id}", response_model=ClaudeCodeEvidenceRead)
+def get_claude_code_history_detail(evidence_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    payload = claude_code_evidence_detail(db, evidence_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="ClaudeCode history not found")
+    return payload
+
+
+@app.delete("/api/claude-code-history/{evidence_id}")
+def delete_claude_code_history(evidence_id: str, _admin: None = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, object]:
+    item = db.get(ClaudeCodeEvidence, evidence_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="ClaudeCode history not found")
+    db.delete(item)
+    db.commit()
+    return {"deleted": True}
 
 
 @app.get("/api/claude-code-check/status", response_model=ClaudeCodeCheckStatusRead)

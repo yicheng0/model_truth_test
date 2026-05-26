@@ -162,6 +162,7 @@ class ClaudeCodeJobProbeRead(BaseModel):
     request_protocol: str | None = None
     provider_endpoint: str | None = None
     evidence_excerpt: str | None = None
+    input_preview: dict[str, Any] | None = None
 
 
 class ClaudeCodeJobSectionRead(BaseModel):
@@ -226,6 +227,7 @@ class ClaudeCodeProbeResultRead(BaseModel):
     request_protocol: str | None = None
     provider_endpoint: str | None = None
     evidence_excerpt: str | None = None
+    input_preview: dict[str, Any] | None = None
 
 
 class ClaudeCodeSectionRead(BaseModel):
@@ -256,6 +258,40 @@ class ClaudeCodeTestRead(BaseModel):
     summary: str
     probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
     sections: list[ClaudeCodeSectionRead] = Field(default_factory=list)
+
+
+class ClaudeCodeEvidenceRead(BaseModel):
+    id: str
+    channel_label: str
+    base_url: str
+    model_name: str
+    provider_type: str
+    request_protocol: str | None = None
+    source_channel_id: str | None = None
+    image_url: str | None = None
+    include_expensive_context: bool = False
+    ok: bool
+    score: float
+    risk_level: str
+    summary: str | None = None
+    result_payload: ClaudeCodeTestRead
+    created_at: datetime | None = None
+
+
+class ClaudeCodeEvidenceListItemRead(BaseModel):
+    id: str
+    channel_label: str
+    base_url: str
+    model_name: str
+    provider_type: str
+    score: float
+    risk_level: str
+    ok: bool
+    summary: str | None = None
+    probe_count: int = 0
+    fail_count: int = 0
+    warning_count: int = 0
+    created_at: datetime | None = None
 
 
 class TestSuiteBase(BaseModel):

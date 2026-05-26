@@ -519,6 +519,7 @@ describe('api request handling', () => {
 
     expect(started.job_id).toBe('relay_job_1');
     expect(progress.status).toBe('running');
+    expect(progress.probes).toEqual([]);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/claude-code-test/jobs',
@@ -575,6 +576,85 @@ describe('api request handling', () => {
       2,
       '/api/claude-code-check/jobs/cli_job_1',
       expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('loads ClaudeCode history list', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          {
+            id: 'cce_1',
+            channel_label: 'ClaudeCode 临时检测渠道',
+            base_url: 'https://relay.example/v1',
+            model_name: 'claude-sonnet-4-5',
+            provider_type: 'third_party_anthropic',
+            score: 82,
+            risk_level: 'high',
+            ok: false,
+            summary: '发现多模态问题',
+            probe_count: 12,
+            fail_count: 3,
+            warning_count: 2,
+            created_at: '2026-05-26T12:00:00Z',
+          },
+        ]),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const payload = await api.claudeCodeHistory();
+
+    expect(payload[0].id).toBe('cce_1');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/claude-code-history',
+      expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('loads ClaudeCode history detail', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: 'cce_1',
+          channel_label: 'ClaudeCode 临时检测渠道',
+          base_url: 'https://relay.example/v1',
+          model_name: 'claude-sonnet-4-5',
+          provider_type: 'third_party_anthropic',
+          request_protocol: 'auto',
+          source_channel_id: null,
+          image_url: null,
+          include_expensive_context: false,
+          ok: false,
+          score: 82,
+          risk_level: 'high',
+          summary: '发现多模态问题',
+          created_at: '2026-05-26T12:00:00Z',
+          result_payload: { ok: false, score: 82, risk_level: 'high', summary: '发现多模态问题', probes: [], sections: [] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const payload = await api.claudeCodeHistoryDetail('cce_1');
+
+    expect(payload.id).toBe('cce_1');
+    expect(payload.result_payload.risk_level).toBe('high');
+    fetchMock.mockRestore();
+  });
+
+  it('deletes one ClaudeCode history item', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ deleted: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.deleteClaudeCodeHistory('cce_1');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/claude-code-history/cce_1',
+      expect.objectContaining({ method: 'DELETE' }),
     );
     fetchMock.mockRestore();
   });

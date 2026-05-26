@@ -1988,6 +1988,61 @@ textarea:focus-visible,
   background: rgba(22, 119, 255, 0.08) !important;
 }
 
+.claude-multimodal-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.claude-page-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.7fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.claude-main-pane,
+.claude-history-pane {
+  min-width: 0;
+}
+
+.claude-history-card-active {
+  border-color: #91caff !important;
+  background: #f5f9ff;
+}
+
+.claude-multimodal-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.claude-multimodal-card-active {
+  border: 1px solid #91caff;
+}
+
+.claude-preview-image {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  border: 1px solid #dbe5f0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.claude-preview-doc {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #dbe5f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .signature-step-excerpt,
 .signature-note {
   max-height: 260px;
@@ -2706,6 +2761,8 @@ textarea:focus-visible,
   .signature-config-grid,
   .signature-sim-grid,
   .claude-section-grid,
+  .claude-page-layout,
+  .claude-multimodal-layout,
   .channel-pair-grid,
   .fixed-channel-grid,
   .ab-compare-grid {
@@ -2794,6 +2851,8 @@ textarea:focus-visible,
   .signature-config-grid,
   .signature-sim-grid,
   .claude-section-grid,
+  .claude-page-layout,
+  .claude-multimodal-layout,
   .form-grid,
   .case-filter-grid,
   .case-form-grid,

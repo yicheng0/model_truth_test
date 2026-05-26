@@ -23,7 +23,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .schemas import (
     BaselineBuildCreate,
     BaselineResultRead,
@@ -1661,6 +1661,58 @@ def _claude_code_text_content(text: str) -> dict[str, Any]:
     return {"type": "text", "text": text}
 
 
+def _claude_code_data_url(media_type: str, raw_base64: str) -> str:
+    return f"data:{media_type};base64,{raw_base64}"
+
+
+def _claude_code_input_preview(config: dict[str, Any]) -> dict[str, Any] | None:
+    key = str(config.get("key") or "")
+    if key == "image_base64":
+        return {
+            "kind": "image_base64",
+            "title": "内置 base64 测试图",
+            "summary": "系统内置红色测试图，要求模型只输出 red 或 红色。",
+            "image_data_url": _claude_code_data_url("image/png", CLAUDE_CODE_RED_PNG_BASE64),
+            "document_text": None,
+            "document_marker": None,
+            "default_image_url": None,
+            "actual_image_url": None,
+        }
+    if key == "image_url":
+        request_params = config.get("request_params") or {}
+        message_content = request_params.get("message_content") if isinstance(request_params, dict) else None
+        actual_url = None
+        if isinstance(message_content, list):
+            for block in message_content:
+                if isinstance(block, dict) and block.get("type") == "image":
+                    source = block.get("source")
+                    if isinstance(source, dict) and source.get("type") == "url":
+                        actual_url = str(source.get("url") or "") or None
+                        break
+        return {
+            "kind": "image_url",
+            "title": "URL 图片测试图",
+            "summary": "系统默认使用红色 URL 测试图，也显示本次请求实际使用的 URL。",
+            "image_data_url": None,
+            "document_text": None,
+            "document_marker": None,
+            "default_image_url": CLAUDE_CODE_DEFAULT_IMAGE_URL,
+            "actual_image_url": actual_url or CLAUDE_CODE_DEFAULT_IMAGE_URL,
+        }
+    if key == "document_input":
+        return {
+            "kind": "document_text",
+            "title": "内置文档输入",
+            "summary": "系统把 marker 文本作为 document 类型输入，要求模型只返回 marker。",
+            "image_data_url": None,
+            "document_text": CLAUDE_CODE_DOCUMENT_TEXT,
+            "document_marker": "CC-DOC-742",
+            "default_image_url": None,
+            "actual_image_url": None,
+        }
+    return None
+
+
 def _claude_code_section_for_category(category: str) -> str:
     mapping = {
         "protocol": "structure",
@@ -2096,6 +2148,7 @@ def _claude_code_probe_payload(
         "request_protocol": normalized.get("request_protocol"),
         "provider_endpoint": normalized.get("provider_endpoint"),
         "evidence_excerpt": _claude_code_excerpt(normalized),
+        "input_preview": _claude_code_input_preview(config),
     }
 
 
@@ -2139,6 +2192,7 @@ def _claude_code_failed_probe(config: dict[str, Any], error: str) -> dict[str, A
         "request_protocol": None,
         "provider_endpoint": None,
         "evidence_excerpt": error[:1200],
+        "input_preview": _claude_code_input_preview(config),
     }
 
 
@@ -2301,6 +2355,90 @@ def claude_code_source_channels(db: Session) -> list[dict[str, Any]]:
         }
         for channel in channels
     ]
+
+
+def create_claude_code_evidence(
+    db: Session,
+    *,
+    channel_label: str,
+    base_url: str,
+    model_name: str,
+    provider_type: str,
+    request_protocol: str | None,
+    source_channel_id: str | None,
+    image_url: str | None,
+    include_expensive_context: bool,
+    result_payload: dict[str, Any],
+) -> ClaudeCodeEvidence:
+    evidence = ClaudeCodeEvidence(
+        id=new_id("cce"),
+        channel_label=channel_label,
+        base_url=base_url,
+        model_name=model_name,
+        provider_type=provider_type,
+        request_protocol=request_protocol,
+        source_channel_id=source_channel_id,
+        image_url=image_url,
+        include_expensive_context=include_expensive_context,
+        ok=bool(result_payload.get("ok")),
+        score=float(result_payload.get("score") or 0.0),
+        risk_level=str(result_payload.get("risk_level") or "unknown"),
+        summary=str(result_payload.get("summary") or ""),
+        result_payload=result_payload,
+    )
+    db.add(evidence)
+    db.commit()
+    db.refresh(evidence)
+    return evidence
+
+
+def claude_code_evidence_list(db: Session) -> list[dict[str, Any]]:
+    items = list(db.scalars(select(ClaudeCodeEvidence).order_by(ClaudeCodeEvidence.created_at.desc())).all())
+    payload: list[dict[str, Any]] = []
+    for item in items:
+        result_payload = item.result_payload or {}
+        probes = result_payload.get("probes") or []
+        payload.append(
+            {
+                "id": item.id,
+                "channel_label": item.channel_label,
+                "base_url": item.base_url,
+                "model_name": item.model_name,
+                "provider_type": item.provider_type,
+                "score": item.score,
+                "risk_level": item.risk_level,
+                "ok": item.ok,
+                "summary": item.summary,
+                "probe_count": len(probes),
+                "fail_count": sum(1 for probe in probes if probe.get("status") == "fail"),
+                "warning_count": sum(1 for probe in probes if probe.get("status") == "warning"),
+                "created_at": item.created_at,
+            }
+        )
+    return payload
+
+
+def claude_code_evidence_detail(db: Session, evidence_id: str) -> dict[str, Any] | None:
+    item = db.get(ClaudeCodeEvidence, evidence_id)
+    if not item:
+        return None
+    return {
+        "id": item.id,
+        "channel_label": item.channel_label,
+        "base_url": item.base_url,
+        "model_name": item.model_name,
+        "provider_type": item.provider_type,
+        "request_protocol": item.request_protocol,
+        "source_channel_id": item.source_channel_id,
+        "image_url": item.image_url,
+        "include_expensive_context": item.include_expensive_context,
+        "ok": item.ok,
+        "score": item.score,
+        "risk_level": item.risk_level,
+        "summary": item.summary,
+        "result_payload": item.result_payload,
+        "created_at": item.created_at,
+    }
 
 
 def patrol_channel_display_name(channel: Channel | None, fallback_name: str | None = None) -> str:
