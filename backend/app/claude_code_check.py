@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,7 +65,26 @@ def claude_code_status() -> dict[str, Any]:
     }
 
 
+def claude_code_check_steps() -> list[dict[str, Any]]:
+    return [
+        {"key": "cli_available", "title": "Claude Code CLI 可用"},
+        {"key": "fixture_sanity", "title": "沙箱 fixture 初始失败"},
+        {"key": "non_interactive_run", "title": "非交互运行成功"},
+        {"key": "structured_output", "title": "JSON / output config 可解析"},
+        {"key": "file_edit", "title": "临时代码读写修复成功"},
+        {"key": "tests_passed", "title": "后端复跑 unittest 通过"},
+        {"key": "sandbox_boundary", "title": "权限边界和沙箱清理"},
+    ]
+
+
 async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
+    return await run_claude_code_check_with_progress(data)
+
+
+async def run_claude_code_check_with_progress(
+    data: ClaudeCodeCheckCreate,
+    progress_callback: callable | None = None,
+) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     monotonic_started = time.monotonic()
     checks: list[dict[str, Any]] = []
@@ -73,10 +93,24 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
     command = _configured_command()
     command_path = _resolve_command(command)
 
+    async def emit(current_key: str | None = None) -> None:
+        if progress_callback is None:
+            return
+        await progress_callback(
+            {
+                "current_key": current_key,
+                "checks": deepcopy(checks),
+                "stdout_excerpt": stdout_excerpt,
+                "stderr_excerpt": stderr_excerpt,
+            }
+        )
+
     if not command_path:
         checks.append(_check("cli_available", "Claude Code CLI 可用", "fail", 0, f"{command!r} was not found on PATH"))
+        await emit("cli_available")
         return _result_payload(started, monotonic_started, None, command, None, checks, "", "")
 
+    await emit("cli_available")
     version_result = await _run_process(_claude_invocation(["--version"], command_path), timeout_seconds=10)
     version = (version_result.stdout or version_result.stderr).strip().splitlines()[0] if (version_result.stdout or version_result.stderr).strip() else None
     checks.append(
@@ -88,6 +122,7 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
             version or _excerpt(version_result.stderr) or "Version command returned no output",
         )
     )
+    await emit("cli_available")
     if version_result.returncode != 0:
         return _result_payload(started, monotonic_started, command_path, command, version, checks, version_result.stdout, version_result.stderr)
 
@@ -95,6 +130,7 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
         workspace_path = Path(workspace)
         _write_probe_workspace(workspace_path)
 
+        await emit("fixture_sanity")
         initial_test = await _run_python_unittest(workspace_path, timeout_seconds=20)
         initial_failed = initial_test.returncode != 0
         checks.append(
@@ -106,6 +142,7 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
                 "Initial unittest fails as expected" if initial_failed else "Initial fixture unexpectedly passed before Claude Code ran",
             )
         )
+        await emit("fixture_sanity")
 
         schema = {
             "type": "object",
@@ -150,6 +187,7 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
             claude_args.extend(["--model", data.model])
         claude_args.append(prompt)
 
+        await emit("non_interactive_run")
         cli_result = await _run_process(
             _claude_invocation(claude_args, command_path),
             cwd=workspace_path,
@@ -167,8 +205,10 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
                 _process_detail(cli_result),
             )
         )
+        await emit("non_interactive_run")
 
         parsed_json = _parse_claude_json(cli_result.stdout)
+        await emit("structured_output")
         checks.append(
             _check(
                 "structured_output",
@@ -178,9 +218,11 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
                 "Structured output parsed" if parsed_json is not None else "Claude Code did not return parseable JSON output",
             )
         )
+        await emit("structured_output")
 
         implementation = (workspace_path / "src" / "math_utils.py").read_text(encoding="utf-8")
         file_fixed = "return a + b" in implementation
+        await emit("file_edit")
         checks.append(
             _check(
                 "file_edit",
@@ -190,7 +232,9 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
                 "Implementation now returns a + b" if file_fixed else "Implementation was not corrected",
             )
         )
+        await emit("file_edit")
 
+        await emit("tests_passed")
         final_test = await _run_python_unittest(workspace_path, timeout_seconds=20)
         tests_passed = final_test.returncode == 0
         checks.append(
@@ -202,8 +246,10 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
                 _process_detail(final_test),
             )
         )
+        await emit("tests_passed")
 
         allowed_files_ok = _workspace_contains_probe_files(workspace_path)
+        await emit("sandbox_boundary")
         checks.append(
             _check(
                 "sandbox_boundary",
@@ -213,6 +259,7 @@ async def run_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, Any]:
                 "Probe remained inside the temporary workspace until cleanup" if allowed_files_ok else "Probe fixture files were missing before cleanup",
             )
         )
+        await emit("sandbox_boundary")
 
     return _result_payload(started, monotonic_started, command_path, command, version, checks, stdout_excerpt, stderr_excerpt)
 

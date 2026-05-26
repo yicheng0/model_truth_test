@@ -140,6 +140,62 @@ class ClaudeCodeCheckRead(BaseModel):
     stderr_excerpt: str
 
 
+class ClaudeCodeJobCreateRead(BaseModel):
+    job_id: str
+    status: str
+
+
+class ClaudeCodeJobProbeRead(BaseModel):
+    key: str
+    title: str
+    category: str | None = None
+    section: str | None = None
+    status: str
+    severity: str | None = None
+    score: float | int = 0
+    labels: list[str] = Field(default_factory=list)
+    detail: str | None = None
+    run_id: str | None = None
+    result_id: str | None = None
+    message_id: str | None = None
+    request_id: str | None = None
+    request_protocol: str | None = None
+    provider_endpoint: str | None = None
+    evidence_excerpt: str | None = None
+
+
+class ClaudeCodeJobSectionRead(BaseModel):
+    key: str
+    title: str
+    status: str
+    score: float
+    probe_count: int
+    pass_count: int
+    fail_count: int
+    warning_count: int
+    skipped_count: int
+    probes: list[ClaudeCodeJobProbeRead] = Field(default_factory=list)
+
+
+class ClaudeCodeJobStatusRead(BaseModel):
+    job_id: str
+    kind: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    current_key: str | None = None
+    current_title: str | None = None
+    current_section: str | None = None
+    completed_count: int
+    total_count: int
+    percent: float
+    sections: list[ClaudeCodeJobSectionRead] = Field(default_factory=list)
+    probes: list[ClaudeCodeJobProbeRead] = Field(default_factory=list)
+    checks: list[ClaudeCodeJobProbeRead] = Field(default_factory=list)
+    result: ClaudeCodeTestRead | ClaudeCodeCheckRead | None = None
+    error: str | None = None
+
+
 class ClaudeCodeTestCreate(BaseModel):
     source_channel_id: str | None = None
     image_url: str | None = Field(default=None, max_length=1000)

@@ -1984,6 +1984,10 @@ textarea:focus-visible,
   justify-content: space-between;
 }
 
+.claude-job-row-active td {
+  background: rgba(22, 119, 255, 0.08) !important;
+}
+
 .signature-step-excerpt,
 .signature-note {
   max-height: 260px;

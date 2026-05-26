@@ -5034,3 +5034,48 @@ def test_merged_channel_credentials_uses_stored_key_and_allows_runtime_override(
 
     assert _merged_channel_credentials(channel, {}) == {"api_key": "stored-key", "request_protocol": "auto"}
     assert _merged_channel_credentials(channel, {"api_key": "runtime-key"}) == {"api_key": "runtime-key", "request_protocol": "auto"}
+
+
+def test_start_claude_code_relay_job_returns_job_id() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/claude-code-test/jobs",
+            json={
+                "base_url": "https://relay.example/v1",
+                "api_key": "sk-test",
+                "model_name": "claude-sonnet-4-5",
+                "provider_type": "third_party_anthropic",
+                "request_protocol": "auto",
+                "source_channel_id": None,
+                "image_url": None,
+                "include_expensive_context": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"]
+    assert payload["status"] == "queued"
+
+
+def test_get_missing_claude_code_relay_job_returns_404() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.get("/api/claude-code-test/jobs/missing_job")
+
+    assert response.status_code == 404
+
+
+def test_start_claude_code_cli_job_returns_job_id() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/claude-code-check/jobs",
+            json={"model": "sonnet", "timeout_seconds": 180, "max_budget_usd": 0.25},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"]
+    assert payload["status"] == "queued"

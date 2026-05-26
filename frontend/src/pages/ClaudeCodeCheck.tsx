@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Descriptions, Form, Input, InputNumber, Progress, Select, Space, Statistic, Table, Tabs, Tag, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
@@ -6,7 +6,7 @@ import { Play, RefreshCw, ShieldCheck, TerminalSquare } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
-import type { ClaudeCodeCheckResult, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
+import type { ClaudeCodeCheckResult, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
 
 type RelayFormValues = {
   base_url: string;
@@ -38,6 +38,8 @@ function statusColor(status: string) {
   if (status === 'fail' || status === 'failed') return 'red';
   if (status === 'warning') return 'orange';
   if (status === 'skipped') return 'default';
+  if (status === 'running') return 'processing';
+  if (status === 'queued') return 'default';
   return 'blue';
 }
 
@@ -46,6 +48,8 @@ function statusLabel(status: string) {
   if (status === 'fail') return '失败';
   if (status === 'warning') return '警告';
   if (status === 'skipped') return '跳过';
+  if (status === 'running') return '运行中';
+  if (status === 'queued') return '等待中';
   return status;
 }
 
@@ -136,14 +140,65 @@ function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
   );
 }
 
+function JobProbeTable({ probes, currentKey }: { probes: ClaudeCodeJobProbe[]; currentKey?: string | null }) {
+  return (
+    <Table<ClaudeCodeJobProbe>
+      rowKey="key"
+      dataSource={probes}
+      pagination={false}
+      size="small"
+      rowClassName={(item) => item.key === currentKey ? 'claude-job-row-active' : ''}
+      columns={[
+        {
+          title: '测试项',
+          width: 220,
+          render: (_, item) => (
+            <Space direction="vertical" size={2}>
+              <Typography.Text strong>{item.title}</Typography.Text>
+              <Typography.Text type="secondary">{item.key}</Typography.Text>
+            </Space>
+          ),
+        },
+        { title: '状态', dataIndex: 'status', width: 110, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
+        { title: '分数', dataIndex: 'score', width: 90 },
+        {
+          title: '摘要',
+          width: 420,
+          render: (_, item) => <Typography.Text ellipsis={{ tooltip: item.evidence_excerpt || item.detail || undefined }}>{item.evidence_excerpt || item.detail || '-'}</Typography.Text>,
+        },
+      ]}
+    />
+  );
+}
+
 export default function ClaudeCodeCheck() {
   const [relayForm] = Form.useForm<RelayFormValues>();
   const [cliForm] = Form.useForm<CliFormValues>();
   const [relayResult, setRelayResult] = useState<ClaudeCodeTestResult | null>(null);
   const [cliResult, setCliResult] = useState<ClaudeCodeCheckResult | null>(null);
+  const [relayJobId, setRelayJobId] = useState<string | null>(null);
+  const [cliJobId, setCliJobId] = useState<string | null>(null);
 
   const sources = useQuery<ClaudeCodeSourceChannel[]>({ queryKey: ['claudeCodeSourceChannels'], queryFn: api.claudeCodeSourceChannels });
   const status = useQuery({ queryKey: ['claudeCodeCheckStatus'], queryFn: api.claudeCodeCheckStatus });
+  const relayJob = useQuery<ClaudeCodeJobStatus>({
+    queryKey: ['claudeCodeRelayJob', relayJobId],
+    queryFn: () => api.claudeCodeRelayTestJob(relayJobId!),
+    enabled: Boolean(relayJobId),
+    refetchInterval: (query) => {
+      const payload = query.state.data;
+      return payload && (payload.status === 'completed' || payload.status === 'failed') ? false : 1000;
+    },
+  });
+  const cliJob = useQuery<ClaudeCodeJobStatus>({
+    queryKey: ['claudeCodeCliJob', cliJobId],
+    queryFn: () => api.claudeCodeCheckJob(cliJobId!),
+    enabled: Boolean(cliJobId),
+    refetchInterval: (query) => {
+      const payload = query.state.data;
+      return payload && (payload.status === 'completed' || payload.status === 'failed') ? false : 1000;
+    },
+  });
 
   const referenceOptions = useMemo(
     () => (sources.data ?? []).map((channel) => ({
@@ -152,6 +207,31 @@ export default function ClaudeCodeCheck() {
     })),
     [sources.data],
   );
+
+  useEffect(() => {
+    const payload = relayJob.data;
+    if (!payload) return;
+    if (payload.status === 'completed' && payload.result) {
+      setRelayResult(payload.result as ClaudeCodeTestResult);
+      message.success('ClaudeCode 中转检测完成');
+    } else if (payload.status === 'failed' && payload.error) {
+      message.error(payload.error);
+    }
+  }, [relayJob.data]);
+
+  useEffect(() => {
+    const payload = cliJob.data;
+    if (!payload) return;
+    if (payload.status === 'completed' && payload.result) {
+      setCliResult(payload.result as ClaudeCodeCheckResult);
+      void status.refetch();
+      const result = payload.result as ClaudeCodeCheckResult;
+      if (result.ok) message.success('Claude Code CLI 自检通过');
+      else message.warning('Claude Code CLI 自检未通过');
+    } else if (payload.status === 'failed' && payload.error) {
+      message.error(payload.error);
+    }
+  }, [cliJob.data, status]);
 
   const runRelayTest = useMutation({
     mutationFn: (values: RelayFormValues) => {
@@ -165,34 +245,31 @@ export default function ClaudeCodeCheck() {
         image_url: values.image_url?.trim() || null,
         include_expensive_context: Boolean(values.include_expensive_context),
       };
-      return api.runClaudeCodeRelayTest(payload);
+      return api.startClaudeCodeRelayTestJob(payload);
     },
     onSuccess: (payload) => {
-      setRelayResult(payload);
-      if (payload.risk_level === 'low' || payload.risk_level === 'medium') message.success('ClaudeCode 中转检测完成');
-      else message.warning('ClaudeCode 中转检测发现高风险异常');
+      setRelayJobId(payload.job_id);
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });
 
   const runCliCheck = useMutation({
-    mutationFn: api.runClaudeCodeCheck,
+    mutationFn: api.startClaudeCodeCheckJob,
     onSuccess: (payload) => {
-      setCliResult(payload);
-      if (payload.ok) message.success('Claude Code CLI 自检通过');
-      else message.warning('Claude Code CLI 自检未通过');
-      void status.refetch();
+      setCliJobId(payload.job_id);
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });
 
   function submitRelay(values: RelayFormValues) {
     setRelayResult(null);
+    setRelayJobId(null);
     runRelayTest.mutate(values);
   }
 
   function submitCli(values: CliFormValues) {
     setCliResult(null);
+    setCliJobId(null);
     runCliCheck.mutate({
       model: values.model?.trim() || null,
       timeout_seconds: values.timeout_seconds,
@@ -201,8 +278,10 @@ export default function ClaudeCodeCheck() {
   }
 
   const statusData = status.data;
-  const canRunCli = Boolean(statusData?.available) && !runCliCheck.isPending;
+  const canRunCli = Boolean(statusData?.available) && !runCliCheck.isPending && cliJob.data?.status !== 'running';
   const allCounts = probeCounts(relayResult?.probes ?? []);
+  const relayRunning = runRelayTest.isPending || relayJob.data?.status === 'queued' || relayJob.data?.status === 'running';
+  const cliRunning = runCliCheck.isPending || cliJob.data?.status === 'queued' || cliJob.data?.status === 'running';
 
   return (
     <Space direction="vertical" size={24} className="page-stack">
@@ -280,14 +359,57 @@ export default function ClaudeCodeCheck() {
                   </Form>
                 </Card>
 
-                {runRelayTest.isPending ? (
+                {relayRunning && relayJob.data ? (
                   <Card bordered={false}>
                     <Space direction="vertical" size={12} className="full-width">
                       <Typography.Text strong>正在运行中转接口组合检测</Typography.Text>
-                      <Progress percent={65} status="active" showInfo={false} />
-                      <Typography.Text type="secondary">正在执行协议、多模态、Signature、上下文和兼容性探针。</Typography.Text>
+                      <Progress percent={relayJob.data.percent} status="active" />
+                      <Typography.Text type="secondary">
+                        当前测试：{relayJob.data.current_title || '准备中'}，已完成 {relayJob.data.completed_count} / {relayJob.data.total_count}
+                      </Typography.Text>
                     </Space>
                   </Card>
+                ) : null}
+
+                {relayJob.data ? (
+                  <Space direction="vertical" size={18} className="full-width">
+                    <div className="claude-section-grid">
+                      {(relayJob.data.sections ?? []).map((section) => (
+                        <Card key={section.key} bordered={false} className="claude-section-card">
+                          <Space direction="vertical" size={10} className="full-width">
+                            <Space wrap className="claude-section-card-head">
+                              <Typography.Text strong>{section.title}</Typography.Text>
+                              <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
+                              <Tag>得分 {section.score}</Tag>
+                            </Space>
+                            <Typography.Text type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Text>
+                            <Progress percent={section.probe_count ? Math.round((section.pass_count / section.probe_count) * 100) : 0} size="small" showInfo={false} status={section.status === 'fail' ? 'exception' : section.status === 'running' ? 'active' : 'normal'} />
+                            <Space wrap size={[6, 6]}>
+                              <Tag color="green">通过 {section.pass_count}</Tag>
+                              <Tag color="red">失败 {section.fail_count}</Tag>
+                              <Tag color="orange">警告 {section.warning_count}</Tag>
+                              <Tag>跳过 {section.skipped_count}</Tag>
+                            </Space>
+                          </Space>
+                        </Card>
+                      ))}
+                    </div>
+                    {(relayJob.data.sections ?? []).map((section) => (
+                      <Card
+                        key={section.key}
+                        title={(
+                          <Space wrap>
+                            <span>{section.title}</span>
+                            <Tag color={statusColor(section.status)}>{statusLabel(section.status)}</Tag>
+                          </Space>
+                        )}
+                        bordered={false}
+                      >
+                        <Typography.Paragraph type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Paragraph>
+                        <JobProbeTable probes={section.probes} currentKey={relayJob.data?.current_key} />
+                      </Card>
+                    ))}
+                  </Space>
                 ) : null}
 
                 {relayResult ? (
@@ -410,13 +532,21 @@ export default function ClaudeCodeCheck() {
                   </Form>
                 </Card>
 
-                {runCliCheck.isPending ? (
+                {cliRunning && cliJob.data ? (
                   <Card bordered={false}>
                     <Space direction="vertical" size={12} className="full-width">
                       <Typography.Text strong>正在运行 Claude Code 沙箱检测</Typography.Text>
-                      <Progress percent={70} status="active" showInfo={false} />
-                      <Typography.Text type="secondary">后端正在创建 fixture、调用 claude -p，并复跑 unittest 校验修复结果。</Typography.Text>
+                      <Progress percent={cliJob.data.percent} status="active" />
+                      <Typography.Text type="secondary">
+                        当前步骤：{cliJob.data.current_title || '准备中'}，已完成 {cliJob.data.completed_count} / {cliJob.data.total_count}
+                      </Typography.Text>
                     </Space>
+                  </Card>
+                ) : null}
+
+                {cliJob.data ? (
+                  <Card title="实时步骤" bordered={false}>
+                    <JobProbeTable probes={cliJob.data.checks} currentKey={cliJob.data.current_key} />
                   </Card>
                 ) : null}
 
@@ -436,7 +566,7 @@ export default function ClaudeCodeCheck() {
                         size="small"
                         columns={[
                           { title: '项目', dataIndex: 'title', width: 220 },
-                          { title: '状态', dataIndex: 'status', width: 100, render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> },
+                          { title: '状态', dataIndex: 'status', width: 100, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
                           { title: '分数', dataIndex: 'score', width: 90 },
                           { title: '详情', dataIndex: 'detail' },
                         ]}

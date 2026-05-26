@@ -6,6 +6,7 @@ import logging
 import uuid
 import os
 import shutil
+import inspect
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import DATABASE_URL, SessionLocal, get_db, init_db
-from .claude_code_check import claude_code_status, run_claude_code_check
+from .claude_code_check import claude_code_check_steps, claude_code_status, run_claude_code_check, run_claude_code_check_with_progress
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .restored_seed import restored_seed_data
 from .suite_seed import DEFAULT_SUITE_ID, default_cases
@@ -36,6 +37,8 @@ from .schemas import (
     ChannelCreate,
     ChannelRead,
     ClaudeCodeCheckCreate,
+    ClaudeCodeJobCreateRead,
+    ClaudeCodeJobStatusRead,
     ClaudeCodeCheckRead,
     ClaudeCodeCheckStatusRead,
     ClaudeCodeEphemeralTestCreate,
@@ -87,6 +90,8 @@ from .schemas import (
     TestSuiteUpdate,
 )
 from .services import (
+    _claude_code_probe_configs,
+    _claude_code_section_for_category,
     _clean_auth_config,
     build_comparisons,
     build_reports,
@@ -174,6 +179,295 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Claude Channel Authenticity Eval", version="0.1.0", lifespan=lifespan)
 logger = logging.getLogger(__name__)
+
+
+CLAUDE_CODE_JOB_STORE: dict[str, dict[str, object]] = {}
+CLAUDE_CODE_JOB_LOCK = asyncio.Lock()
+
+
+def _job_percent(completed_count: int, total_count: int) -> float:
+    if total_count <= 0:
+        return 0.0
+    return round(min(100.0, max(0.0, completed_count / total_count * 100.0)), 1)
+
+
+def _relay_job_sections(probes: list[dict[str, object]]) -> list[dict[str, object]]:
+    ordered = ["fingerprint", "structure", "behavior", "signature", "multimodal"]
+    titles = {
+        "fingerprint": "LLM 指纹验证",
+        "structure": "结构完整性",
+        "behavior": "行为验证",
+        "signature": "签名校验",
+        "multimodal": "多模态能力",
+    }
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for probe in probes:
+        section = str(probe.get("section") or "")
+        if section:
+            grouped[section].append(probe)
+    items: list[dict[str, object]] = []
+    for key in ordered:
+        section_probes = grouped.get(key, [])
+        statuses = {str(item.get("status")) for item in section_probes}
+        if "running" in statuses:
+            status = "running"
+        elif "fail" in statuses:
+            status = "fail"
+        elif "warning" in statuses:
+            status = "warning"
+        elif statuses and statuses == {"queued"}:
+            status = "queued"
+        elif statuses and statuses == {"skipped"}:
+            status = "skipped"
+        elif section_probes:
+            status = "pass"
+        else:
+            status = "queued"
+        pass_count = sum(1 for item in section_probes if item.get("status") == "pass")
+        fail_count = sum(1 for item in section_probes if item.get("status") == "fail")
+        warning_count = sum(1 for item in section_probes if item.get("status") == "warning")
+        skipped_count = sum(1 for item in section_probes if item.get("status") == "skipped")
+        scored = [float(item.get("score") or 0) for item in section_probes if item.get("status") in {"pass", "fail", "warning", "skipped"}]
+        score = round(sum(scored) / len(scored), 2) if scored else 0.0
+        items.append(
+            {
+                "key": key,
+                "title": titles[key],
+                "status": status,
+                "score": score,
+                "probe_count": len(section_probes),
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "warning_count": warning_count,
+                "skipped_count": skipped_count,
+                "probes": section_probes,
+            }
+        )
+    return items
+
+
+def _initial_relay_job_state(include_expensive_context: bool, image_url: str | None) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    section_titles = {
+        "fingerprint": "LLM 指纹验证",
+        "structure": "结构完整性",
+        "behavior": "行为验证",
+        "signature": "签名校验",
+        "multimodal": "多模态能力",
+    }
+    probes: list[dict[str, object]] = []
+    for config in _claude_code_probe_configs(image_url, include_expensive_context):
+        probes.append(
+            {
+                "key": str(config.get("key") or ""),
+                "title": str(config.get("title") or ""),
+                "category": str(config.get("category") or ""),
+                "section": _claude_code_section_for_category(str(config.get("category") or "")),
+                "status": "queued",
+                "severity": str(config.get("severity") or ""),
+                "score": 0.0,
+                "labels": [],
+                "run_id": None,
+                "result_id": None,
+                "message_id": None,
+                "request_id": None,
+                "request_protocol": None,
+                "provider_endpoint": None,
+                "evidence_excerpt": None,
+            }
+        )
+    probes.append(
+        {
+            "key": "signature_interop",
+            "title": "Signature 跨渠道互通",
+            "category": "signature",
+            "section": "signature",
+            "status": "queued",
+            "severity": "core",
+            "score": 0.0,
+            "labels": [],
+            "run_id": None,
+            "result_id": None,
+            "message_id": None,
+            "request_id": None,
+            "request_protocol": None,
+            "provider_endpoint": None,
+            "evidence_excerpt": None,
+        }
+    )
+    sections = _relay_job_sections(probes)
+    for section in sections:
+        section["title"] = section_titles.get(str(section["key"]), str(section["title"]))
+    return probes, sections
+
+
+def _initial_cli_job_state() -> list[dict[str, object]]:
+    return [
+        {"key": item["key"], "title": item["title"], "status": "queued", "score": 0, "detail": ""}
+        for item in claude_code_check_steps()
+    ]
+
+
+async def _job_update(job_id: str, payload: dict[str, object]) -> None:
+    async with CLAUDE_CODE_JOB_LOCK:
+        job = CLAUDE_CODE_JOB_STORE.get(job_id)
+        if not job:
+            return
+        job.update(payload)
+
+
+def _job_snapshot(job_id: str) -> dict[str, object] | None:
+    job = CLAUDE_CODE_JOB_STORE.get(job_id)
+    if not job:
+        return None
+    return dict(job)
+
+
+async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db_factory: callable) -> None:
+    try:
+        base_url = payload.base_url.strip()
+        api_key = payload.api_key.strip()
+        model_name = payload.model_name.strip()
+        channel = Channel(
+            id=f"ephemeral_claude_code_test_{job_id}",
+            name="ClaudeCode 临时检测渠道",
+            provider_type=payload.provider_type.strip() or "third_party_anthropic",
+            role="candidate",
+            base_url=base_url,
+            model_name=model_name,
+            is_reference=False,
+            enabled=True,
+        )
+
+        async def progress(update: dict[str, object]) -> None:
+            probes = list(update.get("probes") or [])
+            completed = sum(1 for item in probes if str(item.get("status")) not in {"queued", "running"})
+            sections = _relay_job_sections(probes)
+            current_key = update.get("current_key")
+            current_title = update.get("current_title")
+            current_section = update.get("current_section")
+            if current_key and not current_title:
+                current = next((item for item in probes if item.get("key") == current_key), None)
+                if current:
+                    current_title = current.get("title")
+                    current_section = current.get("section")
+            await _job_update(
+                job_id,
+                {
+                    "status": "running",
+                    "current_key": current_key,
+                    "current_title": current_title,
+                    "current_section": current_section,
+                    "completed_count": completed,
+                    "percent": _job_percent(completed, int(CLAUDE_CODE_JOB_STORE[job_id]["total_count"])),
+                    "probes": probes,
+                    "sections": sections,
+                },
+            )
+
+        with db_factory() as db:
+            result = await create_claude_code_test(
+                db,
+                channel,
+                source_channel_id=payload.source_channel_id,
+                image_url=payload.image_url,
+                include_expensive_context=payload.include_expensive_context,
+                credentials_override={
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "model": model_name,
+                    "request_protocol": payload.request_protocol,
+                },
+                persist_results=False,
+                progress_callback=progress,
+            )
+        await _job_update(
+            job_id,
+            {
+                "status": "completed",
+                "finished_at": datetime.now(timezone.utc),
+                "current_key": None,
+                "current_title": None,
+                "current_section": None,
+                "completed_count": CLAUDE_CODE_JOB_STORE[job_id]["total_count"],
+                "percent": 100.0,
+                "probes": result.get("probes", []),
+                "sections": result.get("sections", []),
+                "result": result,
+                "error": None,
+            },
+        )
+    except Exception as exc:
+        logger.exception("ClaudeCode relay job failed")
+        await _job_update(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": datetime.now(timezone.utc),
+                "current_key": None,
+                "current_title": None,
+                "current_section": None,
+                "error": str(exc),
+            },
+        )
+
+
+async def _run_cli_job(job_id: str, payload: ClaudeCodeCheckCreate) -> None:
+    try:
+        async def progress(update: dict[str, object]) -> None:
+            raw_checks = list(update.get("checks") or [])
+            known = {str(item.get("key")): dict(item) for item in raw_checks}
+            checks = []
+            for step in claude_code_check_steps():
+                item = known.get(step["key"])
+                if item is None:
+                    checks.append({"key": step["key"], "title": step["title"], "status": "queued", "score": 0, "detail": ""})
+                else:
+                    checks.append(item)
+            completed = sum(1 for item in checks if str(item.get("status")) not in {"queued", "running"})
+            current_key = update.get("current_key")
+            current_title = next((item["title"] for item in checks if item["key"] == current_key), None)
+            await _job_update(
+                job_id,
+                {
+                    "status": "running",
+                    "current_key": current_key,
+                    "current_title": current_title,
+                    "current_section": "cli",
+                    "completed_count": completed,
+                    "percent": _job_percent(completed, int(CLAUDE_CODE_JOB_STORE[job_id]["total_count"])),
+                    "checks": checks,
+                },
+            )
+
+        result = await run_claude_code_check_with_progress(payload, progress_callback=progress)
+        await _job_update(
+            job_id,
+            {
+                "status": "completed",
+                "finished_at": datetime.now(timezone.utc),
+                "current_key": None,
+                "current_title": None,
+                "current_section": None,
+                "completed_count": CLAUDE_CODE_JOB_STORE[job_id]["total_count"],
+                "percent": 100.0,
+                "checks": result.get("checks", []),
+                "result": result,
+                "error": None,
+            },
+        )
+    except Exception as exc:
+        logger.exception("Claude Code CLI job failed")
+        await _job_update(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": datetime.now(timezone.utc),
+                "current_key": None,
+                "current_title": None,
+                "current_section": None,
+                "error": str(exc),
+            },
+        )
 
 
 def cors_origins() -> list[str]:
@@ -786,6 +1080,51 @@ async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Se
         raise HTTPException(status_code=502, detail="ClaudeCode test failed") from exc
 
 
+@app.post("/api/claude-code-test/jobs", response_model=ClaudeCodeJobCreateRead)
+async def start_ephemeral_claude_code_test_job(data: ClaudeCodeEphemeralTestCreate) -> dict[str, object]:
+    base_url = data.base_url.strip()
+    api_key = data.api_key.strip()
+    model_name = data.model_name.strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Base URL is required")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API Key is required")
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Model name is required")
+
+    job_id = str(uuid.uuid4())
+    probes, sections = _initial_relay_job_state(data.include_expensive_context, data.image_url)
+    async with CLAUDE_CODE_JOB_LOCK:
+        CLAUDE_CODE_JOB_STORE[job_id] = {
+            "job_id": job_id,
+            "kind": "relay",
+            "status": "queued",
+            "started_at": datetime.now(timezone.utc),
+            "finished_at": None,
+            "current_key": None,
+            "current_title": None,
+            "current_section": None,
+            "completed_count": 0,
+            "total_count": len(probes),
+            "percent": 0.0,
+            "sections": sections,
+            "probes": probes,
+            "checks": [],
+            "result": None,
+            "error": None,
+        }
+    asyncio.create_task(_run_relay_job(job_id, data, SessionLocal))
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/claude-code-test/jobs/{job_id}", response_model=ClaudeCodeJobStatusRead)
+def get_ephemeral_claude_code_test_job(job_id: str) -> dict[str, object]:
+    payload = _job_snapshot(job_id)
+    if not payload or payload.get("kind") != "relay":
+        raise HTTPException(status_code=404, detail="ClaudeCode relay job not found")
+    return payload
+
+
 @app.get("/api/claude-code-test/source-channels", response_model=list[ClaudeCodeSourceChannelRead])
 def list_claude_code_source_channels(db: Session = Depends(get_db)) -> list[dict[str, object]]:
     return claude_code_source_channels(db)
@@ -803,6 +1142,41 @@ async def post_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, objec
     except Exception as exc:
         logger.exception("Claude Code check failed")
         raise HTTPException(status_code=500, detail=f"Claude Code check failed: {exc}") from exc
+
+
+@app.post("/api/claude-code-check/jobs", response_model=ClaudeCodeJobCreateRead)
+async def start_claude_code_check_job(data: ClaudeCodeCheckCreate) -> dict[str, object]:
+    job_id = str(uuid.uuid4())
+    checks = _initial_cli_job_state()
+    async with CLAUDE_CODE_JOB_LOCK:
+        CLAUDE_CODE_JOB_STORE[job_id] = {
+            "job_id": job_id,
+            "kind": "cli",
+            "status": "queued",
+            "started_at": datetime.now(timezone.utc),
+            "finished_at": None,
+            "current_key": None,
+            "current_title": None,
+            "current_section": None,
+            "completed_count": 0,
+            "total_count": len(checks),
+            "percent": 0.0,
+            "sections": [],
+            "probes": [],
+            "checks": checks,
+            "result": None,
+            "error": None,
+        }
+    asyncio.create_task(_run_cli_job(job_id, data))
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/claude-code-check/jobs/{job_id}", response_model=ClaudeCodeJobStatusRead)
+def get_claude_code_check_job(job_id: str) -> dict[str, object]:
+    payload = _job_snapshot(job_id)
+    if not payload or payload.get("kind") != "cli":
+        raise HTTPException(status_code=404, detail="ClaudeCode CLI job not found")
+    return payload
 
 
 @app.get("/api/channels/{channel_id}/models", response_model=list[str])

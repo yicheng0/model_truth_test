@@ -8,6 +8,8 @@ import type {
   ChannelTaxonomySetting,
   ChannelTaxonomyUpdate,
   ClaudeCodeCheckResult,
+  ClaudeCodeJobCreate,
+  ClaudeCodeJobStatus,
   ClaudeCodeCheckStatus,
   ClaudeCodeRelayTestCreate,
   ClaudeCodeSourceChannel,
@@ -167,10 +169,16 @@ export const api = {
     request<ClaudeCodeTestResult>(`/api/channels/${channelId}/claude-code-test`, { method: 'POST', body: JSON.stringify(payload) }),
   runClaudeCodeRelayTest: (payload: ClaudeCodeRelayTestCreate) =>
     request<ClaudeCodeTestResult>('/api/claude-code-test', { method: 'POST', body: JSON.stringify(payload) }),
+  startClaudeCodeRelayTestJob: (payload: ClaudeCodeRelayTestCreate) =>
+    request<ClaudeCodeJobCreate>('/api/claude-code-test/jobs', { method: 'POST', body: JSON.stringify(payload) }),
+  claudeCodeRelayTestJob: (jobId: string) => request<ClaudeCodeJobStatus>(`/api/claude-code-test/jobs/${jobId}`),
   claudeCodeSourceChannels: () => request<ClaudeCodeSourceChannel[]>('/api/claude-code-test/source-channels'),
   claudeCodeCheckStatus: () => request<ClaudeCodeCheckStatus>('/api/claude-code-check/status'),
   runClaudeCodeCheck: (payload: { model?: string | null; timeout_seconds: number; max_budget_usd: number }) =>
     request<ClaudeCodeCheckResult>('/api/claude-code-check/run', { method: 'POST', body: JSON.stringify(payload) }),
+  startClaudeCodeCheckJob: (payload: { model?: string | null; timeout_seconds: number; max_budget_usd: number }) =>
+    request<ClaudeCodeJobCreate>('/api/claude-code-check/jobs', { method: 'POST', body: JSON.stringify(payload) }),
+  claudeCodeCheckJob: (jobId: string) => request<ClaudeCodeJobStatus>(`/api/claude-code-check/jobs/${jobId}`),
   channelModels: (id: string) => request<string[]>(`/api/channels/${id}/models`),
   suites: () => request<TestSuite[]>('/api/suites'),
   createSuite: (payload: Partial<TestSuite>) => request<TestSuite>('/api/test-suites', { method: 'POST', body: JSON.stringify(payload) }),

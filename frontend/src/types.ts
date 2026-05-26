@@ -266,6 +266,62 @@ export type ClaudeCodeCheckResult = {
   stderr_excerpt: string;
 };
 
+export type ClaudeCodeJobCreate = {
+  job_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | string;
+};
+
+export type ClaudeCodeJobProbe = {
+  key: string;
+  title: string;
+  category?: string | null;
+  section?: string | null;
+  status: 'queued' | 'running' | 'pass' | 'fail' | 'warning' | 'skipped' | string;
+  severity?: string | null;
+  score: number;
+  labels: string[];
+  detail?: string | null;
+  run_id?: string | null;
+  result_id?: string | null;
+  message_id?: string | null;
+  request_id?: string | null;
+  request_protocol?: string | null;
+  provider_endpoint?: string | null;
+  evidence_excerpt?: string | null;
+};
+
+export type ClaudeCodeJobSection = {
+  key: string;
+  title: string;
+  status: 'queued' | 'running' | 'pass' | 'fail' | 'warning' | 'skipped' | string;
+  score: number;
+  probe_count: number;
+  pass_count: number;
+  fail_count: number;
+  warning_count: number;
+  skipped_count: number;
+  probes: ClaudeCodeJobProbe[];
+};
+
+export type ClaudeCodeJobStatus = {
+  job_id: string;
+  kind: 'relay' | 'cli' | string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | string;
+  started_at: string;
+  finished_at?: string | null;
+  current_key?: string | null;
+  current_title?: string | null;
+  current_section?: string | null;
+  completed_count: number;
+  total_count: number;
+  percent: number;
+  sections: ClaudeCodeJobSection[];
+  probes: ClaudeCodeJobProbe[];
+  checks: ClaudeCodeJobProbe[];
+  result?: ClaudeCodeTestResult | ClaudeCodeCheckResult | null;
+  error?: string | null;
+};
+
 export type TestSuite = {
   id: string;
   name: string;

@@ -1923,11 +1923,35 @@ async def create_claude_code_test(
     include_expensive_context: bool = False,
     credentials_override: dict[str, Any] | None = None,
     persist_results: bool = True,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     if not channel.enabled:
         raise ValueError("Channel is disabled")
+    configs = _claude_code_probe_configs(image_url, include_expensive_context)
     probes: list[dict[str, Any]] = []
-    for config in _claude_code_probe_configs(image_url, include_expensive_context):
+
+    async def emit(current_probe: dict[str, Any] | None = None) -> None:
+        if progress_callback is None:
+            return
+        await progress_callback(
+            {
+                "current_key": current_probe.get("key") if current_probe else None,
+                "current_title": current_probe.get("title") if current_probe else None,
+                "current_section": current_probe.get("section") if current_probe else None,
+                "probes": [dict(item) for item in probes],
+                "sections": _claude_code_sections(probes),
+                "total_count": len(configs) + 1,
+            }
+        )
+
+    for config in configs:
+        await emit(
+            {
+                "key": config.get("key"),
+                "title": config.get("title"),
+                "section": _claude_code_section_for_category(str(config.get("category") or "")),
+            }
+        )
         try:
             probe = await _run_claude_code_model_probe(
                 db,
@@ -1940,8 +1964,12 @@ async def create_claude_code_test(
             logger.warning("claude_code_probe_failed channel=%s key=%s error=%s", channel.id, config.get("key"), str(exc)[:200])
             probe = _claude_code_failed_probe(config, str(exc))
         probes.append(probe)
+        await emit(probe)
 
+    signature_config = {"key": "signature_interop", "title": "Signature 跨渠道互通", "section": "signature"}
+    await emit(signature_config)
     probes.append(await _run_claude_code_signature_interop_probe(db, channel, source_channel_id, credentials_override=credentials_override))
+    await emit(probes[-1])
     score = _claude_code_score(probes)
     risk_level = _claude_code_risk_level(score, probes)
     return {

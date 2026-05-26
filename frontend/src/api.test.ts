@@ -481,6 +481,104 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('starts ClaudeCode relay jobs and polls progress', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ job_id: 'relay_job_1', status: 'queued' }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            job_id: 'relay_job_1',
+            kind: 'relay',
+            status: 'running',
+            started_at: '2026-05-26T00:00:00Z',
+            finished_at: null,
+            current_key: 'basic_echo',
+            current_title: '基础回显',
+            current_section: 'structure',
+            completed_count: 1,
+            total_count: 5,
+            percent: 20,
+            sections: [],
+            probes: [],
+            checks: [],
+            result: null,
+            error: null,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+
+    const started = await api.startClaudeCodeRelayTestJob({
+      base_url: 'https://relay.example/v1',
+      api_key: 'sk-test',
+      model_name: 'claude-sonnet-4-5',
+    });
+    const progress = await api.claudeCodeRelayTestJob('relay_job_1');
+
+    expect(started.job_id).toBe('relay_job_1');
+    expect(progress.status).toBe('running');
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/claude-code-test/jobs',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/claude-code-test/jobs/relay_job_1',
+      expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('starts ClaudeCode CLI jobs and polls progress', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ job_id: 'cli_job_1', status: 'queued' }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            job_id: 'cli_job_1',
+            kind: 'cli',
+            status: 'running',
+            started_at: '2026-05-26T00:00:00Z',
+            finished_at: null,
+            current_key: 'non_interactive_run',
+            current_title: '非交互运行成功',
+            current_section: 'cli',
+            completed_count: 2,
+            total_count: 7,
+            percent: 28.6,
+            sections: [],
+            probes: [],
+            checks: [],
+            result: null,
+            error: null,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+
+    const started = await api.startClaudeCodeCheckJob({ timeout_seconds: 180, max_budget_usd: 0.25, model: 'sonnet' });
+    const progress = await api.claudeCodeCheckJob('cli_job_1');
+
+    expect(started.job_id).toBe('cli_job_1');
+    expect(progress.current_key).toBe('non_interactive_run');
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/claude-code-check/jobs',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/claude-code-check/jobs/cli_job_1',
+      expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('sends web search probe params through the model request endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
