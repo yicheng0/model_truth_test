@@ -2514,6 +2514,39 @@ def test_list_alerts_tolerates_legacy_malformed_alert_fields() -> None:
     assert payload[0]["trigger_labels"] == ["{'legacy': 'identity_mismatch'}"]
 
 
+def test_list_alerts_matches_channel_and_run_names() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, name="夜间巡检计划", channel_id="third_party_demo")
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "third_party_demo")
+        assert channel is not None
+        channel.name = "阿宝中转"
+        db.commit()
+
+    run_id = create_report_for_schedule(schedule, grade="D", score=42, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    with SessionLocal() as db:
+        run = db.get(Run, run_id)
+        assert run is not None
+        run.name = "阿宝夜间巡检日志"
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        assert alert is not None
+        db.commit()
+        alert_id = alert.id
+
+    with TestClient(app) as client:
+        by_channel = client.get("/api/alerts", params={"status": "pending_review", "id_query": "阿宝中转"})
+        by_run = client.get("/api/alerts", params={"status": "pending_review", "id_query": "夜间巡检日志"})
+
+    assert by_channel.status_code == 200
+    assert [item["id"] for item in by_channel.json()] == [alert_id]
+    assert by_run.status_code == 200
+    assert [item["id"] for item in by_run.json()] == [alert_id]
+
+
 def test_list_alerts_sanitizes_non_finite_alert_values() -> None:
     reset_database()
     with TestClient(app) as client:

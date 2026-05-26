@@ -144,6 +144,45 @@ describe('runs utilities', () => {
     });
   });
 
+  it('prefers a requested patrol report when multiple reports exist', () => {
+    const results: RunResults = {
+      run: run('patrol_1', 'sched_1'),
+      run_channels: [],
+      results: [],
+      comparisons: [],
+      baseline_results: [],
+      reports: [
+        {
+          id: 'rep_other',
+          run_id: 'patrol_1',
+          channel_id: 'channel_other',
+          final_score: 100,
+          grade: 'A',
+          evidence: {
+            test_scope: 'scheduled_probe',
+            model_requests: [{ key: 'other', title: 'Other', result_id: 'res_other' }],
+          },
+        },
+        {
+          id: 'rep_target',
+          run_id: 'patrol_1',
+          channel_id: 'channel_target',
+          final_score: 50,
+          grade: 'D',
+          evidence: {
+            test_scope: 'scheduled_probe',
+            model_requests: [{ key: 'target', title: 'Target', result_id: 'res_target' }],
+          },
+        },
+      ],
+    };
+
+    const evidence = extractPatrolEvidence(results, 'rep_target');
+
+    expect(evidence?.reportId).toBe('rep_target');
+    expect(evidence?.modelRequests[0].resultId).toBe('res_target');
+  });
+
   it('attaches saved result response text to patrol model request evidence', () => {
     const results: RunResults = {
       run: run('patrol_1', 'sched_1'),

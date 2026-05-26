@@ -3040,6 +3040,16 @@ textarea:focus-visible,
   color: #172033;
   overflow-wrap: anywhere;
 }
+.patrol-focused-row > td {
+  background: #fff6df !important;
+}
+
+.patrol-focused-panel {
+  padding: 10px;
+  border: 1px solid #f2c66d;
+  border-radius: 8px;
+  background: #fffaf0;
+}
 
 .markdown-preview,
 .response-pre {

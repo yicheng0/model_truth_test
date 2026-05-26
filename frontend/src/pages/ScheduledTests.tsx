@@ -7,6 +7,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../channelCredentials';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
+import { buildPatrolRunDetailLink } from '../patrolNavigation';
 import { formatDateTime } from '../time';
 import type { Channel, ChannelAlert, ChannelAlertStatus, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
 import { buildScheduleBasePayload, intervalText, type ScheduleFormValues } from '../scheduledTestsUtils';
@@ -879,7 +880,7 @@ export default function ScheduledTests() {
             value={alertIdQuery}
             onChange={(event) => setAlertIdQuery(event.target.value)}
             onSearch={(value) => setAlertIdQuery(value)}
-            placeholder="输入 request_id / message_id / run_id / report_id"
+            placeholder="输入渠道名 / request_id / message_id / run_id / report_id"
             style={{ width: 420, maxWidth: '100%' }}
           />
           <DatePicker.RangePicker
@@ -943,7 +944,7 @@ export default function ScheduledTests() {
                   </Typography.Text>
                   <Space wrap>
                     <Button icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
-                    <Link to={`/runs/${alert.run_id}`}>查看报告</Link>
+                    <Link to={buildPatrolRunDetailLink(alert)}>查看报告</Link>
                     {alert.notification_error ? (
                       <Typography.Text type="danger">飞书发送错误：{alert.notification_error}</Typography.Text>
                     ) : null}
@@ -960,7 +961,8 @@ export default function ScheduledTests() {
                 const channel = alertChannelText(alert, channelById.get(alert.channel_id));
                 return (
                   <Space direction="vertical" size={4}>
-                    <Typography.Text strong>{channel.displayId}</Typography.Text>
+                    <Typography.Text strong>{channel.name}</Typography.Text>
+                    <Typography.Text type="secondary">{channel.displayId}</Typography.Text>
                     {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
                   </Space>
                 );
@@ -1003,7 +1005,7 @@ export default function ScheduledTests() {
               fixed: 'right',
               render: (_, alert) => (
                 <Space wrap>
-                  <Link to={`/runs/${alert.run_id}`}>查看详情</Link>
+                  <Link to={buildPatrolRunDetailLink(alert)}>查看详情</Link>
                   {alert.status === 'pending_review' ? <Button type="primary" onClick={() => openReview(alert)}>复审</Button> : <Button onClick={() => openReview(alert)}>更新复审</Button>}
                   <Button
                     icon={<RefreshCw size={15} />}
@@ -1090,7 +1092,8 @@ export default function ScheduledTests() {
                               }, item.channel_id);
                             return (
                               <Space direction="vertical" size={2}>
-                                <Typography.Text strong>{displayId}</Typography.Text>
+                                <Typography.Text strong>{item.channel_name ?? item.channel_id}</Typography.Text>
+                                <Typography.Text type="secondary">{displayId}</Typography.Text>
                                 {item.channel_model_name ? <Typography.Text type="secondary">{item.channel_model_name}</Typography.Text> : null}
                               </Space>
                             );
@@ -1161,7 +1164,8 @@ export default function ScheduledTests() {
                             const channel = alertChannelText(alert, channelById.get(alert.channel_id));
                             return (
                               <Space direction="vertical" size={2}>
-                                <Typography.Text strong>{channel.displayId}</Typography.Text>
+                                <Typography.Text strong>{channel.name}</Typography.Text>
+                                <Typography.Text type="secondary">{channel.displayId}</Typography.Text>
                                 {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
                               </Space>
                             );
@@ -1178,6 +1182,7 @@ export default function ScheduledTests() {
                           render: (_, alert) => (
                             <Space wrap>
                               <Button type="link" icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
+                              <Link to={buildPatrolRunDetailLink(alert)}>查看详情</Link>
                               {(
                                 <Popconfirm
                                   title="删除最近异常"

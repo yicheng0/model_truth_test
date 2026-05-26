@@ -239,7 +239,7 @@ export default function Channels() {
           <Typography.Text className="section-kicker">CHANNELS</Typography.Text>
           <Typography.Title level={2}>渠道管理</Typography.Title>
           <Typography.Paragraph>
-            主流程只需要配置渠道名称、渠道编号和账号类型；系统会自动生成渠道 ID 和 API Key。
+            主流程只需要配置渠道名称、渠道编号和账号类型；这里的渠道名称会直接用于自动巡检、告警和日志定位，系统会自动生成渠道 ID 和 API Key。
           </Typography.Paragraph>
         </div>
         <Space wrap>
@@ -252,7 +252,7 @@ export default function Channels() {
       <Card title="新增渠道" bordered={false}>
         <Form form={createForm} layout="vertical" onFinish={submitCreate}>
           <div className="form-grid">
-            <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入渠道名称' }]}>
+            <Form.Item name="name" label="渠道名称" rules={[{ required: true, message: '请输入渠道名称' }]} extra="用于自动巡检、复审告警和日志定位，建议填容易识别的名字。">
               <Input size="large" placeholder="例如：APIPro 生产中转" />
             </Form.Item>
             <Form.Item
@@ -431,7 +431,7 @@ export default function Channels() {
         destroyOnClose
       >
         <Form form={editForm} layout="vertical" onFinish={submitEdit}>
-          <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入渠道名称' }]}>
+          <Form.Item name="name" label="渠道名称" rules={[{ required: true, message: '请输入渠道名称' }]} extra="修改后会同步影响自动巡检、复审告警和日志里的展示名称。">
             <Input placeholder="例如：APIPro 生产中转" />
           </Form.Item>
           <Form.Item name="channel_number" label="渠道编号" extra="已有渠道不会修改 ID；修改编号只会用于重新生成默认 API Key。">

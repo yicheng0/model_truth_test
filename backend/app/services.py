@@ -3506,6 +3506,13 @@ def channel_alert_matches_id_query(db: Session, alert: ChannelAlert, query: str)
     if any(_value_contains_query(value, normalized_query) for value in direct_values):
         return True
 
+    channel = db.get(Channel, alert.channel_id)
+    run = db.get(Run, alert.run_id)
+    if _value_contains_query(channel.name if channel else None, normalized_query):
+        return True
+    if _value_contains_query(run.name if run else None, normalized_query):
+        return True
+
     report = db.get(Report, alert.report_id)
     evidence = report.evidence if report and isinstance(report.evidence, dict) else {}
     if _json_contains_query(evidence, normalized_query):

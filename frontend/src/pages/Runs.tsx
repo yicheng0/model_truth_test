@@ -760,7 +760,8 @@ export default function Runs() {
               width: 220,
               render: (_, run) => (
                 <Space direction="vertical" size={2}>
-                  <Typography.Text strong>{formatPatrolChannel({ id: run.patrol_channel_id, name: run.patrol_channel_name, accountType: run.patrol_channel_account_type, providerType: run.patrol_channel_provider_type }, run.patrol_channel_id)}</Typography.Text>
+                  <Typography.Text strong>{run.patrol_channel_name || run.patrol_channel_id || '-'}</Typography.Text>
+                  <Typography.Text type="secondary">{formatPatrolChannel({ id: run.patrol_channel_id, name: run.patrol_channel_name, accountType: run.patrol_channel_account_type, providerType: run.patrol_channel_provider_type }, run.patrol_channel_id)}</Typography.Text>
                   <Typography.Text type="secondary">{patrolRunTitle(run)}</Typography.Text>
                 </Space>
               ),

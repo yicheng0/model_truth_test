@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type Key } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Descriptions, Drawer, Empty, Progress, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { CheckCircle2, Clock3, Eye, GitCompare, ShieldCheck, TriangleAlert } from 'lucide-react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
 import { api, getErrorMessage } from '../api';
 import { accountTypeLabel, formatChannelDisplayName } from '../channelCredentials';
@@ -89,6 +89,13 @@ function comparisonCell(comparison?: Comparison) {
   );
 }
 
+function escapeRowKey(value: string) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(value);
+  }
+  return value.replace(/["\\]/g, '\\$&');
+}
+
 function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
   const responseText = item.responseText ?? item.rawResponseText ?? item.error ?? '-';
   return (
@@ -133,12 +140,47 @@ function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
   );
 }
 
-function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
+type PatrolFocus = {
+  reportId: string | null;
+  resultId: string | null;
+  section: string | null;
+};
+
+function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | null; focus: PatrolFocus | null }) {
+  const [expandedRowKeys, setExpandedRowKeys] = useState<Key[]>([]);
+  const highlightedProbeKey = useMemo(() => {
+    if (!focus?.resultId || !evidence) return null;
+    const target = evidence.modelRequests.find((item) => item.resultId === focus.resultId);
+    return target ? (target.key ?? target.title ?? target.resultId ?? target.messageId ?? 'model-request') : null;
+  }, [evidence, focus?.resultId]);
+  const probeContainerRef = useRef<HTMLDivElement | null>(null);
+  const signaturePanelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!highlightedProbeKey) {
+      setExpandedRowKeys([]);
+      return;
+    }
+    setExpandedRowKeys([highlightedProbeKey]);
+  }, [highlightedProbeKey]);
+
+  useEffect(() => {
+    if (highlightedProbeKey && probeContainerRef.current) {
+      const row = probeContainerRef.current.querySelector(`tr[data-row-key="${escapeRowKey(String(highlightedProbeKey))}"]`);
+      row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return;
+    }
+    if (focus?.section === 'signature') {
+      signaturePanelRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }, [focus?.section, highlightedProbeKey]);
+
   if (!evidence) {
     return <Empty description="暂无巡检证据" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
   }
   const signature = evidence.signature;
   const classificationText = evidence.classificationLabel || (evidence.classificationStatus === 'aws_resource' ? 'AWS 资源' : evidence.classificationStatus === 'claude' ? 'Claude 资源' : '');
+
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div className="channel-pair-grid">
@@ -152,13 +194,20 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
         </Typography.Text>
       ) : null}
       {evidence.detectedProviderHint ? <Typography.Paragraph className="report-summary-text">{evidence.detectedProviderHint}</Typography.Paragraph> : null}
+      <div ref={probeContainerRef}>
       <Table
         className="patrol-probe-table"
+        rowClassName={(item) => {
+          const rowKey = item.key ?? item.title ?? item.resultId ?? item.messageId ?? 'model-request';
+          return rowKey === highlightedProbeKey ? 'patrol-focused-row' : '';
+        }}
         rowKey={(item) => item.key ?? item.title ?? item.resultId ?? item.messageId ?? 'model-request'}
         dataSource={evidence.modelRequests}
         pagination={false}
         scroll={{ x: 980 }}
         expandable={{
+          expandedRowKeys,
+          onExpandedRowsChange: (keys) => setExpandedRowKeys([...keys]),
           expandedRowRender: (item) => <PatrolProbeDetail item={item} />,
           rowExpandable: () => true,
         }}
@@ -179,8 +228,12 @@ function PatrolDetailPanel({ evidence }: { evidence: PatrolEvidence | null }) {
           },
         ]}
       />
+      </div>
       {signature ? (
-        <div className="patrol-signature-panel">
+        <div
+          ref={signaturePanelRef}
+          className={`patrol-signature-panel ${focus?.section === 'signature' ? 'patrol-focused-panel' : ''}`}
+        >
           <div><span>Source</span><strong>{signature.sourceChannelId ?? '-'} / msg {signature.sourceMessageId ?? '-'} / req {signature.sourceRequestId ?? '-'}</strong></div>
           <div><span>Relay</span><strong>{signature.relayChannelId ?? '-'} / msg {signature.relayMessageId ?? '-'} / req {signature.relayRequestId ?? '-'}</strong></div>
           <div><span>Source 类型</span><strong>{signature.sourceMessageChannelType ?? '-'}</strong></div>
@@ -255,6 +308,7 @@ function extractManualProbeRows(results: RunResults, cases: TestCase[], channels
 
 export default function RunDetail() {
   const { runId = '' } = useParams();
+  const [searchParams] = useSearchParams();
   const [selectedOfficialId, setSelectedOfficialId] = useState('');
   const [selectedCandidateId, setSelectedCandidateId] = useState('');
   const [selectedSampleChannelId, setSelectedSampleChannelId] = useState('');
@@ -291,9 +345,17 @@ export default function RunDetail() {
   const channels = channelsQuery.data ?? [];
   const taxonomy = taxonomyQuery.data ?? null;
   const cases = casesQuery.data ?? [];
-  const isPatrolRun = Boolean(data?.run.scheduled_test_id) || data?.run.test_scope === 'scheduled_probe';
+  const patrolFocus = useMemo<PatrolFocus | null>(() => {
+    if (searchParams.get('focus') !== 'patrol') return null;
+    return {
+      reportId: searchParams.get('reportId'),
+      resultId: searchParams.get('resultId'),
+      section: searchParams.get('section'),
+    };
+  }, [searchParams]);
   const channelById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels]);
-  const patrolEvidence = useMemo(() => data ? extractPatrolEvidence(data) : null, [data]);
+  const isPatrolRun = Boolean(data?.run.scheduled_test_id) || data?.run.test_scope === 'scheduled_probe';
+  const patrolEvidence = useMemo(() => data ? extractPatrolEvidence(data, patrolFocus?.reportId) : null, [data, patrolFocus?.reportId]);
   const patrolChannelName = data?.run.patrol_channel_name ?? patrolEvidence?.modelRequests[0]?.channelName ?? patrolEvidence?.signature?.relayChannelName ?? null;
   const patrolChannelId = data?.run.patrol_channel_id ?? patrolEvidence?.modelRequests[0]?.channelId ?? patrolEvidence?.signature?.relayChannelId ?? null;
   const patrolChannel = patrolChannelId ? channelById.get(patrolChannelId) : undefined;
@@ -563,7 +625,10 @@ export default function RunDetail() {
               </Typography.Paragraph>
               <Space wrap size={16}>
                 <Typography.Text type="secondary">
-                  渠道：{formatChannelDisplayName(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)}
+                  渠道：{patrolChannelName || patrolChannel?.name || patrolChannelId || '-'}
+                </Typography.Text>
+                <Typography.Text type="secondary">
+                  定位标识：{formatChannelDisplayName(patrolChannel ?? { id: patrolChannelId, name: patrolChannelName, accountType: data?.run.patrol_channel_account_type }, patrolChannelId)}
                 </Typography.Text>
                 <Typography.Text type="secondary">进度：{data.run.completed_jobs} / {data.run.total_jobs}</Typography.Text>
               </Space>
@@ -571,7 +636,7 @@ export default function RunDetail() {
             <Tag color={data.run.status === 'running' ? 'processing' : 'default'}>{data.run.status}</Tag>
           </div>
           <Progress percent={percent} strokeColor={{ '0%': '#3b82f6', '100%': '#f97316' }} strokeWidth={12} />
-          <PatrolDetailPanel evidence={patrolEvidence} />
+          <PatrolDetailPanel evidence={patrolEvidence} focus={patrolFocus} />
         </Card>
       ) : (
         <Card

@@ -68,7 +68,7 @@ export default function AlertLogDrawer({ alert, channelName, channelDisplayId, o
             <Descriptions.Item label="探针完成时间">{probeCompletedAt || '-'}</Descriptions.Item>
             <Descriptions.Item label="判定">{probeTitle || '-'}</Descriptions.Item>
             <Descriptions.Item label="渠道">{channelName || '-'}</Descriptions.Item>
-            <Descriptions.Item label="渠道 ID">{displayedChannelId || '-'}</Descriptions.Item>
+            <Descriptions.Item label="定位标识">{displayedChannelId || '-'}</Descriptions.Item>
             <Descriptions.Item label="渠道模型">{channelModel || '-'}</Descriptions.Item>
             <Descriptions.Item label="探针来源">{probeSource || '-'}</Descriptions.Item>
             <Descriptions.Item label="Result ID">

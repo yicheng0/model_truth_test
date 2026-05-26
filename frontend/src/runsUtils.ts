@@ -74,8 +74,9 @@ export function splitRunsByPatrol(runs: Run[]) {
   };
 }
 
-export function extractPatrolEvidence(results: RunResults): PatrolEvidence | null {
-  const report = results.reports.find((item) => {
+export function extractPatrolEvidence(results: RunResults, preferredReportId?: string | null): PatrolEvidence | null {
+  const preferredReport = preferredReportId ? results.reports.find((item) => item.id === preferredReportId) : undefined;
+  const report = preferredReport ?? results.reports.find((item) => {
     const evidence = asRecord(item.evidence);
     return evidence?.test_scope === 'scheduled_probe' || Boolean(evidence?.model_request) || Boolean(evidence?.signature_interop);
   }) ?? results.reports[0];
