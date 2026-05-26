@@ -3462,6 +3462,236 @@ def test_model_request_test_persists_missing_key_failure() -> None:
     assert "缺少 API Key" in payload["result"]["normalized_response"]["error"]
 
 
+def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
+        rules = case.scoring_rules or {}
+        params = case.request_params or {}
+        text = "OK"
+        stop_reason = "end_turn"
+        stop_sequence = None
+        error = None
+        raw_response: dict[str, object] = {
+            "id": "msg_01claudecode",
+            "type": "message",
+            "model": channel.model_name,
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 20, "output_tokens": 2},
+        }
+        if rules.get("invalid_request_probe"):
+            raw_response = {"type": "error", "error": {"type": "invalid_request_error", "message": "messages must contain at least one item"}}
+            error = "messages must contain at least one item"
+        elif rules.get("expected_error_any"):
+            error = "invalid unknown output_config format effort cache_control display thinking"
+            raw_response = {"type": "error", "error": {"type": "invalid_request_error", "message": error}}
+        elif rules.get("expected_stop_reason"):
+            raw_response["content"] = [{"type": "text", "text": "A"}]
+            raw_response["stop_reason"] = "max_tokens"
+        elif rules.get("stop_sequence"):
+            raw_response["content"] = [{"type": "text", "text": "第一句"}]
+            raw_response["stop_reason"] = "stop_sequence"
+            raw_response["stop_sequence"] = "。"
+        elif case.title.endswith("基础回显"):
+            raw_response["content"] = [{"type": "text", "text": "CC-ECHO-731"}]
+        elif case.title.endswith("图片输入 base64") or case.title.endswith("图片输入 URL"):
+            raw_response["content"] = [{"type": "text", "text": "red"}]
+        elif case.title.endswith("文档识别"):
+            raw_response["content"] = [{"type": "text", "text": "CC-DOC-742"}]
+        elif case.title.endswith("Thinking signature"):
+            raw_response["content"] = [
+                {"type": "thinking", "thinking": "hidden", "signature": "sig-test"},
+                {"type": "text", "text": "0.1 和 0.2 的二进制浮点表示无法精确相加。"},
+            ]
+        elif case.title.endswith("提示词泄露诱导"):
+            raw_response["content"] = [{"type": "text", "text": "我不能访问隐藏系统提示词。"}]
+        elif "CC-NEEDLE-219" in case.prompt:
+            raw_response["content"] = [{"type": "text", "text": "CC-NEEDLE-219 violet-731"}]
+
+        return {
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "channel_role": channel.role,
+            "test_case_id": case.id,
+            "status_code": 500 if error else 200,
+            "latency_ms": 10,
+            "first_token_ms": 5,
+            "ttft_ms": 5,
+            "tpot_ms": 1,
+            "input_tokens": 20,
+            "output_tokens": 2,
+            "tokens_per_second": 50,
+            "error_type": "invalid_request_error" if error else None,
+            "provider_message_id": raw_response.get("id"),
+            "provider_model": channel.model_name,
+            "stop_reason": raw_response.get("stop_reason"),
+            "stop_sequence": raw_response.get("stop_sequence"),
+            "usage": raw_response.get("usage"),
+            "content_text": "\n".join(block.get("text", "") for block in raw_response.get("content", []) if isinstance(block, dict)),
+            "content_blocks": raw_response.get("content", []),
+            "tool_calls": [],
+            "stream_events": ["message_stop"],
+            "raw_request": {"messages": [{"role": "user", "content": params.get("message_content") or case.prompt}], "params": params},
+            "raw_response": raw_response,
+            "error": error,
+            "request_mode": "live",
+            "request_attempted": True,
+            "provider_endpoint": "https://relay.example/v1/messages",
+            "request_protocol": "anthropic_messages",
+            "channel_preflight_failed": False,
+        }
+
+    async def fake_signature(source, relay, stream=False):  # noqa: ANN001
+        return {
+            "ok": True,
+            "reason": "兼容",
+            "relay_message_id": "msg_01relay",
+            "relay_request_id": "req_relay",
+            "relay_endpoint": "https://relay.example/v1/messages",
+        }
+
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature)
+
+    with TestClient(app) as client:
+        response = client.post("/api/channels/third_party_demo/claude-code-test", json={})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["risk_level"] in {"low", "medium"}
+    assert payload["score"] >= 90
+    keys = {probe["key"] for probe in payload["probes"]}
+    assert {"basic_echo", "image_base64", "document_input", "thinking_signature", "signature_interop"} <= keys
+    assert all("run_id" in probe for probe in payload["probes"])
+    section_keys = {section["key"] for section in payload["sections"]}
+    assert {"fingerprint", "structure", "behavior", "signature", "multimodal"} >= section_keys
+    assert "structure" in section_keys
+    assert any(section["title"] == "结构完整性" for section in payload["sections"])
+
+
+def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(monkeypatch) -> None:
+    reset_database()
+    seen_credentials: list[dict[str, object]] = []
+    seen_relay_auth: list[dict[str, object]] = []
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
+        seen_credentials.append(dict(credentials))
+        assert channel.id == "ephemeral_claude_code_test"
+        assert channel.base_url == "https://runtime-relay.example/v1"
+        assert channel.model_name == "claude-code-max-200"
+        assert credentials["api_key"] == "sk-runtime-secret"
+        assert credentials["base_url"] == "https://runtime-relay.example/v1"
+        assert credentials["model"] == "claude-code-max-200"
+        assert credentials["request_protocol"] == "anthropic_messages"
+        raw_response = {
+            "id": "msg_01runtime",
+            "type": "message",
+            "model": channel.model_name,
+            "content": [{"type": "text", "text": "OK"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        return {
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "channel_role": channel.role,
+            "test_case_id": case.id,
+            "status_code": 200,
+            "latency_ms": 10,
+            "first_token_ms": 5,
+            "ttft_ms": 5,
+            "tpot_ms": 1,
+            "input_tokens": 8,
+            "output_tokens": 2,
+            "tokens_per_second": 50,
+            "error_type": None,
+            "provider_message_id": raw_response["id"],
+            "provider_model": channel.model_name,
+            "stop_reason": raw_response["stop_reason"],
+            "stop_sequence": None,
+            "usage": raw_response["usage"],
+            "content_text": "OK",
+            "content_blocks": raw_response["content"],
+            "tool_calls": [],
+            "stream_events": ["message_stop"],
+            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
+            "raw_response": raw_response,
+            "error": None,
+            "request_mode": "live",
+            "request_attempted": True,
+            "provider_endpoint": "https://runtime-relay.example/v1/messages",
+            "request_protocol": "anthropic_messages",
+            "channel_preflight_failed": False,
+        }
+
+    async def fake_signature(source, relay, stream=False):  # noqa: ANN001
+        seen_relay_auth.append(dict(relay.auth_config))
+        return {
+            "ok": True,
+            "reason": "runtime signature ok",
+            "relay_message_id": "msg_01relay",
+            "relay_request_id": "req_relay",
+            "relay_endpoint": "https://runtime-relay.example/v1/messages",
+        }
+
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/claude-code-test",
+            json={
+                "base_url": " https://runtime-relay.example/v1 ",
+                "api_key": " sk-runtime-secret ",
+                "model_name": " claude-code-max-200 ",
+                "provider_type": "third_party_anthropic",
+                "request_protocol": "anthropic_messages",
+                "include_expensive_context": False,
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert seen_credentials
+    assert seen_relay_auth and seen_relay_auth[-1]["api_key"] == "sk-runtime-secret"
+    assert payload["probes"]
+    assert all(probe["run_id"] is None and probe["result_id"] is None for probe in payload["probes"])
+    assert "sk-runtime-secret" not in json.dumps(payload, ensure_ascii=False)
+    with SessionLocal() as db:
+        assert db.get(Channel, "ephemeral_claude_code_test") is None
+        assert db.scalar(select(func.count()).select_from(Run).where(Run.name.like("ClaudeCode 检测%"))) == 0
+
+
+def test_ephemeral_claude_code_test_rejects_blank_runtime_fields() -> None:
+    reset_database()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/claude-code-test",
+            json={
+                "base_url": "   ",
+                "api_key": "sk-runtime-secret",
+                "model_name": "claude-code-max-200",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Base URL is required"
+
+
+def test_claude_code_source_channels_endpoint() -> None:
+    reset_database()
+
+    with TestClient(app) as client:
+        response = client.get("/api/claude-code-test/source-channels")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload
+    assert any(item["id"] == "anthropic_official" for item in payload)
+
+
 def test_auto_protocol_falls_back_to_openai_compatible(monkeypatch) -> None:
     reset_database()
     calls: list[str] = []

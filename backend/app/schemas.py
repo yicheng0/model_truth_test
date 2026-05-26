@@ -101,6 +101,107 @@ class ModelRequestTestCreate(BaseModel):
     run_name: str | None = Field(default=None, max_length=200)
 
 
+class ClaudeCodeCheckCreate(BaseModel):
+    model: str | None = Field(default=None, max_length=200)
+    timeout_seconds: int = Field(default=180, ge=30, le=300)
+    max_budget_usd: float = Field(default=0.25, ge=0.01, le=1.0)
+
+
+class ClaudeCodeCheckStatusRead(BaseModel):
+    installed: bool
+    available: bool
+    command: str
+    command_path: str | None = None
+    version: str | None = None
+    error: str | None = None
+
+
+class ClaudeCodeCheckItemRead(BaseModel):
+    key: str
+    title: str
+    status: str
+    score: int
+    detail: str
+
+
+class ClaudeCodeCheckRead(BaseModel):
+    ok: bool
+    status: str
+    score: int
+    grade: str
+    command: str
+    command_path: str | None = None
+    version: str | None = None
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    checks: list[ClaudeCodeCheckItemRead]
+    stdout_excerpt: str
+    stderr_excerpt: str
+
+
+class ClaudeCodeTestCreate(BaseModel):
+    source_channel_id: str | None = None
+    image_url: str | None = Field(default=None, max_length=1000)
+    include_expensive_context: bool = False
+
+
+class ClaudeCodeEphemeralTestCreate(ClaudeCodeTestCreate):
+    base_url: str = Field(min_length=1, max_length=1000)
+    api_key: str = Field(min_length=1, max_length=2000)
+    model_name: str = Field(min_length=1, max_length=200)
+    provider_type: str = "third_party_anthropic"
+    request_protocol: str = "auto"
+
+
+class ClaudeCodeProbeResultRead(BaseModel):
+    key: str
+    title: str
+    category: str
+    section: str | None = None
+    status: str
+    severity: str
+    score: float
+    labels: list[str] = Field(default_factory=list)
+    run_id: str | None = None
+    result_id: str | None = None
+    message_id: str | None = None
+    request_id: str | None = None
+    request_protocol: str | None = None
+    provider_endpoint: str | None = None
+    evidence_excerpt: str | None = None
+
+
+class ClaudeCodeSectionRead(BaseModel):
+    key: str
+    title: str
+    score: float
+    status: str
+    probe_count: int
+    pass_count: int
+    fail_count: int
+    warning_count: int
+    skipped_count: int
+    probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
+
+
+class ClaudeCodeSourceChannelRead(BaseModel):
+    id: str
+    name: str
+    provider_type: str | None = None
+    model_name: str | None = None
+    account_type: str | None = None
+
+
+class ClaudeCodeTestRead(BaseModel):
+    ok: bool
+    score: float
+    risk_level: str
+    summary: str
+    probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
+    sections: list[ClaudeCodeSectionRead] = Field(default_factory=list)
+
+
 class TestSuiteBase(BaseModel):
     name: str
     description: str | None = None

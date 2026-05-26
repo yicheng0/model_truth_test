@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Popconfirm, Select, Space, Tag, Typography, message } from 'antd';
-import { Link } from 'react-router-dom';
-import { BrainCircuit, Bug, Search, Send, Shuffle, Trash2 } from 'lucide-react';
+import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { Link, useNavigate } from 'react-router-dom';
+import { BrainCircuit, Bug, Search, Send, ShieldCheck, Shuffle, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
@@ -204,6 +204,7 @@ function parseExtraParams(value?: string) {
 }
 
 export default function ModelRequestTest() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<ModelRequestForm>();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
@@ -526,6 +527,9 @@ export default function ModelRequestTest() {
               </Button>
               <Button onClick={submitComboProbe} loading={runComboProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runSingleProbe.isPending} icon={<Shuffle size={16} />}>
                 {runComboProbe.isPending ? '检测中' : '三项组合测试'}
+              </Button>
+              <Button onClick={() => navigate('/claude-code-check')} disabled={channels.isLoading || requestModel.isPending || runSingleProbe.isPending || runComboProbe.isPending} icon={<ShieldCheck size={16} />}>
+                打开 ClaudeCode 专页
               </Button>
             </Space>
           </Form>

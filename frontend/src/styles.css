@@ -1969,6 +1969,21 @@ textarea:focus-visible,
   gap: 16px;
 }
 
+.claude-section-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.claude-section-card .ant-card-body {
+  height: 100%;
+}
+
+.claude-section-card-head {
+  width: 100%;
+  justify-content: space-between;
+}
+
 .signature-step-excerpt,
 .signature-note {
   max-height: 260px;
@@ -2686,6 +2701,7 @@ textarea:focus-visible,
   .relay-card,
   .signature-config-grid,
   .signature-sim-grid,
+  .claude-section-grid,
   .channel-pair-grid,
   .fixed-channel-grid,
   .ab-compare-grid {
@@ -2773,6 +2789,7 @@ textarea:focus-visible,
   .relay-metrics,
   .signature-config-grid,
   .signature-sim-grid,
+  .claude-section-grid,
   .form-grid,
   .case-filter-grid,
   .case-form-grid,

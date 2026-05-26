@@ -7,6 +7,11 @@ import type {
   ChannelAlert,
   ChannelTaxonomySetting,
   ChannelTaxonomyUpdate,
+  ClaudeCodeCheckResult,
+  ClaudeCodeCheckStatus,
+  ClaudeCodeRelayTestCreate,
+  ClaudeCodeSourceChannel,
+  ClaudeCodeTestResult,
   Comparison,
   FeishuBroadcastSetting,
   FeishuBroadcastUpdate,
@@ -158,6 +163,14 @@ export const api = {
     request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),
   modelRequestTest: (channelId: string, payload: { prompt: string; system_prompt?: string | null; request_params?: Record<string, unknown>; run_name?: string | null }) =>
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
+  claudeCodeTest: (channelId: string, payload: { source_channel_id?: string | null; image_url?: string | null; include_expensive_context?: boolean }) =>
+    request<ClaudeCodeTestResult>(`/api/channels/${channelId}/claude-code-test`, { method: 'POST', body: JSON.stringify(payload) }),
+  runClaudeCodeRelayTest: (payload: ClaudeCodeRelayTestCreate) =>
+    request<ClaudeCodeTestResult>('/api/claude-code-test', { method: 'POST', body: JSON.stringify(payload) }),
+  claudeCodeSourceChannels: () => request<ClaudeCodeSourceChannel[]>('/api/claude-code-test/source-channels'),
+  claudeCodeCheckStatus: () => request<ClaudeCodeCheckStatus>('/api/claude-code-check/status'),
+  runClaudeCodeCheck: (payload: { model?: string | null; timeout_seconds: number; max_budget_usd: number }) =>
+    request<ClaudeCodeCheckResult>('/api/claude-code-check/run', { method: 'POST', body: JSON.stringify(payload) }),
   channelModels: (id: string) => request<string[]>(`/api/channels/${id}/models`),
   suites: () => request<TestSuite[]>('/api/suites'),
   createSuite: (payload: Partial<TestSuite>) => request<TestSuite>('/api/test-suites', { method: 'POST', body: JSON.stringify(payload) }),

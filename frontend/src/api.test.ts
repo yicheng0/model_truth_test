@@ -366,6 +366,121 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('sends ClaudeCode tests through the isolated channel endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          score: 72,
+          risk_level: 'high',
+          summary: '失败项：基础回显',
+          probes: [
+            {
+              key: 'basic_echo',
+              title: '基础回显',
+              category: 'protocol',
+              status: 'fail',
+              severity: 'core',
+              score: 0,
+              labels: ['exact_output_mismatch'],
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.claudeCodeTest('ch_1', {
+      source_channel_id: 'source_1',
+      image_url: 'https://example.test/red.png',
+      include_expensive_context: false,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/ch_1/claude-code-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          source_channel_id: 'source_1',
+          image_url: 'https://example.test/red.png',
+          include_expensive_context: false,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('sends ephemeral ClaudeCode relay tests with runtime credentials', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          score: 96,
+          risk_level: 'low',
+          summary: 'ok',
+          probes: [],
+          sections: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.runClaudeCodeRelayTest({
+      base_url: 'https://relay.example/v1',
+      api_key: 'sk-test',
+      model_name: 'claude-sonnet-4-5',
+      provider_type: 'third_party_anthropic',
+      request_protocol: 'anthropic_messages',
+      source_channel_id: 'source_1',
+      image_url: null,
+      include_expensive_context: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/claude-code-test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          base_url: 'https://relay.example/v1',
+          api_key: 'sk-test',
+          model_name: 'claude-sonnet-4-5',
+          provider_type: 'third_party_anthropic',
+          request_protocol: 'anthropic_messages',
+          source_channel_id: 'source_1',
+          image_url: null,
+          include_expensive_context: true,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('loads ClaudeCode source channels from the dedicated endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          {
+            id: 'anthropic_official',
+            name: 'Anthropic Official',
+            provider_type: 'anthropic',
+            model_name: 'claude-sonnet-4-5',
+            account_type: 'claude',
+          },
+        ]),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const payload = await api.claudeCodeSourceChannels();
+
+    expect(payload[0].id).toBe('anthropic_official');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/claude-code-test/source-channels',
+      expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('sends web search probe params through the model request endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

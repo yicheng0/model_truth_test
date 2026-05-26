@@ -174,6 +174,98 @@ export type ModelRequestTestResult = {
   provider_endpoint?: string | null;
 };
 
+export type ClaudeCodeProbeResult = {
+  key: string;
+  title: string;
+  category: string;
+  section?: string | null;
+  status: 'pass' | 'fail' | 'warning' | 'skipped' | string;
+  severity: 'core' | 'supporting' | 'weak' | string;
+  score: number;
+  labels: string[];
+  run_id?: string | null;
+  result_id?: string | null;
+  message_id?: string | null;
+  request_id?: string | null;
+  request_protocol?: string | null;
+  provider_endpoint?: string | null;
+  evidence_excerpt?: string | null;
+};
+
+export type ClaudeCodeSection = {
+  key: string;
+  title: string;
+  score: number;
+  status: 'pass' | 'fail' | 'warning' | 'skipped' | string;
+  probe_count: number;
+  pass_count: number;
+  fail_count: number;
+  warning_count: number;
+  skipped_count: number;
+  probes: ClaudeCodeProbeResult[];
+};
+
+export type ClaudeCodeTestResult = {
+  ok: boolean;
+  score: number;
+  risk_level: 'low' | 'medium' | 'high' | 'critical' | string;
+  summary: string;
+  probes: ClaudeCodeProbeResult[];
+  sections: ClaudeCodeSection[];
+};
+
+export type ClaudeCodeSourceChannel = {
+  id: string;
+  name: string;
+  provider_type?: string | null;
+  model_name?: string | null;
+  account_type?: string | null;
+};
+
+export type ClaudeCodeRelayTestCreate = {
+  base_url: string;
+  api_key: string;
+  model_name: string;
+  provider_type?: string;
+  request_protocol?: string;
+  source_channel_id?: string | null;
+  image_url?: string | null;
+  include_expensive_context?: boolean;
+};
+
+export type ClaudeCodeCheckStatus = {
+  installed: boolean;
+  available: boolean;
+  command: string;
+  command_path?: string | null;
+  version?: string | null;
+  error?: string | null;
+};
+
+export type ClaudeCodeCheckItem = {
+  key: string;
+  title: string;
+  status: 'pass' | 'fail' | string;
+  score: number;
+  detail: string;
+};
+
+export type ClaudeCodeCheckResult = {
+  ok: boolean;
+  status: 'passed' | 'failed' | string;
+  score: number;
+  grade: string;
+  command: string;
+  command_path?: string | null;
+  version?: string | null;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  checks: ClaudeCodeCheckItem[];
+  stdout_excerpt: string;
+  stderr_excerpt: string;
+};
+
 export type TestSuite = {
   id: string;
   name: string;

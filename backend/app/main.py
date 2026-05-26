@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import DATABASE_URL, SessionLocal, get_db, init_db
+from .claude_code_check import claude_code_status, run_claude_code_check
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .restored_seed import restored_seed_data
 from .suite_seed import DEFAULT_SUITE_ID, default_cases
@@ -34,6 +35,13 @@ from .schemas import (
     ChannelAlertReviewUpdate,
     ChannelCreate,
     ChannelRead,
+    ClaudeCodeCheckCreate,
+    ClaudeCodeCheckRead,
+    ClaudeCodeCheckStatusRead,
+    ClaudeCodeEphemeralTestCreate,
+    ClaudeCodeSourceChannelRead,
+    ClaudeCodeTestCreate,
+    ClaudeCodeTestRead,
     BulkDeleteRequest,
     SignatureInteropTestCreate,
     SignatureInteropTestRead,
@@ -88,9 +96,11 @@ from .services import (
     channel_taxonomy_setting_read,
     channel_alert_read,
     create_alerts_for_run,
+    create_claude_code_test,
     create_baseline_build,
     create_case,
     create_channel,
+    claude_code_source_channels,
     create_model_request_test,
     create_signature_interop_test,
     create_run,
@@ -711,6 +721,88 @@ async def channel_model_request_test(channel_id: str, data: ModelRequestTestCrea
     except Exception as exc:
         logger.exception("Model request test failed for channel %s", channel_id)
         raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+
+
+@app.post("/api/channels/{channel_id}/claude-code-test", response_model=ClaudeCodeTestRead)
+async def channel_claude_code_test(channel_id: str, data: ClaudeCodeTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        return await create_claude_code_test(
+            db,
+            channel,
+            source_channel_id=data.source_channel_id,
+            image_url=data.image_url,
+            include_expensive_context=data.include_expensive_context,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("ClaudeCode test failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="ClaudeCode test failed") from exc
+
+
+@app.post("/api/claude-code-test", response_model=ClaudeCodeTestRead)
+async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    base_url = data.base_url.strip()
+    api_key = data.api_key.strip()
+    model_name = data.model_name.strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Base URL is required")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API Key is required")
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Model name is required")
+    channel = Channel(
+        id="ephemeral_claude_code_test",
+        name="ClaudeCode 临时检测渠道",
+        provider_type=data.provider_type.strip() or "third_party_anthropic",
+        role="candidate",
+        base_url=base_url,
+        model_name=model_name,
+        is_reference=False,
+        enabled=True,
+    )
+    try:
+        return await create_claude_code_test(
+            db,
+            channel,
+            source_channel_id=data.source_channel_id,
+            image_url=data.image_url,
+            include_expensive_context=data.include_expensive_context,
+            credentials_override={
+                "api_key": api_key,
+                "base_url": base_url,
+                "model": model_name,
+                "request_protocol": data.request_protocol,
+            },
+            persist_results=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Ephemeral ClaudeCode test failed")
+        raise HTTPException(status_code=502, detail="ClaudeCode test failed") from exc
+
+
+@app.get("/api/claude-code-test/source-channels", response_model=list[ClaudeCodeSourceChannelRead])
+def list_claude_code_source_channels(db: Session = Depends(get_db)) -> list[dict[str, object]]:
+    return claude_code_source_channels(db)
+
+
+@app.get("/api/claude-code-check/status", response_model=ClaudeCodeCheckStatusRead)
+def get_claude_code_check_status() -> dict[str, object]:
+    return claude_code_status()
+
+
+@app.post("/api/claude-code-check/run", response_model=ClaudeCodeCheckRead)
+async def post_claude_code_check(data: ClaudeCodeCheckCreate) -> dict[str, object]:
+    try:
+        return await run_claude_code_check(data)
+    except Exception as exc:
+        logger.exception("Claude Code check failed")
+        raise HTTPException(status_code=500, detail=f"Claude Code check failed: {exc}") from exc
 
 
 @app.get("/api/channels/{channel_id}/models", response_model=list[str])
