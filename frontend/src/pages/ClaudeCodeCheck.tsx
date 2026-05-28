@@ -106,6 +106,13 @@ function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
         { title: '权重', dataIndex: 'severity', width: 74, render: (value: string) => <Tag>{value}</Tag> },
         { title: '分数', dataIndex: 'score', width: 64 },
         {
+          title: '延迟',
+          width: 90,
+          render: (_, item) => typeof item.latency_ms === 'number' ? (
+            <Typography.Text type={item.latency_ms > 5000 ? 'warning' : undefined}>{item.latency_ms} ms</Typography.Text>
+          ) : <EmptyProbeValue />,
+        },
+        {
           title: 'Message / Request',
           width: 150,
           render: (_, item) => {
@@ -160,6 +167,13 @@ function JobProbeTable({ probes, currentKey }: { probes: ClaudeCodeJobProbe[]; c
         },
         { title: '状态', dataIndex: 'status', width: 110, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
         { title: '分数', dataIndex: 'score', width: 90 },
+        {
+          title: '延迟',
+          width: 90,
+          render: (_, item) => typeof item.latency_ms === 'number' ? (
+            <Typography.Text type={item.latency_ms > 5000 ? 'warning' : undefined}>{item.latency_ms} ms</Typography.Text>
+          ) : <EmptyProbeValue />,
+        },
         {
           title: '摘要',
           width: 420,

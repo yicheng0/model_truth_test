@@ -189,6 +189,8 @@ export type ClaudeCodeProbeResult = {
   request_id?: string | null;
   request_protocol?: string | null;
   provider_endpoint?: string | null;
+  latency_ms?: number | null;
+  first_token_ms?: number | null;
   evidence_excerpt?: string | null;
   input_preview?: {
     kind: 'image_base64' | 'image_url' | 'document_text' | string;
@@ -297,6 +299,8 @@ export type ClaudeCodeJobProbe = {
   request_id?: string | null;
   request_protocol?: string | null;
   provider_endpoint?: string | null;
+  latency_ms?: number | null;
+  first_token_ms?: number | null;
   evidence_excerpt?: string | null;
   input_preview?: {
     kind: 'image_base64' | 'image_url' | 'document_text' | string;

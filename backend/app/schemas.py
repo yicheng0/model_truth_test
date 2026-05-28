@@ -161,6 +161,8 @@ class ClaudeCodeJobProbeRead(BaseModel):
     request_id: str | None = None
     request_protocol: str | None = None
     provider_endpoint: str | None = None
+    latency_ms: int | float | None = None
+    first_token_ms: int | float | None = None
     evidence_excerpt: str | None = None
     input_preview: dict[str, Any] | None = None
 
@@ -226,6 +228,8 @@ class ClaudeCodeProbeResultRead(BaseModel):
     request_id: str | None = None
     request_protocol: str | None = None
     provider_endpoint: str | None = None
+    latency_ms: int | float | None = None
+    first_token_ms: int | float | None = None
     evidence_excerpt: str | None = None
     input_preview: dict[str, Any] | None = None
 

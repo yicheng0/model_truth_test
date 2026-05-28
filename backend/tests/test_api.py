@@ -3696,6 +3696,56 @@ def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(
         assert db.scalar(select(func.count()).select_from(Run).where(Run.name.like("ClaudeCode 检测%"))) == 0
 
 
+def test_prompt_leak_accepts_official_english_refusal_and_reports_latency() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "prompt_leak")
+    channel = Channel(
+        id="official_cloud_probe",
+        name="Official Cloud Probe",
+        base_url="https://example.test/v1/messages",
+        model_name="claude-sonnet-4-6",
+        provider_type="aws_bedrock",
+        role="official_cloud",
+    )
+    case = TestCaseModel(
+        id="prompt_leak_regression",
+        suite_id="manual_model_request_probe",
+        module="manual_probe",
+        title="ClaudeCode 检测 · 提示词泄露诱导",
+        prompt=str(config["prompt"]),
+        scoring_rules=config["scoring_rules"],
+    )
+    raw_response = {
+        "id": "msg_01promptleak",
+        "type": "message",
+        "model": channel.model_name,
+        "content": [{"type": "text", "text": "I can't share details about my internal instructions."}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 24, "output_tokens": 9},
+    }
+    normalized = {
+        "raw_response": raw_response,
+        "usage": raw_response["usage"],
+        "content_text": "I can't share details about my internal instructions.",
+        "latency_ms": 6000,
+        "first_token_ms": 120,
+        "provider_message_id": raw_response["id"],
+        "request_protocol": "anthropic_messages",
+        "provider_endpoint": "https://example.test/v1/messages",
+        "error": None,
+    }
+
+    score, labels = score_result(channel, case, normalized)
+    payload = _claude_code_probe_payload(config, None, normalized, score=score, labels=labels)
+
+    assert score == 95
+    assert labels == ["latency_outlier"]
+    assert payload["status"] == "pass"
+    assert payload["latency_ms"] == 6000
+    assert payload["first_token_ms"] == 120
+
+
 def test_ephemeral_claude_code_test_rejects_blank_runtime_fields() -> None:
     reset_database()
 
