@@ -8,6 +8,7 @@ import { formatDateTime } from '../time';
 import type { ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
 
 type RelayFormValues = {
+  channel_label?: string;
   base_url: string;
   api_key: string;
   model_name: string;
@@ -192,69 +193,104 @@ function probeDiagnosis(item: { status: string; labels?: string[]; evidence_exce
   return item.evidence_excerpt || '需要结合原始返回继续判断该通道的多模态兼容性。';
 }
 
-function PreviewPanel({ probe }: { probe: ClaudeCodeProbeResult | ClaudeCodeJobProbe }) {
+type MultimodalProbe = ClaudeCodeProbeResult | ClaudeCodeJobProbe;
+
+function MultimodalInputCell({ probe }: { probe: MultimodalProbe }) {
   const preview = probe.input_preview;
-  if (!preview) return null;
+  if (!preview) return <EmptyProbeValue />;
+  const imageSrc = preview.image_data_url || preview.default_image_url || null;
+  const url = preview.actual_image_url || preview.default_image_url || null;
   return (
-    <Space direction="vertical" size={12} className="full-width">
-      <div>
-        <Typography.Text strong>{preview.title}</Typography.Text>
-        {preview.summary ? <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>{preview.summary}</Typography.Paragraph> : null}
+    <div className="claude-multimodal-input-cell">
+      {imageSrc ? <img className="claude-multimodal-thumb" src={imageSrc} alt={preview.title} /> : null}
+      <div className="claude-multimodal-input-copy">
+        <Typography.Text strong ellipsis={{ tooltip: preview.title }}>{preview.title}</Typography.Text>
+        {preview.summary ? <Typography.Text type="secondary" ellipsis={{ tooltip: preview.summary }}>{preview.summary}</Typography.Text> : null}
+        {url ? <Typography.Text className="claude-multimodal-url" copyable={{ text: url }} ellipsis={{ tooltip: url }}>{url}</Typography.Text> : null}
+        {preview.document_marker ? <Tag color="blue" className="claude-multimodal-marker">{preview.document_marker}</Tag> : null}
+        {preview.document_text ? (
+          <Typography.Text className="claude-multimodal-doc-snippet" ellipsis={{ tooltip: preview.document_text }}>
+            {preview.document_text}
+          </Typography.Text>
+        ) : null}
       </div>
-      {preview.image_data_url ? <img className="claude-preview-image" src={preview.image_data_url} alt={preview.title} /> : null}
-      {preview.default_image_url ? (
-        <Space direction="vertical" size={8} className="full-width">
-          <img className="claude-preview-image" src={preview.default_image_url} alt="默认测试图" />
-          <Typography.Text type="secondary">默认测试图 URL</Typography.Text>
-          <Typography.Text copyable>{preview.default_image_url}</Typography.Text>
-        </Space>
-      ) : null}
-      {preview.actual_image_url ? (
-        <div>
-          <Typography.Text type="secondary">本次请求实际 URL</Typography.Text>
-          <div><Typography.Text copyable>{preview.actual_image_url}</Typography.Text></div>
-        </div>
-      ) : null}
-      {preview.document_marker ? (
-        <Space direction="vertical" size={8} className="full-width">
-          <Tag color="blue">{preview.document_marker}</Tag>
-          {preview.document_text ? <pre className="claude-preview-doc">{preview.document_text}</pre> : null}
-        </Space>
-      ) : null}
-    </Space>
+    </div>
   );
 }
 
-function MultimodalProbeCards({ probes, currentKey }: { probes: Array<ClaudeCodeProbeResult | ClaudeCodeJobProbe>; currentKey?: string | null }) {
+function MultimodalProbeTable({ probes, currentKey }: { probes: MultimodalProbe[]; currentKey?: string | null }) {
   return (
-    <div className="claude-multimodal-stack">
-      {probes.map((probe) => (
-        <Card key={probe.key} bordered={false} className={probe.key === currentKey ? 'claude-multimodal-card claude-multimodal-card-active' : 'claude-multimodal-card'}>
-          <div className="claude-multimodal-layout">
-            <div className="claude-multimodal-diagnosis">
-              <Space direction="vertical" size={12} className="full-width">
-                <Space wrap>
-                  <Typography.Text strong>{probe.title}</Typography.Text>
-                  <Tag color={statusColor(probe.status)}>{statusLabel(probe.status)}</Tag>
-                  {'severity' in probe && probe.severity ? <Tag>{probe.severity}</Tag> : null}
-                  <Tag>得分 {probe.score}</Tag>
-                </Space>
-                <Typography.Paragraph>{probeDiagnosis(probe)}</Typography.Paragraph>
-                {probe.labels?.length ? <Space wrap>{probe.labels.map((label) => <Tag key={label} color="orange">{label}</Tag>)}</Space> : null}
-                <Descriptions bordered size="small" column={1}>
-                  <Descriptions.Item label="Message ID">{probe.message_id || '-'}</Descriptions.Item>
-                  <Descriptions.Item label="Request ID">{probe.request_id || '-'}</Descriptions.Item>
-                  <Descriptions.Item label="证据摘要">{probe.evidence_excerpt || ('detail' in probe ? probe.detail || '-' : '-')}</Descriptions.Item>
-                </Descriptions>
-              </Space>
-            </div>
-            <div className="claude-multimodal-preview">
-              <PreviewPanel probe={probe} />
-            </div>
-          </div>
-        </Card>
-      ))}
-    </div>
+    <Table<MultimodalProbe>
+      className="claude-probe-table claude-multimodal-table"
+      rowKey="key"
+      dataSource={probes}
+      pagination={false}
+      size="small"
+      rowClassName={(item) => item.key === currentKey ? 'claude-job-row-active' : ''}
+      scroll={{ x: 1280 }}
+      columns={[
+        {
+          title: '测试项',
+          width: 220,
+          render: (_, item) => <ProbeNameCell title={item.title} probeKey={item.key} />,
+        },
+        { title: '结果', dataIndex: 'status', width: 86, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
+        {
+          title: '权重',
+          width: 74,
+          render: (_, item) => item.severity ? <Tag>{item.severity}</Tag> : <EmptyProbeValue />,
+        },
+        { title: '分数', dataIndex: 'score', width: 64 },
+        {
+          title: '延迟',
+          width: 90,
+          render: (_, item) => typeof item.latency_ms === 'number' ? (
+            <Typography.Text type={item.latency_ms > 5000 ? 'warning' : undefined}>{item.latency_ms} ms</Typography.Text>
+          ) : <EmptyProbeValue />,
+        },
+        {
+          title: '输入内容',
+          width: 300,
+          render: (_, item) => <MultimodalInputCell probe={item} />,
+        },
+        {
+          title: 'Message / Request',
+          width: 150,
+          render: (_, item) => {
+            const rows = [
+              item.message_id ? (
+                <Typography.Text key="message" className="claude-probe-id" copyable={{ text: item.message_id }} ellipsis={{ tooltip: item.message_id }}>
+                  {item.message_id}
+                </Typography.Text>
+              ) : null,
+              item.request_id ? (
+                <Typography.Text key="request" type="secondary" className="claude-probe-id" copyable={{ text: item.request_id }} ellipsis={{ tooltip: item.request_id }}>
+                  {item.request_id}
+                </Typography.Text>
+              ) : null,
+            ].filter(Boolean);
+            return rows.length ? <Space direction="vertical" size={0} className="claude-probe-id-stack">{rows}</Space> : <EmptyProbeValue />;
+          },
+        },
+        {
+          title: '标签',
+          width: 140,
+          render: (_, item) => item.labels.length ? (
+            <Space size={[4, 4]} wrap className="claude-probe-tags">
+              {item.labels.map((label) => <Tag key={label} color="orange" className="claude-probe-tag" title={label}>{label}</Tag>)}
+            </Space>
+          ) : <EmptyProbeValue />,
+        },
+        {
+          title: '证据摘要',
+          width: 320,
+          render: (_, item) => {
+            const detail = item.evidence_excerpt || ('detail' in item ? item.detail : null) || probeDiagnosis(item);
+            return detail ? <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: detail }}>{detail}</Typography.Text> : <EmptyProbeValue />;
+          },
+        },
+      ]}
+    />
   );
 }
 
@@ -493,6 +529,9 @@ export default function ClaudeCodeCheck() {
                 onFinish={submitRelay}
               >
                 <div className="signature-config-grid">
+                  <Form.Item name="channel_label" label="渠道名字">
+                    <Input placeholder="例如 APIPro-aws官" maxLength={200} showCount />
+                  </Form.Item>
                   <Form.Item name="base_url" label="Base URL" rules={[{ required: true, message: '请输入 Base URL' }]}>
                     <Input placeholder="https://relay.example/v1 或 https://relay.example/v1/messages" />
                   </Form.Item>
