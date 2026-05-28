@@ -8,6 +8,8 @@ import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
 import type { CacheHitRateAttempt, CacheHitRateJobStatus, CacheHitRateTestResult, Channel } from '../types';
 
+type CacheTtlOption = '5m' | '1h';
+
 function channelApiKey(channel: Channel) {
   const value = channel.auth_config?.api_key;
   return typeof value === 'string' ? value : '';
@@ -58,6 +60,7 @@ export default function CacheHitRateTest() {
   const queryClient = useQueryClient();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [channelId, setChannelId] = useState<string | null>(null);
+  const [cacheTtl, setCacheTtl] = useState<CacheTtlOption>('5m');
   const [cacheResult, setCacheResult] = useState<CacheHitRateTestResult | null>(null);
   const [cacheJobId, setCacheJobId] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -106,6 +109,7 @@ export default function CacheHitRateTest() {
         test_count: 10,
         interval_seconds: 3,
         warmup_wait_seconds: 5,
+        cache_ttl: cacheTtl,
         run_name: '缓存命中率测试',
       }),
     onSuccess: (payload) => {
@@ -158,7 +162,7 @@ export default function CacheHitRateTest() {
           <Typography.Text className="section-kicker">PROMPT CACHE</Typography.Text>
           <Typography.Title level={2}>缓存命中率</Typography.Title>
           <Typography.Paragraph>
-            使用 5K 级长文本和 Anthropic Messages cache_control 发起预热与重复请求，实时观察渠道缓存命中率。
+            使用 5K 级长文本和 Anthropic Messages cache_control 发起预热与重复请求，支持 5m / 1h TTL，实时观察渠道缓存命中率。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">可请求渠道 {availableChannels.length}</Tag>
@@ -173,7 +177,7 @@ export default function CacheHitRateTest() {
             type="info"
             showIcon
             message="会发起真实缓存测试请求"
-            description="默认预热 1 次，等待 5 秒后测量 10 次，每次间隔 3 秒。内置样本超过 4K token 缓存门槛，API Key 只读取渠道配置，不写入原始请求。"
+            description="默认预热 1 次，等待 5 秒后测量 10 次，每次间隔 3 秒。可选 5m / 1h TTL；1h 更适合识别渠道是否真的透传长 TTL。API Key 只读取渠道配置，不写入原始请求。"
           />
           <div className="signature-config-grid">
             <Form.Item label="请求渠道" style={{ marginBottom: 0 }}>
@@ -185,6 +189,22 @@ export default function CacheHitRateTest() {
                 placeholder="选择已配置密钥的渠道"
                 onChange={(value) => {
                   setChannelId(value);
+                  setCacheResult(null);
+                  setCacheJobId(null);
+                  setRequestError(null);
+                }}
+              />
+            </Form.Item>
+            <Form.Item label="缓存 TTL" style={{ marginBottom: 0 }}>
+              <Select
+                className="full-width"
+                value={cacheTtl}
+                options={[
+                  { value: '5m', label: '5m' },
+                  { value: '1h', label: '1h' },
+                ]}
+                onChange={(value: CacheTtlOption) => {
+                  setCacheTtl(value);
                   setCacheResult(null);
                   setCacheJobId(null);
                   setRequestError(null);
@@ -226,6 +246,7 @@ export default function CacheHitRateTest() {
                 {cacheRun ? <Link to={`/runs/${cacheRun.id}`}>{cacheRun.id}</Link> : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="状态">{cacheRun?.status || cacheJobPayload?.status || '-'}</Descriptions.Item>
+              <Descriptions.Item label="请求 TTL">{cachePanel.requested_cache_ttl}</Descriptions.Item>
               <Descriptions.Item label="请求命中">{cachePanel.hits}/{cachePanel.total}</Descriptions.Item>
               <Descriptions.Item label="请求命中率">{formatPercent(cachePanel.request_hit_rate)}</Descriptions.Item>
               <Descriptions.Item label="Token 命中率">{formatPercent(cachePanel.token_hit_rate)}</Descriptions.Item>
@@ -233,6 +254,8 @@ export default function CacheHitRateTest() {
               <Descriptions.Item label="总 prompt tokens">{cachePanel.total_prompt_tokens}</Descriptions.Item>
               <Descriptions.Item label="平均缓存 tokens">{cachePanel.avg_cached_tokens}</Descriptions.Item>
               <Descriptions.Item label="预热写入 tokens">{cachePanel.warmup_cache_creation_input_tokens}</Descriptions.Item>
+              <Descriptions.Item label="预热 5m 写入">{cachePanel.warmup_cache_creation_ephemeral_5m_input_tokens}</Descriptions.Item>
+              <Descriptions.Item label="预热 1h 写入">{cachePanel.warmup_cache_creation_ephemeral_1h_input_tokens}</Descriptions.Item>
               <Descriptions.Item label="渠道特征">{cachePanel.message_channel_type}</Descriptions.Item>
               <Descriptions.Item label="协议">{cachePanel.request_protocol || '-'}</Descriptions.Item>
               <Descriptions.Item label="Endpoint">{cachePanel.provider_endpoint || '-'}</Descriptions.Item>
@@ -258,6 +281,8 @@ export default function CacheHitRateTest() {
                 <Descriptions.Item label="Message ID">{cacheWarmup.message_id || '-'}</Descriptions.Item>
                 <Descriptions.Item label="Request ID">{cacheWarmup.request_id || '-'}</Descriptions.Item>
                 <Descriptions.Item label="写入 tokens">{cacheWarmup.cache_creation_input_tokens}</Descriptions.Item>
+                <Descriptions.Item label="5m 写入">{cacheWarmup.cache_creation_ephemeral_5m_input_tokens}</Descriptions.Item>
+                <Descriptions.Item label="1h 写入">{cacheWarmup.cache_creation_ephemeral_1h_input_tokens}</Descriptions.Item>
                 <Descriptions.Item label="输入 tokens">{cacheWarmup.input_tokens}</Descriptions.Item>
               </Descriptions>
             </Card>

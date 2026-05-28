@@ -3508,6 +3508,10 @@ def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
             "output_tokens": 6,
             "cache_creation_input_tokens": 1800 if is_warmup else 0,
             "cache_read_input_tokens": 0 if is_warmup or calls["count"] == 3 else 1700,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 1800 if is_warmup else 0,
+                "ephemeral_1h_input_tokens": 0,
+            },
         }
         return (
             {
@@ -3554,8 +3558,13 @@ def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
     assert payload["total_prompt_tokens"] == 25 + 25 + 1700 + 25 + 1700
     assert payload["token_hit_rate"] == 97.84
     assert payload["avg_cached_tokens"] == 1700
+    assert payload["requested_cache_ttl"] == "5m"
     assert payload["warmup_cache_creation_input_tokens"] == 1800
+    assert payload["warmup_cache_creation_ephemeral_5m_input_tokens"] == 1800
+    assert payload["warmup_cache_creation_ephemeral_1h_input_tokens"] == 0
     assert payload["warmup"]["is_warmup"] is True
+    assert payload["warmup"]["cache_creation_ephemeral_5m_input_tokens"] == 1800
+    assert payload["warmup"]["cache_creation_ephemeral_1h_input_tokens"] == 0
     assert payload["attempts"][0]["cache_hit"] is True
     assert payload["attempts"][1]["cache_hit"] is False
     assert payload["attempts"][2]["cache_hit"] is True
@@ -3566,7 +3575,7 @@ def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
     with SessionLocal() as db:
         results = db.scalars(select(Result).where(Result.run_id == payload["run"]["id"]).order_by(Result.attempt_index)).all()
     assert len(results) == 4
-    assert results[0].raw_request["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert results[0].raw_request["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
     sample_text = results[0].raw_request["system"][0]["text"]
     assert "PROJECT GUTENBERG EBOOK 4300" in sample_text
     assert "Ulysses" in sample_text
@@ -3574,6 +3583,93 @@ def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
     assert len(sample_text) > 18000
     assert "Authorization" not in json.dumps(results[0].raw_request)
     assert "test-key" not in json.dumps(results[0].raw_request)
+
+
+def test_cache_hit_rate_test_supports_one_hour_ttl(monkeypatch) -> None:
+    reset_database()
+    calls = {"count": 0}
+
+    async def fake_live_call(channel, case, raw_request, credentials):  # noqa: ANN001
+        calls["count"] += 1
+        is_warmup = calls["count"] == 1
+        return (
+            {
+                "id": f"msg_01cache_one_hour_{calls['count']}",
+                "type": "message",
+                "role": "assistant",
+                "model": channel.model_name,
+                "content": [{"type": "text", "text": "Ulysses"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 25,
+                    "output_tokens": 6,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0 if is_warmup else 1700,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 0,
+                        "ephemeral_1h_input_tokens": 1900 if is_warmup else 0,
+                    },
+                },
+                "_response_metadata": {"request_id": f"req_cache_one_hour_{calls['count']}"},
+            },
+            "anthropic_messages",
+            "https://relay.example/v1/messages",
+        )
+
+    monkeypatch.setattr("app.services._live_call_with_metadata", fake_live_call)
+
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Cache Probe One Hour Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            f"/api/channels/{channel_id}/cache-hit-rate-test",
+            json={"test_count": 1, "interval_seconds": 0, "warmup_wait_seconds": 0, "cache_ttl": "1h"},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["requested_cache_ttl"] == "1h"
+    assert payload["warmup_cache_creation_input_tokens"] == 0
+    assert payload["warmup_cache_creation_ephemeral_5m_input_tokens"] == 0
+    assert payload["warmup_cache_creation_ephemeral_1h_input_tokens"] == 1900
+    assert payload["warmup"]["cache_creation_ephemeral_1h_input_tokens"] == 1900
+    assert payload["warmup"]["prompt_tokens"] == 1925
+    assert payload["attempts"][0]["cache_read_input_tokens"] == 1700
+    with SessionLocal() as db:
+        result = db.scalar(select(Result).where(Result.run_id == payload["run"]["id"], Result.attempt_index == 1))
+    assert result is not None
+    assert result.raw_request["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_cache_hit_rate_test_rejects_invalid_ttl() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Cache Probe Invalid TTL Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            f"/api/channels/{channel_id}/cache-hit-rate-test",
+            json={"test_count": 1, "interval_seconds": 0, "warmup_wait_seconds": 0, "cache_ttl": "30m"},
+        )
+
+    assert response.status_code == 422
 
 
 def test_cache_hit_rate_test_rejects_openai_compatible_channel() -> None:
@@ -3620,6 +3716,10 @@ def test_cache_hit_rate_job_reports_live_progress(monkeypatch) -> None:
                     "output_tokens": 5,
                     "cache_creation_input_tokens": 1000 if is_warmup else 0,
                     "cache_read_input_tokens": 0 if is_warmup else 950,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 1000 if is_warmup else 0,
+                        "ephemeral_1h_input_tokens": 0,
+                    },
                 },
                 "_response_metadata": {"request_id": f"req_cache_job_{calls['count']}"},
             },
@@ -3673,6 +3773,9 @@ def test_cache_hit_rate_job_reports_live_progress(monkeypatch) -> None:
     assert final_snapshot["hits"] == 2
     assert final_snapshot["request_hit_rate"] == 100.0
     assert final_snapshot["token_hit_rate"] == 97.94
+    assert final_snapshot["requested_cache_ttl"] == "5m"
+    assert final_snapshot["warmup_cache_creation_ephemeral_5m_input_tokens"] == 1000
+    assert final_snapshot["warmup_cache_creation_ephemeral_1h_input_tokens"] == 0
     assert final_snapshot["result"]["run"]["status"] == "completed"
     assert final_snapshot["attempts"][0]["cache_hit"] is True
 

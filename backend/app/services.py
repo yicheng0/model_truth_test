@@ -2078,7 +2078,7 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
         {
             "type": "text",
             "text": f"需要阅读的小说内容：{CACHE_HIT_RATE_SAMPLE_TEXT}",
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": {"type": "ephemeral", "ttl": data.cache_ttl},
         }
     ]
     request_params = {
@@ -2138,7 +2138,7 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
             else:
                 attempts.append(attempt_payload)
             if progress_callback is not None:
-                await progress_callback(_cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint))
+                await progress_callback(_cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint, data.cache_ttl))
 
         run.finished_at = datetime.now(timezone.utc)
         run.status = "failed" if any(_attempt_has_error(item) for item in ([warmup] if warmup else []) + attempts) else "completed"
@@ -2150,7 +2150,7 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
         raise
 
     db.refresh(run)
-    return _cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint)
+    return _cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint, data.cache_ttl)
 
 
 def _attempt_has_error(attempt: dict[str, Any]) -> bool:
@@ -2173,12 +2173,24 @@ def _cache_usage_value(usage: Any, key: str) -> int:
     return 0
 
 
+def _cache_nested_usage_value(usage: Any, parent_key: str, key: str) -> int:
+    if not isinstance(usage, dict):
+        return 0
+    parent = usage.get(parent_key)
+    if not isinstance(parent, dict):
+        return 0
+    return _cache_usage_value(parent, key)
+
+
 def _cache_hit_rate_attempt_payload(result: Result, normalized: dict[str, Any], *, is_warmup: bool) -> dict[str, Any]:
     usage = normalized.get("usage")
     input_tokens = _cache_usage_value(usage, "input_tokens")
     cache_creation_input_tokens = _cache_usage_value(usage, "cache_creation_input_tokens")
     cache_read_input_tokens = _cache_usage_value(usage, "cache_read_input_tokens")
-    prompt_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+    cache_creation_ephemeral_5m_input_tokens = _cache_nested_usage_value(usage, "cache_creation", "ephemeral_5m_input_tokens")
+    cache_creation_ephemeral_1h_input_tokens = _cache_nested_usage_value(usage, "cache_creation", "ephemeral_1h_input_tokens")
+    cache_creation_tokens_for_prompt = cache_creation_input_tokens or (cache_creation_ephemeral_5m_input_tokens + cache_creation_ephemeral_1h_input_tokens)
+    prompt_tokens = input_tokens + cache_creation_tokens_for_prompt + cache_read_input_tokens
     return {
         "attempt_index": result.attempt_index,
         "result": ResultRead.model_validate(result).model_dump(mode="json"),
@@ -2189,6 +2201,8 @@ def _cache_hit_rate_attempt_payload(result: Result, normalized: dict[str, Any], 
         "input_tokens": input_tokens,
         "cache_creation_input_tokens": cache_creation_input_tokens,
         "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_creation_ephemeral_5m_input_tokens": cache_creation_ephemeral_5m_input_tokens,
+        "cache_creation_ephemeral_1h_input_tokens": cache_creation_ephemeral_1h_input_tokens,
         "prompt_tokens": prompt_tokens,
         "latency_ms": normalized.get("latency_ms"),
     }
@@ -2200,6 +2214,7 @@ def _cache_hit_rate_response(
     attempts: list[dict[str, Any]],
     request_protocol: str | None,
     provider_endpoint: str | None,
+    requested_cache_ttl: str,
 ) -> dict[str, Any]:
     total = len(attempts)
     hits = sum(1 for item in attempts if item["cache_hit"])
@@ -2215,6 +2230,7 @@ def _cache_hit_rate_response(
         "run": RunRead.model_validate(run).model_dump(mode="json"),
         "warmup": warmup,
         "attempts": attempts,
+        "requested_cache_ttl": requested_cache_ttl,
         "total": total,
         "hits": hits,
         "request_hit_rate": round(request_hit_rate, 2),
@@ -2223,6 +2239,8 @@ def _cache_hit_rate_response(
         "token_hit_rate": round(token_hit_rate, 2),
         "avg_cached_tokens": round(avg_cached_tokens, 2),
         "warmup_cache_creation_input_tokens": int(warmup["cache_creation_input_tokens"]) if warmup else 0,
+        "warmup_cache_creation_ephemeral_5m_input_tokens": int(warmup["cache_creation_ephemeral_5m_input_tokens"]) if warmup else 0,
+        "warmup_cache_creation_ephemeral_1h_input_tokens": int(warmup["cache_creation_ephemeral_1h_input_tokens"]) if warmup else 0,
         "message_channel_type": classify_claude_message_id(message_id),
         "request_protocol": request_protocol,
         "provider_endpoint": provider_endpoint,

@@ -184,6 +184,8 @@ export type CacheHitRateAttempt = {
   input_tokens: number;
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
+  cache_creation_ephemeral_5m_input_tokens: number;
+  cache_creation_ephemeral_1h_input_tokens: number;
   prompt_tokens: number;
   latency_ms?: number | null;
 };
@@ -192,6 +194,7 @@ export type CacheHitRateTestResult = {
   run: Run;
   warmup?: CacheHitRateAttempt | null;
   attempts: CacheHitRateAttempt[];
+  requested_cache_ttl: '5m' | '1h';
   total: number;
   hits: number;
   request_hit_rate: number;
@@ -200,6 +203,8 @@ export type CacheHitRateTestResult = {
   token_hit_rate: number;
   avg_cached_tokens: number;
   warmup_cache_creation_input_tokens: number;
+  warmup_cache_creation_ephemeral_5m_input_tokens: number;
+  warmup_cache_creation_ephemeral_1h_input_tokens: number;
   message_channel_type: string;
   request_protocol?: string | null;
   provider_endpoint?: string | null;
@@ -222,6 +227,7 @@ export type CacheHitRateJobStatus = {
   percent: number;
   warmup?: CacheHitRateAttempt | null;
   attempts: CacheHitRateAttempt[];
+  requested_cache_ttl: '5m' | '1h';
   total: number;
   hits: number;
   request_hit_rate: number;
@@ -230,6 +236,8 @@ export type CacheHitRateJobStatus = {
   token_hit_rate: number;
   avg_cached_tokens: number;
   warmup_cache_creation_input_tokens: number;
+  warmup_cache_creation_ephemeral_5m_input_tokens: number;
+  warmup_cache_creation_ephemeral_1h_input_tokens: number;
   message_channel_type: string;
   request_protocol?: string | null;
   provider_endpoint?: string | null;

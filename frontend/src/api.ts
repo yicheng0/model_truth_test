@@ -170,9 +170,9 @@ export const api = {
     request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),
   modelRequestTest: (channelId: string, payload: { prompt: string; system_prompt?: string | null; request_params?: Record<string, unknown>; run_name?: string | null }) =>
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
-  cacheHitRateTest: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; run_name?: string | null }) =>
+  cacheHitRateTest: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; cache_ttl?: '5m' | '1h'; run_name?: string | null }) =>
     request<CacheHitRateTestResult>(`/api/channels/${channelId}/cache-hit-rate-test`, { method: 'POST', body: JSON.stringify(payload) }),
-  startCacheHitRateTestJob: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; run_name?: string | null }) =>
+  startCacheHitRateTestJob: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; cache_ttl?: '5m' | '1h'; run_name?: string | null }) =>
     request<CacheHitRateJobCreate>(`/api/channels/${channelId}/cache-hit-rate-test/jobs`, { method: 'POST', body: JSON.stringify(payload) }),
   cacheHitRateJob: (jobId: string) => request<CacheHitRateJobStatus>(`/api/cache-hit-rate-test/jobs/${jobId}`),
   claudeCodeTest: (channelId: string, payload: { source_channel_id?: string | null; image_url?: string | null; include_expensive_context?: boolean }) =>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -105,6 +105,7 @@ class CacheHitRateTestCreate(BaseModel):
     test_count: int = Field(default=10, ge=1, le=30)
     interval_seconds: float = Field(default=3, ge=0, le=30)
     warmup_wait_seconds: float = Field(default=5, ge=0, le=30)
+    cache_ttl: Literal["5m", "1h"] = "5m"
     run_name: str | None = Field(default=None, max_length=200)
 
 
@@ -986,6 +987,8 @@ class CacheHitRateAttemptRead(BaseModel):
     input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    cache_creation_ephemeral_5m_input_tokens: int = 0
+    cache_creation_ephemeral_1h_input_tokens: int = 0
     prompt_tokens: int = 0
     latency_ms: int | None = None
 
@@ -994,6 +997,7 @@ class CacheHitRateTestRead(BaseModel):
     run: RunRead
     warmup: CacheHitRateAttemptRead | None = None
     attempts: list[CacheHitRateAttemptRead]
+    requested_cache_ttl: Literal["5m", "1h"] = "5m"
     total: int
     hits: int
     request_hit_rate: float
@@ -1002,6 +1006,8 @@ class CacheHitRateTestRead(BaseModel):
     token_hit_rate: float
     avg_cached_tokens: float
     warmup_cache_creation_input_tokens: int = 0
+    warmup_cache_creation_ephemeral_5m_input_tokens: int = 0
+    warmup_cache_creation_ephemeral_1h_input_tokens: int = 0
     message_channel_type: str
     request_protocol: str | None = None
     provider_endpoint: str | None = None
@@ -1024,6 +1030,7 @@ class CacheHitRateJobStatusRead(BaseModel):
     percent: float
     warmup: CacheHitRateAttemptRead | None = None
     attempts: list[CacheHitRateAttemptRead] = Field(default_factory=list)
+    requested_cache_ttl: Literal["5m", "1h"] = "5m"
     total: int = 0
     hits: int = 0
     request_hit_rate: float = 0
@@ -1032,6 +1039,8 @@ class CacheHitRateJobStatusRead(BaseModel):
     token_hit_rate: float = 0
     avg_cached_tokens: float = 0
     warmup_cache_creation_input_tokens: int = 0
+    warmup_cache_creation_ephemeral_5m_input_tokens: int = 0
+    warmup_cache_creation_ephemeral_1h_input_tokens: int = 0
     message_channel_type: str = "未知"
     request_protocol: str | None = None
     provider_endpoint: str | None = None
