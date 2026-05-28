@@ -28,7 +28,7 @@ from sqlalchemy.orm import close_all_sessions, sessionmaker
 from app import database as database_module
 from app.database import SessionLocal, engine, init_db
 from app.main import app, cors_origins
-from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
+from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
@@ -3495,6 +3495,104 @@ def test_model_request_test_persists_missing_key_failure() -> None:
     assert "缺少 API Key" in payload["result"]["normalized_response"]["error"]
 
 
+def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
+    reset_database()
+    calls = {"count": 0}
+
+    async def fake_live_call(channel, case, raw_request, credentials):  # noqa: ANN001
+        calls["count"] += 1
+        is_warmup = calls["count"] == 1
+        usage = {
+            "input_tokens": 25,
+            "output_tokens": 6,
+            "cache_creation_input_tokens": 1800 if is_warmup else 0,
+            "cache_read_input_tokens": 0 if is_warmup or calls["count"] == 3 else 1700,
+        }
+        return (
+            {
+                "id": f"msg_01cache{calls['count']}",
+                "type": "message",
+                "role": "assistant",
+                "model": channel.model_name,
+                "content": [{"type": "text", "text": "Ulysses"}],
+                "stop_reason": "end_turn",
+                "usage": usage,
+                "_response_metadata": {"request_id": f"req_cache_{calls['count']}"},
+            },
+            "anthropic_messages",
+            "https://relay.example/v1/messages",
+        )
+
+    monkeypatch.setattr("app.services._live_call_with_metadata", fake_live_call)
+
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Cache Probe Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            f"/api/channels/{channel_id}/cache-hit-rate-test",
+            json={"test_count": 3, "interval_seconds": 0, "warmup_wait_seconds": 0},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["run"]["mode"] == "manual_probe"
+    assert payload["run"]["status"] == "completed"
+    assert payload["total"] == 3
+    assert payload["hits"] == 2
+    assert payload["request_hit_rate"] == 66.67
+    assert payload["total_cached_tokens"] == 3400
+    assert payload["total_prompt_tokens"] == 25 + 25 + 1700 + 25 + 1700
+    assert payload["token_hit_rate"] == 97.84
+    assert payload["avg_cached_tokens"] == 1700
+    assert payload["warmup_cache_creation_input_tokens"] == 1800
+    assert payload["warmup"]["is_warmup"] is True
+    assert payload["attempts"][0]["cache_hit"] is True
+    assert payload["attempts"][1]["cache_hit"] is False
+    assert payload["attempts"][2]["cache_hit"] is True
+    assert payload["attempts"][0]["request_id"] == "req_cache_2"
+    assert payload["request_protocol"] == "anthropic_messages"
+    assert payload["provider_endpoint"] == "https://relay.example/v1/messages"
+
+    with SessionLocal() as db:
+        results = db.scalars(select(Result).where(Result.run_id == payload["run"]["id"]).order_by(Result.attempt_index)).all()
+    assert len(results) == 4
+    assert results[0].raw_request["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "Authorization" not in json.dumps(results[0].raw_request)
+    assert "test-key" not in json.dumps(results[0].raw_request)
+
+
+def test_cache_hit_rate_test_rejects_openai_compatible_channel() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "OpenAI Compat",
+                "provider_type": "openai_compatible",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            f"/api/channels/{channel_id}/cache-hit-rate-test",
+            json={"test_count": 1, "interval_seconds": 0, "warmup_wait_seconds": 0},
+        )
+
+    assert response.status_code == 400
+    assert "Anthropic Messages" in response.json()["detail"]
+
+
 def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> None:
     reset_database()
 
@@ -3675,6 +3773,7 @@ def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(
         response = client.post(
             "/api/claude-code-test",
             json={
+                "channel_label": "APIPro-aws官",
                 "base_url": " https://runtime-relay.example/v1 ",
                 "api_key": " sk-runtime-secret ",
                 "model_name": " claude-code-max-200 ",
@@ -3691,9 +3790,92 @@ def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(
     assert payload["probes"]
     assert all(probe["run_id"] is None and probe["result_id"] is None for probe in payload["probes"])
     assert "sk-runtime-secret" not in json.dumps(payload, ensure_ascii=False)
+    assert seen_credentials[-1]["model"] == "claude-code-max-200"
     with SessionLocal() as db:
         assert db.get(Channel, "ephemeral_claude_code_test") is None
         assert db.scalar(select(func.count()).select_from(Run).where(Run.name.like("ClaudeCode 检测%"))) == 0
+
+
+def test_claude_code_relay_job_persists_custom_channel_label(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_create_test(db, channel, **kwargs):  # noqa: ANN001
+        assert channel.name == "APIPro-aws官"
+        return {
+            "ok": True,
+            "score": 96,
+            "risk_level": "low",
+            "summary": "ok",
+            "probes": [],
+            "sections": [],
+        }
+
+    monkeypatch.setattr("app.main.create_claude_code_test", fake_create_test)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/claude-code-test/jobs",
+            json={
+                "channel_label": " APIPro-aws官 ",
+                "base_url": "https://relay.example/v1",
+                "api_key": "sk-test",
+                "model_name": "claude-sonnet-4-5",
+            },
+        )
+
+    assert response.status_code == 200
+    job_id = response.json()["job_id"]
+    with TestClient(app) as client:
+        for _ in range(20):
+            status = client.get(f"/api/claude-code-test/jobs/{job_id}").json()
+            if status["status"] == "completed":
+                break
+        assert status["status"] == "completed"
+    with SessionLocal() as db:
+        item = db.scalar(select(ClaudeCodeEvidence).order_by(ClaudeCodeEvidence.created_at.desc()))
+        assert item is not None
+        assert item.channel_label == "APIPro-aws官"
+
+
+def test_claude_code_relay_job_uses_default_channel_label_when_blank(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_create_test(db, channel, **kwargs):  # noqa: ANN001
+        assert channel.name == "ClaudeCode 临时检测渠道"
+        return {
+            "ok": True,
+            "score": 96,
+            "risk_level": "low",
+            "summary": "ok",
+            "probes": [],
+            "sections": [],
+        }
+
+    monkeypatch.setattr("app.main.create_claude_code_test", fake_create_test)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/claude-code-test/jobs",
+            json={
+                "channel_label": "   ",
+                "base_url": "https://relay.example/v1",
+                "api_key": "sk-test",
+                "model_name": "claude-sonnet-4-5",
+            },
+        )
+
+    assert response.status_code == 200
+    job_id = response.json()["job_id"]
+    with TestClient(app) as client:
+        for _ in range(20):
+            status = client.get(f"/api/claude-code-test/jobs/{job_id}").json()
+            if status["status"] == "completed":
+                break
+        assert status["status"] == "completed"
+    with SessionLocal() as db:
+        item = db.scalar(select(ClaudeCodeEvidence).order_by(ClaudeCodeEvidence.created_at.desc()))
+        assert item is not None
+        assert item.channel_label == "ClaudeCode 临时检测渠道"
 
 
 def test_claude_code_thinking_signature_latency_outlier_still_passes(monkeypatch) -> None:

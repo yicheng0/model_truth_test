@@ -426,6 +426,7 @@ describe('api request handling', () => {
     );
 
     await api.runClaudeCodeRelayTest({
+      channel_label: 'APIPro-aws官',
       base_url: 'https://relay.example/v1',
       api_key: 'sk-test',
       model_name: 'claude-sonnet-4-5',
@@ -441,6 +442,7 @@ describe('api request handling', () => {
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({
+          channel_label: 'APIPro-aws官',
           base_url: 'https://relay.example/v1',
           api_key: 'sk-test',
           model_name: 'claude-sonnet-4-5',
@@ -511,6 +513,7 @@ describe('api request handling', () => {
       );
 
     const started = await api.startClaudeCodeRelayTestJob({
+      channel_label: 'APIPro-aws官',
       base_url: 'https://relay.example/v1',
       api_key: 'sk-test',
       model_name: 'claude-sonnet-4-5',
@@ -523,7 +526,15 @@ describe('api request handling', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/claude-code-test/jobs',
-      expect.objectContaining({ method: 'POST' }),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          channel_label: 'APIPro-aws官',
+          base_url: 'https://relay.example/v1',
+          api_key: 'sk-test',
+          model_name: 'claude-sonnet-4-5',
+        }),
+      }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,

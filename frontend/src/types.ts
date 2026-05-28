@@ -174,6 +174,37 @@ export type ModelRequestTestResult = {
   provider_endpoint?: string | null;
 };
 
+export type CacheHitRateAttempt = {
+  attempt_index: number;
+  result: Result;
+  is_warmup: boolean;
+  cache_hit: boolean;
+  message_id?: string | null;
+  request_id?: string | null;
+  input_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+  prompt_tokens: number;
+  latency_ms?: number | null;
+};
+
+export type CacheHitRateTestResult = {
+  run: Run;
+  warmup?: CacheHitRateAttempt | null;
+  attempts: CacheHitRateAttempt[];
+  total: number;
+  hits: number;
+  request_hit_rate: number;
+  total_prompt_tokens: number;
+  total_cached_tokens: number;
+  token_hit_rate: number;
+  avg_cached_tokens: number;
+  warmup_cache_creation_input_tokens: number;
+  message_channel_type: string;
+  request_protocol?: string | null;
+  provider_endpoint?: string | null;
+};
+
 export type ClaudeCodeProbeResult = {
   key: string;
   title: string;
@@ -235,6 +266,7 @@ export type ClaudeCodeSourceChannel = {
 };
 
 export type ClaudeCodeRelayTestCreate = {
+  channel_label?: string | null;
   base_url: string;
   api_key: string;
   model_name: string;

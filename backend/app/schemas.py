@@ -101,6 +101,13 @@ class ModelRequestTestCreate(BaseModel):
     run_name: str | None = Field(default=None, max_length=200)
 
 
+class CacheHitRateTestCreate(BaseModel):
+    test_count: int = Field(default=10, ge=1, le=30)
+    interval_seconds: float = Field(default=3, ge=0, le=30)
+    warmup_wait_seconds: float = Field(default=5, ge=0, le=30)
+    run_name: str | None = Field(default=None, max_length=200)
+
+
 class ClaudeCodeCheckCreate(BaseModel):
     model: str | None = Field(default=None, max_length=200)
     timeout_seconds: int = Field(default=180, ge=30, le=300)
@@ -206,6 +213,7 @@ class ClaudeCodeTestCreate(BaseModel):
 
 
 class ClaudeCodeEphemeralTestCreate(ClaudeCodeTestCreate):
+    channel_label: str | None = Field(default=None, max_length=200)
     base_url: str = Field(min_length=1, max_length=1000)
     api_key: str = Field(min_length=1, max_length=2000)
     model_name: str = Field(min_length=1, max_length=200)
@@ -963,6 +971,37 @@ class ModelRequestTestRead(BaseModel):
     result: ResultRead
     message_id: str | None = None
     request_id: str | None = None
+    message_channel_type: str
+    request_protocol: str | None = None
+    provider_endpoint: str | None = None
+
+
+class CacheHitRateAttemptRead(BaseModel):
+    attempt_index: int
+    result: ResultRead
+    is_warmup: bool = False
+    cache_hit: bool = False
+    message_id: str | None = None
+    request_id: str | None = None
+    input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    prompt_tokens: int = 0
+    latency_ms: int | None = None
+
+
+class CacheHitRateTestRead(BaseModel):
+    run: RunRead
+    warmup: CacheHitRateAttemptRead | None = None
+    attempts: list[CacheHitRateAttemptRead]
+    total: int
+    hits: int
+    request_hit_rate: float
+    total_prompt_tokens: int
+    total_cached_tokens: int
+    token_hit_rate: float
+    avg_cached_tokens: float
+    warmup_cache_creation_input_tokens: int = 0
     message_channel_type: str
     request_protocol: str | None = None
     provider_endpoint: str | None = None

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Descriptions, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
 import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
@@ -363,7 +363,7 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
             bordered={false}
           >
             <Typography.Paragraph type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Paragraph>
-            {section.key === 'multimodal' ? <MultimodalProbeCards probes={probes} /> : <ProbeTable probes={probes} />}
+            {section.key === 'multimodal' ? <MultimodalProbeTable probes={probes} /> : <ProbeTable probes={probes} />}
           </Card>
         );
       })}
@@ -427,6 +427,11 @@ export default function ClaudeCodeCheck() {
   const [relayJobId, setRelayJobId] = useState<string | null>(null);
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [deletingHistoryId, setDeletingHistoryId] = useState<string | null>(null);
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [historyRiskFilter, setHistoryRiskFilter] = useState('all');
+  const [historyMatchCurrent, setHistoryMatchCurrent] = useState(false);
+  const watchedChannelLabel = Form.useWatch('channel_label', relayForm);
+  const watchedBaseUrl = Form.useWatch('base_url', relayForm);
 
   const sources = useQuery<ClaudeCodeSourceChannel[]>({ queryKey: ['claudeCodeSourceChannels'], queryFn: api.claudeCodeSourceChannels });
   const history = useQuery<ClaudeCodeHistoryItem[]>({ queryKey: ['claudeCodeHistory'], queryFn: api.claudeCodeHistory });
@@ -452,6 +457,23 @@ export default function ClaudeCodeCheck() {
     })),
     [sources.data],
   );
+  const filteredHistory = useMemo(() => {
+    const query = historyQuery.trim().toLowerCase();
+    const currentLabel = String(watchedChannelLabel || '').trim().toLowerCase();
+    const currentBaseUrl = String(watchedBaseUrl || '').trim().toLowerCase();
+    return (history.data ?? []).filter((item) => {
+      const haystack = [item.channel_label, item.base_url, item.model_name, item.provider_type, item.summary].join(' ').toLowerCase();
+      if (query && !haystack.includes(query)) return false;
+      if (historyRiskFilter !== 'all' && item.risk_level !== historyRiskFilter) return false;
+      if (historyMatchCurrent) {
+        if (!currentLabel && !currentBaseUrl) return false;
+        const sameLabel = currentLabel ? item.channel_label.toLowerCase() === currentLabel : false;
+        const sameBaseUrl = currentBaseUrl ? item.base_url.toLowerCase() === currentBaseUrl : false;
+        if (!sameLabel && !sameBaseUrl) return false;
+      }
+      return true;
+    });
+  }, [history.data, historyMatchCurrent, historyQuery, historyRiskFilter, watchedBaseUrl, watchedChannelLabel]);
 
   useEffect(() => {
     const payload = relayJob.data;
@@ -469,6 +491,7 @@ export default function ClaudeCodeCheck() {
   const runRelayTest = useMutation({
     mutationFn: (values: RelayFormValues) => {
       const payload: ClaudeCodeRelayTestCreate = {
+        channel_label: values.channel_label?.trim() || null,
         base_url: values.base_url.trim(),
         api_key: values.api_key.trim(),
         model_name: values.model_name.trim(),
@@ -627,7 +650,7 @@ export default function ClaudeCodeCheck() {
                   >
                     <Typography.Paragraph type="secondary">{SECTION_DESCRIPTIONS[section.key] ?? '检测板块'}</Typography.Paragraph>
                     {section.key === 'multimodal'
-                      ? <MultimodalProbeCards probes={section.probes} currentKey={relayJob.data?.current_key} />
+                      ? <MultimodalProbeTable probes={section.probes} currentKey={relayJob.data?.current_key} />
                       : <JobProbeTable probes={section.probes} currentKey={relayJob.data?.current_key} />}
                   </Card>
                 ))}
@@ -644,10 +667,34 @@ export default function ClaudeCodeCheck() {
         <aside className="claude-history-pane">
           <Card title={<span className="card-title-with-icon"><History size={18} />历史记录</span>} bordered={false}>
             <Space direction="vertical" size={12} className="full-width">
+              <Input.Search
+                allowClear
+                placeholder="搜索渠道名 / URL / 模型"
+                value={historyQuery}
+                onChange={(event) => setHistoryQuery(event.target.value)}
+              />
+              <Space wrap>
+                <Select
+                  value={historyRiskFilter}
+                  onChange={setHistoryRiskFilter}
+                  style={{ minWidth: 120 }}
+                  options={[
+                    { value: 'all', label: '全部风险' },
+                    { value: 'low', label: 'low' },
+                    { value: 'medium', label: 'medium' },
+                    { value: 'high', label: 'high' },
+                    { value: 'critical', label: 'critical' },
+                  ]}
+                />
+                <Checkbox checked={historyMatchCurrent} onChange={(event) => setHistoryMatchCurrent(event.target.checked)}>
+                  当前渠道
+                </Checkbox>
+              </Space>
               {history.isError ? <Alert type="error" showIcon message="历史记录加载失败" description={getErrorMessage(history.error)} /> : null}
               {history.isLoading ? <Typography.Text type="secondary">正在加载历史记录...</Typography.Text> : null}
               {!history.isLoading && !(history.data?.length) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 ClaudeCode 证据历史" /> : null}
-              {(history.data ?? []).map((item) => (
+              {!history.isLoading && Boolean(history.data?.length) && !filteredHistory.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的历史记录" /> : null}
+              {filteredHistory.map((item) => (
                 <HistoryCard
                   key={item.id}
                   item={item}

@@ -33,6 +33,7 @@ from .schemas import (
     ComparisonRead,
     EvalScopeJsonlImportCreate,
     FeishuBroadcastSettingUpdate,
+    CacheHitRateTestCreate,
     ModelRequestTestCreate,
     ReportRead,
     ResultRead,
@@ -320,6 +321,79 @@ REQUEST_PROTOCOL_OPENAI = "openai_chat_completions"
 REQUEST_PROTOCOL_AWS_BEDROCK = "aws_bedrock"
 MANUAL_PROBE_SUITE_ID = "manual_model_request_probe"
 MANUAL_PROBE_MODE = "manual_probe"
+CACHE_HIT_RATE_PROMPT = "说出下面长篇小说的名字"
+CACHE_HIT_RATE_SAMPLE_TEXT = "\n\n".join(
+    [
+        """
+Secondleg they should be. God knows what poxy bowsy left them off. I have a
+lovely pair with a hair stripe, grey. You'll look spiffing in them. I'm not
+joking, Kinch. You look damn well when you're dressed.
+
+Thanks, Stephen said. I can't wear them if they are grey.
+
+He can't wear them, Buck Mulligan told his face in the mirror. Etiquette is
+etiquette. He kills his mother but he can't wear grey trousers.
+
+Stephen turned his gaze from the sea and to the plump face with its smokeblue
+mobile eyes. That fellow I was with in the Ship last night, said Buck Mulligan,
+says you have general paralysis of the insane.
+
+Look at yourself, he said, you dreadful bard.
+
+Stephen bent forward and peered at the mirror held out to him, cleft by a
+crooked crack. Hair on end. As he and others see me. Who chose this face for
+me? This dogsbody to rid of vermin. It asks me too.
+
+It is a symbol of Irish art, Stephen said with bitterness. The cracked
+lookingglass of a servant.
+
+Buck Mulligan suddenly linked his arm in Stephen's and walked with him round
+the tower, his razor and mirror clacking in the pocket where he had thrust
+them. It's not fair to tease you like that, Kinch, is it? God knows you have
+more spirit than any of them.
+
+Cracked lookingglass of a servant! Tell that to the oxy chap downstairs and
+touch him for a guinea. He's stinking with money and thinks you're not a
+gentleman. God, Kinch, if you and I could only work together we might do
+something for the island. Hellenise it.
+
+Do you remember the first day I went to your house after my mother's death?
+Stephen asked.
+
+You were making tea, Stephen said, and went across the landing to get more hot
+water. Your mother and some visitor came out of the drawingroom. She asked you
+who was in your room.
+
+You said, Stephen answered, O, it's only Dedalus whose mother is beastly dead.
+
+A flush which made him seem younger and more engaging rose to Buck Mulligan's
+cheek. Did I say that? he asked. Well? What harm is that?
+
+I am not thinking of the offence to my mother, Stephen answered. Of the
+offence to me.
+
+Look at the sea. What does it care about offences? Chuck Loyola, Kinch, and
+come on down. The Sassenach wants his morning rashers.
+
+Woodshadows floated silently by through the morning peace from the stairhead
+seaward where he gazed. Inshore and farther out the mirror of water whitened,
+spurned by lightshod hurrying feet. White breast of the dim sea.
+
+In a dream, silently, she had come to him, her wasted body within its loose
+graveclothes giving off an odour of wax and rosewood, her breath bent over him
+with mute secret words, a faint odour of wetted ashes.
+
+No, mother! Let me be and let me live.
+
+Dedalus, come down, like a good mosey. Breakfast is ready. Haines is
+apologising for waking us last night. It's all right.
+
+The nickel shavingbowl shone, forgotten, on the parapet. Why should I bring it
+down? Or leave it there all day, forgotten friendship?
+""".strip()
+    ]
+    * 6
+)
 SIGNATURE_INVALID_ERROR = "Invalid `signature` in `thinking` block"
 SIGNATURE_TEST_PROMPT_A = "请用中文解释：为什么 0.1 + 0.2 不等于 0.3？请展示完整推理过程。"
 SIGNATURE_TEST_PROMPT_B = "好的，那 0.1 + 0.2 + 0.3 == 0.6 是否成立？"
@@ -1555,6 +1629,163 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
         "request_id": request_id_from_normalized(normalized),
         "request_protocol": normalized.get("request_protocol"),
         "provider_endpoint": normalized.get("provider_endpoint"),
+    }
+
+
+async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheHitRateTestCreate) -> dict[str, Any]:
+    if not channel.enabled:
+        raise ValueError("Channel is disabled")
+    credentials = _merged_channel_credentials(channel, {})
+    protocol = _request_protocol(channel, credentials)
+    if protocol not in {REQUEST_PROTOCOL_ANTHROPIC, REQUEST_PROTOCOL_AUTO}:
+        raise ValueError("Prompt cache test only supports Anthropic Messages compatible channels")
+
+    system_content = [
+        {
+            "type": "text",
+            "text": f"需要阅读的小说内容：{CACHE_HIT_RATE_SAMPLE_TEXT}",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    request_params = {
+        "max_tokens": 4096,
+        "temperature": 0,
+        "system_content": system_content,
+    }
+    case = _manual_probe_case(
+        db,
+        title="缓存命中率测试",
+        prompt=CACHE_HIT_RATE_PROMPT,
+        system_prompt=None,
+        request_params=request_params,
+        scoring_rules={},
+    )
+    started_at = datetime.now(timezone.utc)
+    total_jobs = data.test_count + 1
+    run = Run(
+        id=new_id("run"),
+        suite_id=case.suite_id,
+        name=(data.run_name or f"缓存命中率测试 · {channel.name}")[:200],
+        mode=MANUAL_PROBE_MODE,
+        test_scope="quick",
+        status="running",
+        repeat_count=total_jobs,
+        concurrency=1,
+        total_jobs=total_jobs,
+        completed_jobs=0,
+        started_at=started_at,
+    )
+    db.add(run)
+    db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=channel.id, role_in_run=channel.role or "candidate"))
+    db.commit()
+
+    warmup: dict[str, Any] | None = None
+    attempts: list[dict[str, Any]] = []
+    latest_protocol: str | None = None
+    latest_endpoint: str | None = None
+    try:
+        for attempt_index in range(1, total_jobs + 1):
+            if attempt_index == 2 and data.warmup_wait_seconds > 0:
+                await asyncio.sleep(data.warmup_wait_seconds)
+            elif attempt_index > 2 and data.interval_seconds > 0:
+                await asyncio.sleep(data.interval_seconds)
+
+            normalized = await invoke_channel(channel, case, attempt_index, dict(credentials), use_mock=False)
+            latest_protocol = normalized.get("request_protocol") or latest_protocol
+            latest_endpoint = normalized.get("provider_endpoint") or latest_endpoint
+            result = _result_from_normalized(run.id, case, channel, attempt_index, normalized)
+            db.add(result)
+            run.completed_jobs = attempt_index
+            db.commit()
+            db.refresh(result)
+            attempt_payload = _cache_hit_rate_attempt_payload(result, normalized, is_warmup=attempt_index == 1)
+            if attempt_index == 1:
+                warmup = attempt_payload
+            else:
+                attempts.append(attempt_payload)
+
+        run.finished_at = datetime.now(timezone.utc)
+        run.status = "failed" if any(_attempt_has_error(item) for item in ([warmup] if warmup else []) + attempts) else "completed"
+        db.commit()
+    except Exception:
+        run.finished_at = datetime.now(timezone.utc)
+        run.status = "failed"
+        db.commit()
+        raise
+
+    db.refresh(run)
+    return _cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint)
+
+
+def _attempt_has_error(attempt: dict[str, Any]) -> bool:
+    normalized = attempt.get("result").normalized_response if attempt.get("result") else None
+    return bool(isinstance(normalized, dict) and normalized.get("error"))
+
+
+def _cache_usage_value(usage: Any, key: str) -> int:
+    if not isinstance(usage, dict):
+        return 0
+    value = usage.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return 0
+
+
+def _cache_hit_rate_attempt_payload(result: Result, normalized: dict[str, Any], *, is_warmup: bool) -> dict[str, Any]:
+    usage = normalized.get("usage")
+    input_tokens = _cache_usage_value(usage, "input_tokens")
+    cache_creation_input_tokens = _cache_usage_value(usage, "cache_creation_input_tokens")
+    cache_read_input_tokens = _cache_usage_value(usage, "cache_read_input_tokens")
+    prompt_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+    return {
+        "attempt_index": result.attempt_index,
+        "result": result,
+        "is_warmup": is_warmup,
+        "cache_hit": cache_read_input_tokens > 0,
+        "message_id": normalized.get("provider_message_id"),
+        "request_id": request_id_from_normalized(normalized),
+        "input_tokens": input_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "prompt_tokens": prompt_tokens,
+        "latency_ms": normalized.get("latency_ms"),
+    }
+
+
+def _cache_hit_rate_response(
+    run: Run,
+    warmup: dict[str, Any] | None,
+    attempts: list[dict[str, Any]],
+    request_protocol: str | None,
+    provider_endpoint: str | None,
+) -> dict[str, Any]:
+    total = len(attempts)
+    hits = sum(1 for item in attempts if item["cache_hit"])
+    total_cached_tokens = sum(int(item["cache_read_input_tokens"]) for item in attempts)
+    total_prompt_tokens = sum(int(item["prompt_tokens"]) for item in attempts)
+    request_hit_rate = (hits / total * 100) if total else 0
+    token_hit_rate = (total_cached_tokens / total_prompt_tokens * 100) if total_prompt_tokens else 0
+    avg_cached_tokens = (total_cached_tokens / hits) if hits else 0
+    message_id = next((str(item.get("message_id")) for item in attempts if item.get("message_id")), None)
+    if not message_id and warmup:
+        message_id = warmup.get("message_id")
+    return {
+        "run": run,
+        "warmup": warmup,
+        "attempts": attempts,
+        "total": total,
+        "hits": hits,
+        "request_hit_rate": round(request_hit_rate, 2),
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_cached_tokens": total_cached_tokens,
+        "token_hit_rate": round(token_hit_rate, 2),
+        "avg_cached_tokens": round(avg_cached_tokens, 2),
+        "warmup_cache_creation_input_tokens": int(warmup["cache_creation_input_tokens"]) if warmup else 0,
+        "message_channel_type": classify_claude_message_id(message_id),
+        "request_protocol": request_protocol,
+        "provider_endpoint": provider_endpoint,
     }
 
 
@@ -4687,11 +4918,12 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
 def build_raw_request(channel: Channel, case: TestCase) -> dict[str, Any]:
     params = case.request_params or {}
     message_content = params.get("message_content")
+    system_content = params.get("system_content")
     user_content: Any = message_content if isinstance(message_content, list) else case.prompt
     return {
         "provider_type": channel.provider_type,
         "model": channel.model_name,
-        "system": case.system_prompt,
+        "system": system_content if isinstance(system_content, list) else case.system_prompt,
         "messages": [{"role": "user", "content": user_content}],
         "params": params,
     }
@@ -5540,6 +5772,7 @@ def _remove_probe_only_params(body: dict[str, Any]) -> None:
         "expected_error_unexpected_label",
         "body_overrides",
         "message_content",
+        "system_content",
     ]:
         body.pop(key, None)
     for key, value in list(body.items()):

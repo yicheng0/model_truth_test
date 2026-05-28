@@ -48,6 +48,8 @@ from .schemas import (
     ClaudeCodeTestCreate,
     ClaudeCodeTestRead,
     BulkDeleteRequest,
+    CacheHitRateTestCreate,
+    CacheHitRateTestRead,
     SignatureInteropTestCreate,
     SignatureInteropTestRead,
     ChannelTaxonomySettingRead,
@@ -112,6 +114,7 @@ from .services import (
     claude_code_evidence_detail,
     claude_code_evidence_list,
     create_model_request_test,
+    create_cache_hit_rate_test,
     create_signature_interop_test,
     create_run,
     create_scheduled_channel_test,
@@ -332,9 +335,10 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
         base_url = payload.base_url.strip()
         api_key = payload.api_key.strip()
         model_name = payload.model_name.strip()
+        channel_label = (payload.channel_label or "").strip() or "ClaudeCode 临时检测渠道"
         channel = Channel(
             id=f"ephemeral_claude_code_test_{job_id}",
-            name="ClaudeCode 临时检测渠道",
+            name=channel_label,
             provider_type=payload.provider_type.strip() or "third_party_anthropic",
             role="candidate",
             base_url=base_url,
@@ -1034,6 +1038,23 @@ async def channel_model_request_test(channel_id: str, data: ModelRequestTestCrea
         raise HTTPException(status_code=502, detail="Upstream request failed") from exc
 
 
+@app.post("/api/channels/{channel_id}/cache-hit-rate-test", response_model=CacheHitRateTestRead)
+async def channel_cache_hit_rate_test(channel_id: str, data: CacheHitRateTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        return await create_cache_hit_rate_test(db, channel, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        logger.exception("Cache hit rate test timed out for channel %s", channel_id)
+        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
+    except Exception as exc:
+        logger.exception("Cache hit rate test failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+
+
 @app.post("/api/channels/{channel_id}/claude-code-test", response_model=ClaudeCodeTestRead)
 async def channel_claude_code_test(channel_id: str, data: ClaudeCodeTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     channel = db.get(Channel, channel_id)
@@ -1059,6 +1080,7 @@ async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Se
     base_url = data.base_url.strip()
     api_key = data.api_key.strip()
     model_name = data.model_name.strip()
+    channel_label = (data.channel_label or "").strip() or "ClaudeCode 临时检测渠道"
     if not base_url:
         raise HTTPException(status_code=400, detail="Base URL is required")
     if not api_key:
@@ -1067,7 +1089,7 @@ async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Se
         raise HTTPException(status_code=400, detail="Model name is required")
     channel = Channel(
         id="ephemeral_claude_code_test",
-        name="ClaudeCode 临时检测渠道",
+        name=channel_label,
         provider_type=data.provider_type.strip() or "third_party_anthropic",
         role="candidate",
         base_url=base_url,

@@ -5,6 +5,7 @@ import type {
   Channel,
   ChannelCreate,
   ChannelAlert,
+  CacheHitRateTestResult,
   ChannelTaxonomySetting,
   ChannelTaxonomyUpdate,
   ClaudeCodeCheckResult,
@@ -167,6 +168,8 @@ export const api = {
     request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),
   modelRequestTest: (channelId: string, payload: { prompt: string; system_prompt?: string | null; request_params?: Record<string, unknown>; run_name?: string | null }) =>
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
+  cacheHitRateTest: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; run_name?: string | null }) =>
+    request<CacheHitRateTestResult>(`/api/channels/${channelId}/cache-hit-rate-test`, { method: 'POST', body: JSON.stringify(payload) }),
   claudeCodeTest: (channelId: string, payload: { source_channel_id?: string | null; image_url?: string | null; include_expensive_context?: boolean }) =>
     request<ClaudeCodeTestResult>(`/api/channels/${channelId}/claude-code-test`, { method: 'POST', body: JSON.stringify(payload) }),
   runClaudeCodeRelayTest: (payload: ClaudeCodeRelayTestCreate) =>
