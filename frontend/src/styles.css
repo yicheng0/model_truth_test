@@ -2029,6 +2029,14 @@ textarea:focus-visible,
   max-width: 100%;
 }
 
+.claude-probe-latency {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .claude-probe-tags {
   max-width: 100%;
 }

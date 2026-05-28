@@ -88,6 +88,16 @@ function ProbeNameCell({ title, probeKey }: { title: string; probeKey: string })
   );
 }
 
+function LatencyCell({ value }: { value?: number | null }) {
+  if (typeof value !== 'number') return <EmptyProbeValue />;
+  return (
+    <Typography.Text className="claude-probe-latency" type={value > 5000 ? 'warning' : undefined}>
+      <span>{value}</span>
+      <span>ms</span>
+    </Typography.Text>
+  );
+}
+
 function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
   return (
     <Table<ClaudeCodeProbeResult>
@@ -108,10 +118,8 @@ function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
         { title: '分数', dataIndex: 'score', width: 64 },
         {
           title: '延迟',
-          width: 90,
-          render: (_, item) => typeof item.latency_ms === 'number' ? (
-            <Typography.Text type={item.latency_ms > 5000 ? 'warning' : undefined}>{item.latency_ms} ms</Typography.Text>
-          ) : <EmptyProbeValue />,
+          width: 112,
+          render: (_, item) => <LatencyCell value={item.latency_ms} />,
         },
         {
           title: 'Message / Request',
@@ -170,10 +178,8 @@ function JobProbeTable({ probes, currentKey }: { probes: ClaudeCodeJobProbe[]; c
         { title: '分数', dataIndex: 'score', width: 90 },
         {
           title: '延迟',
-          width: 90,
-          render: (_, item) => typeof item.latency_ms === 'number' ? (
-            <Typography.Text type={item.latency_ms > 5000 ? 'warning' : undefined}>{item.latency_ms} ms</Typography.Text>
-          ) : <EmptyProbeValue />,
+          width: 112,
+          render: (_, item) => <LatencyCell value={item.latency_ms} />,
         },
         {
           title: '摘要',
@@ -253,10 +259,8 @@ function MultimodalProbeTable({ probes, currentKey }: { probes: MultimodalProbe[
         { title: '分数', dataIndex: 'score', width: 64 },
         {
           title: '延迟',
-          width: 90,
-          render: (_, item) => typeof item.latency_ms === 'number' ? (
-            <Typography.Text type={item.latency_ms > 5000 ? 'warning' : undefined}>{item.latency_ms} ms</Typography.Text>
-          ) : <EmptyProbeValue />,
+          width: 112,
+          render: (_, item) => <LatencyCell value={item.latency_ms} />,
         },
         {
           title: '输入内容',
