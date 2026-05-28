@@ -205,6 +205,38 @@ export type CacheHitRateTestResult = {
   provider_endpoint?: string | null;
 };
 
+export type CacheHitRateJobCreate = {
+  job_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | string;
+};
+
+export type CacheHitRateJobStatus = {
+  job_id: string;
+  kind: 'cache_hit_rate' | string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | string;
+  started_at: string;
+  finished_at?: string | null;
+  current_title?: string | null;
+  completed_count: number;
+  total_count: number;
+  percent: number;
+  warmup?: CacheHitRateAttempt | null;
+  attempts: CacheHitRateAttempt[];
+  total: number;
+  hits: number;
+  request_hit_rate: number;
+  total_prompt_tokens: number;
+  total_cached_tokens: number;
+  token_hit_rate: number;
+  avg_cached_tokens: number;
+  warmup_cache_creation_input_tokens: number;
+  message_channel_type: string;
+  request_protocol?: string | null;
+  provider_endpoint?: string | null;
+  result?: CacheHitRateTestResult | null;
+  error?: string | null;
+};
+
 export type ClaudeCodeProbeResult = {
   key: string;
   title: string;

@@ -1632,7 +1632,7 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
     }
 
 
-async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheHitRateTestCreate) -> dict[str, Any]:
+async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheHitRateTestCreate, progress_callback: Any | None = None) -> dict[str, Any]:
     if not channel.enabled:
         raise ValueError("Channel is disabled")
     credentials = _merged_channel_credentials(channel, {})
@@ -1703,6 +1703,8 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
                 warmup = attempt_payload
             else:
                 attempts.append(attempt_payload)
+            if progress_callback is not None:
+                await progress_callback(_cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint))
 
         run.finished_at = datetime.now(timezone.utc)
         run.status = "failed" if any(_attempt_has_error(item) for item in ([warmup] if warmup else []) + attempts) else "completed"
@@ -1718,7 +1720,11 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
 
 
 def _attempt_has_error(attempt: dict[str, Any]) -> bool:
-    normalized = attempt.get("result").normalized_response if attempt.get("result") else None
+    result = attempt.get("result")
+    if isinstance(result, dict):
+        normalized = result.get("normalized_response")
+    else:
+        normalized = result.normalized_response if result else None
     return bool(isinstance(normalized, dict) and normalized.get("error"))
 
 
@@ -1741,7 +1747,7 @@ def _cache_hit_rate_attempt_payload(result: Result, normalized: dict[str, Any], 
     prompt_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
     return {
         "attempt_index": result.attempt_index,
-        "result": result,
+        "result": ResultRead.model_validate(result).model_dump(mode="json"),
         "is_warmup": is_warmup,
         "cache_hit": cache_read_input_tokens > 0,
         "message_id": normalized.get("provider_message_id"),
@@ -1772,7 +1778,7 @@ def _cache_hit_rate_response(
     if not message_id and warmup:
         message_id = warmup.get("message_id")
     return {
-        "run": run,
+        "run": RunRead.model_validate(run).model_dump(mode="json"),
         "warmup": warmup,
         "attempts": attempts,
         "total": total,

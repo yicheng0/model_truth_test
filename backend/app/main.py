@@ -48,6 +48,8 @@ from .schemas import (
     ClaudeCodeTestCreate,
     ClaudeCodeTestRead,
     BulkDeleteRequest,
+    CacheHitRateJobCreateRead,
+    CacheHitRateJobStatusRead,
     CacheHitRateTestCreate,
     CacheHitRateTestRead,
     SignatureInteropTestCreate,
@@ -191,6 +193,8 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_CODE_JOB_STORE: dict[str, dict[str, object]] = {}
 CLAUDE_CODE_JOB_LOCK = asyncio.Lock()
+CACHE_HIT_RATE_JOB_STORE: dict[str, dict[str, object]] = {}
+CACHE_HIT_RATE_JOB_LOCK = asyncio.Lock()
 
 
 def _job_percent(completed_count: int, total_count: int) -> float:
@@ -328,6 +332,91 @@ def _job_snapshot(job_id: str) -> dict[str, object] | None:
     if not job:
         return None
     return dict(job)
+
+
+async def _cache_job_update(job_id: str, payload: dict[str, object]) -> None:
+    async with CACHE_HIT_RATE_JOB_LOCK:
+        job = CACHE_HIT_RATE_JOB_STORE.get(job_id)
+        if not job:
+            return
+        job.update(payload)
+
+
+def _cache_job_snapshot(job_id: str) -> dict[str, object] | None:
+    job = CACHE_HIT_RATE_JOB_STORE.get(job_id)
+    if not job:
+        return None
+    return dict(job)
+
+
+def _cache_job_progress_payload(job_id: str, payload: dict[str, object], total_count: int, status: str = "running") -> dict[str, object]:
+    warmup = payload.get("warmup")
+    attempts = list(payload.get("attempts") or [])
+    completed_count = (1 if warmup else 0) + len(attempts)
+    measured_total = int(payload.get("total") or 0)
+    if not warmup:
+        current_title = "准备预热请求"
+    elif measured_total < max(0, total_count - 1):
+        current_title = f"测量请求 {measured_total} / {max(0, total_count - 1)}"
+    else:
+        current_title = "缓存命中率测试完成"
+    return {
+        "job_id": job_id,
+        "kind": "cache_hit_rate",
+        "status": status,
+        "current_title": current_title,
+        "completed_count": completed_count,
+        "percent": _job_percent(completed_count, total_count),
+        "warmup": warmup,
+        "attempts": attempts,
+        "total": measured_total,
+        "hits": int(payload.get("hits") or 0),
+        "request_hit_rate": float(payload.get("request_hit_rate") or 0),
+        "total_prompt_tokens": int(payload.get("total_prompt_tokens") or 0),
+        "total_cached_tokens": int(payload.get("total_cached_tokens") or 0),
+        "token_hit_rate": float(payload.get("token_hit_rate") or 0),
+        "avg_cached_tokens": float(payload.get("avg_cached_tokens") or 0),
+        "warmup_cache_creation_input_tokens": int(payload.get("warmup_cache_creation_input_tokens") or 0),
+        "message_channel_type": str(payload.get("message_channel_type") or "未知"),
+        "request_protocol": payload.get("request_protocol"),
+        "provider_endpoint": payload.get("provider_endpoint"),
+    }
+
+
+async def _run_cache_hit_rate_job(job_id: str, channel_id: str, payload: CacheHitRateTestCreate, db_factory: callable) -> None:
+    total_count = payload.test_count + 1
+    try:
+        async def progress(update: dict[str, object]) -> None:
+            await _cache_job_update(job_id, _cache_job_progress_payload(job_id, update, total_count, status="running"))
+
+        with db_factory() as db:
+            channel = db.get(Channel, channel_id)
+            if not channel:
+                raise ValueError("Channel not found")
+            result = await create_cache_hit_rate_test(db, channel, payload, progress_callback=progress)
+
+        await _cache_job_update(
+            job_id,
+            {
+                **_cache_job_progress_payload(job_id, result, total_count, status="completed"),
+                "finished_at": datetime.now(timezone.utc),
+                "completed_count": total_count,
+                "percent": 100.0,
+                "result": result,
+                "error": None,
+            },
+        )
+    except Exception as exc:
+        logger.exception("Cache hit rate job failed")
+        await _cache_job_update(
+            job_id,
+            {
+                "status": "failed",
+                "finished_at": datetime.now(timezone.utc),
+                "current_title": None,
+                "error": str(exc),
+            },
+        )
 
 
 async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db_factory: callable) -> None:
@@ -1053,6 +1142,52 @@ async def channel_cache_hit_rate_test(channel_id: str, data: CacheHitRateTestCre
     except Exception as exc:
         logger.exception("Cache hit rate test failed for channel %s", channel_id)
         raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+
+
+@app.post("/api/channels/{channel_id}/cache-hit-rate-test/jobs", response_model=CacheHitRateJobCreateRead)
+async def start_channel_cache_hit_rate_test_job(channel_id: str, data: CacheHitRateTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    job_id = str(uuid.uuid4())
+    total_count = data.test_count + 1
+    async with CACHE_HIT_RATE_JOB_LOCK:
+        CACHE_HIT_RATE_JOB_STORE[job_id] = {
+            "job_id": job_id,
+            "kind": "cache_hit_rate",
+            "status": "queued",
+            "started_at": datetime.now(timezone.utc),
+            "finished_at": None,
+            "current_title": "排队中",
+            "completed_count": 0,
+            "total_count": total_count,
+            "percent": 0.0,
+            "warmup": None,
+            "attempts": [],
+            "total": 0,
+            "hits": 0,
+            "request_hit_rate": 0.0,
+            "total_prompt_tokens": 0,
+            "total_cached_tokens": 0,
+            "token_hit_rate": 0.0,
+            "avg_cached_tokens": 0.0,
+            "warmup_cache_creation_input_tokens": 0,
+            "message_channel_type": "未知",
+            "request_protocol": None,
+            "provider_endpoint": None,
+            "result": None,
+            "error": None,
+        }
+    asyncio.create_task(_run_cache_hit_rate_job(job_id, channel_id, data, SessionLocal))
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/cache-hit-rate-test/jobs/{job_id}", response_model=CacheHitRateJobStatusRead)
+def get_cache_hit_rate_test_job(job_id: str) -> dict[str, object]:
+    payload = _cache_job_snapshot(job_id)
+    if not payload or payload.get("kind") != "cache_hit_rate":
+        raise HTTPException(status_code=404, detail="Cache hit rate job not found")
+    return payload
 
 
 @app.post("/api/channels/{channel_id}/claude-code-test", response_model=ClaudeCodeTestRead)

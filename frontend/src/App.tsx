@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Popover, Typography } from 'antd';
-import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
+import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
@@ -14,6 +14,7 @@ const RunDetail = lazy(() => import('./pages/RunDetail'));
 const TestCases = lazy(() => import('./pages/TestCases'));
 const ScheduledTests = lazy(() => import('./pages/ScheduledTests'));
 const SignatureInterop = lazy(() => import('./pages/SignatureInterop'));
+const CacheHitRateTest = lazy(() => import('./pages/CacheHitRateTest'));
 const ModelRequestTest = lazy(() => import('./pages/ModelRequestTest'));
 const ClaudeCodeCheck = lazy(() => import('./pages/ClaudeCodeCheck'));
 const ReportsPage = lazy(() => import('./pages/ReportsPage'));
@@ -43,8 +44,9 @@ function writeSidebarCollapsed(collapsed: boolean) {
 const navItems = [
   { key: '/', icon: Activity, label: '总览', to: '/' },
   { key: '/channels', icon: Network, label: '渠道管理', to: '/channels' },
-  { key: '/model-request-test', icon: Send, label: '模型请求', to: '/model-request-test' },
+  { key: '/cache-hit-rate-test', icon: DatabaseZap, label: '缓存命中率', to: '/cache-hit-rate-test' },
   { key: '/claude-code-check', icon: TerminalSquare, label: 'Claude Code', to: '/claude-code-check' },
+  { key: '/model-request-test', icon: Send, label: '模型请求', to: '/model-request-test' },
   { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
   { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },
   { key: '/baselines', icon: Database, label: '渠道指纹', to: '/baselines' },
@@ -137,6 +139,7 @@ function Shell() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/channels" element={<Channels />} />
+              <Route path="/cache-hit-rate-test" element={<CacheHitRateTest />} />
               <Route path="/model-request-test" element={<ModelRequestTest />} />
               <Route path="/claude-code-check" element={<ClaudeCodeCheck />} />
               <Route path="/signature-interop" element={<SignatureInterop />} />

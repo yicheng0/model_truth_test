@@ -1007,6 +1007,38 @@ class CacheHitRateTestRead(BaseModel):
     provider_endpoint: str | None = None
 
 
+class CacheHitRateJobCreateRead(BaseModel):
+    job_id: str
+    status: str
+
+
+class CacheHitRateJobStatusRead(BaseModel):
+    job_id: str
+    kind: str = "cache_hit_rate"
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    current_title: str | None = None
+    completed_count: int
+    total_count: int
+    percent: float
+    warmup: CacheHitRateAttemptRead | None = None
+    attempts: list[CacheHitRateAttemptRead] = Field(default_factory=list)
+    total: int = 0
+    hits: int = 0
+    request_hit_rate: float = 0
+    total_prompt_tokens: int = 0
+    total_cached_tokens: int = 0
+    token_hit_rate: float = 0
+    avg_cached_tokens: float = 0
+    warmup_cache_creation_input_tokens: int = 0
+    message_channel_type: str = "未知"
+    request_protocol: str | None = None
+    provider_endpoint: str | None = None
+    result: CacheHitRateTestRead | None = None
+    error: str | None = None
+
+
 class ManualScoreUpdate(BaseModel):
     final_score: float
     labels: list[str] | None = None

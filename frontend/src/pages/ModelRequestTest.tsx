@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
-import type { ColumnsType } from 'antd/es/table';
+import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Popconfirm, Select, Space, Tag, Typography, message } from 'antd';
 import { Link, useNavigate } from 'react-router-dom';
-import { BrainCircuit, Bug, DatabaseZap, Search, Send, ShieldCheck, Shuffle, Trash2 } from 'lucide-react';
+import { BrainCircuit, Bug, Search, Send, ShieldCheck, Shuffle, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
-import type { CacheHitRateAttempt, CacheHitRateTestResult, Channel, ModelRequestTestResult } from '../types';
+import type { Channel, ModelRequestTestResult } from '../types';
 
 type ModelRequestForm = {
   channel_id: string;
@@ -141,10 +140,6 @@ function prettyJson(value: unknown) {
   return JSON.stringify(value ?? null, null, 2);
 }
 
-function formatPercent(value: number) {
-  return `${Number.isFinite(value) ? value.toFixed(2) : '0.00'}%`;
-}
-
 function normalizedValue(result: ModelRequestTestResult | null, key: string) {
   const normalized = result?.result.normalized_response;
   return normalized && typeof normalized === 'object' ? normalized[key] : undefined;
@@ -215,7 +210,6 @@ export default function ModelRequestTest() {
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<ModelRequestTestResult | null>(null);
   const [comboResults, setComboResults] = useState<ComboProbeResult[]>([]);
-  const [cacheResult, setCacheResult] = useState<CacheHitRateTestResult | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
 
   const availableChannels = useMemo(
@@ -329,7 +323,6 @@ export default function ModelRequestTest() {
       message.success('请求日志已删除');
       setResult((current) => current?.run.id === runId ? null : current);
       setComboResults((items) => items.filter((item) => item.payload.run.id !== runId));
-      setCacheResult((current) => current?.run.id === runId ? null : current);
       await queryClient.invalidateQueries({ queryKey: ['runs'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
     },
@@ -350,36 +343,9 @@ export default function ModelRequestTest() {
     onError: (error) => message.error(getErrorMessage(error)),
   });
 
-  const runCacheProbe = useMutation({
-    mutationFn: (channelId: string) =>
-      api.cacheHitRateTest(channelId, {
-        test_count: 10,
-        interval_seconds: 3,
-        warmup_wait_seconds: 5,
-        run_name: '缓存命中率测试',
-      }),
-    onSuccess: (payload) => {
-      setRequestError(null);
-      setResult(null);
-      setComboResults([]);
-      setCacheResult(payload);
-      if (payload.hits > 0) {
-        message.success(`缓存测试完成：命中率 ${formatPercent(payload.request_hit_rate)}`);
-      } else {
-        message.warning('缓存测试完成：未观察到缓存命中');
-      }
-    },
-    onError: (error) => {
-      const detail = error instanceof Error ? error.message : '缓存命中率测试失败';
-      setRequestError(detail);
-      message.error(detail);
-    },
-  });
-
   function submit(values: ModelRequestForm) {
     setResult(null);
     setComboResults([]);
-    setCacheResult(null);
     setRequestError(null);
     requestModel.mutate(values);
   }
@@ -392,7 +358,6 @@ export default function ModelRequestTest() {
     }
     setResult(null);
     setComboResults([]);
-    setCacheResult(null);
     setRequestError(null);
     runComboProbe.mutate(channelId);
   }
@@ -405,22 +370,8 @@ export default function ModelRequestTest() {
     }
     setResult(null);
     setComboResults([]);
-    setCacheResult(null);
     setRequestError(null);
     runSingleProbe.mutate({ channelId, probe });
-  }
-
-  function submitCacheProbe() {
-    const channelId = form.getFieldValue('channel_id');
-    if (!channelId) {
-      message.warning('请选择请求渠道');
-      return;
-    }
-    setResult(null);
-    setComboResults([]);
-    setCacheResult(null);
-    setRequestError(null);
-    runCacheProbe.mutate(channelId);
   }
 
   function applyProbe(probe: ProbeConfig) {
@@ -433,7 +384,6 @@ export default function ModelRequestTest() {
     });
     setResult(null);
     setComboResults([]);
-    setCacheResult(null);
     setRequestError(null);
   }
 
@@ -449,59 +399,6 @@ export default function ModelRequestTest() {
     }
     deleteComboRuns.mutate(ids);
   }
-
-  const cacheAttemptColumns: ColumnsType<CacheHitRateAttempt> = [
-    {
-      title: '请求',
-      dataIndex: 'attempt_index',
-      key: 'attempt_index',
-      render: (value: number) => `#${value - 1}`,
-    },
-    {
-      title: '命中',
-      dataIndex: 'cache_hit',
-      key: 'cache_hit',
-      render: (value: boolean) => <Tag color={value ? 'green' : 'red'}>{value ? '命中' : '未命中'}</Tag>,
-    },
-    {
-      title: '缓存 tokens',
-      dataIndex: 'cache_read_input_tokens',
-      key: 'cache_read_input_tokens',
-    },
-    {
-      title: '写入 tokens',
-      dataIndex: 'cache_creation_input_tokens',
-      key: 'cache_creation_input_tokens',
-    },
-    {
-      title: '输入 tokens',
-      dataIndex: 'input_tokens',
-      key: 'input_tokens',
-    },
-    {
-      title: 'Prompt tokens',
-      dataIndex: 'prompt_tokens',
-      key: 'prompt_tokens',
-    },
-    {
-      title: '延迟',
-      dataIndex: 'latency_ms',
-      key: 'latency_ms',
-      render: (value: number | null) => (value == null ? '-' : `${value} ms`),
-    },
-    {
-      title: 'Message ID',
-      dataIndex: 'message_id',
-      key: 'message_id',
-      render: (value: string | null) => value || '-',
-    },
-    {
-      title: 'Request ID',
-      dataIndex: 'request_id',
-      key: 'request_id',
-      render: (value: string | null) => value || '-',
-    },
-  ];
 
   const resultLabels = result?.result.labels ?? [];
   const resultParams = result?.result.raw_request?.params;
@@ -578,7 +475,6 @@ export default function ModelRequestTest() {
             onValuesChange={() => {
               setResult(null);
               setComboResults([]);
-              setCacheResult(null);
               setRequestError(null);
             }}
           >
@@ -617,25 +513,22 @@ export default function ModelRequestTest() {
               <Input.TextArea rows={6} placeholder='{"thinking":{"type":"enabled","budget_tokens":1024},"reasoning_effort":"medium"}' />
             </Form.Item>
             <Space wrap>
-              <Button type="primary" htmlType="submit" loading={requestModel.isPending} disabled={channels.isLoading || !availableChannels.length || runComboProbe.isPending || runSingleProbe.isPending || runCacheProbe.isPending} icon={<Send size={16} />}>
+              <Button type="primary" htmlType="submit" loading={requestModel.isPending} disabled={channels.isLoading || !availableChannels.length || runComboProbe.isPending || runSingleProbe.isPending} icon={<Send size={16} />}>
                 {requestModel.isPending ? '发送中' : '发送真实请求'}
               </Button>
-              <Button onClick={() => submitSingleProbe(PROBES[0])} loading={runSingleProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runComboProbe.isPending || runCacheProbe.isPending} icon={<BrainCircuit size={16} />}>
+              <Button onClick={() => submitSingleProbe(PROBES[0])} loading={runSingleProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runComboProbe.isPending} icon={<BrainCircuit size={16} />}>
                 {runSingleProbe.isPending ? '测试中' : PROBES[0].buttonLabel}
               </Button>
-              <Button onClick={() => submitSingleProbe(PROBES[1])} loading={runSingleProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runComboProbe.isPending || runCacheProbe.isPending} icon={<Search size={16} />}>
+              <Button onClick={() => submitSingleProbe(PROBES[1])} loading={runSingleProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runComboProbe.isPending} icon={<Search size={16} />}>
                 {runSingleProbe.isPending ? '测试中' : PROBES[1].buttonLabel}
               </Button>
-              <Button onClick={() => submitSingleProbe(PROBES[2])} loading={runSingleProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runComboProbe.isPending || runCacheProbe.isPending} icon={<Bug size={16} />}>
+              <Button onClick={() => submitSingleProbe(PROBES[2])} loading={runSingleProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runComboProbe.isPending} icon={<Bug size={16} />}>
                 {runSingleProbe.isPending ? '测试中' : PROBES[2].buttonLabel}
               </Button>
-              <Button onClick={submitComboProbe} loading={runComboProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runSingleProbe.isPending || runCacheProbe.isPending} icon={<Shuffle size={16} />}>
+              <Button onClick={submitComboProbe} loading={runComboProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runSingleProbe.isPending} icon={<Shuffle size={16} />}>
                 {runComboProbe.isPending ? '检测中' : '三项组合测试'}
               </Button>
-              <Button onClick={submitCacheProbe} loading={runCacheProbe.isPending} disabled={channels.isLoading || !availableChannels.length || requestModel.isPending || runSingleProbe.isPending || runComboProbe.isPending} icon={<DatabaseZap size={16} />}>
-                {runCacheProbe.isPending ? '测试中' : '测试缓存命中率'}
-              </Button>
-              <Button onClick={() => navigate('/claude-code-check')} disabled={channels.isLoading || requestModel.isPending || runSingleProbe.isPending || runComboProbe.isPending || runCacheProbe.isPending} icon={<ShieldCheck size={16} />}>
+              <Button onClick={() => navigate('/claude-code-check')} disabled={channels.isLoading || requestModel.isPending || runSingleProbe.isPending || runComboProbe.isPending} icon={<ShieldCheck size={16} />}>
                 打开 ClaudeCode 专页
               </Button>
             </Space>
@@ -646,67 +539,6 @@ export default function ModelRequestTest() {
           ) : null}
         </Space>
       </Card>
-
-      {cacheResult ? (
-        <Space direction="vertical" size={16} className="full-width">
-          <Alert
-            type={cacheResult.hits > 0 ? 'success' : 'warning'}
-            showIcon
-            message={cacheResult.hits > 0 ? '缓存命中率测试完成' : '未观察到缓存命中'}
-            description={`请求命中率 ${formatPercent(cacheResult.request_hit_rate)}，Token 命中率 ${formatPercent(cacheResult.token_hit_rate)}。`}
-          />
-          <Card title="缓存命中率结果" bordered={false}>
-            <Descriptions bordered size="small" column={2}>
-              <Descriptions.Item label="任务">
-                <Link to={`/runs/${cacheResult.run.id}`}>{cacheResult.run.id}</Link>
-              </Descriptions.Item>
-              <Descriptions.Item label="状态">{cacheResult.run.status}</Descriptions.Item>
-              <Descriptions.Item label="请求命中">{cacheResult.hits}/{cacheResult.total}</Descriptions.Item>
-              <Descriptions.Item label="请求命中率">{formatPercent(cacheResult.request_hit_rate)}</Descriptions.Item>
-              <Descriptions.Item label="Token 命中率">{formatPercent(cacheResult.token_hit_rate)}</Descriptions.Item>
-              <Descriptions.Item label="总缓存 tokens">{cacheResult.total_cached_tokens}</Descriptions.Item>
-              <Descriptions.Item label="总 prompt tokens">{cacheResult.total_prompt_tokens}</Descriptions.Item>
-              <Descriptions.Item label="平均缓存 tokens">{cacheResult.avg_cached_tokens}</Descriptions.Item>
-              <Descriptions.Item label="预热写入 tokens">{cacheResult.warmup_cache_creation_input_tokens}</Descriptions.Item>
-              <Descriptions.Item label="渠道特征">{cacheResult.message_channel_type}</Descriptions.Item>
-              <Descriptions.Item label="协议">{cacheResult.request_protocol || '-'}</Descriptions.Item>
-              <Descriptions.Item label="Endpoint">{cacheResult.provider_endpoint || '-'}</Descriptions.Item>
-            </Descriptions>
-            <Popconfirm
-              title="删除本次缓存测试日志"
-              description="会删除本次缓存测试生成的任务和所有请求结果。确定删除吗？"
-              okText="删除"
-              cancelText="取消"
-              okButtonProps={{ danger: true }}
-              onConfirm={() => deleteProbeRun.mutate(cacheResult.run.id)}
-            >
-              <Button danger icon={<Trash2 size={15} />} loading={deleteProbeRun.isPending && deleteProbeRun.variables === cacheResult.run.id} style={{ marginTop: 16 }}>
-                删除本次缓存测试日志
-              </Button>
-            </Popconfirm>
-          </Card>
-          {cacheResult.warmup ? (
-            <Card title="预热请求" bordered={false}>
-              <Descriptions bordered size="small" column={2}>
-                <Descriptions.Item label="Message ID">{cacheResult.warmup.message_id || '-'}</Descriptions.Item>
-                <Descriptions.Item label="Request ID">{cacheResult.warmup.request_id || '-'}</Descriptions.Item>
-                <Descriptions.Item label="写入 tokens">{cacheResult.warmup.cache_creation_input_tokens}</Descriptions.Item>
-                <Descriptions.Item label="输入 tokens">{cacheResult.warmup.input_tokens}</Descriptions.Item>
-              </Descriptions>
-            </Card>
-          ) : null}
-          <Card title="测量请求明细" bordered={false}>
-            <Table<CacheHitRateAttempt>
-              rowKey={(row) => row.result.id}
-              dataSource={cacheResult.attempts}
-              columns={cacheAttemptColumns}
-              pagination={false}
-              size="small"
-              scroll={{ x: 1100 }}
-            />
-          </Card>
-        </Space>
-      ) : null}
 
       {comboResults.length ? (
         <Space direction="vertical" size={16} className="full-width">

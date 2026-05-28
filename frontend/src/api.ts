@@ -5,6 +5,8 @@ import type {
   Channel,
   ChannelCreate,
   ChannelAlert,
+  CacheHitRateJobCreate,
+  CacheHitRateJobStatus,
   CacheHitRateTestResult,
   ChannelTaxonomySetting,
   ChannelTaxonomyUpdate,
@@ -170,6 +172,9 @@ export const api = {
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
   cacheHitRateTest: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; run_name?: string | null }) =>
     request<CacheHitRateTestResult>(`/api/channels/${channelId}/cache-hit-rate-test`, { method: 'POST', body: JSON.stringify(payload) }),
+  startCacheHitRateTestJob: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; run_name?: string | null }) =>
+    request<CacheHitRateJobCreate>(`/api/channels/${channelId}/cache-hit-rate-test/jobs`, { method: 'POST', body: JSON.stringify(payload) }),
+  cacheHitRateJob: (jobId: string) => request<CacheHitRateJobStatus>(`/api/cache-hit-rate-test/jobs/${jobId}`),
   claudeCodeTest: (channelId: string, payload: { source_channel_id?: string | null; image_url?: string | null; include_expensive_context?: boolean }) =>
     request<ClaudeCodeTestResult>(`/api/channels/${channelId}/claude-code-test`, { method: 'POST', body: JSON.stringify(payload) }),
   runClaudeCodeRelayTest: (payload: ClaudeCodeRelayTestCreate) =>

@@ -5,6 +5,7 @@ import asyncio
 import importlib.util
 import json
 import math
+import time
 import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -3591,6 +3592,84 @@ def test_cache_hit_rate_test_rejects_openai_compatible_channel() -> None:
 
     assert response.status_code == 400
     assert "Anthropic Messages" in response.json()["detail"]
+
+
+def test_cache_hit_rate_job_reports_live_progress(monkeypatch) -> None:
+    reset_database()
+    calls = {"count": 0}
+
+    async def fake_live_call(channel, case, raw_request, credentials):  # noqa: ANN001
+        calls["count"] += 1
+        await asyncio.sleep(0.01)
+        is_warmup = calls["count"] == 1
+        return (
+            {
+                "id": f"msg_01cache_job_{calls['count']}",
+                "type": "message",
+                "role": "assistant",
+                "model": channel.model_name,
+                "content": [{"type": "text", "text": "Ulysses"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 20,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 1000 if is_warmup else 0,
+                    "cache_read_input_tokens": 0 if is_warmup else 950,
+                },
+                "_response_metadata": {"request_id": f"req_cache_job_{calls['count']}"},
+            },
+            "anthropic_messages",
+            "https://relay.example/v1/messages",
+        )
+
+    monkeypatch.setattr("app.services._live_call_with_metadata", fake_live_call)
+
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Cache Probe Job Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        started = client.post(
+            f"/api/channels/{channel_id}/cache-hit-rate-test/jobs",
+            json={"test_count": 2, "interval_seconds": 0, "warmup_wait_seconds": 0},
+        )
+        assert started.status_code == 200
+        job_id = started.json()["job_id"]
+
+        running_snapshot: dict[str, object] | None = None
+        final_snapshot: dict[str, object] | None = None
+        for _ in range(80):
+            polled = client.get(f"/api/cache-hit-rate-test/jobs/{job_id}")
+            assert polled.status_code == 200
+            payload = polled.json()
+            if payload["completed_count"] >= 1 and payload["status"] in {"running", "completed"}:
+                running_snapshot = payload
+            if payload["status"] == "completed":
+                final_snapshot = payload
+                break
+            time.sleep(0.02)
+
+    assert running_snapshot is not None
+    assert running_snapshot["warmup"]["is_warmup"] is True
+    assert running_snapshot["completed_count"] >= 1
+    assert final_snapshot is not None
+    assert final_snapshot["status"] == "completed"
+    assert final_snapshot["completed_count"] == 3
+    assert final_snapshot["total_count"] == 3
+    assert final_snapshot["percent"] == 100.0
+    assert len(final_snapshot["attempts"]) == 2
+    assert final_snapshot["hits"] == 2
+    assert final_snapshot["request_hit_rate"] == 100.0
+    assert final_snapshot["token_hit_rate"] == 97.94
+    assert final_snapshot["result"]["run"]["status"] == "completed"
+    assert final_snapshot["attempts"][0]["cache_hit"] is True
 
 
 def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> None:
