@@ -158,7 +158,7 @@ export default function CacheHitRateTest() {
           <Typography.Text className="section-kicker">PROMPT CACHE</Typography.Text>
           <Typography.Title level={2}>缓存命中率</Typography.Title>
           <Typography.Paragraph>
-            使用长文本和 Anthropic Messages cache_control 发起预热与重复请求，实时观察渠道缓存命中率。
+            使用 5K 级长文本和 Anthropic Messages cache_control 发起预热与重复请求，实时观察渠道缓存命中率。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">可请求渠道 {availableChannels.length}</Tag>
@@ -173,7 +173,7 @@ export default function CacheHitRateTest() {
             type="info"
             showIcon
             message="会发起真实缓存测试请求"
-            description="默认预热 1 次，等待 5 秒后测量 10 次，每次间隔 3 秒。API Key 只读取渠道配置，不写入原始请求。"
+            description="默认预热 1 次，等待 5 秒后测量 10 次，每次间隔 3 秒。内置样本超过 4K token 缓存门槛，API Key 只读取渠道配置，不写入原始请求。"
           />
           <div className="signature-config-grid">
             <Form.Item label="请求渠道" style={{ marginBottom: 0 }}>

@@ -3567,6 +3567,11 @@ def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
         results = db.scalars(select(Result).where(Result.run_id == payload["run"]["id"]).order_by(Result.attempt_index)).all()
     assert len(results) == 4
     assert results[0].raw_request["system"][0]["cache_control"] == {"type": "ephemeral"}
+    sample_text = results[0].raw_request["system"][0]["text"]
+    assert "PROJECT GUTENBERG EBOOK 4300" in sample_text
+    assert "Ulysses" in sample_text
+    assert "by James Joyce" in sample_text
+    assert len(sample_text) > 18000
     assert "Authorization" not in json.dumps(results[0].raw_request)
     assert "test-key" not in json.dumps(results[0].raw_request)
 
