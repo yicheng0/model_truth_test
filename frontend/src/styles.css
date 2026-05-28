@@ -2044,14 +2044,33 @@ textarea:focus-visible,
 
 .claude-page-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.7fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
   align-items: start;
 }
 
-.claude-main-pane,
-.claude-history-pane {
+.claude-main-pane {
   min-width: 0;
+}
+
+.claude-history-drawer-trigger {
+  position: fixed;
+  top: 50%;
+  right: 18px;
+  z-index: 30;
+  transform: translateY(-50%);
+}
+
+.claude-history-drawer-trigger .ant-btn {
+  box-shadow: 0 12px 28px rgba(31, 73, 125, 0.2);
+}
+
+.claude-history-drawer .ant-drawer-body {
+  background: #f6f8fb;
+}
+
+.claude-history-drawer-root .ant-drawer-content-wrapper {
+  max-width: calc(100vw - 16px);
 }
 
 .claude-history-card-active {
@@ -2063,9 +2082,13 @@ textarea:focus-visible,
   vertical-align: top;
 }
 
+.claude-multimodal-table .ant-table {
+  min-width: 1484px;
+}
+
 .claude-multimodal-input-cell {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr);
   gap: 10px;
   align-items: start;
   min-width: 0;
@@ -2073,8 +2096,8 @@ textarea:focus-visible,
 
 .claude-multimodal-thumb {
   display: block;
-  width: 58px;
-  height: 58px;
+  width: 52px;
+  height: 52px;
   aspect-ratio: 1 / 1;
   object-fit: contain;
   border: 1px solid #dbe5f0;
@@ -2090,9 +2113,23 @@ textarea:focus-visible,
   gap: 3px;
 }
 
+.claude-multimodal-input-copy .ant-typography {
+  display: block;
+  max-width: 100%;
+  margin-bottom: 0;
+}
+
+.claude-multimodal-kind {
+  font-size: 12px;
+}
+
 .claude-multimodal-url,
 .claude-multimodal-doc-snippet {
+  display: block;
   max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: "Fira Code", "Consolas", monospace;
   font-size: 12px;
 }
@@ -2820,7 +2857,6 @@ textarea:focus-visible,
   .signature-config-grid,
   .signature-sim-grid,
   .claude-section-grid,
-  .claude-page-layout,
   .channel-pair-grid,
   .fixed-channel-grid,
   .ab-compare-grid {
@@ -2843,6 +2879,13 @@ textarea:focus-visible,
   body::after {
     opacity: 0.42;
     background-size: 28px 28px;
+  }
+
+  .claude-history-drawer-trigger {
+    top: auto;
+    right: 14px;
+    bottom: 18px;
+    transform: none;
   }
 
   .site-frame {
@@ -2909,7 +2952,6 @@ textarea:focus-visible,
   .signature-config-grid,
   .signature-sim-grid,
   .claude-section-grid,
-  .claude-page-layout,
   .form-grid,
   .case-filter-grid,
   .case-form-grid,

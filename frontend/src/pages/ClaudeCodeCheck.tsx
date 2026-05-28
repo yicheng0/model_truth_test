@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { Alert, Badge, Button, Card, Checkbox, Drawer, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
 import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
@@ -200,17 +200,26 @@ function MultimodalInputCell({ probe }: { probe: MultimodalProbe }) {
   if (!preview) return <EmptyProbeValue />;
   const imageSrc = preview.image_data_url || preview.default_image_url || null;
   const url = preview.actual_image_url || preview.default_image_url || null;
+  const documentExcerpt = preview.document_text ? preview.document_text.replace(/\s+/g, ' ').trim() : null;
+  const kindLabel = preview.kind === 'image_base64'
+    ? 'base64 图片'
+    : preview.kind === 'image_url'
+      ? 'URL 图片'
+      : preview.kind === 'document_text'
+        ? '文档输入'
+        : preview.kind;
   return (
     <div className="claude-multimodal-input-cell">
       {imageSrc ? <img className="claude-multimodal-thumb" src={imageSrc} alt={preview.title} /> : null}
       <div className="claude-multimodal-input-copy">
         <Typography.Text strong ellipsis={{ tooltip: preview.title }}>{preview.title}</Typography.Text>
+        <Typography.Text type="secondary" className="claude-multimodal-kind">{kindLabel}</Typography.Text>
         {preview.summary ? <Typography.Text type="secondary" ellipsis={{ tooltip: preview.summary }}>{preview.summary}</Typography.Text> : null}
         {url ? <Typography.Text className="claude-multimodal-url" copyable={{ text: url }} ellipsis={{ tooltip: url }}>{url}</Typography.Text> : null}
         {preview.document_marker ? <Tag color="blue" className="claude-multimodal-marker">{preview.document_marker}</Tag> : null}
-        {preview.document_text ? (
-          <Typography.Text className="claude-multimodal-doc-snippet" ellipsis={{ tooltip: preview.document_text }}>
-            {preview.document_text}
+        {documentExcerpt ? (
+          <Typography.Text className="claude-multimodal-doc-snippet" ellipsis={{ tooltip: preview.document_text || documentExcerpt }}>
+            {documentExcerpt}
           </Typography.Text>
         ) : null}
       </div>
@@ -226,8 +235,9 @@ function MultimodalProbeTable({ probes, currentKey }: { probes: MultimodalProbe[
       dataSource={probes}
       pagination={false}
       size="small"
+      tableLayout="fixed"
       rowClassName={(item) => item.key === currentKey ? 'claude-job-row-active' : ''}
-      scroll={{ x: 1280 }}
+      scroll={{ x: 1484 }}
       columns={[
         {
           title: '测试项',
@@ -250,7 +260,7 @@ function MultimodalProbeTable({ probes, currentKey }: { probes: MultimodalProbe[
         },
         {
           title: '输入内容',
-          width: 300,
+          width: 340,
           render: (_, item) => <MultimodalInputCell probe={item} />,
         },
         {
@@ -427,6 +437,7 @@ export default function ClaudeCodeCheck() {
   const [relayJobId, setRelayJobId] = useState<string | null>(null);
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [deletingHistoryId, setDeletingHistoryId] = useState<string | null>(null);
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyRiskFilter, setHistoryRiskFilter] = useState('all');
   const [historyMatchCurrent, setHistoryMatchCurrent] = useState(false);
@@ -527,6 +538,54 @@ export default function ClaudeCodeCheck() {
 
   const relayRunning = runRelayTest.isPending || relayJob.data?.status === 'queued' || relayJob.data?.status === 'running';
   const activeResult = selectedHistoryId ? historyDetail.data?.result_payload ?? null : relayResult;
+  const historyCount = history.data?.length ?? 0;
+  const historyPanelContent = (
+    <Space direction="vertical" size={12} className="full-width">
+      <Input.Search
+        allowClear
+        placeholder="搜索渠道名 / URL / 模型"
+        value={historyQuery}
+        onChange={(event) => setHistoryQuery(event.target.value)}
+      />
+      <Space wrap>
+        <Select
+          value={historyRiskFilter}
+          onChange={setHistoryRiskFilter}
+          style={{ minWidth: 120 }}
+          options={[
+            { value: 'all', label: '全部风险' },
+            { value: 'low', label: 'low' },
+            { value: 'medium', label: 'medium' },
+            { value: 'high', label: 'high' },
+            { value: 'critical', label: 'critical' },
+          ]}
+        />
+        <Checkbox checked={historyMatchCurrent} onChange={(event) => setHistoryMatchCurrent(event.target.checked)}>
+          当前渠道
+        </Checkbox>
+      </Space>
+      {history.isError ? <Alert type="error" showIcon message="历史记录加载失败" description={getErrorMessage(history.error)} /> : null}
+      {history.isLoading ? <Typography.Text type="secondary">正在加载历史记录...</Typography.Text> : null}
+      {!history.isLoading && !(history.data?.length) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 ClaudeCode 证据历史" /> : null}
+      {!history.isLoading && Boolean(history.data?.length) && !filteredHistory.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的历史记录" /> : null}
+      {filteredHistory.map((item) => (
+        <HistoryCard
+          key={item.id}
+          item={item}
+          selected={selectedHistoryId === item.id}
+          deleting={deletingHistoryId === item.id}
+          onSelect={() => {
+            setSelectedHistoryId(item.id);
+            setHistoryDrawerOpen(false);
+          }}
+          onDelete={() => {
+            setDeletingHistoryId(item.id);
+            deleteHistory.mutate(item.id);
+          }}
+        />
+      ))}
+    </Space>
+  );
 
   return (
     <Space direction="vertical" size={24} className="page-stack">
@@ -663,54 +722,32 @@ export default function ClaudeCodeCheck() {
             {activeResult ? <ClaudeCodeResultView result={activeResult} meta={selectedHistoryId ? historyDetail.data : null} /> : null}
           </Space>
         </main>
-
-        <aside className="claude-history-pane">
-          <Card title={<span className="card-title-with-icon"><History size={18} />历史记录</span>} bordered={false}>
-            <Space direction="vertical" size={12} className="full-width">
-              <Input.Search
-                allowClear
-                placeholder="搜索渠道名 / URL / 模型"
-                value={historyQuery}
-                onChange={(event) => setHistoryQuery(event.target.value)}
-              />
-              <Space wrap>
-                <Select
-                  value={historyRiskFilter}
-                  onChange={setHistoryRiskFilter}
-                  style={{ minWidth: 120 }}
-                  options={[
-                    { value: 'all', label: '全部风险' },
-                    { value: 'low', label: 'low' },
-                    { value: 'medium', label: 'medium' },
-                    { value: 'high', label: 'high' },
-                    { value: 'critical', label: 'critical' },
-                  ]}
-                />
-                <Checkbox checked={historyMatchCurrent} onChange={(event) => setHistoryMatchCurrent(event.target.checked)}>
-                  当前渠道
-                </Checkbox>
-              </Space>
-              {history.isError ? <Alert type="error" showIcon message="历史记录加载失败" description={getErrorMessage(history.error)} /> : null}
-              {history.isLoading ? <Typography.Text type="secondary">正在加载历史记录...</Typography.Text> : null}
-              {!history.isLoading && !(history.data?.length) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 ClaudeCode 证据历史" /> : null}
-              {!history.isLoading && Boolean(history.data?.length) && !filteredHistory.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的历史记录" /> : null}
-              {filteredHistory.map((item) => (
-                <HistoryCard
-                  key={item.id}
-                  item={item}
-                  selected={selectedHistoryId === item.id}
-                  deleting={deletingHistoryId === item.id}
-                  onSelect={() => setSelectedHistoryId(item.id)}
-                  onDelete={() => {
-                    setDeletingHistoryId(item.id);
-                    deleteHistory.mutate(item.id);
-                  }}
-                />
-              ))}
-            </Space>
-          </Card>
-        </aside>
       </div>
+      <div className="claude-history-drawer-trigger">
+        <Badge count={historyCount} overflowCount={99} size="small">
+          <Button
+            type="primary"
+            shape="round"
+            icon={<History size={16} />}
+            onClick={() => setHistoryDrawerOpen(true)}
+            aria-label="打开历史记录"
+          >
+            历史记录
+          </Button>
+        </Badge>
+      </div>
+      <Drawer
+        title={<span className="card-title-with-icon"><History size={18} />历史记录</span>}
+        placement="right"
+        width={420}
+        open={historyDrawerOpen}
+        onClose={() => setHistoryDrawerOpen(false)}
+        className="claude-history-drawer"
+        rootClassName="claude-history-drawer-root"
+        destroyOnClose={false}
+      >
+        {historyPanelContent}
+      </Drawer>
     </Space>
   );
 }
