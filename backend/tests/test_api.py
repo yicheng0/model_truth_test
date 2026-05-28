@@ -3696,6 +3696,71 @@ def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(
         assert db.scalar(select(func.count()).select_from(Run).where(Run.name.like("ClaudeCode 检测%"))) == 0
 
 
+def test_claude_code_thinking_signature_latency_outlier_still_passes(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
+        raw_response = {
+            "id": "msg_01signature",
+            "type": "message",
+            "model": channel.model_name,
+            "content": [
+                {"type": "thinking", "thinking": "hidden", "signature": "sig-test"},
+                {"type": "text", "text": "0.1 和 0.2 的二进制浮点表示无法精确相加。"},
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 20, "output_tokens": 12},
+        }
+        return {
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "channel_role": channel.role,
+            "test_case_id": case.id,
+            "status_code": 200,
+            "latency_ms": 6000,
+            "first_token_ms": 5,
+            "ttft_ms": 5,
+            "tpot_ms": 1,
+            "input_tokens": 20,
+            "output_tokens": 12,
+            "tokens_per_second": 50,
+            "error_type": None,
+            "provider_message_id": raw_response["id"],
+            "provider_model": channel.model_name,
+            "stop_reason": raw_response["stop_reason"],
+            "stop_sequence": None,
+            "usage": raw_response["usage"],
+            "content_text": "0.1 和 0.2 的二进制浮点表示无法精确相加。",
+            "content_blocks": raw_response["content"],
+            "tool_calls": [],
+            "stream_events": ["message_stop"],
+            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
+            "raw_response": raw_response,
+            "error": None,
+            "request_mode": "live",
+            "request_attempted": True,
+            "provider_endpoint": "https://relay.example/v1/messages",
+            "request_protocol": "anthropic_messages",
+            "channel_preflight_failed": False,
+        }
+
+    async def fake_signature(source, relay, stream=False):  # noqa: ANN001
+        return {"ok": True, "reason": "兼容"}
+
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature)
+
+    with TestClient(app) as client:
+        response = client.post("/api/channels/third_party_demo/claude-code-test", json={})
+
+    payload = response.json()
+    assert response.status_code == 200
+    probe = next(item for item in payload["probes"] if item["key"] == "thinking_signature")
+    assert probe["status"] == "pass"
+    assert probe["score"] == 95
+    assert probe["labels"] == ["latency_outlier"]
+
+
 def test_prompt_leak_accepts_official_english_refusal_and_reports_latency() -> None:
     from app.services import _claude_code_probe_configs, _claude_code_probe_payload
 
@@ -4124,6 +4189,127 @@ def test_aws_adaptive_enabled_probe_uses_raw_messages_body() -> None:
     assert "expected_error_variant_any" not in body
     assert "expected_error_variant_label" not in body
     assert "expected_error_unexpected_label" not in body
+    assert payload["id"] == "msg_bdrk_01ok"
+
+
+def test_aws_multimodal_probe_uses_message_content_blocks() -> None:
+    from app.services import CLAUDE_CODE_RED_PNG_BASE64
+
+    reset_database()
+    captured: dict[str, object] = {}
+    image_data = CLAUDE_CODE_RED_PNG_BASE64
+
+    class FakeBody:
+        def read(self) -> bytes:
+            return b'{"id":"msg_bdrk_01ok","type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}'
+
+    class FakeAwsClient:
+        def invoke_model(self, **kwargs):  # noqa: ANN001, ANN201
+            captured.update(kwargs)
+            return {"body": FakeBody()}
+
+    case = TestCaseModel(
+        id="manual_image_base64_probe",
+        suite_id="manual_model_request_probe",
+        module="manual_probe",
+        title="图片输入 base64",
+        prompt="请识别图片主色，只输出 red 或 红色。",
+        request_params={
+            "max_tokens": 64,
+            "temperature": 0,
+            "message_content": [
+                {"type": "text", "text": "请识别图片主色，只输出 red 或 红色。"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": image_data,
+                    },
+                },
+            ],
+        },
+        scoring_rules={},
+        is_hidden=False,
+        enabled=True,
+    )
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "aws_bedrock")
+        assert channel is not None
+        payload = _aws_bedrock_messages_call(FakeAwsClient(), channel, case, {}, case.request_params or {})
+
+    body = json.loads(captured["body"])
+    content = body["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "请识别图片主色，只输出 red 或 红色。"}
+    assert content[1]["source"] == {"type": "base64", "media_type": "image/png", "data": image_data}
+    assert not content[1]["source"]["data"].startswith("data:image/png;base64,")
+    assert "message_content" not in body
+    assert payload["id"] == "msg_bdrk_01ok"
+
+
+def test_aws_multimodal_call_dispatches_to_invoke_model(monkeypatch) -> None:
+    reset_database()
+    captured: dict[str, object] = {}
+
+    class FakeBody:
+        def read(self) -> bytes:
+            return b'{"id":"msg_bdrk_01ok","type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}'
+
+    class FakeAwsClient:
+        def converse(self, **kwargs):  # noqa: ANN001, ANN201
+            raise AssertionError("multimodal requests must not use text-only converse")
+
+        def invoke_model(self, **kwargs):  # noqa: ANN001, ANN201
+            captured.update(kwargs)
+            return {"body": FakeBody(), "ResponseMetadata": {"RequestId": "req_aws_test"}}
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    def fake_client(service_name, **kwargs):  # noqa: ANN001, ANN202
+        captured["service_name"] = service_name
+        captured["region_name"] = kwargs.get("region_name")
+        return FakeAwsClient()
+
+    monkeypatch.setattr("boto3.client", fake_client)
+
+    case = TestCaseModel(
+        id="manual_image_base64_probe",
+        suite_id="manual_model_request_probe",
+        module="manual_probe",
+        title="图片输入 base64",
+        prompt="请识别图片主色，只输出 red 或 红色。",
+        request_params={
+            "max_tokens": 64,
+            "temperature": 0,
+            "message_content": [
+                {"type": "text", "text": "请识别图片主色，只输出 red 或 红色。"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc123"}},
+            ],
+        },
+        scoring_rules={},
+        is_hidden=False,
+        enabled=True,
+    )
+
+    with SessionLocal() as db:
+        channel = db.get(Channel, "aws_bedrock")
+        assert channel is not None
+        from app import services as services_module
+
+        payload = services_module._aws_bedrock_call(
+            channel,
+            case,
+            {"aws_access_key_id": "ak", "aws_secret_access_key": "sk", "region": "us-west-2"},
+        )
+
+    body = json.loads(captured["body"])
+    assert captured["service_name"] == "bedrock-runtime"
+    assert captured["region_name"] == "us-west-2"
+    assert body["messages"][0]["content"][1]["source"]["data"] == "abc123"
+    assert captured["closed"] is True
     assert payload["id"] == "msg_bdrk_01ok"
 
 
@@ -5165,7 +5351,9 @@ def test_start_claude_code_cli_job_returns_job_id() -> None:
 
 
 def test_claude_code_multimodal_probe_payload_includes_input_preview() -> None:
-    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+    import base64
+
+    from app.services import CLAUDE_CODE_RED_PNG_BASE64, _claude_code_probe_configs, _claude_code_probe_payload
 
     configs = _claude_code_probe_configs(None, False)
     image_base64 = next(item for item in configs if item["key"] == "image_base64")
@@ -5178,6 +5366,10 @@ def test_claude_code_multimodal_probe_payload_includes_input_preview() -> None:
 
     assert image_base64_payload["input_preview"]["kind"] == "image_base64"
     assert image_base64_payload["input_preview"]["image_data_url"].startswith("data:image/png;base64,")
+    raw_png = base64.b64decode(CLAUDE_CODE_RED_PNG_BASE64)
+    assert raw_png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert int.from_bytes(raw_png[16:20], "big") == 64
+    assert int.from_bytes(raw_png[20:24], "big") == 64
     assert image_url_payload["input_preview"]["kind"] == "image_url"
     assert image_url_payload["input_preview"]["default_image_url"]
     assert image_url_payload["input_preview"]["actual_image_url"]

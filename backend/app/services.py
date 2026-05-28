@@ -1645,7 +1645,7 @@ SCHEDULED_MODEL_REQUEST_PROBES: list[dict[str, Any]] = [
 ]
 
 CLAUDE_CODE_DEFAULT_IMAGE_URL = "https://dummyimage.com/64x64/ff0000/ffffff.png&text=R"
-CLAUDE_CODE_RED_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z/C/HwAFgwJ/l2lnNwAAAABJRU5ErkJggg=="
+CLAUDE_CODE_RED_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfElEQVR4nNXOQREAMAjAsK7+PTMRPLhGQd7QJnESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ES53Vg6wNShQF/fRSLfgAAAABJRU5ErkJggg=="
 CLAUDE_CODE_DOCUMENT_TEXT = "ClaudeCode document marker: CC-DOC-742. Return this marker exactly."
 
 CLAUDE_CODE_SECTION_TITLES: dict[str, str] = {
@@ -2134,7 +2134,7 @@ def _claude_code_probe_payload(
 ) -> dict[str, Any]:
     final_score = float(score if score is not None else (result.score if result else 0))
     final_labels = labels if labels is not None else (result.labels if result else []) or []
-    status = _claude_code_probe_status(config.get("severity"), final_score, final_labels, normalized.get("error"))
+    status = _claude_code_probe_status(config, final_score, final_labels, normalized)
     return {
         "key": str(config["key"]),
         "title": str(config["title"]),
@@ -2157,8 +2157,16 @@ def _claude_code_probe_payload(
     }
 
 
-def _claude_code_probe_status(severity: Any, score: float, labels: list[str], error: Any = None) -> str:
+def _claude_code_probe_status(config: dict[str, Any], score: float, labels: list[str], normalized: dict[str, Any]) -> str:
+    severity = config.get("severity")
     label_set = set(labels)
+    if (
+        config.get("post_check") == "thinking_signature"
+        and not normalized.get("error")
+        and _raw_response_has_thinking_signature(normalized.get("raw_response"))
+        and score > 0
+    ):
+        return "pass"
     if score >= 99 and (not labels or set(labels) <= {"provider_error_variant"}):
         return "pass"
     if str(severity) == "weak" and score > 0 and label_set and label_set <= {"latency_outlier"}:
@@ -5461,7 +5469,7 @@ def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, A
     )
     try:
         params = case.request_params or {}
-        if params.get("thinking") or params.get("tools") or "stream" in params:
+        if params.get("thinking") or params.get("tools") or params.get("message_content") or "stream" in params:
             return _aws_bedrock_messages_call(client, channel, case, credentials, params)
         response = client.converse(
             modelId=credentials.get("model") or channel.model_name,
@@ -5483,10 +5491,12 @@ def _aws_bedrock_call(channel: Channel, case: TestCase, credentials: dict[str, A
 
 
 def _aws_bedrock_messages_call(client: Any, channel: Channel, case: TestCase, credentials: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    message_content = params.get("message_content")
+    user_content: Any = message_content if isinstance(message_content, list) else case.prompt
     body = {
         "anthropic_version": credentials.get("anthropic_version", "bedrock-2023-05-31"),
         "system": case.system_prompt,
-        "messages": [{"role": "user", "content": case.prompt}],
+        "messages": [{"role": "user", "content": user_content}],
         "max_tokens": params.get("max_tokens", 1024),
         "temperature": params.get("temperature", 0),
     }
