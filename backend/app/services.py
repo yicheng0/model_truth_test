@@ -2343,6 +2343,7 @@ CLAUDE_CODE_SECTION_TITLES: dict[str, str] = {
     "behavior": "行为验证",
     "signature": "签名校验",
     "multimodal": "多模态能力",
+    "web_capability": "Web 能力参考",
 }
 
 
@@ -2410,6 +2411,7 @@ def _claude_code_section_for_category(category: str) -> str:
         "context": "behavior",
         "safety": "behavior",
         "relay_compatibility": "fingerprint",
+        "web_capability": "web_capability",
     }
     return mapping.get(category, "behavior")
 
@@ -2543,6 +2545,24 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "request_params": {"max_tokens": 4000, "temperature": 1, "thinking": {"type": "enabled", "budget_tokens": 2000}},
             "scoring_rules": {"required_any": ["0.1", "0.2", "二进制", "浮点"]},
             "post_check": "thinking_signature",
+        },
+        {
+            "key": "web_search_reference",
+            "title": "Web Search 能力参考",
+            "category": "web_capability",
+            "severity": "reference",
+            "prompt": (
+                "请查询今天 Anthropic 官方新闻或博客的最新更新，并给出标题、发布日期和来源链接。"
+                "如果当前环境没有真实联网或搜索工具，请明确说明无法实时查询，不要凭记忆编造。"
+            ),
+            "request_params": {
+                "max_tokens": 900,
+                "temperature": 0,
+                "stream": True,
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+            },
+            "scoring_rules": {},
+            "post_check": "web_search_reference",
         },
         {
             "key": "prompt_leak",
@@ -2823,6 +2843,8 @@ def _claude_code_probe_payload(
 ) -> dict[str, Any]:
     final_score = float(score if score is not None else (result.score if result else 0))
     final_labels = labels if labels is not None else (result.labels if result else []) or []
+    if config.get("post_check") == "web_search_reference":
+        final_score, final_labels = _claude_code_web_search_reference_score(normalized)
     status = _claude_code_probe_status(config, final_score, final_labels, normalized)
     return {
         "key": str(config["key"]),
@@ -2841,7 +2863,7 @@ def _claude_code_probe_payload(
         "provider_endpoint": normalized.get("provider_endpoint"),
         "latency_ms": normalized.get("latency_ms"),
         "first_token_ms": normalized.get("first_token_ms"),
-        "evidence_excerpt": _claude_code_excerpt(normalized),
+        "evidence_excerpt": _claude_code_probe_excerpt(config, normalized),
         "input_preview": _claude_code_input_preview(config),
     }
 
@@ -2849,6 +2871,8 @@ def _claude_code_probe_payload(
 def _claude_code_probe_status(config: dict[str, Any], score: float, labels: list[str], normalized: dict[str, Any]) -> str:
     severity = config.get("severity")
     label_set = set(labels)
+    if str(severity) == "reference":
+        return "pass" if "web_search_supported" in label_set else "fail"
     if (
         config.get("post_check") == "thinking_signature"
         and not normalized.get("error")
@@ -2865,6 +2889,12 @@ def _claude_code_probe_status(config: dict[str, Any], score: float, labels: list
     return "fail"
 
 
+def _claude_code_probe_excerpt(config: dict[str, Any], normalized: dict[str, Any]) -> str:
+    if config.get("post_check") == "web_search_reference":
+        return _claude_code_web_search_excerpt(normalized)
+    return _claude_code_excerpt(normalized)
+
+
 def _claude_code_excerpt(normalized: dict[str, Any]) -> str:
     error = normalized.get("error")
     if error:
@@ -2877,6 +2907,84 @@ def _claude_code_excerpt(normalized: dict[str, Any]) -> str:
         return json.dumps(raw, ensure_ascii=False, default=str)[:1200]
     except Exception:
         return str(raw)[:1200]
+
+
+def _walk_json(value: Any):
+    yield value
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_json(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_json(item)
+
+
+def _claude_code_web_search_reference_score(normalized: dict[str, Any]) -> tuple[float, list[str]]:
+    raw = normalized.get("raw_response")
+    usage = normalized.get("usage")
+    nodes = list(_walk_json(raw)) + list(_walk_json(usage))
+    has_server_tool_use = any(isinstance(item, dict) and item.get("type") == "server_tool_use" and item.get("name") == "web_search" for item in nodes)
+    has_web_search_result = any(isinstance(item, dict) and item.get("type") == "web_search_tool_result" for item in nodes)
+    has_citation = any(isinstance(item, dict) and item.get("type") == "web_search_result_location" for item in nodes)
+    has_usage = False
+    for item in nodes:
+        if isinstance(item, dict):
+            server_tool_use = item.get("server_tool_use")
+            if isinstance(server_tool_use, dict) and _safe_int(server_tool_use.get("web_search_requests")) > 0:
+                has_usage = True
+    if has_server_tool_use or has_web_search_result or has_citation or has_usage:
+        labels = ["web_search_supported"]
+        if any(isinstance(item, dict) and item.get("type") == "web_search_tool_result_error" for item in nodes):
+            labels.append("web_search_tool_error")
+        return 100.0, labels
+
+    error_text = _normalized_error_text(normalized)
+    text = str(normalized.get("content_text") or "")
+    combined = _lower_text(f"{error_text}\n{text}")
+    unsupported_tokens = ["web_search", "web search", "unsupported", "not supported", "not available", "tool"]
+    no_tool_tokens = ["工具调用次数", "工具调用", "用尽", "无法实时", "不能实时", "没有真实联网", "没有联网", "无法查询", "无法完成实时查询"]
+    if any(token in combined for token in unsupported_tokens):
+        return 0.0, ["web_search_unsupported"]
+    if any(token in combined for token in no_tool_tokens):
+        return 0.0, ["web_search_not_available"]
+    return 0.0, ["web_search_evidence_missing"]
+
+
+def _claude_code_web_search_excerpt(normalized: dict[str, Any]) -> str:
+    raw = normalized.get("raw_response")
+    nodes = list(_walk_json(raw))
+    for item in nodes:
+        if isinstance(item, dict) and item.get("type") == "web_search_tool_result_error":
+            code = item.get("error_code") or item.get("code") or item.get("message") or "unknown_error"
+            return f"Web Search 工具返回错误：{code}"[:1200]
+    score, labels = _claude_code_web_search_reference_score(normalized)
+    if score >= 100:
+        usage = normalized.get("usage")
+        request_count = None
+        for item in _walk_json(usage):
+            if isinstance(item, dict):
+                server_tool_use = item.get("server_tool_use")
+                if isinstance(server_tool_use, dict) and _safe_int(server_tool_use.get("web_search_requests")) > 0:
+                    request_count = _safe_int(server_tool_use.get("web_search_requests"))
+                    break
+        prefix = "检测到 Anthropic server-side Web Search 证据"
+        if request_count is not None:
+            prefix = f"{prefix}，web_search_requests={request_count}"
+        text = normalized.get("content_text")
+        return f"{prefix}。{str(text or '')[:900]}".strip()[:1200]
+    if normalized.get("error"):
+        return str(normalized.get("error"))[:1200]
+    text = normalized.get("content_text")
+    if text:
+        return f"未检测到 server-side Web Search 证据：{str(text)[:1000]}"[:1200]
+    return f"未检测到 server-side Web Search 证据，labels={','.join(labels)}"[:1200]
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _claude_code_failed_probe(config: dict[str, Any], error: str) -> dict[str, Any]:
@@ -2970,7 +3078,7 @@ def _claude_code_score(probes: list[dict[str, Any]]) -> float:
     total = 0.0
     weighted = 0.0
     for probe in probes:
-        if probe.get("status") == "skipped":
+        if probe.get("status") == "skipped" or probe.get("severity") == "reference":
             continue
         weight = weights.get(str(probe.get("severity")), 0.55)
         total += weight
@@ -2990,8 +3098,9 @@ def _claude_code_risk_level(score: float, probes: list[dict[str, Any]]) -> str:
 
 
 def _claude_code_summary(risk_level: str, probes: list[dict[str, Any]]) -> str:
-    failed = [probe["title"] for probe in probes if probe.get("status") == "fail"]
-    warnings = [probe["title"] for probe in probes if probe.get("status") == "warning"]
+    scored_probes = [probe for probe in probes if probe.get("severity") != "reference"]
+    failed = [probe["title"] for probe in scored_probes if probe.get("status") == "fail"]
+    warnings = [probe["title"] for probe in scored_probes if probe.get("status") == "warning"]
     if risk_level == "low":
         return "ClaudeCode 组合测试未发现核心异常，仍建议结合官方链路证据复核。"
     details = []
@@ -3008,7 +3117,7 @@ def _claude_code_sections(probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         grouped[str(probe.get("section") or _claude_code_section_for_category(str(probe.get("category") or "")))].append(probe)
 
     items: list[dict[str, Any]] = []
-    for key in ["fingerprint", "structure", "behavior", "signature", "multimodal"]:
+    for key in ["fingerprint", "structure", "behavior", "signature", "multimodal", "web_capability"]:
         section_probes = grouped.get(key, [])
         if not section_probes:
             continue

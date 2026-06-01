@@ -25,6 +25,7 @@ const SECTION_DESCRIPTIONS: Record<string, string> = {
   behavior: '上下文、提示词防泄露以及运行时行为稳定性。',
   signature: 'Thinking signature 以及跨渠道 signature 互通。',
   multimodal: '图片 base64、图片 URL 和文档输入能力。',
+  web_capability: 'Anthropic server-side Web Search 支持情况，仅作参考，不参与风险评分。',
 };
 
 function statusColor(status: string) {

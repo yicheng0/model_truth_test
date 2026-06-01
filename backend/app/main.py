@@ -211,6 +211,7 @@ def _relay_job_sections(probes: list[dict[str, object]]) -> list[dict[str, objec
         "behavior": "行为验证",
         "signature": "签名校验",
         "multimodal": "多模态能力",
+        "web_capability": "Web 能力参考",
     }
     grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
     for probe in probes:
@@ -218,7 +219,7 @@ def _relay_job_sections(probes: list[dict[str, object]]) -> list[dict[str, objec
         if section:
             grouped[section].append(probe)
     items: list[dict[str, object]] = []
-    for key in ordered:
+    for key in [*ordered, "web_capability"]:
         section_probes = grouped.get(key, [])
         statuses = {str(item.get("status")) for item in section_probes}
         if "running" in statuses:
@@ -265,6 +266,7 @@ def _initial_relay_job_state(include_expensive_context: bool, image_url: str | N
         "behavior": "行为验证",
         "signature": "签名校验",
         "multimodal": "多模态能力",
+        "web_capability": "Web 能力参考",
     }
     probes: list[dict[str, object]] = []
     for config in _claude_code_probe_configs(image_url, include_expensive_context):

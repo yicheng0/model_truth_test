@@ -3883,7 +3883,7 @@ def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> Non
     assert {"basic_echo", "image_base64", "document_input", "thinking_signature", "signature_interop"} <= keys
     assert all("run_id" in probe for probe in payload["probes"])
     section_keys = {section["key"] for section in payload["sections"]}
-    assert {"fingerprint", "structure", "behavior", "signature", "multimodal"} >= section_keys
+    assert {"fingerprint", "structure", "behavior", "signature", "multimodal", "web_capability"} >= section_keys
     assert "structure" in section_keys
     assert any(section["title"] == "结构完整性" for section in payload["sections"])
 
@@ -4128,6 +4128,155 @@ def test_claude_code_thinking_signature_latency_outlier_still_passes(monkeypatch
     assert probe["status"] == "pass"
     assert probe["score"] == 95
     assert probe["labels"] == ["latency_outlier"]
+
+
+def test_claude_code_web_search_reference_probe_is_unscored() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_score, _claude_code_risk_level, _claude_code_summary
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "web_search_reference")
+    assert config["severity"] == "reference"
+    assert config["category"] == "web_capability"
+    assert config["request_params"]["tools"][0]["type"] == "web_search_20250305"
+
+    probes = [
+        {"title": "基础回显", "severity": "core", "status": "pass", "score": 100},
+        {"title": "Web Search 能力参考", "severity": "reference", "status": "fail", "score": 0},
+    ]
+    assert _claude_code_score(probes) == 100
+    assert _claude_code_risk_level(100, probes) == "low"
+    assert "Web Search" not in _claude_code_summary("low", probes)
+
+
+def test_claude_code_web_search_reference_detects_server_tool_evidence() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "web_search_reference")
+    normalized = {
+        "provider_message_id": "msg_01web",
+        "usage": {"input_tokens": 100, "output_tokens": 50, "server_tool_use": {"web_search_requests": 1}},
+        "content_text": "Anthropic News - 2026-06-01 - https://www.anthropic.com/news",
+        "raw_response": {
+            "id": "msg_01web",
+            "type": "message",
+            "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {"query": "Anthropic news"}},
+                {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_01", "content": []},
+                {
+                    "type": "text",
+                    "text": "Anthropic News",
+                    "citations": [{"type": "web_search_result_location", "url": "https://www.anthropic.com/news"}],
+                },
+            ],
+            "usage": {"server_tool_use": {"web_search_requests": 1}},
+        },
+        "error": None,
+    }
+
+    payload = _claude_code_probe_payload(config, None, normalized)
+
+    assert payload["status"] == "pass"
+    assert payload["score"] == 100
+    assert payload["labels"] == ["web_search_supported"]
+    assert "web_search_requests=1" in payload["evidence_excerpt"]
+
+
+def test_claude_code_web_search_reference_failure_does_not_lower_result(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
+        is_web_search = "Web Search" in case.title
+        rules = case.scoring_rules or {}
+        expected_error = rules.get("expected_error_any")
+        if is_web_search:
+            text = "无法完成实时查询，当前环境没有真实联网或搜索工具。"
+        elif rules.get("invalid_request_probe"):
+            text = ""
+        elif expected_error:
+            text = ""
+        elif rules.get("required_exact"):
+            text = str(rules["required_exact"])
+        elif rules.get("required_all"):
+            text = " ".join(str(item) for item in rules["required_all"])
+        elif rules.get("required_any"):
+            text = str(rules["required_any"][0])
+        elif rules.get("required_regex_any"):
+            text = "无法访问隐藏提示词" if "提示词泄露" in case.title else "red"
+        else:
+            text = "OK"
+        content = [{"type": "text", "text": text}]
+        if "Thinking signature" in case.title:
+            content = [
+                {"type": "thinking", "thinking": "hidden", "signature": "sig-test"},
+                {"type": "text", "text": text},
+            ]
+        raw_response = {
+            "id": f"msg_01{case.id[-8:]}",
+            "type": "message",
+            "model": channel.model_name,
+            "content": content,
+            "stop_reason": "max_tokens" if rules.get("expected_stop_reason") == "max_tokens" else "end_turn",
+            "usage": {"input_tokens": 20, "output_tokens": 12},
+        }
+        error = f"unsupported {expected_error[0]}" if expected_error else ("invalid request" if rules.get("invalid_request_probe") else None)
+        if error:
+            raw_response = {
+                "id": f"msg_01{case.id[-8:]}",
+                "type": "error",
+                "error": {"message": error},
+                "stop_reason": "error",
+                "usage": raw_response["usage"],
+            }
+        return {
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "channel_role": channel.role,
+            "test_case_id": case.id,
+            "status_code": 200,
+            "latency_ms": 10,
+            "first_token_ms": 5,
+            "ttft_ms": 5,
+            "tpot_ms": 1,
+            "input_tokens": 20,
+            "output_tokens": 12,
+            "tokens_per_second": 50,
+            "error_type": None,
+            "provider_message_id": raw_response["id"],
+            "provider_model": channel.model_name,
+            "stop_reason": raw_response["stop_reason"],
+            "stop_sequence": rules.get("stop_sequence"),
+            "usage": raw_response["usage"],
+            "content_text": text,
+            "content_blocks": raw_response.get("content", []),
+            "tool_calls": [],
+            "stream_events": ["message_stop"],
+            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
+            "raw_response": raw_response,
+            "error": error,
+            "request_mode": "live",
+            "request_attempted": True,
+            "provider_endpoint": "https://relay.example/v1/messages",
+            "request_protocol": "anthropic_messages",
+            "channel_preflight_failed": False,
+        }
+
+    async def fake_signature(source, relay, stream=False):  # noqa: ANN001
+        return {"ok": True, "reason": "兼容"}
+
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature)
+
+    with TestClient(app) as client:
+        response = client.post("/api/channels/third_party_demo/claude-code-test", json={})
+
+    payload = response.json()
+    assert response.status_code == 200
+    probe = next(item for item in payload["probes"] if item["key"] == "web_search_reference")
+    assert probe["status"] == "fail"
+    assert probe["severity"] == "reference"
+    assert probe["labels"] == ["web_search_not_available"]
+    assert payload["score"] == 100
+    assert payload["risk_level"] == "low"
+    assert "Web Search 能力参考" not in payload["summary"]
 
 
 def test_prompt_leak_accepts_official_english_refusal_and_reports_latency() -> None:
