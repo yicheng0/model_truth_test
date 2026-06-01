@@ -998,6 +998,7 @@ class CacheHitRateTestRead(BaseModel):
     warmup: CacheHitRateAttemptRead | None = None
     attempts: list[CacheHitRateAttemptRead]
     requested_cache_ttl: Literal["5m", "1h"] = "5m"
+    cache_probe_id: str | None = None
     total: int
     hits: int
     request_hit_rate: float
@@ -1031,6 +1032,7 @@ class CacheHitRateJobStatusRead(BaseModel):
     warmup: CacheHitRateAttemptRead | None = None
     attempts: list[CacheHitRateAttemptRead] = Field(default_factory=list)
     requested_cache_ttl: Literal["5m", "1h"] = "5m"
+    cache_probe_id: str | None = None
     total: int = 0
     hits: int = 0
     request_hit_rate: float = 0

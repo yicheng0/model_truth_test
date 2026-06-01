@@ -3585,6 +3585,84 @@ def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
     assert "test-key" not in json.dumps(results[0].raw_request)
 
 
+def test_cache_hit_rate_test_uses_unique_probe_id_per_run(monkeypatch) -> None:
+    reset_database()
+    calls = {"count": 0}
+
+    async def fake_live_call(channel, case, raw_request, credentials):  # noqa: ANN001
+        calls["count"] += 1
+        is_warmup = calls["count"] % 2 == 1
+        return (
+            {
+                "id": f"msg_01cache_unique_{calls['count']}",
+                "type": "message",
+                "role": "assistant",
+                "model": channel.model_name,
+                "content": [{"type": "text", "text": "Ulysses"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 25,
+                    "output_tokens": 6,
+                    "cache_creation_input_tokens": 1800 if is_warmup else 0,
+                    "cache_read_input_tokens": 0 if is_warmup else 1700,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 1800 if is_warmup else 0,
+                        "ephemeral_1h_input_tokens": 0,
+                    },
+                },
+                "_response_metadata": {"request_id": f"req_cache_unique_{calls['count']}"},
+            },
+            "anthropic_messages",
+            "https://relay.example/v1/messages",
+        )
+
+    monkeypatch.setattr("app.services._live_call_with_metadata", fake_live_call)
+
+    with TestClient(app) as client:
+        channel_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Cache Probe Unique Channel",
+                "provider_type": "third_party_anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-sonnet-4-5",
+                "auth_config": {"api_key": "test-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        first = client.post(
+            f"/api/channels/{channel_id}/cache-hit-rate-test",
+            json={"test_count": 1, "interval_seconds": 0, "warmup_wait_seconds": 0},
+        ).json()
+        second = client.post(
+            f"/api/channels/{channel_id}/cache-hit-rate-test",
+            json={"test_count": 1, "interval_seconds": 0, "warmup_wait_seconds": 0},
+        ).json()
+
+    assert first["cache_probe_id"]
+    assert second["cache_probe_id"]
+    assert first["cache_probe_id"] != second["cache_probe_id"]
+    assert first["total"] == 1
+    assert first["hits"] == 1
+
+    with SessionLocal() as db:
+        first_texts = [
+            result.raw_request["system"][0]["text"]
+            for result in db.scalars(select(Result).where(Result.run_id == first["run"]["id"]).order_by(Result.attempt_index)).all()
+        ]
+        second_texts = [
+            result.raw_request["system"][0]["text"]
+            for result in db.scalars(select(Result).where(Result.run_id == second["run"]["id"]).order_by(Result.attempt_index)).all()
+        ]
+
+    assert len(first_texts) == 2
+    assert len(second_texts) == 2
+    assert all(first["cache_probe_id"] in text for text in first_texts)
+    assert all(second["cache_probe_id"] in text for text in second_texts)
+    assert all(second["cache_probe_id"] not in text for text in first_texts)
+    assert all(first["cache_probe_id"] not in text for text in second_texts)
+
+
 def test_cache_hit_rate_test_supports_one_hour_ttl(monkeypatch) -> None:
     reset_database()
     calls = {"count": 0}

@@ -2074,10 +2074,11 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
     if protocol not in {REQUEST_PROTOCOL_ANTHROPIC, REQUEST_PROTOCOL_AUTO}:
         raise ValueError("Prompt cache test only supports Anthropic Messages compatible channels")
 
+    cache_probe_id = new_id("cache_probe")
     system_content = [
         {
             "type": "text",
-            "text": f"需要阅读的小说内容：{CACHE_HIT_RATE_SAMPLE_TEXT}",
+            "text": f"缓存测试独立标记：{cache_probe_id}\n需要阅读的小说内容：{CACHE_HIT_RATE_SAMPLE_TEXT}",
             "cache_control": {"type": "ephemeral", "ttl": data.cache_ttl},
         }
     ]
@@ -2138,7 +2139,7 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
             else:
                 attempts.append(attempt_payload)
             if progress_callback is not None:
-                await progress_callback(_cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint, data.cache_ttl))
+                await progress_callback(_cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint, data.cache_ttl, cache_probe_id))
 
         run.finished_at = datetime.now(timezone.utc)
         run.status = "failed" if any(_attempt_has_error(item) for item in ([warmup] if warmup else []) + attempts) else "completed"
@@ -2150,7 +2151,7 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
         raise
 
     db.refresh(run)
-    return _cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint, data.cache_ttl)
+    return _cache_hit_rate_response(run, warmup, attempts, latest_protocol, latest_endpoint, data.cache_ttl, cache_probe_id)
 
 
 def _attempt_has_error(attempt: dict[str, Any]) -> bool:
@@ -2215,6 +2216,7 @@ def _cache_hit_rate_response(
     request_protocol: str | None,
     provider_endpoint: str | None,
     requested_cache_ttl: str,
+    cache_probe_id: str | None = None,
 ) -> dict[str, Any]:
     total = len(attempts)
     hits = sum(1 for item in attempts if item["cache_hit"])
@@ -2231,6 +2233,7 @@ def _cache_hit_rate_response(
         "warmup": warmup,
         "attempts": attempts,
         "requested_cache_ttl": requested_cache_ttl,
+        "cache_probe_id": cache_probe_id,
         "total": total,
         "hits": hits,
         "request_hit_rate": round(request_hit_rate, 2),

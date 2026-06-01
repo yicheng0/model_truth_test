@@ -195,6 +195,7 @@ export type CacheHitRateTestResult = {
   warmup?: CacheHitRateAttempt | null;
   attempts: CacheHitRateAttempt[];
   requested_cache_ttl: '5m' | '1h';
+  cache_probe_id?: string | null;
   total: number;
   hits: number;
   request_hit_rate: number;
@@ -228,6 +229,7 @@ export type CacheHitRateJobStatus = {
   warmup?: CacheHitRateAttempt | null;
   attempts: CacheHitRateAttempt[];
   requested_cache_ttl: '5m' | '1h';
+  cache_probe_id?: string | null;
   total: number;
   hits: number;
   request_hit_rate: number;

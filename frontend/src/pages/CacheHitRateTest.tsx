@@ -177,7 +177,7 @@ export default function CacheHitRateTest() {
             type="info"
             showIcon
             message="会发起真实缓存测试请求"
-            description="默认预热 1 次，等待 5 秒后测量 10 次，每次间隔 3 秒。可选 5m / 1h TTL；1h 更适合识别渠道是否真的透传长 TTL。API Key 只读取渠道配置，不写入原始请求。"
+            description="默认预热 1 次，等待 5 秒后测量 10 次，每次间隔 3 秒。每轮测试会使用独立缓存标记，避免连续测试互相污染。可选 5m / 1h TTL；1h 更适合识别渠道是否真的透传长 TTL。API Key 只读取渠道配置，不写入原始请求。"
           />
           <div className="signature-config-grid">
             <Form.Item label="请求渠道" style={{ marginBottom: 0 }}>
@@ -247,6 +247,7 @@ export default function CacheHitRateTest() {
               </Descriptions.Item>
               <Descriptions.Item label="状态">{cacheRun?.status || cacheJobPayload?.status || '-'}</Descriptions.Item>
               <Descriptions.Item label="请求 TTL">{cachePanel.requested_cache_ttl}</Descriptions.Item>
+              <Descriptions.Item label="缓存标记">{cachePanel.cache_probe_id || '-'}</Descriptions.Item>
               <Descriptions.Item label="请求命中">{cachePanel.hits}/{cachePanel.total}</Descriptions.Item>
               <Descriptions.Item label="请求命中率">{formatPercent(cachePanel.request_hit_rate)}</Descriptions.Item>
               <Descriptions.Item label="Token 命中率">{formatPercent(cachePanel.token_hit_rate)}</Descriptions.Item>
