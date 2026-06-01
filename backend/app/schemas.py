@@ -193,6 +193,7 @@ class ClaudeCodeJobStatusRead(BaseModel):
     kind: str
     status: str
     started_at: datetime
+    updated_at: datetime | None = None
     finished_at: datetime | None = None
     current_key: str | None = None
     current_title: str | None = None
@@ -1024,6 +1025,7 @@ class CacheHitRateJobStatusRead(BaseModel):
     kind: str = "cache_hit_rate"
     status: str
     started_at: datetime
+    updated_at: datetime | None = None
     finished_at: datetime | None = None
     current_title: str | None = None
     completed_count: int

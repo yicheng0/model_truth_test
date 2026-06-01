@@ -84,6 +84,10 @@ export default function CacheHitRateTest() {
     queryKey: ['cacheHitRateJob', cacheJobId],
     queryFn: () => api.cacheHitRateJob(cacheJobId!),
     enabled: Boolean(cacheJobId),
+    retry: (failureCount, error) => {
+      if (error && typeof error === 'object' && 'status' in error && error.status === 404) return false;
+      return failureCount < 2;
+    },
     refetchInterval: (query) => {
       const payload = query.state.data;
       return payload && (payload.status === 'completed' || payload.status === 'failed') ? false : 1000;
@@ -218,6 +222,14 @@ export default function CacheHitRateTest() {
             </Button>
           </Space>
           {requestError ? <Alert type="error" showIcon message="缓存测试没有发出或接口返回失败" description={requestError} /> : null}
+          {cacheJob.isError ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="实时任务状态不可用"
+              description={`${getErrorMessage(cacheJob.error)} 这通常表示后端服务重启或任务状态已过期；已保存的检测结果仍可在运行记录中查看。`}
+            />
+          ) : null}
         </Space>
       </Card>
 

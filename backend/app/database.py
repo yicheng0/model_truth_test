@@ -30,6 +30,7 @@ def _alembic_config() -> Config:
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     command.upgrade(_alembic_config(), "head")
+    repair_schema()
 
 
 def repair_schema() -> None:

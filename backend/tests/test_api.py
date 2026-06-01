@@ -28,6 +28,7 @@ from sqlalchemy.orm import close_all_sessions, sessionmaker
 
 from app import database as database_module
 from app.database import SessionLocal, engine, init_db
+from app.job_store import InMemoryJobStore
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
@@ -2823,6 +2824,29 @@ def test_channel_api_key_is_readable_and_updatable() -> None:
 
 def test_channel_delete_rejects_referenced_channel() -> None:
     reset_database()
+    with SessionLocal() as db:
+        run = Run(
+            id="run_references_channel_delete",
+            suite_id="claude_full_35",
+            name="references channel delete",
+            mode="candidate_eval",
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=0,
+            completed_jobs=0,
+        )
+        db.add(run)
+        db.add(
+            RunChannel(
+                id="run_channel_references_delete",
+                run_id=run.id,
+                channel_id="third_party_demo",
+                role_in_run="candidate",
+            )
+        )
+        db.commit()
+
     with TestClient(app) as client:
         response = client.delete("/api/channels/third_party_demo", headers=ADMIN_HEADERS)
 
@@ -3856,6 +3880,16 @@ def test_cache_hit_rate_job_reports_live_progress(monkeypatch) -> None:
     assert final_snapshot["warmup_cache_creation_ephemeral_1h_input_tokens"] == 0
     assert final_snapshot["result"]["run"]["status"] == "completed"
     assert final_snapshot["attempts"][0]["cache_hit"] is True
+
+
+def test_cache_hit_rate_missing_job_explains_restart_or_expiry() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.get("/api/cache-hit-rate-test/jobs/missing_job")
+
+    assert response.status_code == 404
+    assert "服务重启" in response.json()["detail"]
+    assert "过期" in response.json()["detail"]
 
 
 def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> None:
@@ -5930,6 +5964,25 @@ def test_get_missing_claude_code_relay_job_returns_404() -> None:
         response = client.get("/api/claude-code-test/jobs/missing_job")
 
     assert response.status_code == 404
+    assert "服务重启" in response.json()["detail"]
+    assert "过期" in response.json()["detail"]
+
+
+def test_in_memory_job_store_cleans_finished_jobs_after_ttl() -> None:
+    store = InMemoryJobStore(ttl=timedelta(seconds=1))
+    store.set(
+        "old_job",
+        {
+            "job_id": "old_job",
+            "status": "completed",
+            "started_at": datetime.now(timezone.utc) - timedelta(minutes=5),
+            "updated_at": datetime.now(timezone.utc) - timedelta(minutes=5),
+            "finished_at": datetime.now(timezone.utc) - timedelta(minutes=5),
+            "total_count": 1,
+        },
+    )
+
+    assert store.get("old_job") is None
 
 
 def test_start_claude_code_cli_job_returns_job_id() -> None:

@@ -460,6 +460,10 @@ export default function ClaudeCodeCheck() {
     queryKey: ['claudeCodeRelayJob', relayJobId],
     queryFn: () => api.claudeCodeRelayTestJob(relayJobId!),
     enabled: Boolean(relayJobId),
+    retry: (failureCount, error) => {
+      if (error && typeof error === 'object' && 'status' in error && error.status === 404) return false;
+      return failureCount < 2;
+    },
     refetchInterval: (query) => {
       const payload = query.state.data;
       return payload && (payload.status === 'completed' || payload.status === 'failed') ? false : 1000;
@@ -676,6 +680,14 @@ export default function ClaudeCodeCheck() {
                   </Typography.Text>
                 </Space>
               </Card>
+            ) : null}
+            {relayJob.isError ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="实时任务状态不可用"
+                description={`${getErrorMessage(relayJob.error)} 这通常表示后端服务重启或任务状态已过期；请重新发起检测。`}
+              />
             ) : null}
 
             {relayJob.data ? (

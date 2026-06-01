@@ -221,6 +221,7 @@ export type CacheHitRateJobStatus = {
   kind: 'cache_hit_rate' | string;
   status: 'queued' | 'running' | 'completed' | 'failed' | string;
   started_at: string;
+  updated_at?: string | null;
   finished_at?: string | null;
   current_title?: string | null;
   completed_count: number;
@@ -406,6 +407,7 @@ export type ClaudeCodeJobStatus = {
   kind: 'relay' | 'cli' | string;
   status: 'queued' | 'running' | 'completed' | 'failed' | string;
   started_at: string;
+  updated_at?: string | null;
   finished_at?: string | null;
   current_key?: string | null;
   current_title?: string | null;

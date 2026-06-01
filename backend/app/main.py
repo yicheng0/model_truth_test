@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from .database import DATABASE_URL, SessionLocal, get_db, init_db
 from .claude_code_check import claude_code_check_steps, claude_code_status, run_claude_code_check, run_claude_code_check_with_progress
+from .job_store import InMemoryJobStore
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ClaudeCodeEvidence, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .restored_seed import restored_seed_data
 from .suite_seed import DEFAULT_SUITE_ID, default_cases
@@ -191,10 +192,12 @@ app = FastAPI(title="Claude Channel Authenticity Eval", version="0.1.0", lifespa
 logger = logging.getLogger(__name__)
 
 
-CLAUDE_CODE_JOB_STORE: dict[str, dict[str, object]] = {}
+JOB_TTL = timedelta(hours=6)
+CLAUDE_CODE_JOB_STORE = InMemoryJobStore(ttl=JOB_TTL)
 CLAUDE_CODE_JOB_LOCK = asyncio.Lock()
-CACHE_HIT_RATE_JOB_STORE: dict[str, dict[str, object]] = {}
+CACHE_HIT_RATE_JOB_STORE = InMemoryJobStore(ttl=JOB_TTL)
 CACHE_HIT_RATE_JOB_LOCK = asyncio.Lock()
+JOB_NOT_FOUND_DETAIL = "任务不存在，可能是服务重启或任务状态已过期，请重新发起检测。"
 
 
 def _job_percent(completed_count: int, total_count: int) -> float:
@@ -323,32 +326,22 @@ def _initial_cli_job_state() -> list[dict[str, object]]:
 
 async def _job_update(job_id: str, payload: dict[str, object]) -> None:
     async with CLAUDE_CODE_JOB_LOCK:
-        job = CLAUDE_CODE_JOB_STORE.get(job_id)
-        if not job:
-            return
-        job.update(payload)
+        if not CLAUDE_CODE_JOB_STORE.update(job_id, payload):
+            logger.info("ClaudeCode job update skipped because job was missing", extra={"job_id": job_id})
 
 
 def _job_snapshot(job_id: str) -> dict[str, object] | None:
-    job = CLAUDE_CODE_JOB_STORE.get(job_id)
-    if not job:
-        return None
-    return dict(job)
+    return CLAUDE_CODE_JOB_STORE.get(job_id)
 
 
 async def _cache_job_update(job_id: str, payload: dict[str, object]) -> None:
     async with CACHE_HIT_RATE_JOB_LOCK:
-        job = CACHE_HIT_RATE_JOB_STORE.get(job_id)
-        if not job:
-            return
-        job.update(payload)
+        if not CACHE_HIT_RATE_JOB_STORE.update(job_id, payload):
+            logger.info("Cache hit rate job update skipped because job was missing", extra={"job_id": job_id})
 
 
 def _cache_job_snapshot(job_id: str) -> dict[str, object] | None:
-    job = CACHE_HIT_RATE_JOB_STORE.get(job_id)
-    if not job:
-        return None
-    return dict(job)
+    return CACHE_HIT_RATE_JOB_STORE.get(job_id)
 
 
 def _cache_job_progress_payload(job_id: str, payload: dict[str, object], total_count: int, status: str = "running") -> dict[str, object]:
@@ -462,7 +455,7 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
                     "current_title": current_title,
                     "current_section": current_section,
                     "completed_count": completed,
-                    "percent": _job_percent(completed, int(CLAUDE_CODE_JOB_STORE[job_id]["total_count"])),
+                    "percent": _job_percent(completed, CLAUDE_CODE_JOB_STORE.total_count(job_id)),
                     "probes": probes,
                     "sections": sections,
                 },
@@ -504,7 +497,7 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
                 "current_key": None,
                 "current_title": None,
                 "current_section": None,
-                "completed_count": CLAUDE_CODE_JOB_STORE[job_id]["total_count"],
+                "completed_count": CLAUDE_CODE_JOB_STORE.total_count(job_id),
                 "percent": 100.0,
                 "probes": result.get("probes", []),
                 "sections": result.get("sections", []),
@@ -550,7 +543,7 @@ async def _run_cli_job(job_id: str, payload: ClaudeCodeCheckCreate) -> None:
                     "current_title": current_title,
                     "current_section": "cli",
                     "completed_count": completed,
-                    "percent": _job_percent(completed, int(CLAUDE_CODE_JOB_STORE[job_id]["total_count"])),
+                    "percent": _job_percent(completed, CLAUDE_CODE_JOB_STORE.total_count(job_id)),
                     "checks": checks,
                 },
             )
@@ -564,7 +557,7 @@ async def _run_cli_job(job_id: str, payload: ClaudeCodeCheckCreate) -> None:
                 "current_key": None,
                 "current_title": None,
                 "current_section": None,
-                "completed_count": CLAUDE_CODE_JOB_STORE[job_id]["total_count"],
+                "completed_count": CLAUDE_CODE_JOB_STORE.total_count(job_id),
                 "percent": 100.0,
                 "checks": result.get("checks", []),
                 "result": result,
@@ -1158,11 +1151,13 @@ async def start_channel_cache_hit_rate_test_job(channel_id: str, data: CacheHitR
     job_id = str(uuid.uuid4())
     total_count = data.test_count + 1
     async with CACHE_HIT_RATE_JOB_LOCK:
-        CACHE_HIT_RATE_JOB_STORE[job_id] = {
+        now = datetime.now(timezone.utc)
+        CACHE_HIT_RATE_JOB_STORE.set(job_id, {
             "job_id": job_id,
             "kind": "cache_hit_rate",
             "status": "queued",
-            "started_at": datetime.now(timezone.utc),
+            "started_at": now,
+            "updated_at": now,
             "finished_at": None,
             "current_title": "排队中",
             "completed_count": 0,
@@ -1187,7 +1182,7 @@ async def start_channel_cache_hit_rate_test_job(channel_id: str, data: CacheHitR
             "provider_endpoint": None,
             "result": None,
             "error": None,
-        }
+        })
     asyncio.create_task(_run_cache_hit_rate_job(job_id, channel_id, data, SessionLocal))
     return {"job_id": job_id, "status": "queued"}
 
@@ -1196,7 +1191,7 @@ async def start_channel_cache_hit_rate_test_job(channel_id: str, data: CacheHitR
 def get_cache_hit_rate_test_job(job_id: str) -> dict[str, object]:
     payload = _cache_job_snapshot(job_id)
     if not payload or payload.get("kind") != "cache_hit_rate":
-        raise HTTPException(status_code=404, detail="Cache hit rate job not found")
+        raise HTTPException(status_code=404, detail=JOB_NOT_FOUND_DETAIL)
     return payload
 
 
@@ -1279,11 +1274,13 @@ async def start_ephemeral_claude_code_test_job(data: ClaudeCodeEphemeralTestCrea
     job_id = str(uuid.uuid4())
     probes, sections = _initial_relay_job_state(data.include_expensive_context, data.image_url)
     async with CLAUDE_CODE_JOB_LOCK:
-        CLAUDE_CODE_JOB_STORE[job_id] = {
+        now = datetime.now(timezone.utc)
+        CLAUDE_CODE_JOB_STORE.set(job_id, {
             "job_id": job_id,
             "kind": "relay",
             "status": "queued",
-            "started_at": datetime.now(timezone.utc),
+            "started_at": now,
+            "updated_at": now,
             "finished_at": None,
             "current_key": None,
             "current_title": None,
@@ -1296,7 +1293,7 @@ async def start_ephemeral_claude_code_test_job(data: ClaudeCodeEphemeralTestCrea
             "checks": [],
             "result": None,
             "error": None,
-        }
+        })
     asyncio.create_task(_run_relay_job(job_id, data, SessionLocal))
     return {"job_id": job_id, "status": "queued"}
 
@@ -1305,7 +1302,7 @@ async def start_ephemeral_claude_code_test_job(data: ClaudeCodeEphemeralTestCrea
 def get_ephemeral_claude_code_test_job(job_id: str) -> dict[str, object]:
     payload = _job_snapshot(job_id)
     if not payload or payload.get("kind") != "relay":
-        raise HTTPException(status_code=404, detail="ClaudeCode relay job not found")
+        raise HTTPException(status_code=404, detail=JOB_NOT_FOUND_DETAIL)
     return payload
 
 
@@ -1356,11 +1353,13 @@ async def start_claude_code_check_job(data: ClaudeCodeCheckCreate) -> dict[str, 
     job_id = str(uuid.uuid4())
     checks = _initial_cli_job_state()
     async with CLAUDE_CODE_JOB_LOCK:
-        CLAUDE_CODE_JOB_STORE[job_id] = {
+        now = datetime.now(timezone.utc)
+        CLAUDE_CODE_JOB_STORE.set(job_id, {
             "job_id": job_id,
             "kind": "cli",
             "status": "queued",
-            "started_at": datetime.now(timezone.utc),
+            "started_at": now,
+            "updated_at": now,
             "finished_at": None,
             "current_key": None,
             "current_title": None,
@@ -1373,7 +1372,7 @@ async def start_claude_code_check_job(data: ClaudeCodeCheckCreate) -> dict[str, 
             "checks": checks,
             "result": None,
             "error": None,
-        }
+        })
     asyncio.create_task(_run_cli_job(job_id, data))
     return {"job_id": job_id, "status": "queued"}
 
@@ -1382,7 +1381,7 @@ async def start_claude_code_check_job(data: ClaudeCodeCheckCreate) -> dict[str, 
 def get_claude_code_check_job(job_id: str) -> dict[str, object]:
     payload = _job_snapshot(job_id)
     if not payload or payload.get("kind") != "cli":
-        raise HTTPException(status_code=404, detail="ClaudeCode CLI job not found")
+        raise HTTPException(status_code=404, detail=JOB_NOT_FOUND_DETAIL)
     return payload
 
 
