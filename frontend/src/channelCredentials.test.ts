@@ -51,10 +51,24 @@ describe('channel credential helpers', () => {
     );
 
     expect(authConfig).toEqual({
-      api_key: 'sk--9333',
+      api_key: 'saved-key',
       account_type: 'reverse',
       region: 'us-east-1',
       request_protocol: 'openai_chat_completions',
+    });
+  });
+
+  it('keeps a redacted stored API key placeholder when editing other channel fields', () => {
+    const authConfig = buildChannelAuthConfig(
+      { api_key: '', channel_number: '9333', account_type: 'aws', request_protocol: 'auto' },
+      { api_key: 'sec...key [REDACTED] len=16', region: 'us-east-1' },
+    );
+
+    expect(authConfig).toEqual({
+      api_key: 'sec...key [REDACTED] len=16',
+      account_type: 'aws',
+      region: 'us-east-1',
+      request_protocol: 'auto',
     });
   });
 

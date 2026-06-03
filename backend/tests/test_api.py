@@ -31,10 +31,10 @@ from app.database import SessionLocal, engine, init_db
 from app.job_store import InMemoryJobStore
 from app.main import app, cors_origins
 from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
-from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate
+from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate, TestSuiteCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -1806,6 +1806,8 @@ def test_baseline_build_then_candidate_eval_reuses_snapshot() -> None:
     assert payload["reports"][0]["evidence"]["baseline_snapshot_id"] == snapshot["id"]
     evidence = payload["reports"][0]["evidence"]
     assert evidence["dimension_scores"]["authenticity"] is not None
+    assert evidence["scoring_dimensions"]["protocol"] is not None
+    assert set(evidence["scoring_dimensions"]).issuperset({"protocol", "streaming", "tool_use", "parameter_adherence", "capability", "stability", "latency", "cost_usage"})
     assert evidence["confidence"] in {"medium", "high"}
     assert isinstance(evidence["label_explanations"], list)
 
@@ -2797,7 +2799,7 @@ def test_channel_create_defaults_provider_type_and_role() -> None:
     assert reference.json()["role"] == "gold"
 
 
-def test_channel_api_key_is_readable_and_updatable() -> None:
+def test_channel_api_key_is_updatable_but_redacted_in_api_response() -> None:
     reset_database()
     with TestClient(app) as client:
         created = client.post(
@@ -2812,14 +2814,53 @@ def test_channel_api_key_is_readable_and_updatable() -> None:
         )
         channel_id = created.json()["id"]
         updated = client.patch(f"/api/channels/{channel_id}", json={"auth_config": {"api_key": "second-key"}})
+        with SessionLocal() as db:
+            stored_after_update = db.get(Channel, channel_id)
+            stored_auth_after_update = dict(stored_after_update.auth_config) if stored_after_update else {}
         cleared = client.patch(f"/api/channels/{channel_id}", json={"auth_config": {}})
 
     assert created.status_code == 200
-    assert created.json()["auth_config"]["api_key"] == "first-key"
+    assert "first-key" not in json.dumps(created.json(), ensure_ascii=False)
+    assert "[REDACTED]" in created.json()["auth_config"]["api_key"]
     assert updated.status_code == 200
-    assert updated.json()["auth_config"]["api_key"] == "second-key"
+    assert "second-key" not in json.dumps(updated.json(), ensure_ascii=False)
+    assert "[REDACTED]" in updated.json()["auth_config"]["api_key"]
+    assert stored_auth_after_update == {"api_key": "second-key"}
     assert cleared.status_code == 200
     assert cleared.json()["auth_config"] == {}
+
+
+def test_channel_update_preserves_existing_secret_when_redacted_placeholder_is_submitted() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = create_channel(
+            db,
+            ChannelCreate(
+                id="redacted_placeholder_channel",
+                name="Redacted Placeholder Channel",
+                provider_type="anthropic",
+                model_name="claude-test",
+                auth_config={"api_key": "real-secret-key", "request_protocol": "auto"},
+            ),
+        )
+        channel_id = channel.id
+
+    with TestClient(app) as client:
+        current = client.get(f"/api/channels/{channel_id}").json()
+        placeholder = current["auth_config"]["api_key"]
+        updated = client.patch(
+            f"/api/channels/{channel_id}",
+            json={"auth_config": {"api_key": placeholder, "request_protocol": "anthropic_messages"}},
+        )
+
+    with SessionLocal() as db:
+        stored = db.get(Channel, channel_id)
+
+    assert updated.status_code == 200
+    assert placeholder != "real-secret-key"
+    assert stored is not None
+    assert stored.auth_config["api_key"] == "real-secret-key"
+    assert stored.auth_config["request_protocol"] == "anthropic_messages"
 
 
 def test_channel_delete_rejects_referenced_channel() -> None:
@@ -3030,6 +3071,95 @@ def test_openai_http_error_preserves_upstream_message(monkeypatch) -> None:
         response = asyncio.run(invoke_channel(channel, case, 1, {"api_key": "test-key"}, use_mock=False))
 
     assert "模型 claude-bad 无可用渠道" in response["error"]
+
+
+def test_runtime_secret_is_redacted_from_stored_results_api_and_report_download(monkeypatch) -> None:
+    reset_database()
+    secret = "sk-runtime-secret-abcdef"
+
+    async def fake_anthropic_call(channel, raw_request, credentials):  # noqa: ANN001
+        assert credentials["api_key"] == secret
+        return {
+            "type": "message",
+            "id": "msg_01secretredaction",
+            "model": channel.model_name,
+            "role": "assistant",
+            "content": [{"type": "text", "text": f"ok Authorization: Bearer {secret}"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 4},
+            "debug": {"authorization": f"Bearer {secret}", "api_key": secret},
+        }
+
+    monkeypatch.setattr("app.services._anthropic_compatible_call", fake_anthropic_call)
+
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="secret_redaction_suite", name="Secret Redaction Suite"))
+        create_case(
+            db,
+            TestCaseCreate(
+                id="secret_redaction_case",
+                suite_id="secret_redaction_suite",
+                module="protocol",
+                title="Secret redaction case",
+                prompt="Return a normal response.",
+                request_params={"max_tokens": 16, "temperature": 0},
+                scoring_rules={"quick": True},
+            ),
+        )
+        channel = create_channel(
+            db,
+            ChannelCreate(
+                id="secret_redaction_channel",
+                name="Secret Redaction Channel",
+                provider_type="anthropic",
+                role="candidate",
+                base_url="https://provider.example",
+                model_name="claude-test",
+            ),
+        )
+        run = create_run(
+            db,
+            RunCreate(
+                name="Secret redaction run",
+                suite_id="secret_redaction_suite",
+                channel_ids={"candidate": [channel.id]},
+                repeat_count=1,
+                concurrency=1,
+                use_mock=False,
+                test_scope="quick",
+            ),
+        )
+        run_id = run.id
+
+    asyncio.run(execute_run(SessionLocal, run_id, runtime_credentials={"secret_redaction_channel": {"api_key": secret}}, use_mock=False))
+
+    with SessionLocal() as db:
+        result = db.scalar(select(Result).where(Result.run_id == run_id))
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert result is not None
+        assert report is not None
+        stored_blob = json.dumps(
+            {
+                "normalized_response": result.normalized_response,
+                "raw_request": result.raw_request,
+                "raw_response": result.raw_response,
+                "report_evidence": report.evidence,
+                "report_markdown": report.markdown,
+            },
+            ensure_ascii=False,
+        )
+
+    assert secret not in stored_blob
+    assert "[REDACTED]" in stored_blob
+
+    with TestClient(app) as client:
+        results_payload = client.get(f"/api/runs/{run_id}/results").json()
+        report_response = client.get(f"/api/runs/{run_id}/report.md")
+
+    assert secret not in json.dumps(results_payload, ensure_ascii=False)
+    assert "[REDACTED]" in json.dumps(results_payload, ensure_ascii=False)
+    assert report_response.status_code == 200
+    assert secret not in report_response.text
 
 
 def test_channel_models_endpoint_returns_model_ids(monkeypatch) -> None:
@@ -5679,7 +5809,7 @@ def test_cleanup_run_logs_dry_run_falls_back_when_summary_fails(monkeypatch) -> 
     def fail_count(*_args, **_kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("count failed")
 
-    monkeypatch.setattr("app.main._cleanup_candidate_run_ids", fail_count)
+    monkeypatch.setattr("app.routers.system._cleanup_candidate_run_ids", fail_count)
 
     with TestClient(app) as client:
         response = client.post("/api/system/cleanup-run-logs?dry_run=true", headers=ADMIN_HEADERS)

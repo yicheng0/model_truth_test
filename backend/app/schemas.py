@@ -4,7 +4,9 @@ from datetime import datetime
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+
+from .redaction import redact_channel_auth_config, redact_secrets
 
 
 TIME_OF_DAY_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -53,6 +55,10 @@ class ChannelRead(ChannelBase):
     id: str
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @field_serializer("auth_config")
+    def serialize_auth_config(self, value: dict[str, Any]) -> dict[str, Any]:
+        return redact_channel_auth_config(value)
 
 
 class SignatureInteropTestCreate(BaseModel):
@@ -778,6 +784,10 @@ class ResultRead(BaseModel):
     labels: list[str] | None = None
     created_at: datetime | None = None
 
+    @field_serializer("normalized_response", "raw_request", "raw_response")
+    def serialize_evidence(self, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return redact_secrets(value)
+
 
 class BaselineSnapshotRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -815,6 +825,10 @@ class BaselineResultRead(BaseModel):
     score: float
     labels: list[str] | None = None
     created_at: datetime | None = None
+
+    @field_serializer("normalized_response", "raw_request", "raw_response")
+    def serialize_evidence(self, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return redact_secrets(value)
 
 
 class BaselineBuildCreate(BaseModel):
@@ -854,6 +868,10 @@ class ReportRead(BaseModel):
     evidence: dict[str, Any] | None = None
     markdown: str | None = None
     created_at: datetime | None = None
+
+    @field_serializer("evidence", "markdown")
+    def serialize_report_evidence(self, value: Any) -> Any:
+        return redact_secrets(value)
 
 
 class PerformanceSummary(BaseModel):

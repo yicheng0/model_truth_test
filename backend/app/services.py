@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .redaction import merge_redacted_config, redact_secrets, redact_text
 from .schemas import (
     BaselineBuildCreate,
     BaselineResultRead,
@@ -1057,7 +1058,7 @@ def create_channel(db: Session, data: ChannelCreate) -> Channel:
         existing.role = role
         existing.base_url = data.base_url
         existing.model_name = data.model_name
-        existing.auth_config_encrypted = _clean_auth_config(data.auth_config)
+        existing.auth_config_encrypted = _clean_auth_config(merge_redacted_config(existing.auth_config_encrypted, data.auth_config))
         existing.is_reference = data.is_reference
         existing.enabled = data.enabled
         db.commit()
@@ -1928,15 +1929,16 @@ def _merged_channel_credentials(channel: Channel, runtime: dict[str, Any] | None
 
 def _result_from_normalized(run_id: str, case: TestCase, channel: Channel, attempt: int, normalized: dict[str, Any]) -> Result:
     score, labels = score_result(channel, case, normalized)
+    stored_normalized = redact_secrets(normalized)
     return Result(
         id=new_id("res"),
         run_id=run_id,
         test_case_id=case.id,
         channel_id=channel.id,
         attempt_index=attempt,
-        normalized_response=normalized,
-        raw_request=normalized.get("raw_request"),
-        raw_response=normalized.get("raw_response"),
+        normalized_response=stored_normalized,
+        raw_request=redact_secrets(normalized.get("raw_request")),
+        raw_response=redact_secrets(normalized.get("raw_response")),
         metrics=metrics_from_normalized(normalized),
         score=score,
         labels=labels,
@@ -3586,6 +3588,7 @@ async def execute_run(
                 if snapshot:
                     snapshot.status = "failed"
             fallback_channel_id = db.scalar(select(RunChannel.channel_id).where(RunChannel.run_id == run.id)) or "anthropic_official"
+            safe_error = redact_text(str(exc))
             db.add(
                 Report(
                     id=new_id("rep"),
@@ -3593,9 +3596,9 @@ async def execute_run(
                     channel_id=fallback_channel_id,
                     final_score=0,
                     grade="E",
-                    summary=f"检测任务失败：{exc}",
-                    evidence={"error": str(exc)},
-                    markdown=f"# 检测任务失败\n\n{exc}\n",
+                    summary=f"检测任务失败：{safe_error}",
+                    evidence={"error": safe_error},
+                    markdown=f"# 检测任务失败\n\n{safe_error}\n",
                 )
             )
             db.commit()
@@ -3817,13 +3820,14 @@ def _attach_signature_interop_result_to_reports(
         evidence["red_flags"] = sorted(set(labels).intersection(ALERT_RED_FLAGS))
         evidence["label_explanations"] = label_explanations(sorted(labels))
         evidence["signature_interop"] = _signature_interop_report_evidence(signature_result)
-        report.evidence = evidence
+        safe_evidence = redact_secrets(evidence)
+        report.evidence = safe_evidence
         if signature_result.get("status") != "skipped" and not signature_result.get("ok"):
             report.grade = worse_grade(report.grade, "D")
             report.summary = f"{report.summary or _summary_for(report.grade)} Signature 互通检测未通过。"
         channel = db.get(Channel, report.channel_id)
         if channel:
-            report.markdown = report_markdown(channel, report.final_score, report.grade, report.summary or _summary_for(report.grade), evidence)
+            report.markdown = redact_text(report_markdown(channel, report.final_score, report.grade, report.summary or _summary_for(report.grade), safe_evidence))
     db.commit()
 
 
@@ -3999,8 +4003,8 @@ def build_scheduled_probe_report(
         report.final_score = round(score, 2)
         report.grade = grade
         report.summary = summary
-        report.evidence = evidence
-        report.markdown = scheduled_probe_markdown(channel, score, grade, summary, evidence) if channel else summary
+        report.evidence = redact_secrets(evidence)
+        report.markdown = redact_text(scheduled_probe_markdown(channel, score, grade, summary, evidence) if channel else summary)
     else:
         report = Report(
             id=new_id("rep"),
@@ -4009,8 +4013,8 @@ def build_scheduled_probe_report(
             final_score=round(score, 2),
             grade=grade,
             summary=summary,
-            evidence=evidence,
-            markdown=scheduled_probe_markdown(channel, score, grade, summary, evidence) if channel else summary,
+            evidence=redact_secrets(evidence),
+            markdown=redact_text(scheduled_probe_markdown(channel, score, grade, summary, evidence) if channel else summary),
         )
         db.add(report)
     db.commit()
@@ -5366,9 +5370,9 @@ def finalize_baseline_from_run(db: Session, run_id: str) -> BaselineSnapshot | N
                 channel_id=result.channel_id,
                 role_in_baseline="reference",
                 attempt_index=result.attempt_index,
-                normalized_response=result.normalized_response,
-                raw_request=result.raw_request,
-                raw_response=result.raw_response,
+                normalized_response=redact_secrets(result.normalized_response),
+                raw_request=redact_secrets(result.raw_request),
+                raw_response=redact_secrets(result.raw_response),
                 metrics=result.metrics,
                 score=result.score,
                 labels=result.labels,
@@ -6981,6 +6985,7 @@ def build_reports(db: Session, run_id: str) -> None:
         grade = capped_grade_from_score(final_score, labels)
         summary = _summary_for(grade)
         dimension_scores = dimension_scores_for(items, cases)
+        scoring_dimensions = scoring_dimensions_for(items, cases)
         confidence = confidence_for(run, snapshot, items, labels)
         evidence = {
             "avg_gold_similarity": round(sum(item.gold_similarity for item in items) / len(items), 2),
@@ -6988,6 +6993,7 @@ def build_reports(db: Session, run_id: str) -> None:
             "labels": labels,
             "label_explanations": label_explanations(labels),
             "dimension_scores": dimension_scores,
+            "scoring_dimensions": scoring_dimensions,
             "confidence": confidence,
             "red_flags": sorted(set(labels).intersection(ALERT_RED_FLAGS)),
             "top_evidence": top_evidence_for(items, cases),
@@ -6998,6 +7004,7 @@ def build_reports(db: Session, run_id: str) -> None:
             "baseline_ready_at": snapshot.ready_at.isoformat() if snapshot and snapshot.ready_at else None,
             "baseline_expires_at": snapshot.expires_at.isoformat() if snapshot and snapshot.expires_at else None,
         }
+        safe_evidence = redact_secrets(evidence)
         db.add(
             Report(
                 id=new_id("rep"),
@@ -7006,8 +7013,8 @@ def build_reports(db: Session, run_id: str) -> None:
                 final_score=round(final_score, 2),
                 grade=grade,
                 summary=summary,
-                evidence=evidence,
-                markdown=report_markdown(channel, final_score, grade, summary, evidence),
+                evidence=safe_evidence,
+                markdown=redact_text(report_markdown(channel, final_score, grade, summary, safe_evidence)),
             )
         )
     db.commit()
@@ -7048,6 +7055,7 @@ def build_performance_reports(db: Session, run_id: str, benchmark_config: dict[s
             "top_evidence": performance_evidence(items),
             "comparison_count": len(items),
         }
+        safe_evidence = redact_secrets(evidence)
         summary = f"诊断成功率 {performance.get('success_rate', 0):.1f}%，P95 延迟 {performance.get('p95_latency_ms') or '-'} ms。"
         db.add(
             Report(
@@ -7057,8 +7065,8 @@ def build_performance_reports(db: Session, run_id: str, benchmark_config: dict[s
                 final_score=round(score, 2),
                 grade=grade,
                 summary=summary,
-                evidence=evidence,
-                markdown=special_report_markdown(channel, "性能诊断报告", score, grade, summary, evidence),
+                evidence=safe_evidence,
+                markdown=redact_text(special_report_markdown(channel, "性能诊断报告", score, grade, summary, safe_evidence)),
             )
         )
     db.commit()
@@ -7094,6 +7102,7 @@ def build_arena_reports(db: Session, run_id: str, arena_config: dict[str, Any] |
             "top_evidence": item.get("top_losses", []),
             "comparison_count": item.get("case_count", 0),
         }
+        safe_evidence = redact_secrets(evidence)
         summary = f"Arena 胜率 {item['win_rate']:.1f}%，平均题目分 {item['avg_case_score']:.1f}。"
         db.add(
             Report(
@@ -7103,8 +7112,8 @@ def build_arena_reports(db: Session, run_id: str, arena_config: dict[str, Any] |
                 final_score=round(item["score"], 2),
                 grade=grade,
                 summary=summary,
-                evidence=evidence,
-                markdown=special_report_markdown(channel, "Arena 排名报告", item["score"], grade, summary, evidence),
+                evidence=safe_evidence,
+                markdown=redact_text(special_report_markdown(channel, "Arena 排名报告", item["score"], grade, summary, safe_evidence)),
             )
         )
     db.commit()
@@ -7789,6 +7798,62 @@ def dimension_scores_for(items: list[Comparison], cases: dict[str, TestCase]) ->
     return scores
 
 
+SCORING_DIMENSION_LABELS = {
+    "protocol": {
+        "protocol_mismatch",
+        "usage_missing",
+        "message_id_mismatch",
+        "message_id_family_mismatch",
+        "json_invalid",
+        "json_object_expected",
+        "json_schema_invalid",
+    },
+    "streaming": {"streaming_event_missing"},
+    "tool_use": {"tool_use_invalid", "tool_name_mismatch", "tool_input_mismatch", "tool_schema_invalid"},
+    "parameter_adherence": {
+        "max_tokens_not_enforced",
+        "max_tokens_output_too_long",
+        "stop_sequence_not_enforced",
+        "stop_sequence_leaked",
+        "invalid_request_not_rejected",
+        "thinking_temperature_not_rejected",
+        "thinking_adaptive_enabled_not_rejected",
+        "thinking_adaptive_enabled_wrong_error",
+    },
+    "capability": {
+        "quality_regression",
+        "required_keypoint_missing",
+        "regex_keypoint_missing",
+        "exact_output_mismatch",
+        "output_too_short",
+        "forbidden_pattern_hit",
+        "web_honesty_missing",
+        "identity_mismatch",
+        "unsafe_response",
+        "suspected_model_swap",
+    },
+    "stability": {"repeat_inconsistent", "request_failed", "channel_preflight_failed", "baseline_gold_missing", "baseline_cloud_missing"},
+    "latency": {"latency_outlier", "ttft_outlier"},
+    "cost_usage": {"usage_missing", "performance_error_rate_high"},
+}
+
+
+def scoring_dimensions_for(items: list[Comparison], cases: dict[str, TestCase]) -> dict[str, float | None]:
+    if not items:
+        return {dimension: None for dimension in SCORING_DIMENSION_LABELS}
+    base_score = round(weighted_comparison_score(items, cases), 2)
+    scores: dict[str, float | None] = {}
+    for dimension, label_set in SCORING_DIMENSION_LABELS.items():
+        affected = [item for item in items if label_set.intersection(item.labels or [])]
+        if not affected:
+            scores[dimension] = base_score
+            continue
+        affected_score = weighted_comparison_score(affected, cases)
+        penalty = min(35.0, 5.0 * len({label for item in affected for label in (item.labels or []) if label in label_set}))
+        scores[dimension] = round(max(0.0, min(base_score, affected_score) - penalty), 2)
+    return scores
+
+
 GRADE_ORDER = ["A", "B", "C", "D", "E"]
 
 
@@ -7968,36 +8033,40 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
 def render_report_markdown(db: Session, report: Report) -> str:
     current = (report.markdown or "").strip()
     if current:
-        return current
+        return redact_text(current)
 
     run = db.get(Run, report.run_id)
     channel = db.get(Channel, report.channel_id)
     if not run or not channel:
-        return (report.summary or "").strip()
+        return redact_text((report.summary or "").strip())
 
-    evidence = report.evidence or {}
-    summary = report.summary or _summary_for(report.grade)
+    evidence = redact_secrets(report.evidence or {})
+    summary = redact_text(report.summary or _summary_for(report.grade))
     mode = str(evidence.get("mode") or run.mode or "").strip()
     if evidence.get("test_scope") == "scheduled_probe" or run.test_scope == "scheduled_probe" or mode == "scheduled_probe":
-        return scheduled_probe_markdown(channel, report.final_score, report.grade, summary, evidence)
+        return redact_text(scheduled_probe_markdown(channel, report.final_score, report.grade, summary, evidence))
     if mode == "performance_benchmark" or run.mode == "performance_benchmark":
-        return special_report_markdown(channel, "性能诊断报告", report.final_score, report.grade, summary, evidence)
+        return redact_text(special_report_markdown(channel, "性能诊断报告", report.final_score, report.grade, summary, evidence))
     if mode == "arena_comparison" or run.mode == "arena_comparison":
-        return special_report_markdown(channel, "Arena 排名报告", report.final_score, report.grade, summary, evidence)
+        return redact_text(special_report_markdown(channel, "Arena 排名报告", report.final_score, report.grade, summary, evidence))
     if mode in {"candidate_eval", "full_comparison", MANUAL_PROBE_MODE} or any(key in evidence for key in ("avg_gold_similarity", "avg_official_cloud_similarity", "comparison_count", "dimension_scores")):
         normalized_evidence = _normalized_report_evidence(evidence)
-        return report_markdown(channel, report.final_score, report.grade, summary, normalized_evidence)
-    return _generic_report_markdown(run, channel, report, summary, evidence)
+        return redact_text(report_markdown(channel, report.final_score, report.grade, summary, normalized_evidence))
+    return redact_text(_generic_report_markdown(run, channel, report, summary, evidence))
 
 
 def hydrate_report_markdown(db: Session, report: Report) -> bool:
     rendered = render_report_markdown(db, report)
+    safe_evidence = redact_secrets(report.evidence)
+    evidence_changed = safe_evidence != report.evidence
+    if evidence_changed:
+        report.evidence = safe_evidence
     current = report.markdown or ""
     if rendered == current.strip():
         if current and current != current.strip():
             report.markdown = current.strip()
             return True
-        return False
+        return evidence_changed
     report.markdown = rendered
     return True
 
@@ -8010,6 +8079,7 @@ def _normalized_report_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("comparison_count", 0)
     normalized.setdefault("confidence", "medium")
     normalized.setdefault("dimension_scores", {})
+    normalized.setdefault("scoring_dimensions", {})
     normalized.setdefault("label_explanations", [])
     normalized.setdefault("top_evidence", [])
     normalized.setdefault("signature_interop", {})
@@ -8018,7 +8088,7 @@ def _normalized_report_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
 
 def _generic_report_markdown(run: Run, channel: Channel, report: Report, summary: str, evidence: dict[str, Any]) -> str:
     labels = ", ".join(str(label) for label in (evidence.get("labels") or []) if str(label).strip()) or "未发现显著异常"
-    evidence_block = json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) if evidence else "{}"
+    evidence_block = json.dumps(redact_secrets(evidence), ensure_ascii=False, indent=2, sort_keys=True) if evidence else "{}"
     return f"""# 报告摘要
 
 ## 基本信息

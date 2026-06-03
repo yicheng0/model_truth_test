@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import logging
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from ..admin import require_admin
+from ..database import get_db
+from ..models import BaselineResult, Channel, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest
+from ..redaction import merge_redacted_config
+from ..seed_utils import ensure_seed_data_when_empty
+from ..schemas import (
+    CacheHitRateTestCreate,
+    CacheHitRateTestRead,
+    ChannelCreate,
+    ChannelRead,
+    ChannelUpdate,
+    ModelRequestTestCreate,
+    ModelRequestTestRead,
+    RunRead,
+    SignatureInteropTestCreate,
+    SignatureInteropTestRead,
+)
+from ..services import (
+    _clean_auth_config,
+    create_cache_hit_rate_test,
+    create_channel,
+    create_model_request_test,
+    create_signature_interop_test,
+    fetch_channel_models,
+)
+
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def run_read(db: Session, run: Run) -> RunRead:
+    payload = RunRead.model_validate(run)
+    run_channels = db.scalars(select(RunChannel).where(RunChannel.run_id == run.id).order_by(RunChannel.role_in_run, RunChannel.channel_id)).all()
+    channel_by_id = {channel.id: channel for channel in db.scalars(select(Channel).where(Channel.id.in_([item.channel_id for item in run_channels]))).all()} if run_channels else {}
+    payload.channels = [
+        {
+            "channel_id": item.channel_id,
+            "channel_name": channel_by_id[item.channel_id].name if item.channel_id in channel_by_id else None,
+            "role_in_run": item.role_in_run,
+        }
+        for item in run_channels
+    ]
+    patrol_channel: Channel | None = None
+    if run.scheduled_test_id:
+        scheduled = db.get(ScheduledChannelTest, run.scheduled_test_id)
+        if scheduled:
+            patrol_channel = db.get(Channel, scheduled.channel_id)
+        else:
+            logger.warning("run_read: scheduled_test_id=%s not found for run_id=%s", run.scheduled_test_id, run.id)
+    if not patrol_channel and (run.scheduled_test_id or run.test_scope == "scheduled_probe"):
+        report = db.scalar(select(Report).where(Report.run_id == run.id).order_by(Report.created_at.desc()))
+        if report:
+            patrol_channel = db.get(Channel, report.channel_id)
+    if patrol_channel:
+        payload.patrol_channel_id = patrol_channel.id
+        payload.patrol_channel_name = patrol_channel.name
+        payload.patrol_channel_provider_type = patrol_channel.provider_type
+        payload.patrol_channel_account_type = (patrol_channel.auth_config or {}).get("account_type")
+    return payload
+
+
+@router.get("/api/channels", response_model=list[ChannelRead])
+def list_channels(db: Session = Depends(get_db)) -> list[Channel]:
+    ensure_seed_data_when_empty(db, Channel)
+    return list(db.scalars(select(Channel).order_by(Channel.role, Channel.name)).all())
+
+
+@router.post("/api/channels", response_model=ChannelRead)
+def add_channel(data: ChannelCreate, db: Session = Depends(get_db)) -> Channel:
+    try:
+        return create_channel(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/channels/{channel_id}", response_model=ChannelRead)
+def get_channel(channel_id: str, db: Session = Depends(get_db)) -> Channel:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    return channel
+
+
+@router.patch("/api/channels/{channel_id}", response_model=ChannelRead)
+def update_channel(channel_id: str, data: ChannelUpdate, db: Session = Depends(get_db)) -> Channel:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    safe_columns = {"name", "provider_type", "role", "base_url", "model_name", "is_reference", "enabled", "auth_config"}
+    for key, value in data.model_dump(exclude_unset=True).items():
+        if key not in safe_columns:
+            continue
+        if key == "auth_config":
+            channel.auth_config_encrypted = _clean_auth_config(merge_redacted_config(channel.auth_config_encrypted, value))
+        else:
+            setattr(channel, key, value)
+    if data.is_reference is not None and data.role is None:
+        channel.role = "gold" if channel.is_reference else "candidate"
+    db.commit()
+    db.refresh(channel)
+    return channel
+
+
+def _channel_delete_conflict_reason(db: Session, channel_id: str) -> str | None:
+    checks = [
+        (select(RunChannel.id).where(RunChannel.channel_id == channel_id).limit(1), "该渠道已被检测任务引用，不能删除"),
+        (select(Result.id).where(Result.channel_id == channel_id).limit(1), "该渠道已有检测结果，不能删除"),
+        (select(Comparison.id).where(Comparison.candidate_channel_id == channel_id).limit(1), "该渠道已被对比结果引用，不能删除"),
+        (select(Report.id).where(Report.channel_id == channel_id).limit(1), "该渠道已有报告引用，不能删除"),
+        (select(ChannelAlert.id).where(ChannelAlert.channel_id == channel_id).limit(1), "该渠道已有巡检告警引用，不能删除"),
+        (select(ScheduledChannelTest.id).where(ScheduledChannelTest.channel_id == channel_id).limit(1), "该渠道已被自动巡检计划引用，不能删除"),
+        (select(BaselineResult.id).where(BaselineResult.channel_id == channel_id).limit(1), "该渠道已有渠道指纹引用，不能删除"),
+    ]
+    for stmt, reason in checks:
+        if db.scalar(stmt) is not None:
+            return reason
+    return None
+
+
+@router.delete("/api/channels/{channel_id}")
+def remove_channel(
+    channel_id: str,
+    _admin: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    conflict = _channel_delete_conflict_reason(db, channel_id)
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+    try:
+        db.delete(channel)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该渠道仍被其他记录引用，不能删除") from exc
+    return {"deleted": True}
+
+
+@router.post("/api/channels/{channel_id}/health-check")
+def channel_health(channel_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    return {
+        "channel_id": channel.id,
+        "ok": channel.enabled,
+        "latency_ms": 380 + len(channel.name) * 8,
+        "provider_type": channel.provider_type,
+        "message": "MVP health check uses configured metadata; live probes are handled by eval runs.",
+    }
+
+
+@router.post("/api/channels/signature-interop-test", response_model=SignatureInteropTestRead)
+async def channel_signature_interop_test(data: SignatureInteropTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    source = db.get(Channel, data.source_channel_id)
+    relay = db.get(Channel, data.relay_channel_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Source channel not found")
+    if not relay:
+        raise HTTPException(status_code=404, detail="Relay channel not found")
+    payload = await create_signature_interop_test(db, source, relay, data.stream)
+    if isinstance(payload.get("run"), Run):
+        payload["run"] = run_read(db, payload["run"])
+    return payload
+
+
+@router.post("/api/channels/{channel_id}/model-request-test", response_model=ModelRequestTestRead)
+async def channel_model_request_test(channel_id: str, data: ModelRequestTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        return await create_model_request_test(db, channel, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        logger.exception("Model request test timed out for channel %s", channel_id)
+        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
+    except httpx.HTTPStatusError as exc:
+        logger.exception("Model request test failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream service returned an error") from exc
+    except Exception as exc:
+        logger.exception("Model request test failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+
+
+@router.post("/api/channels/{channel_id}/cache-hit-rate-test", response_model=CacheHitRateTestRead)
+async def channel_cache_hit_rate_test(channel_id: str, data: CacheHitRateTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        return await create_cache_hit_rate_test(db, channel, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        logger.exception("Cache hit rate test timed out for channel %s", channel_id)
+        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
+    except Exception as exc:
+        logger.exception("Cache hit rate test failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+
+
+@router.get("/api/channels/{channel_id}/models", response_model=list[str])
+async def channel_models(channel_id: str, db: Session = Depends(get_db)) -> list[str]:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        return await fetch_channel_models(channel)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        logger.exception("Model list fetch timed out for channel %s", channel_id)
+        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
+    except httpx.HTTPStatusError as exc:
+        logger.exception("Model list fetch failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream service returned an error") from exc
+    except Exception as exc:
+        logger.exception("Model list fetch failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Upstream request failed") from exc

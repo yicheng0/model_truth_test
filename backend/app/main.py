@@ -5,7 +5,6 @@ import asyncio
 import logging
 import uuid
 import os
-import shutil
 import inspect
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -13,15 +12,15 @@ from pathlib import Path
 
 import httpx
 import time as time_module
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import delete, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from .database import DATABASE_URL, SessionLocal, get_db, init_db
+from .admin import require_admin, require_configured_admin
+from .database import SessionLocal, get_db, init_db
 from .claude_code_check import claude_code_check_steps, claude_code_status, run_claude_code_check, run_claude_code_check_with_progress
 from .job_store import InMemoryJobStore
 from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ClaudeCodeEvidence, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
@@ -35,8 +34,6 @@ from .schemas import (
     ArenaRunCreate,
     ChannelAlertRead,
     ChannelAlertReviewUpdate,
-    ChannelCreate,
-    ChannelRead,
     ClaudeCodeCheckCreate,
     ClaudeCodeEvidenceListItemRead,
     ClaudeCodeEvidenceRead,
@@ -52,26 +49,15 @@ from .schemas import (
     CacheHitRateJobCreateRead,
     CacheHitRateJobStatusRead,
     CacheHitRateTestCreate,
-    CacheHitRateTestRead,
-    SignatureInteropTestCreate,
-    SignatureInteropTestRead,
     ChannelTaxonomySettingRead,
     ChannelTaxonomySettingUpdate,
-    ChannelUpdate,
     ComparisonRead,
-    EvalScopeJsonlImportCreate,
     FeishuBroadcastSettingRead,
     FeishuBroadcastSettingUpdate,
     FeishuTestMessageRead,
     ManualScoreUpdate,
-    ModelRequestTestCreate,
-    ModelRequestTestRead,
     ReportRead,
-    ReportCompareRead,
-    ReportDetailRead,
-    ReportSummaryRead,
     ResultRead,
-    RunLogCleanupRead,
     RunChannelRead,
     RunCreate,
     RunRead,
@@ -79,27 +65,15 @@ from .schemas import (
     RunSummaryRead,
     SamplePlanCreate,
     SamplePlanRead,
-    TestSuiteBundle,
-    TestSuiteCoverageRead,
-    TestSuiteDiffRead,
-    TestSuiteValidationRead,
     ScheduledChannelTestCreate,
     ScheduledChannelTestRead,
     ScheduledTestHealthRead,
     ScheduledChannelTestUpdate,
     SmartPatrolReportRead,
-    SystemUsageRead,
-    TestCaseCreate,
-    TestCaseRead,
-    TestCaseUpdate,
-    TestSuiteCreate,
-    TestSuiteRead,
-    TestSuiteUpdate,
 )
 from .services import (
     _claude_code_probe_configs,
     _claude_code_section_for_category,
-    _clean_auth_config,
     build_comparisons,
     build_reports,
     build_special_run_reports,
@@ -111,36 +85,22 @@ from .services import (
     create_claude_code_evidence,
     create_claude_code_test,
     create_baseline_build,
-    create_case,
-    create_channel,
     claude_code_source_channels,
     claude_code_evidence_detail,
     claude_code_evidence_list,
-    create_model_request_test,
     create_cache_hit_rate_test,
-    create_signature_interop_test,
     create_run,
     create_scheduled_channel_test,
-    create_suite,
-    compare_reports,
-    export_suite_bundle,
     claim_scheduled_test,
     execute_run,
     execute_scheduled_channel_test,
-    fetch_channel_models,
     finalize_baseline_from_run,
     build_sample_plan,
     get_or_create_channel_taxonomy_setting,
     feishu_setting_read,
     get_or_create_feishu_setting,
-    get_report_detail,
     list_channel_alerts,
-    list_report_summaries,
-    MANUAL_PROBE_MODE,
-    MANUAL_PROBE_SUITE_ID,
     refresh_baseline_status,
-    import_suite_bundle,
-    import_evalscope_jsonl,
     next_run_for_scheduled_test,
     scheduled_tests_health,
     scheduled_test_loop,
@@ -151,14 +111,17 @@ from .services import (
     seed_demo_data,
     hydrate_report_markdown,
     smart_patrol_report_markdown,
-    suite_diff,
-    suite_coverage,
     update_channel_taxonomy_setting,
     update_feishu_setting,
     validate_baseline_for_run,
     validate_scheduled_channel_test,
-    validate_suite_cases,
 )
+from .redaction import redact_text
+from .routers.channels import router as channels_router
+from .routers.reports import router as reports_router
+from .routers.seed import router as seed_router
+from .routers.suites import router as suites_router
+from .routers.system import router as system_router
 
 
 @asynccontextmanager
@@ -190,6 +153,11 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Claude Channel Authenticity Eval", version="0.1.0", lifespan=lifespan)
 logger = logging.getLogger(__name__)
+app.include_router(channels_router)
+app.include_router(reports_router)
+app.include_router(seed_router)
+app.include_router(suites_router)
+app.include_router(system_router)
 
 
 JOB_TTL = timedelta(hours=6)
@@ -600,20 +568,6 @@ def cors_origins() -> list[str]:
 allowed_origins = cors_origins()
 
 
-def ensure_seed_data_when_empty(db: Session, model: type | None = None) -> None:
-    """Re-seed when a requested seed table is empty or a fresh DB missed lifespan seed."""
-    channels_empty = not db.scalar(select(func.count()).select_from(Channel))
-    suites_empty = not db.scalar(select(func.count()).select_from(TestSuite))
-    model_empty = bool(model and not db.scalar(select(func.count()).select_from(model)))
-    default_case_ids = [case["id"] for case in default_cases()]
-    default_suite_missing = db.get(TestSuite, DEFAULT_SUITE_ID) is None
-    default_cases_missing = bool(
-        default_case_ids
-        and db.scalar(select(func.count()).select_from(TestCase).where(TestCase.id.in_(default_case_ids))) < len(default_case_ids)
-    )
-    if model_empty or (channels_empty and suites_empty) or default_suite_missing or default_cases_missing:
-        logger.warning("Core tables empty — triggering emergency re-seed")
-        seed_demo_data(db)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -646,22 +600,6 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _configured_admin_key() -> str:
-    return os.getenv("ADMIN_API_KEY", "").strip()
-
-
-def require_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
-    expected = _configured_admin_key()
-    if not expected:
-        raise HTTPException(status_code=403, detail="Admin API key is not configured")
-    if x_admin_key != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-def require_configured_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
-    require_admin(x_admin_key)
-
-
 @app.middleware("http")
 async def rate_limit(request: Request, call_next) -> Response:
     rate_limit_per_minute = _rate_limit_per_minute()
@@ -684,77 +622,6 @@ async def add_request_id(request: Request, call_next) -> Response:
     response: Response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
-
-
-TERMINAL_RUN_STATUSES = {"completed", "failed", "canceled", "interrupted"}
-ACTIVE_RUN_STATUSES = {"pending", "running"}
-
-
-def _database_file_path() -> Path | None:
-    if not DATABASE_URL.startswith("sqlite:///"):
-        return None
-    raw_path = DATABASE_URL.removeprefix("sqlite:///")
-    return Path(raw_path).resolve()
-
-
-def _database_size_bytes() -> int | None:
-    path = _database_file_path()
-    if not path or not path.exists():
-        return None
-    return path.stat().st_size
-
-
-def _memory_usage() -> dict[str, int | float | None]:
-    try:
-        import psutil  # type: ignore
-    except Exception:
-        psutil = None
-    if psutil is not None:
-        mem = psutil.virtual_memory()
-        return {
-            "memory_total_bytes": int(mem.total),
-            "memory_available_bytes": int(mem.available),
-            "memory_used_bytes": int(mem.used),
-            "memory_used_percent": round(float(mem.percent), 2),
-        }
-    meminfo = Path("/proc/meminfo")
-    if not meminfo.exists():
-        return {
-            "memory_total_bytes": None,
-            "memory_available_bytes": None,
-            "memory_used_bytes": None,
-            "memory_used_percent": None,
-        }
-    values: dict[str, int] = {}
-    for line in meminfo.read_text(encoding="utf-8").splitlines():
-        key, _, rest = line.partition(":")
-        parts = rest.strip().split()
-        if not parts:
-            continue
-        try:
-            values[key] = int(parts[0]) * 1024
-        except ValueError:
-            continue
-    total = values.get("MemTotal")
-    available = values.get("MemAvailable")
-    used = total - available if total is not None and available is not None else None
-    used_percent = round((used / total) * 100, 2) if total and used is not None else None
-    return {
-        "memory_total_bytes": total,
-        "memory_available_bytes": available,
-        "memory_used_bytes": used,
-        "memory_used_percent": used_percent,
-    }
-
-
-def _cleanup_candidate_run_ids(db: Session) -> tuple[list[str], int, int]:
-    terminal_run_ids = list(db.scalars(select(Run.id).where(Run.status.in_(TERMINAL_RUN_STATUSES))).all())
-    if not terminal_run_ids:
-        return [], 0, int(db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0)
-    baseline_run_ids = set(db.scalars(select(BaselineSnapshot.source_run_id).where(BaselineSnapshot.source_run_id.in_(terminal_run_ids))).all())
-    candidate_ids = [run_id for run_id in terminal_run_ids if run_id not in baseline_run_ids]
-    active_count = int(db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0)
-    return candidate_ids, len(baseline_run_ids), active_count
 
 
 def run_read(db: Session, run: Run) -> RunRead:
@@ -797,108 +664,6 @@ def _baseline_reference_conflict(db: Session, baseline_id: str, source_run_id: s
     if db.scalar(select(ScheduledChannelTest).where(ScheduledChannelTest.baseline_snapshot_id == baseline_id).limit(1)):
         return "Baseline snapshot is referenced by scheduled tests"
     return None
-
-
-@app.get("/api/health")
-def health(db: Session = Depends(get_db)) -> dict[str, str]:
-    db.scalar(select(TestSuite).limit(1))
-    return {"status": "ok", "database": "ok"}
-
-
-@app.get("/api/system/usage", response_model=SystemUsageRead)
-def system_usage(
-    db: Session = Depends(get_db),
-    x_admin_key: str | None = Header(None, alias="X-Admin-Key"),
-) -> SystemUsageRead:
-    expected = os.getenv("ADMIN_API_KEY", "").strip()
-    if expected and x_admin_key != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    disk_path = Path.cwd()
-    disk = shutil.disk_usage(disk_path)
-    candidate_run_ids, skipped_baseline_runs, active_runs = _cleanup_candidate_run_ids(db)
-    database_path = _database_file_path()
-    return SystemUsageRead(
-        disk_path=str(disk_path),
-        disk_total_bytes=disk.total,
-        disk_used_bytes=disk.used,
-        disk_free_bytes=disk.free,
-        disk_used_percent=round((disk.used / disk.total) * 100, 2) if disk.total else 0,
-        database_path=str(database_path) if database_path else None,
-        database_size_bytes=_database_size_bytes(),
-        run_count=int(db.scalar(select(func.count()).select_from(Run)) or 0),
-        result_count=int(db.scalar(select(func.count()).select_from(Result)) or 0),
-        comparison_count=int(db.scalar(select(func.count()).select_from(Comparison)) or 0),
-        report_count=int(db.scalar(select(func.count()).select_from(Report)) or 0),
-        alert_count=int(db.scalar(select(func.count()).select_from(ChannelAlert)) or 0),
-        cleanup_candidate_run_count=len(candidate_run_ids),
-        cleanup_skipped_baseline_run_count=skipped_baseline_runs + active_runs,
-        **_memory_usage(),
-    )
-
-
-@app.post("/api/system/cleanup-run-logs", response_model=RunLogCleanupRead)
-def cleanup_run_logs(
-    dry_run: bool = Query(False),
-    _admin: None = Depends(require_configured_admin),
-    db: Session = Depends(get_db),
-) -> RunLogCleanupRead:
-    try:
-        candidate_run_ids, skipped_baseline_runs, active_runs = _cleanup_candidate_run_ids(db)
-    except Exception:
-        db.rollback()
-        logger.warning("cleanup_run_logs: failed to collect candidate runs", exc_info=True)
-        if dry_run:
-            active_runs = int(db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0)
-            return RunLogCleanupRead(dry_run=True, skipped_running_runs=active_runs)
-        raise
-    if not candidate_run_ids:
-        return RunLogCleanupRead(
-            dry_run=dry_run,
-            skipped_running_runs=active_runs,
-            skipped_baseline_runs=skipped_baseline_runs,
-        )
-
-    def count_for(model: type, field) -> int:  # noqa: ANN001
-        return int(db.scalar(select(func.count()).select_from(model).where(field.in_(candidate_run_ids))) or 0)
-
-    try:
-        scheduled_refs = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(candidate_run_ids))).all())
-        payload = RunLogCleanupRead(
-            dry_run=dry_run,
-            deleted_runs=len(candidate_run_ids),
-            deleted_run_channels=count_for(RunChannel, RunChannel.run_id),
-            deleted_results=count_for(Result, Result.run_id),
-            deleted_comparisons=count_for(Comparison, Comparison.run_id),
-            deleted_reports=count_for(Report, Report.run_id),
-            deleted_alerts=count_for(ChannelAlert, ChannelAlert.run_id),
-            cleared_scheduled_last_run_refs=len(scheduled_refs),
-            skipped_running_runs=active_runs,
-            skipped_baseline_runs=skipped_baseline_runs,
-        )
-    except Exception:
-        db.rollback()
-        logger.warning("cleanup_run_logs: failed to build cleanup summary", exc_info=True)
-        if dry_run:
-            return RunLogCleanupRead(
-                dry_run=True,
-                deleted_runs=len(candidate_run_ids),
-                skipped_running_runs=active_runs,
-                skipped_baseline_runs=skipped_baseline_runs,
-            )
-        raise
-    if dry_run:
-        return payload
-
-    for scheduled in scheduled_refs:
-        scheduled.last_run_id = None
-    db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(candidate_run_ids)))
-    db.execute(delete(RunChannel).where(RunChannel.run_id.in_(candidate_run_ids)))
-    db.execute(delete(Result).where(Result.run_id.in_(candidate_run_ids)))
-    db.execute(delete(Comparison).where(Comparison.run_id.in_(candidate_run_ids)))
-    db.execute(delete(Report).where(Report.run_id.in_(candidate_run_ids)))
-    db.execute(delete(Run).where(Run.id.in_(candidate_run_ids)))
-    db.commit()
-    return payload
 
 
 def _channel_has_references(db: Session, channel_id: str) -> bool:
@@ -996,151 +761,6 @@ async def validation_exception_handler(_request: Request, exc: RequestValidation
         status_code=422,
         content={"detail": "Validation error", "errors": errors, "request_id": request_id},
     )
-
-
-@app.get("/api/channels", response_model=list[ChannelRead])
-def list_channels(db: Session = Depends(get_db)) -> list[Channel]:
-    ensure_seed_data_when_empty(db, Channel)
-    return list(db.scalars(select(Channel).order_by(Channel.role, Channel.name)).all())
-
-
-@app.post("/api/channels", response_model=ChannelRead)
-def add_channel(data: ChannelCreate, db: Session = Depends(get_db)) -> Channel:
-    try:
-        return create_channel(db, data)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/channels/{channel_id}", response_model=ChannelRead)
-def get_channel(channel_id: str, db: Session = Depends(get_db)) -> Channel:
-    channel = db.get(Channel, channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    return channel
-
-
-@app.patch("/api/channels/{channel_id}", response_model=ChannelRead)
-def update_channel(channel_id: str, data: ChannelUpdate, db: Session = Depends(get_db)) -> Channel:
-    channel = db.get(Channel, channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    SAFE_COLUMNS = {"name", "provider_type", "role", "base_url", "model_name", "is_reference", "enabled", "auth_config"}
-    for key, value in data.model_dump(exclude_unset=True).items():
-        if key not in SAFE_COLUMNS:
-            continue
-        if key == "auth_config":
-            value = _clean_auth_config(value)
-            channel.auth_config_encrypted = value
-        else:
-            setattr(channel, key, value)
-    if data.is_reference is not None and data.role is None:
-        channel.role = "gold" if channel.is_reference else "candidate"
-    db.commit()
-    db.refresh(channel)
-    return channel
-
-
-def _channel_delete_conflict_reason(db: Session, channel_id: str) -> str | None:
-    checks = [
-        (select(RunChannel.id).where(RunChannel.channel_id == channel_id).limit(1), '该渠道已被检测任务引用，不能删除'),
-        (select(Result.id).where(Result.channel_id == channel_id).limit(1), '该渠道已有检测结果，不能删除'),
-        (select(Comparison.id).where(Comparison.candidate_channel_id == channel_id).limit(1), '该渠道已被对比结果引用，不能删除'),
-        (select(Report.id).where(Report.channel_id == channel_id).limit(1), '该渠道已有报告引用，不能删除'),
-        (select(ChannelAlert.id).where(ChannelAlert.channel_id == channel_id).limit(1), '该渠道已有巡检告警引用，不能删除'),
-        (select(ScheduledChannelTest.id).where(ScheduledChannelTest.channel_id == channel_id).limit(1), '该渠道已被自动巡检计划引用，不能删除'),
-        (select(BaselineResult.id).where(BaselineResult.channel_id == channel_id).limit(1), '该渠道已有渠道指纹引用，不能删除'),
-    ]
-    for stmt, reason in checks:
-        if db.scalar(stmt) is not None:
-            return reason
-    return None
-
-
-@app.delete("/api/channels/{channel_id}")
-def remove_channel(
-    channel_id: str,
-    _admin: None = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> dict[str, bool]:
-    channel = db.get(Channel, channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    conflict = _channel_delete_conflict_reason(db, channel_id)
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
-    try:
-        db.delete(channel)
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="该渠道仍被其他记录引用，不能删除") from exc
-    return {"deleted": True}
-
-
-@app.post("/api/channels/{channel_id}/health-check")
-def channel_health(channel_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
-    channel = db.get(Channel, channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    return {
-        "channel_id": channel.id,
-        "ok": channel.enabled,
-        "latency_ms": 380 + len(channel.name) * 8,
-        "provider_type": channel.provider_type,
-        "message": "MVP health check uses configured metadata; live probes are handled by eval runs.",
-    }
-
-
-@app.post("/api/channels/signature-interop-test", response_model=SignatureInteropTestRead)
-async def channel_signature_interop_test(data: SignatureInteropTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
-    source = db.get(Channel, data.source_channel_id)
-    relay = db.get(Channel, data.relay_channel_id)
-    if not source:
-        raise HTTPException(status_code=404, detail="Source channel not found")
-    if not relay:
-        raise HTTPException(status_code=404, detail="Relay channel not found")
-    payload = await create_signature_interop_test(db, source, relay, data.stream)
-    if isinstance(payload.get("run"), Run):
-        payload["run"] = run_read(db, payload["run"])
-    return payload
-
-
-@app.post("/api/channels/{channel_id}/model-request-test", response_model=ModelRequestTestRead)
-async def channel_model_request_test(channel_id: str, data: ModelRequestTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
-    channel = db.get(Channel, channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        return await create_model_request_test(db, channel, data)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except httpx.TimeoutException as exc:
-        logger.exception("Model request test timed out for channel %s", channel_id)
-        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
-    except httpx.HTTPStatusError as exc:
-        logger.exception("Model request test failed for channel %s", channel_id)
-        raise HTTPException(status_code=502, detail="Upstream service returned an error") from exc
-    except Exception as exc:
-        logger.exception("Model request test failed for channel %s", channel_id)
-        raise HTTPException(status_code=502, detail="Upstream request failed") from exc
-
-
-@app.post("/api/channels/{channel_id}/cache-hit-rate-test", response_model=CacheHitRateTestRead)
-async def channel_cache_hit_rate_test(channel_id: str, data: CacheHitRateTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
-    channel = db.get(Channel, channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        return await create_cache_hit_rate_test(db, channel, data)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except httpx.TimeoutException as exc:
-        logger.exception("Cache hit rate test timed out for channel %s", channel_id)
-        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
-    except Exception as exc:
-        logger.exception("Cache hit rate test failed for channel %s", channel_id)
-        raise HTTPException(status_code=502, detail="Upstream request failed") from exc
 
 
 @app.post("/api/channels/{channel_id}/cache-hit-rate-test/jobs", response_model=CacheHitRateJobCreateRead)
@@ -1383,174 +1003,6 @@ def get_claude_code_check_job(job_id: str) -> dict[str, object]:
     if not payload or payload.get("kind") != "cli":
         raise HTTPException(status_code=404, detail=JOB_NOT_FOUND_DETAIL)
     return payload
-
-
-@app.get("/api/channels/{channel_id}/models", response_model=list[str])
-async def channel_models(channel_id: str, db: Session = Depends(get_db)) -> list[str]:
-    channel = db.get(Channel, channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    try:
-        return await fetch_channel_models(channel)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except httpx.TimeoutException as exc:
-        logger.exception("Model list fetch timed out for channel %s", channel_id)
-        raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
-    except httpx.HTTPStatusError as exc:
-        logger.exception("Model list fetch failed for channel %s", channel_id)
-        raise HTTPException(status_code=502, detail="Upstream service returned an error") from exc
-    except Exception as exc:
-        logger.exception("Model list fetch failed for channel %s", channel_id)
-        raise HTTPException(status_code=502, detail="Upstream request failed") from exc
-
-
-@app.get("/api/suites", response_model=list[TestSuiteRead])
-def list_suites(db: Session = Depends(get_db)) -> list[TestSuite]:
-    ensure_seed_data_when_empty(db, TestSuite)
-    return list(db.scalars(select(TestSuite).where(TestSuite.id != MANUAL_PROBE_SUITE_ID).order_by(TestSuite.name)).all())
-
-
-@app.get("/api/test-suites", response_model=list[TestSuiteRead])
-def list_test_suites_alias(db: Session = Depends(get_db)) -> list[TestSuite]:
-    return list_suites(db)
-
-
-@app.post("/api/test-suites", response_model=TestSuiteRead)
-def add_test_suite_alias(data: TestSuiteCreate, db: Session = Depends(get_db)) -> TestSuite:
-    return create_suite(db, data)
-
-
-@app.get("/api/test-suites/{suite_id}", response_model=TestSuiteRead)
-def get_test_suite_alias(suite_id: str, db: Session = Depends(get_db)) -> TestSuite:
-    suite = db.get(TestSuite, suite_id)
-    if not suite:
-        raise HTTPException(status_code=404, detail="Test suite not found")
-    return suite
-
-
-@app.patch("/api/test-suites/{suite_id}", response_model=TestSuiteRead)
-def update_test_suite_alias(suite_id: str, data: TestSuiteUpdate, db: Session = Depends(get_db)) -> TestSuite:
-    suite = db.get(TestSuite, suite_id)
-    if not suite:
-        raise HTTPException(status_code=404, detail="Test suite not found")
-    for key, value in data.model_dump(exclude_unset=True).items():
-        setattr(suite, key, value)
-    db.commit()
-    db.refresh(suite)
-    return suite
-
-
-@app.post("/api/test-suites/import")
-def import_test_suite_bundle(data: TestSuiteBundle, db: Session = Depends(get_db)) -> dict[str, object]:
-    try:
-        return import_suite_bundle(db, data)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/test-suites/import-evalscope-jsonl")
-def import_evalscope_jsonl_bundle(data: EvalScopeJsonlImportCreate, db: Session = Depends(get_db)) -> dict[str, object]:
-    try:
-        return import_evalscope_jsonl(db, data)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/test-suites/{suite_id}/export")
-def export_test_suite_bundle(suite_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
-    try:
-        return export_suite_bundle(db, suite_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/test-suites/{suite_id}/diff", response_model=TestSuiteDiffRead)
-def diff_test_suite_bundle(suite_id: str, against: str = Query(...), db: Session = Depends(get_db)) -> dict[str, object]:
-    try:
-        return suite_diff(db, suite_id, against)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/api/test-suites/{suite_id}/validate", response_model=TestSuiteValidationRead)
-def validate_test_suite_cases(suite_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
-    try:
-        return validate_suite_cases(db, suite_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/test-suites/{suite_id}/coverage", response_model=TestSuiteCoverageRead)
-def get_test_suite_coverage(suite_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
-    try:
-        return suite_coverage(db, suite_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/suites/{suite_id}/cases", response_model=list[TestCaseRead])
-def list_cases(suite_id: str, db: Session = Depends(get_db)) -> list[TestCase]:
-    ensure_seed_data_when_empty(db, TestCase)
-    return list(
-        db.scalars(
-            select(TestCase)
-            .where(TestCase.suite_id == suite_id)
-            .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
-        ).all()
-    )
-
-
-@app.get("/api/test-cases", response_model=list[TestCaseRead])
-def list_test_cases_alias(suite_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> list[TestCase]:
-    ensure_seed_data_when_empty(db, TestCase)
-    stmt = select(TestCase).order_by(TestCase.sort_order, TestCase.module, TestCase.id)
-    if suite_id:
-        stmt = stmt.where(TestCase.suite_id == suite_id)
-    else:
-        stmt = stmt.where(TestCase.suite_id != MANUAL_PROBE_SUITE_ID, TestCase.module != MANUAL_PROBE_MODE)
-    return list(db.scalars(stmt).all())
-
-
-@app.post("/api/test-cases", response_model=TestCaseRead)
-def add_test_case_alias(data: TestCaseCreate, db: Session = Depends(get_db)) -> TestCase:
-    return create_case(db, data)
-
-
-@app.get("/api/test-cases/{case_id}", response_model=TestCaseRead)
-def get_test_case_alias(case_id: str, db: Session = Depends(get_db)) -> TestCase:
-    case = db.get(TestCase, case_id)
-    if not case:
-        raise HTTPException(status_code=404, detail="Test case not found")
-    return case
-
-
-@app.patch("/api/test-cases/{case_id}", response_model=TestCaseRead)
-def update_test_case_alias(case_id: str, data: TestCaseUpdate, db: Session = Depends(get_db)) -> TestCase:
-    case = db.get(TestCase, case_id)
-    if not case:
-        raise HTTPException(status_code=404, detail="Test case not found")
-    for key, value in data.model_dump(exclude_unset=True).items():
-        setattr(case, key, value)
-    db.commit()
-    db.refresh(case)
-    return case
-
-
-@app.delete("/api/test-cases/{case_id}")
-def remove_test_case_alias(
-    case_id: str,
-    _admin: None = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> dict[str, bool]:
-    case = db.get(TestCase, case_id)
-    if not case:
-        raise HTTPException(status_code=404, detail="Test case not found")
-    db.execute(delete(Result).where(Result.test_case_id == case_id))
-    db.execute(delete(Comparison).where(Comparison.test_case_id == case_id))
-    db.delete(case)
-    db.commit()
-    return {"deleted": True}
 
 
 @app.post("/api/eval-runs", response_model=RunRead)
@@ -2232,153 +1684,10 @@ def download_report(run_id: str, db: Session = Depends(get_db)) -> Response:
         updated = hydrate_report_markdown(db, report) or updated
     if updated:
         db.commit()
-    markdown = "\n\n---\n\n".join(report.markdown or "" for report in reports)
+    markdown = redact_text("\n\n---\n\n".join(report.markdown or "" for report in reports))
     return Response(markdown, media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{run_id}.md"'})
 
 
 @app.get("/api/runs/{run_id}/report.md")
 def download_report_alias(run_id: str, db: Session = Depends(get_db)) -> Response:
     return download_report(run_id, db)
-
-
-@app.get("/api/reports", response_model=list[ReportRead])
-def list_reports_alias(db: Session = Depends(get_db)) -> list[Report]:
-    return list(db.scalars(select(Report).order_by(Report.created_at.desc())).all())
-
-
-def _delete_report_by_id(db: Session, report_id: str) -> bool:
-    report = db.get(Report, report_id)
-    if not report:
-        return False
-    db.execute(delete(ChannelAlert).where(ChannelAlert.report_id == report_id))
-    db.delete(report)
-    return True
-
-
-@app.post("/api/reports/bulk-delete")
-def bulk_delete_reports(
-    payload: dict[str, list[str]] = Body(...),
-    _admin: None = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> dict[str, object]:
-    report_ids = [str(item).strip() for item in payload.get("ids", []) if str(item).strip()]
-    if not report_ids:
-        raise HTTPException(status_code=400, detail="Select at least one report")
-    deleted = 0
-    missing: list[str] = []
-    for report_id in dict.fromkeys(report_ids):
-        if _delete_report_by_id(db, report_id):
-            deleted += 1
-        else:
-            missing.append(report_id)
-    db.commit()
-    return {"deleted": deleted, "missing": missing}
-
-
-@app.delete("/api/reports/{report_id}")
-def delete_report_alias(
-    report_id: str,
-    _admin: None = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> dict[str, bool]:
-    if not _delete_report_by_id(db, report_id):
-        raise HTTPException(status_code=404, detail="Report not found")
-    db.commit()
-    return {"deleted": True}
-
-
-@app.get("/api/reports/summary", response_model=list[ReportSummaryRead])
-def list_report_summary_alias(db: Session = Depends(get_db)) -> list[dict[str, object]]:
-    return list_report_summaries(db)
-
-
-@app.get("/api/reports/compare", response_model=ReportCompareRead)
-def compare_reports_alias(ids: str = Query(..., description="Comma-separated report ids, 2-3 reports"), db: Session = Depends(get_db)) -> dict[str, object]:
-    report_ids = [item.strip() for item in ids.split(",") if item.strip()]
-    if len(report_ids) < 2:
-        raise HTTPException(status_code=400, detail="Select at least 2 reports")
-    if len(report_ids) > 3:
-        raise HTTPException(status_code=400, detail="Select at most 3 reports")
-    try:
-        return compare_reports(db, report_ids)
-    except ValueError as exc:
-        if "modes must match" in str(exc):
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/reports/{report_id}/detail", response_model=ReportDetailRead)
-def get_report_detail_alias(report_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
-    detail = get_report_detail(db, report_id)
-    if not detail:
-        raise HTTPException(status_code=404, detail="Report not found")
-    report = db.get(Report, report_id)
-    if report and hydrate_report_markdown(db, report):
-        db.commit()
-        detail["report"] = ReportRead.model_validate(report)
-    return detail
-
-
-@app.get("/api/reports/{report_id}", response_model=ReportRead)
-def get_report_alias(report_id: str, db: Session = Depends(get_db)) -> Report:
-    report = db.get(Report, report_id)
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    if hydrate_report_markdown(db, report):
-        db.commit()
-    return report
-
-
-@app.get("/api/reports/{report_id}/markdown")
-def get_report_markdown_alias(report_id: str, db: Session = Depends(get_db)) -> dict[str, str | None]:
-    report = get_report_alias(report_id, db)
-    return {"id": report.id, "markdown": report.markdown}
-
-
-def seed_status_payload(db: Session) -> dict[str, object]:
-    return {
-        "channels": db.scalar(select(func.count()).select_from(Channel)),
-        "test_suites": db.scalar(select(func.count()).select_from(TestSuite)),
-        "test_cases": db.scalar(select(func.count()).select_from(TestCase)),
-        "builtin_suite_exists": db.scalar(select(TestSuite).where(TestSuite.id == "claude_full_35")) is not None,
-    }
-
-
-def reseed_payload(db: Session) -> dict[str, object]:
-    before = seed_status_payload(db)
-    try:
-        seed_demo_data(db)
-    except Exception as exc:
-        logger.exception("Seed recovery failed")
-        raise HTTPException(status_code=500, detail=f"Reseed failed: {exc}") from exc
-    return {"ok": True, "before": before, "after": seed_status_payload(db)}
-
-
-@app.get("/api/seed-status")
-def public_seed_status(_admin: None = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, object]:
-    """Return current seed data counts for diagnostics."""
-    return seed_status_payload(db)
-
-
-@app.post("/api/reseed")
-def public_reseed(_admin: None = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, object]:
-    """Create missing built-in seed data without deleting or overwriting existing rows."""
-    return reseed_payload(db)
-
-
-@app.get("/api/admin/seed-status")
-def admin_seed_status(
-    _admin: None = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> dict[str, object]:
-    """Return current seed data counts for diagnostics."""
-    return seed_status_payload(db)
-
-
-@app.post("/api/admin/reseed")
-def admin_reseed(
-    _admin: None = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> dict[str, object]:
-    """Re-run seed to create any missing built-in data."""
-    return reseed_payload(db)

@@ -94,6 +94,7 @@ export interface ReportEvidence {
   label_explanations?: Array<{ label: string; description: string }>;
   detected_provider_hint?: string | null;
   dimension_scores?: Record<string, number | null | undefined>;
+  scoring_dimensions?: Record<string, number | null | undefined>;
   arena?: ArenaEvidence;
   arena_matrix?: Array<Record<string, unknown>>;
   judge_evidence?: Record<string, unknown>;

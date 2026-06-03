@@ -136,6 +136,10 @@ function nonEmptyText(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
 
+function isRedactedSecretPlaceholder(value?: string) {
+  return Boolean(value?.includes('[REDACTED]'));
+}
+
 function channelNameTokens(name?: string | null) {
   return nonEmptyText(name).split('-').map((part) => part.trim()).filter(Boolean);
 }
@@ -245,9 +249,13 @@ export function buildChannelAuthConfig(
   existingAuthConfig?: Record<string, unknown>,
 ) {
   const authConfig: Record<string, unknown> = { ...(existingAuthConfig ?? {}) };
-  const apiKey = trimmedValue(values.api_key) ?? buildTokenflowApiKey(values.channel_number);
+  const explicitApiKey = trimmedValue(values.api_key);
+  const existingApiKey = typeof existingAuthConfig?.api_key === 'string' ? existingAuthConfig.api_key : undefined;
+  const apiKey = explicitApiKey ?? (existingAuthConfig ? undefined : buildTokenflowApiKey(values.channel_number));
   if (apiKey) {
     authConfig.api_key = apiKey;
+  } else if (isRedactedSecretPlaceholder(existingApiKey)) {
+    authConfig.api_key = existingApiKey;
   }
   authConfig.account_type = values.account_type || defaultAccountType;
   authConfig.request_protocol = values.request_protocol || 'auto';
