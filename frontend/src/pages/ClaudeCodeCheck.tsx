@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Badge, Button, Card, Checkbox, Drawer, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { Alert, Badge, Button, Card, Checkbox, Drawer, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
+import { labelText, labelTooltip, probeDiagnosis, topRiskLabels } from '../claudeCodeDiagnostics';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
@@ -99,6 +100,31 @@ function LatencyCell({ value }: { value?: number | null }) {
   );
 }
 
+function ProbeLabelTags({ labels }: { labels?: string[] | null }) {
+  if (!labels?.length) return <EmptyProbeValue />;
+  return (
+    <Space size={[4, 4]} wrap className="claude-probe-tags">
+      {labels.map((label) => (
+        <Tooltip key={label} title={labelTooltip(label)}>
+          <Tag color="orange" className="claude-probe-tag">
+            {labelText(label)}
+          </Tag>
+        </Tooltip>
+      ))}
+    </Space>
+  );
+}
+
+function ProbeEvidenceText({ probe }: { probe: { status: string; labels?: string[] | null; evidence_excerpt?: string | null; detail?: string | null } }) {
+  const raw = probe.evidence_excerpt || probe.detail || '';
+  if (probe.status === 'pass' && !probe.labels?.length) {
+    return raw ? <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: raw }}>{raw}</Typography.Text> : <EmptyProbeValue />;
+  }
+  const diagnosis = probeDiagnosis(probe);
+  const display = raw && raw !== diagnosis ? `${diagnosis} · ${raw}` : diagnosis;
+  return <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: display }}>{display}</Typography.Text>;
+}
+
 function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
   return (
     <Table<ClaudeCodeProbeResult>
@@ -144,17 +170,12 @@ function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
         {
           title: '标签',
           width: 140,
-          render: (_, item) => item.labels.length ? (
-            <Space size={[4, 4]} wrap className="claude-probe-tags">
-              {item.labels.map((label) => <Tag key={label} color="orange" className="claude-probe-tag" title={label}>{label}</Tag>)}
-            </Space>
-          ) : <EmptyProbeValue />,
+          render: (_, item) => <ProbeLabelTags labels={item.labels} />,
         },
         {
           title: '证据摘要',
-          dataIndex: 'evidence_excerpt',
           width: 300,
-          render: (value: string | null | undefined) => value ? <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: value }}>{value}</Typography.Text> : <EmptyProbeValue />,
+          render: (_, item) => <ProbeEvidenceText probe={item} />,
         },
       ]}
     />
@@ -185,19 +206,11 @@ function JobProbeTable({ probes, currentKey }: { probes: ClaudeCodeJobProbe[]; c
         {
           title: '摘要',
           width: 420,
-          render: (_, item) => <Typography.Text ellipsis={{ tooltip: item.evidence_excerpt || item.detail || undefined }}>{item.evidence_excerpt || item.detail || '-'}</Typography.Text>,
+          render: (_, item) => <ProbeEvidenceText probe={item} />,
         },
       ]}
     />
   );
-}
-
-function probeDiagnosis(item: { status: string; labels?: string[]; evidence_excerpt?: string | null }) {
-  if (item.status === 'pass') return '测试通过，模型正确处理了该类输入。';
-  if (item.labels?.includes('request_failed')) return '请求被上游直接拒绝，优先检查该通道是否接受此类多模态请求体。';
-  if (item.labels?.includes('regex_keypoint_missing')) return '模型没有真正读到图片内容，更像把这次请求当成普通文本对话处理。';
-  if (item.labels?.some((label) => label.startsWith('missing:'))) return '模型返回了文字说明，但没有命中文档 marker，说明文档输入未按预期生效。';
-  return item.evidence_excerpt || '需要结合原始返回继续判断该通道的多模态兼容性。';
 }
 
 type MultimodalProbe = ClaudeCodeProbeResult | ClaudeCodeJobProbe;
@@ -290,19 +303,12 @@ function MultimodalProbeTable({ probes, currentKey }: { probes: MultimodalProbe[
         {
           title: '标签',
           width: 140,
-          render: (_, item) => item.labels.length ? (
-            <Space size={[4, 4]} wrap className="claude-probe-tags">
-              {item.labels.map((label) => <Tag key={label} color="orange" className="claude-probe-tag" title={label}>{label}</Tag>)}
-            </Space>
-          ) : <EmptyProbeValue />,
+          render: (_, item) => <ProbeLabelTags labels={item.labels} />,
         },
         {
           title: '证据摘要',
           width: 320,
-          render: (_, item) => {
-            const detail = item.evidence_excerpt || ('detail' in item ? item.detail : null) || probeDiagnosis(item);
-            return detail ? <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: detail }}>{detail}</Typography.Text> : <EmptyProbeValue />;
-          },
+          render: (_, item) => <ProbeEvidenceText probe={item} />,
         },
       ]}
     />
@@ -311,6 +317,7 @@ function MultimodalProbeTable({ probes, currentKey }: { probes: MultimodalProbe[
 
 function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; meta?: ClaudeCodeHistoryDetail | null }) {
   const allCounts = probeCounts(result.probes ?? []);
+  const riskLabels = topRiskLabels(result.probes ?? []);
   return (
     <Space direction="vertical" size={18} className="full-width">
       {meta ? (
@@ -333,6 +340,12 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
         )}
         description={result.summary}
       />
+      {riskLabels.length ? (
+        <div className="claude-risk-row">
+          <Typography.Text strong>关键风险</Typography.Text>
+          <ProbeLabelTags labels={riskLabels} />
+        </div>
+      ) : null}
       <div className="signature-sim-grid">
         <Card bordered={false}><Statistic title="通过" value={allCounts.pass} valueStyle={{ color: '#15803d' }} /></Card>
         <Card bordered={false}><Statistic title="失败" value={allCounts.fail} valueStyle={{ color: '#b91c1c' }} /></Card>

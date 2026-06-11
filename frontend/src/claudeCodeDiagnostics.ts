@@ -1,0 +1,213 @@
+type ClaudeCodeDiagnosticProbe = {
+  key?: string | null;
+  title?: string | null;
+  status?: string | null;
+  severity?: string | null;
+  labels?: string[] | null;
+  evidence_excerpt?: string | null;
+  detail?: string | null;
+};
+
+type LabelInfo = {
+  text: string;
+  description: string;
+  priority: number;
+};
+
+const LABELS: Record<string, LabelInfo> = {
+  suspected_cache: {
+    text: '疑似缓存复用',
+    description: '两次不同 nonce 请求返回了重复内容，可能存在缓存命中、请求复用或中间层回放。',
+    priority: 100,
+  },
+  nonce_cross_talk: {
+    text: 'nonce 串线',
+    description: '某次请求返回了另一轮 nonce，说明请求上下文可能混线或复用了旧响应。',
+    priority: 98,
+  },
+  nonce_mismatch: {
+    text: 'nonce 不匹配',
+    description: '模型没有按要求回显本轮 nonce，可能忽略 prompt、被代理改写或命中缓存。',
+    priority: 96,
+  },
+  openai_shape_response: {
+    text: 'OpenAI 响应形态',
+    description: '返回体更像 Chat Completions，不像 Anthropic Messages 原生 message 结构。',
+    priority: 94,
+  },
+  openai_protocol_fallback: {
+    text: 'OpenAI 协议回退',
+    description: '自动探测落到 OpenAI-compatible 协议，说明该中转可能不是原生 Claude Messages 链路。',
+    priority: 92,
+  },
+  message_id_openai_family: {
+    text: 'OpenAI ID 族',
+    description: 'message id 呈现 chatcmpl 等 OpenAI 风格，和 Claude msg_ 家族不一致。',
+    priority: 90,
+  },
+  stop_reason_openai_style: {
+    text: 'OpenAI stop 风格',
+    description: 'stop reason 更接近 OpenAI finish_reason，可能经过协议转换。',
+    priority: 74,
+  },
+  model_name_mismatch: {
+    text: '模型名不一致',
+    description: '返回模型名和请求模型名不一致，可能被路由到其他模型或被中间层改写。',
+    priority: 88,
+  },
+  tool_use_invalid: {
+    text: '工具结构缺失',
+    description: '要求工具调用时没有返回 Claude tool_use block，工具透传或模型能力可疑。',
+    priority: 86,
+  },
+  tool_id_mismatch: {
+    text: '工具 ID 异常',
+    description: 'tool_use id 不符合 toolu_ 家族，可能是 OpenAI tool_calls 被转换或伪装。',
+    priority: 84,
+  },
+  tool_name_mismatch: {
+    text: '工具名不匹配',
+    description: '返回的工具名不是探针要求的工具名，说明工具选择或透传异常。',
+    priority: 82,
+  },
+  tool_input_mismatch: {
+    text: '工具参数不匹配',
+    description: '工具参数没有包含探针要求的字段和值，可能发生参数改写或模型未遵循 schema。',
+    priority: 80,
+  },
+  tool_schema_invalid: {
+    text: '工具 schema 异常',
+    description: '工具参数没有通过 schema 校验，结构化调用能力不稳定。',
+    priority: 78,
+  },
+  json_invalid: {
+    text: 'JSON 非法',
+    description: '要求严格 JSON 时返回了不可解析内容，可能是普通聊天模型或格式约束未生效。',
+    priority: 76,
+  },
+  json_object_expected: {
+    text: '非 JSON 对象',
+    description: '要求 JSON 对象时返回了其他类型，结构化输出不符合预期。',
+    priority: 75,
+  },
+  json_schema_invalid: {
+    text: 'JSON schema 不符',
+    description: 'JSON 可解析但字段类型、枚举或数组要求不符合探针约束。',
+    priority: 74,
+  },
+  protocol_mismatch: {
+    text: '协议结构不符',
+    description: '响应结构偏离 Claude Messages API，协议可信度下降。',
+    priority: 72,
+  },
+  usage_missing: {
+    text: 'usage 缺失',
+    description: '缺少 token usage 字段或字段族不对，可能是中间层裁剪或协议转换。',
+    priority: 70,
+  },
+  message_id_family_mismatch: {
+    text: 'Message ID 异常',
+    description: 'message id 不属于预期 Claude 家族，可能不是原生 Claude 响应。',
+    priority: 68,
+  },
+  thinking_signature_missing: {
+    text: 'Signature 缺失',
+    description: 'Thinking block 没有 signature，Claude Code thinking 链路可信度不足。',
+    priority: 88,
+  },
+  signature_interop_failed: {
+    text: 'Signature 互通失败',
+    description: 'Relay 无法复用 source 生成的 thinking signature，可能不是同源 Claude Code 能力。',
+    priority: 90,
+  },
+  request_failed: {
+    text: '请求失败',
+    description: '上游请求失败，需先确认 base URL、模型名、密钥、协议和该能力是否被支持。',
+    priority: 64,
+  },
+  provider_error_variant: {
+    text: '错误形态变体',
+    description: '上游返回了同类拒绝，但错误文案和官方参考不完全一致，通常作为轻微代理痕迹处理。',
+    priority: 30,
+  },
+  latency_outlier: {
+    text: '延迟异常',
+    description: '请求延迟明显偏高，可能是中转链路、排队或上游不稳定。',
+    priority: 22,
+  },
+  regex_keypoint_missing: {
+    text: '关键点缺失',
+    description: '输出没有命中探针要求的关键证据，可能未真正处理输入。',
+    priority: 58,
+  },
+  required_keypoint_missing: {
+    text: '必要内容缺失',
+    description: '输出缺少必要关键词或关键结论，遵循度不足。',
+    priority: 56,
+  },
+  exact_output_mismatch: {
+    text: '精确输出不符',
+    description: '要求精确回显时输出不一致，可能发生 prompt 忽略或中间层改写。',
+    priority: 54,
+  },
+};
+
+function infoFor(label: string): LabelInfo {
+  if (label.startsWith('json_missing:')) {
+    const field = label.split(':', 2)[1] || '-';
+    return {
+      text: `JSON 缺字段 ${field}`,
+      description: `返回 JSON 缺少必填字段 ${field}。`,
+      priority: 74,
+    };
+  }
+  if (label.startsWith('missing:')) {
+    const token = label.split(':').slice(1).join(':') || '-';
+    return {
+      text: `缺少 ${token}`,
+      description: `输出未包含探针要求的关键内容：${token}。`,
+      priority: 58,
+    };
+  }
+  return LABELS[label] ?? { text: label, description: label, priority: 0 };
+}
+
+export function labelText(label: string): string {
+  return infoFor(label).text;
+}
+
+export function labelDescription(label: string): string {
+  return infoFor(label).description;
+}
+
+export function labelTooltip(label: string): string {
+  const description = labelDescription(label);
+  return description === label ? label : `${label}：${description}`;
+}
+
+export function topRiskLabels(probes: ClaudeCodeDiagnosticProbe[], limit = 6): string[] {
+  const labels = new Map<string, number>();
+  for (const probe of probes) {
+    if (probe.status !== 'fail' && probe.status !== 'warning') continue;
+    if (probe.severity === 'reference') continue;
+    for (const label of probe.labels ?? []) {
+      labels.set(label, Math.max(labels.get(label) ?? 0, infoFor(label).priority));
+    }
+  }
+  return [...labels.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([label]) => label);
+}
+
+export function probeDiagnosis(probe: ClaudeCodeDiagnosticProbe): string {
+  const labels = probe.labels ?? [];
+  if (probe.status === 'pass' && labels.length === 0) return '测试通过，未发现该项异常。';
+  const primary = topRiskLabels([probe], 1)[0] ?? labels[0];
+  if (primary) return labelDescription(primary);
+  if (probe.evidence_excerpt) return probe.evidence_excerpt;
+  if (probe.detail) return probe.detail;
+  if (probe.status === 'queued') return '等待执行该探针。';
+  if (probe.status === 'running') return '正在执行该探针。';
+  return '暂无可解释标签，请结合原始证据继续判断。';
+}

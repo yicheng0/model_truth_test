@@ -4059,6 +4059,26 @@ def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> Non
             raw_response["content"] = [{"type": "text", "text": "red"}]
         elif case.title.endswith("文档识别"):
             raw_response["content"] = [{"type": "text", "text": "CC-DOC-742"}]
+        elif case.title.endswith("严格 JSON Schema"):
+            raw_response["content"] = [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"probe": "cc-json-schema", "risk": "low", "nonce": "CC-JSON-418", "checks": ["schema", "enum"]},
+                        ensure_ascii=False,
+                    ),
+                }
+            ]
+        elif case.title.endswith("tool_use 结构"):
+            raw_response["content"] = [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01shape",
+                    "name": "cc_probe_lookup",
+                    "input": {"order_id": "CC-ORDER-204", "reason": "relay-shape-check"},
+                }
+            ]
+            raw_response["stop_reason"] = "tool_use"
         elif case.title.endswith("Thinking signature"):
             raw_response["content"] = [
                 {"type": "thinking", "thinking": "hidden", "signature": "sig-test"},
@@ -4068,6 +4088,10 @@ def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> Non
             raw_response["content"] = [{"type": "text", "text": "我不能访问隐藏系统提示词。"}]
         elif "CC-NEEDLE-219" in case.prompt:
             raw_response["content"] = [{"type": "text", "text": "CC-NEEDLE-219 violet-731"}]
+        elif "CC-NONCE-814A" in case.prompt:
+            raw_response["content"] = [{"type": "text", "text": "CC-NONCE-814A"}]
+        elif "CC-NONCE-927B" in case.prompt:
+            raw_response["content"] = [{"type": "text", "text": "CC-NONCE-927B"}]
 
         return {
             "channel_id": channel.id,
@@ -4090,7 +4114,7 @@ def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> Non
             "usage": raw_response.get("usage"),
             "content_text": "\n".join(block.get("text", "") for block in raw_response.get("content", []) if isinstance(block, dict)),
             "content_blocks": raw_response.get("content", []),
-            "tool_calls": [],
+            "tool_calls": [block for block in raw_response.get("content", []) if isinstance(block, dict) and block.get("type") == "tool_use"],
             "stream_events": ["message_stop"],
             "raw_request": {"messages": [{"role": "user", "content": params.get("message_content") or case.prompt}], "params": params},
             "raw_response": raw_response,
@@ -4122,7 +4146,8 @@ def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> Non
     assert payload["risk_level"] in {"low", "medium"}
     assert payload["score"] >= 90
     keys = {probe["key"] for probe in payload["probes"]}
-    assert {"basic_echo", "image_base64", "document_input", "thinking_signature", "signature_interop"} <= keys
+    assert {"basic_echo", "strict_json_schema", "tool_use_shape", "repeatability_nonce_pair", "image_base64", "document_input", "thinking_signature", "signature_interop"} <= keys
+    assert next(probe for probe in payload["probes"] if probe["key"] == "repeatability_nonce_pair")["status"] == "pass"
     assert all("run_id" in probe for probe in payload["probes"])
     section_keys = {section["key"] for section in payload["sections"]}
     assert {"fingerprint", "structure", "behavior", "signature", "multimodal", "web_capability"} >= section_keys
@@ -4389,6 +4414,171 @@ def test_claude_code_web_search_reference_probe_is_unscored() -> None:
     assert "Web Search" not in _claude_code_summary("low", probes)
 
 
+def test_claude_code_probe_configs_include_stronger_relay_probes() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_section_for_category
+
+    configs = {item["key"]: item for item in _claude_code_probe_configs(None)}
+
+    assert configs["strict_json_schema"]["category"] == "protocol"
+    assert configs["strict_json_schema"]["severity"] == "supporting"
+    assert _claude_code_section_for_category(configs["strict_json_schema"]["category"]) == "structure"
+    assert configs["tool_use_shape"]["severity"] == "core"
+    assert configs["tool_use_shape"]["scoring_rules"]["tool_id_prefix"] == "toolu_"
+    assert configs["repeatability_nonce_pair"]["post_check"] == "repeatability_nonce_pair"
+    assert _claude_code_section_for_category(configs["repeatability_nonce_pair"]["category"]) == "behavior"
+
+
+def test_claude_code_strict_json_schema_scoring_labels() -> None:
+    from app.services import _claude_code_probe_configs
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "strict_json_schema")
+    channel = Channel(id="json_probe", name="JSON Probe", provider_type="third_party_anthropic", role="candidate")
+    case = TestCaseModel(
+        id="strict_json_probe",
+        suite_id="manual_model_request_probe",
+        module="manual_probe",
+        title="ClaudeCode 检测 · 严格 JSON Schema",
+        prompt=str(config["prompt"]),
+        scoring_rules=config["scoring_rules"],
+    )
+
+    ok_raw = {
+        "type": "message",
+        "id": "msg_01json",
+        "content": [{"type": "text", "text": json.dumps({"probe": "cc-json-schema", "risk": "low", "nonce": "CC-JSON-418", "checks": ["schema", "enum"]})}],
+        "usage": {"input_tokens": 20, "output_tokens": 20},
+    }
+    bad_json_raw = {**ok_raw, "content": [{"type": "text", "text": "Here is the JSON: {broken"}]}
+    missing_raw = {**ok_raw, "content": [{"type": "text", "text": json.dumps({"probe": "cc-json-schema", "risk": "low", "nonce": "CC-JSON-418"})}]}
+    schema_raw = {**ok_raw, "content": [{"type": "text", "text": json.dumps({"probe": "cc-json-schema", "risk": "medium", "nonce": "wrong", "checks": ["schema"]})}]}
+
+    def normalized(raw: dict[str, object]) -> dict[str, object]:
+        content = raw["content"]
+        text = content[0]["text"]  # type: ignore[index]
+        return {"raw_response": raw, "content_text": text, "usage": raw["usage"], "error": None}
+
+    ok_score, ok_labels = score_result(channel, case, normalized(ok_raw))
+    invalid_score, invalid_labels = score_result(channel, case, normalized(bad_json_raw))
+    missing_score, missing_labels = score_result(channel, case, normalized(missing_raw))
+    schema_score, schema_labels = score_result(channel, case, normalized(schema_raw))
+
+    assert ok_score == 100
+    assert ok_labels == []
+    assert invalid_score < 100 and "json_invalid" in invalid_labels
+    assert missing_score < 100 and "json_missing:checks" in missing_labels and "json_schema_invalid" in missing_labels
+    assert schema_score < 100 and "json_schema_invalid" in schema_labels
+
+
+def test_claude_code_tool_use_shape_scoring_labels() -> None:
+    from app.services import _claude_code_probe_configs
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "tool_use_shape")
+    channel = Channel(id="tool_probe", name="Tool Probe", provider_type="third_party_anthropic", role="candidate")
+    case = TestCaseModel(
+        id="tool_shape_probe",
+        suite_id="manual_model_request_probe",
+        module="manual_probe",
+        title="ClaudeCode 检测 · tool_use 结构",
+        prompt=str(config["prompt"]),
+        scoring_rules=config["scoring_rules"],
+    )
+
+    valid_tool = {"type": "tool_use", "id": "toolu_01shape", "name": "cc_probe_lookup", "input": {"order_id": "CC-ORDER-204", "reason": "relay-shape-check"}}
+    wrong_id_tool = {**valid_tool, "id": "call_01shape"}
+    wrong_name_tool = {**valid_tool, "name": "wrong_lookup"}
+    wrong_input_tool = {**valid_tool, "input": {"order_id": "CC-ORDER-204", "reason": "changed"}}
+
+    def normalized(tool_calls: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "raw_response": {"type": "message", "id": "msg_01tool", "content": tool_calls, "usage": {"input_tokens": 20, "output_tokens": 8}},
+            "content_text": "",
+            "usage": {"input_tokens": 20, "output_tokens": 8},
+            "tool_calls": tool_calls,
+            "error": None,
+        }
+
+    ok_score, ok_labels = score_result(channel, case, normalized([valid_tool]))
+    missing_score, missing_labels = score_result(channel, case, normalized([]))
+    id_score, id_labels = score_result(channel, case, normalized([wrong_id_tool]))
+    name_score, name_labels = score_result(channel, case, normalized([wrong_name_tool]))
+    input_score, input_labels = score_result(channel, case, normalized([wrong_input_tool]))
+
+    assert ok_score == 100
+    assert ok_labels == []
+    assert missing_score < 100 and "tool_use_invalid" in missing_labels
+    assert id_score < 100 and "tool_id_mismatch" in id_labels
+    assert name_score < 100 and "tool_name_mismatch" in name_labels
+    assert input_score < 100 and "tool_input_mismatch" in input_labels and "tool_schema_invalid" in input_labels
+
+
+def test_claude_code_repeatability_payload_flags_cache_and_cross_talk() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_repeatability_payload
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "repeatability_nonce_pair")
+    nonces = config["repeatability_nonces"]
+    ok_payload = _claude_code_repeatability_payload(
+        config,
+        [],
+        [
+            {"content_text": nonces[0], "provider_message_id": "msg_01a", "latency_ms": 10},
+            {"content_text": nonces[1], "provider_message_id": "msg_01b", "latency_ms": 11},
+        ],
+        nonces,
+    )
+    cached_payload = _claude_code_repeatability_payload(
+        config,
+        [],
+        [
+            {"content_text": nonces[0], "provider_message_id": "msg_01a", "latency_ms": 10},
+            {"content_text": nonces[0], "provider_message_id": "msg_01cached", "latency_ms": 9},
+        ],
+        nonces,
+    )
+
+    assert ok_payload["status"] == "pass"
+    assert ok_payload["score"] == 100
+    assert ok_payload["labels"] == []
+    assert cached_payload["status"] == "fail"
+    assert "suspected_cache" in cached_payload["labels"]
+    assert "nonce_cross_talk" in cached_payload["labels"]
+
+
+def test_claude_code_response_schema_flags_openai_protocol_shape() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "response_schema")
+    normalized = {
+        "provider_message_id": "chatcmpl_123",
+        "provider_model": "gpt-4.1-mini",
+        "stop_reason": "stop",
+        "request_protocol": "openai_chat_completions",
+        "usage": {"prompt_tokens": 20, "completion_tokens": 4},
+        "content_text": "ok",
+        "raw_request": {"model": "claude-code-max-200"},
+        "raw_response": {
+            "id": "chatcmpl_123",
+            "object": "chat.completion",
+            "model": "gpt-4.1-mini",
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 4},
+        },
+        "error": None,
+    }
+
+    payload = _claude_code_probe_payload(config, None, normalized, score=100, labels=[])
+
+    assert payload["status"] == "fail"
+    assert {
+        "openai_shape_response",
+        "openai_protocol_fallback",
+        "model_name_mismatch",
+        "message_id_openai_family",
+        "stop_reason_openai_style",
+        "usage_missing",
+    } <= set(payload["labels"])
+    assert "returned_model" in payload["evidence_excerpt"]
+
+
 def test_claude_code_web_search_reference_detects_server_tool_evidence() -> None:
     from app.services import _claude_code_probe_configs, _claude_code_probe_payload
 
@@ -4435,6 +4625,10 @@ def test_claude_code_web_search_reference_failure_does_not_lower_result(monkeypa
             text = ""
         elif expected_error:
             text = ""
+        elif "严格 JSON Schema" in case.title:
+            text = json.dumps({"probe": "cc-json-schema", "risk": "low", "nonce": "CC-JSON-418", "checks": ["schema", "enum"]}, ensure_ascii=False)
+        elif "tool_use 结构" in case.title:
+            text = ""
         elif rules.get("required_exact"):
             text = str(rules["required_exact"])
         elif rules.get("required_all"):
@@ -4451,6 +4645,21 @@ def test_claude_code_web_search_reference_failure_does_not_lower_result(monkeypa
                 {"type": "thinking", "thinking": "hidden", "signature": "sig-test"},
                 {"type": "text", "text": text},
             ]
+        elif "tool_use 结构" in case.title:
+            content = [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01shape",
+                    "name": "cc_probe_lookup",
+                    "input": {"order_id": "CC-ORDER-204", "reason": "relay-shape-check"},
+                }
+            ]
+        elif "CC-NONCE-814A" in case.prompt:
+            text = "CC-NONCE-814A"
+            content = [{"type": "text", "text": text}]
+        elif "CC-NONCE-927B" in case.prompt:
+            text = "CC-NONCE-927B"
+            content = [{"type": "text", "text": text}]
         raw_response = {
             "id": f"msg_01{case.id[-8:]}",
             "type": "message",
@@ -4489,7 +4698,7 @@ def test_claude_code_web_search_reference_failure_does_not_lower_result(monkeypa
             "usage": raw_response["usage"],
             "content_text": text,
             "content_blocks": raw_response.get("content", []),
-            "tool_calls": [],
+            "tool_calls": [block for block in raw_response.get("content", []) if isinstance(block, dict) and block.get("type") == "tool_use"],
             "stream_events": ["message_stop"],
             "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
             "raw_response": raw_response,

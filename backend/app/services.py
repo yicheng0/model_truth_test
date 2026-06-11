@@ -2480,6 +2480,74 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "scoring_rules": {"required_any": ["OK", "ok"]},
         },
         {
+            "key": "strict_json_schema",
+            "title": "严格 JSON Schema",
+            "category": "protocol",
+            "severity": "supporting",
+            "prompt": (
+                "只返回一个 JSON 对象，不要 Markdown，不要解释。"
+                '字段必须为 {"probe":"cc-json-schema","risk":"low","nonce":"CC-JSON-418","checks":["schema","enum"]}。'
+            ),
+            "request_params": {"max_tokens": 180, "temperature": 0},
+            "scoring_rules": {
+                "json_required": True,
+                "json_required_keys": ["probe", "risk", "nonce", "checks"],
+                "json_schema": {
+                    "type": "object",
+                    "required": ["probe", "risk", "nonce", "checks"],
+                    "properties": {
+                        "probe": {"type": "string", "enum": ["cc-json-schema"]},
+                        "risk": {"type": "string", "enum": ["low"]},
+                        "nonce": {"type": "string", "enum": ["CC-JSON-418"]},
+                        "checks": {
+                            "type": "array",
+                            "minItems": 2,
+                            "items": {"type": "string", "enum": ["schema", "enum"]},
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "key": "tool_use_shape",
+            "title": "tool_use 结构",
+            "category": "protocol",
+            "severity": "core",
+            "prompt": "请调用 cc_probe_lookup 工具查询 order_id=CC-ORDER-204，reason=relay-shape-check。不要直接回答文本。",
+            "request_params": {
+                "max_tokens": 320,
+                "temperature": 0,
+                "tools": [
+                    {
+                        "name": "cc_probe_lookup",
+                        "description": "Return probe order metadata.",
+                        "input_schema": {
+                            "type": "object",
+                            "required": ["order_id", "reason"],
+                            "properties": {
+                                "order_id": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                        },
+                    }
+                ],
+            },
+            "scoring_rules": {
+                "tool_required": True,
+                "tool_name": "cc_probe_lookup",
+                "tool_id_prefix": "toolu_",
+                "tool_input_contains": {"order_id": "CC-ORDER-204", "reason": "relay-shape-check"},
+                "tool_input_schema": {
+                    "type": "object",
+                    "required": ["order_id", "reason"],
+                    "properties": {
+                        "order_id": {"type": "string", "enum": ["CC-ORDER-204"]},
+                        "reason": {"type": "string", "enum": ["relay-shape-check"]},
+                    },
+                },
+            },
+        },
+        {
             "key": "image_base64",
             "title": "图片输入 base64",
             "category": "multimodal",
@@ -2592,6 +2660,17 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "prompt": f"{context_filler}\nneedle_id=CC-NEEDLE-219; needle_value=violet-731\n请只输出 needle_id 和 needle_value。",
             "request_params": {"max_tokens": 96, "temperature": 0},
             "scoring_rules": {"required_all": ["CC-NEEDLE-219", "violet-731"]},
+        },
+        {
+            "key": "repeatability_nonce_pair",
+            "title": "低温 nonce 双请求",
+            "category": "context",
+            "severity": "supporting",
+            "prompt": "请只输出本轮 nonce。",
+            "request_params": {"max_tokens": 64, "temperature": 0},
+            "repeatability_nonces": ["CC-NONCE-814A", "CC-NONCE-927B"],
+            "scoring_rules": {"required_exact": "CC-NONCE-814A"},
+            "post_check": "repeatability_nonce_pair",
         },
         {
             "key": "cache_control_invalid",
@@ -2722,13 +2801,22 @@ async def create_claude_code_test(
             }
         )
         try:
-            probe = await _run_claude_code_model_probe(
-                db,
-                channel,
-                config,
-                credentials_override=credentials_override,
-                persist_results=persist_results,
-            )
+            if config.get("post_check") == "repeatability_nonce_pair":
+                probe = await _run_claude_code_repeatability_probe(
+                    db,
+                    channel,
+                    config,
+                    credentials_override=credentials_override,
+                    persist_results=persist_results,
+                )
+            else:
+                probe = await _run_claude_code_model_probe(
+                    db,
+                    channel,
+                    config,
+                    credentials_override=credentials_override,
+                    persist_results=persist_results,
+                )
         except Exception as exc:
             logger.warning("claude_code_probe_failed channel=%s key=%s error=%s", channel.id, config.get("key"), str(exc)[:200])
             probe = _claude_code_failed_probe(config, str(exc))
@@ -2803,6 +2891,65 @@ async def _run_claude_code_model_probe(
     return _claude_code_probe_payload(config, result, normalized)
 
 
+async def _run_claude_code_repeatability_probe(
+    db: Session,
+    channel: Channel,
+    config: dict[str, Any],
+    *,
+    credentials_override: dict[str, Any] | None = None,
+    persist_results: bool = True,
+) -> dict[str, Any]:
+    nonces = [str(item) for item in config.get("repeatability_nonces", []) if str(item)]
+    if len(nonces) < 2:
+        raise ValueError("repeatability probe requires at least two nonces")
+    credentials = credentials_override or _merged_channel_credentials(channel, {})
+    results: list[Result] = []
+    normalized_items: list[dict[str, Any]] = []
+
+    run: Run | None = None
+    if persist_results:
+        run = Run(
+            id=new_id("run"),
+            suite_id=MANUAL_PROBE_SUITE_ID,
+            name=f"ClaudeCode 检测 · {config['title']}"[:200],
+            mode=MANUAL_PROBE_MODE,
+            test_scope="quick",
+            status="running",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=len(nonces),
+            completed_jobs=0,
+            started_at=datetime.now(timezone.utc),
+        )
+        db.add(run)
+        db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=channel.id, role_in_run=channel.role or "candidate"))
+        db.commit()
+
+    for index, nonce in enumerate(nonces, start=1):
+        nonce_config = dict(config)
+        nonce_config["prompt"] = f"请只输出本轮 nonce：{nonce}"
+        nonce_config["scoring_rules"] = {"required_exact": nonce}
+        nonce_config.pop("post_check", None)
+        case = _claude_code_case(db, nonce_config, persist=persist_results)
+        normalized = await invoke_channel(channel, case, index, credentials, use_mock=False)
+        normalized_items.append(normalized)
+        if run:
+            result = _result_from_normalized(run.id, case, channel, index, normalized)
+            results.append(result)
+            db.add(result)
+
+    if run:
+        run.completed_jobs = len(nonces)
+        run.finished_at = datetime.now(timezone.utc)
+        run.status = "failed" if any(item.get("error") for item in normalized_items) else "completed"
+        db.commit()
+        db.refresh(run)
+        for result in results:
+            db.refresh(result)
+
+    return _claude_code_repeatability_payload(config, results, normalized_items, nonces)
+
+
 def _claude_code_case(db: Session, config: dict[str, Any], *, persist: bool) -> TestCase:
     if persist:
         return _manual_probe_case(
@@ -2850,6 +2997,7 @@ def _claude_code_probe_payload(
     final_labels = labels if labels is not None else (result.labels if result else []) or []
     if config.get("post_check") == "web_search_reference":
         final_score, final_labels = _claude_code_web_search_reference_score(normalized)
+    final_score, final_labels = _claude_code_apply_probe_post_checks(config, normalized, final_score, final_labels)
     status = _claude_code_probe_status(config, final_score, final_labels, normalized)
     return {
         "key": str(config["key"]),
@@ -2870,6 +3018,105 @@ def _claude_code_probe_payload(
         "first_token_ms": normalized.get("first_token_ms"),
         "evidence_excerpt": _claude_code_probe_excerpt(config, normalized),
         "input_preview": _claude_code_input_preview(config),
+    }
+
+
+def _claude_code_apply_probe_post_checks(
+    config: dict[str, Any],
+    normalized: dict[str, Any],
+    score: float,
+    labels: list[str],
+) -> tuple[float, list[str]]:
+    if config.get("key") != "response_schema":
+        return score, labels
+    adjusted_score = score
+    adjusted_labels = set(labels)
+    raw_response = normalized.get("raw_response")
+    message_id = str(normalized.get("provider_message_id") or "")
+    provider_model = str(normalized.get("provider_model") or "")
+    requested_model = str((normalized.get("raw_request") or {}).get("model") or "")
+    protocol = str(normalized.get("request_protocol") or "")
+    stop_reason = str(normalized.get("stop_reason") or "")
+    usage = normalized.get("usage")
+
+    if isinstance(raw_response, dict) and raw_response.get("object") == "chat.completion":
+        adjusted_score -= 20
+        adjusted_labels.add("openai_shape_response")
+    if protocol == REQUEST_PROTOCOL_OPENAI:
+        adjusted_score -= 15
+        adjusted_labels.add("openai_protocol_fallback")
+    if requested_model and provider_model and provider_model != requested_model:
+        adjusted_score -= 15
+        adjusted_labels.add("model_name_mismatch")
+    if message_id.startswith("chatcmpl"):
+        adjusted_score -= 20
+        adjusted_labels.add("message_id_openai_family")
+    if stop_reason in {"stop", "length"}:
+        adjusted_score -= 8
+        adjusted_labels.add("stop_reason_openai_style")
+    if not isinstance(usage, dict) or not any(key in usage for key in ("input_tokens", "output_tokens")):
+        adjusted_score -= 10
+        adjusted_labels.add("usage_missing")
+    return max(0.0, min(100.0, adjusted_score)), sorted(adjusted_labels)
+
+
+def _claude_code_repeatability_payload(
+    config: dict[str, Any],
+    results: list[Result],
+    normalized_items: list[dict[str, Any]],
+    nonces: list[str],
+) -> dict[str, Any]:
+    labels: set[str] = set()
+    scores: list[float] = []
+    outputs: list[str] = []
+    for nonce, normalized in zip(nonces, normalized_items):
+        text = str(normalized.get("content_text") or "").strip()
+        outputs.append(text)
+        if normalized.get("error"):
+            labels.add("request_failed")
+            scores.append(0.0)
+            continue
+        if text != nonce:
+            labels.add("nonce_mismatch")
+            scores.append(0.0)
+        else:
+            scores.append(100.0)
+    if len(set(outputs)) < len(outputs):
+        labels.add("suspected_cache")
+    if outputs and any(output in nonces and output != nonce for output, nonce in zip(outputs, nonces)):
+        labels.add("nonce_cross_talk")
+    final_score = _avg(scores) or 0.0
+    if "suspected_cache" in labels:
+        final_score = min(final_score, 40.0)
+    if "nonce_cross_talk" in labels:
+        final_score = min(final_score, 30.0)
+    representative = normalized_items[-1] if normalized_items else {}
+    status = _claude_code_probe_status(config, final_score, sorted(labels), representative)
+    evidence_bits = []
+    for index, (nonce, normalized) in enumerate(zip(nonces, normalized_items), start=1):
+        evidence_bits.append(
+            f"attempt{index} nonce={nonce} output={str(normalized.get('content_text') or '').strip()[:80] or '-'} "
+            f"message_id={normalized.get('provider_message_id') or '-'} request_id={request_id_from_normalized(normalized) or '-'}"
+        )
+    return {
+        "key": str(config["key"]),
+        "title": str(config["title"]),
+        "category": str(config["category"]),
+        "section": _claude_code_section_for_category(str(config["category"])),
+        "status": status,
+        "severity": str(config.get("severity") or "supporting"),
+        "score": round(final_score, 2),
+        "labels": sorted(labels),
+        "run_id": results[0].run_id if results else None,
+        "result_id": results[-1].id if results else None,
+        "message_id": representative.get("provider_message_id"),
+        "request_id": request_id_from_normalized(representative),
+        "request_protocol": representative.get("request_protocol"),
+        "provider_endpoint": representative.get("provider_endpoint"),
+        "latency_ms": sum(int(item.get("latency_ms") or 0) for item in normalized_items),
+        "first_token_ms": representative.get("first_token_ms"),
+        "evidence_excerpt": "；".join(evidence_bits),
+        "input_preview": None,
     }
 
 
@@ -2897,7 +3144,26 @@ def _claude_code_probe_status(config: dict[str, Any], score: float, labels: list
 def _claude_code_probe_excerpt(config: dict[str, Any], normalized: dict[str, Any]) -> str:
     if config.get("post_check") == "web_search_reference":
         return _claude_code_web_search_excerpt(normalized)
+    if config.get("key") == "response_schema":
+        return _claude_code_protocol_consistency_excerpt(normalized)
     return _claude_code_excerpt(normalized)
+
+
+def _claude_code_protocol_consistency_excerpt(normalized: dict[str, Any]) -> str:
+    raw = normalized.get("raw_response")
+    requested_model = (normalized.get("raw_request") or {}).get("model") if isinstance(normalized.get("raw_request"), dict) else None
+    raw_type = raw.get("type") if isinstance(raw, dict) else None
+    raw_object = raw.get("object") if isinstance(raw, dict) else None
+    fields = {
+        "raw_type": raw_type or raw_object or "-",
+        "message_id": normalized.get("provider_message_id") or "-",
+        "requested_model": requested_model or "-",
+        "returned_model": normalized.get("provider_model") or "-",
+        "stop_reason": normalized.get("stop_reason") or "-",
+        "request_protocol": normalized.get("request_protocol") or "-",
+        "usage_keys": sorted((normalized.get("usage") or {}).keys()) if isinstance(normalized.get("usage"), dict) else [],
+    }
+    return json.dumps(fields, ensure_ascii=False, default=str)
 
 
 def _claude_code_excerpt(normalized: dict[str, Any]) -> str:
@@ -6700,6 +6966,12 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
     if rules.get("tool_required") and not normalized.get("tool_calls"):
         score -= 35
         labels.append("tool_use_invalid")
+    if rules.get("tool_id_prefix"):
+        prefix = str(rules.get("tool_id_prefix") or "")
+        tool_calls = normalized.get("tool_calls") or []
+        if prefix and not any(str(call.get("id") or "").startswith(prefix) for call in tool_calls):
+            score -= 20
+            labels.append("tool_id_mismatch")
     if rules.get("tool_name"):
         tool_calls = normalized.get("tool_calls") or []
         if not any(call.get("name") == rules["tool_name"] for call in tool_calls):
