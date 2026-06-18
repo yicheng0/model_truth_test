@@ -23,7 +23,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .redaction import merge_redacted_config, redact_secrets, redact_text
 from .schemas import (
     BaselineBuildCreate,
@@ -296,17 +296,133 @@ def scheduled_tests_health(db: Session) -> dict[str, Any]:
         and SCHEDULER_LAST_TICK_AT is not None
         and _as_utc(SCHEDULER_LAST_TICK_AT) < now - timedelta(seconds=180)
     )
+    overdue_job_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(PatrolJob)
+            .where(PatrolJob.status.in_(["queued", "running"]), PatrolJob.due_at.is_not(None), PatrolJob.due_at <= _naive_utc(now))
+        )
+        or 0
+    )
+    stale_attempt_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(PatrolJobAttempt)
+            .where(
+                PatrolJobAttempt.status == "running",
+                PatrolJobAttempt.started_at <= _naive_utc(now - timedelta(seconds=SCHEDULED_TEST_TASK_TIMEOUT_SECONDS)),
+            )
+        )
+        or 0
+    )
     return {
         "enabled": scheduler_enabled(),
         "instance_id": SCHEDULER_INSTANCE_ID,
         "last_tick_at": SCHEDULER_LAST_TICK_AT,
         "stale_schedule_count": stale_schedule_count,
         "overdue_schedule_count": overdue_schedule_count,
+        "overdue_job_count": overdue_job_count,
+        "stale_attempt_count": stale_attempt_count,
         "heartbeat_stale": heartbeat_stale,
         "queued_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "queued"),
         "running_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "running"),
         "next_due_at": min(next_due_candidates, default=None),
     }
+
+
+def create_patrol_job_for_schedule(db: Session, scheduled: ScheduledChannelTest) -> PatrolJob:
+    job = PatrolJob(
+        id=new_id("pjob"),
+        scheduled_test_id=scheduled.id,
+        channel_id=scheduled.channel_id,
+        status="queued",
+        due_at=datetime.now(timezone.utc),
+        claimed_by=SCHEDULER_INSTANCE_ID,
+        claimed_until=scheduled.locked_until,
+        job_metadata={
+            "test_scope": scheduled.test_scope,
+            "interval_minutes": scheduled.interval_minutes,
+            "source": "scheduled_test_execution",
+        },
+    )
+    db.add(job)
+    db.flush()
+    return job
+
+
+def claimable_patrol_job_for_schedule(db: Session, scheduled: ScheduledChannelTest) -> PatrolJob | None:
+    return db.scalar(
+        select(PatrolJob)
+        .where(
+            PatrolJob.scheduled_test_id == scheduled.id,
+            PatrolJob.status == "queued",
+            PatrolJob.run_id.is_(None),
+        )
+        .order_by(PatrolJob.created_at, PatrolJob.id)
+        .limit(1)
+    )
+
+
+def get_or_create_patrol_job_for_schedule(db: Session, scheduled: ScheduledChannelTest) -> PatrolJob:
+    return claimable_patrol_job_for_schedule(db, scheduled) or create_patrol_job_for_schedule(db, scheduled)
+
+
+def start_patrol_job_attempt(
+    db: Session,
+    job: PatrolJob,
+    *,
+    attempt_index: int,
+    run_id: str | None = None,
+) -> PatrolJobAttempt:
+    now = datetime.now(timezone.utc)
+    if not job.started_at:
+        job.started_at = now
+    job.status = "running"
+    job.run_id = run_id or job.run_id
+    job.claimed_by = SCHEDULER_INSTANCE_ID
+    job.claimed_until = _lock_expiry(now)
+    attempt = PatrolJobAttempt(
+        id=new_id("pattempt"),
+        job_id=job.id,
+        attempt_index=attempt_index,
+        worker_id=SCHEDULER_INSTANCE_ID,
+        status="running",
+        run_id=run_id,
+        started_at=now,
+        timeout_seconds=SCHEDULED_TEST_TASK_TIMEOUT_SECONDS,
+    )
+    db.add(attempt)
+    db.flush()
+    return attempt
+
+
+def finish_patrol_job_attempt(
+    db: Session,
+    job_id: str | None,
+    attempt_id: str | None,
+    *,
+    status: str,
+    run_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    if not job_id:
+        return
+    now = datetime.now(timezone.utc)
+    job = db.get(PatrolJob, job_id)
+    attempt = db.get(PatrolJobAttempt, attempt_id) if attempt_id else None
+    safe_error = redact_text(error) if error else None
+    if attempt:
+        attempt.status = status
+        attempt.finished_at = now
+        attempt.run_id = run_id or attempt.run_id
+        if safe_error:
+            attempt.error_type = "runtime_error"
+            attempt.error_message = safe_error
+    if job:
+        job.status = status
+        job.finished_at = now
+        job.run_id = run_id or job.run_id
+        job.last_error = safe_error
 
 
 def similarity(a: str, b: str) -> float:
@@ -1200,6 +1316,36 @@ def _clean_auth_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
     return cleaned or None
 
 
+def _resolve_secret_reference(reference: Any) -> str | None:
+    """Resolve a runtime secret reference.
+
+    Phase-1 enterprise credential hardening intentionally supports only
+    environment-variable references (`env:NAME`) so local development and
+    existing SQLite deployments stay compatible. Future providers (Vault, KMS,
+    cloud Secret Manager) should plug in here without changing runner code.
+    """
+    if not isinstance(reference, str):
+        return None
+    text = reference.strip()
+    if not text:
+        return None
+    if text.lower().startswith("env:"):
+        env_name = text.split(":", 1)[1].strip()
+        if not env_name:
+            return None
+        return os.getenv(env_name)
+    return None
+
+
+def resolve_channel_credentials(config: dict[str, Any] | None) -> dict[str, Any]:
+    credentials = dict(config or {})
+    secret_ref = credentials.get("secret_ref") or credentials.get("credential_ref")
+    resolved_secret = _resolve_secret_reference(secret_ref)
+    if resolved_secret and not str(credentials.get("api_key") or "").strip():
+        credentials["api_key"] = resolved_secret
+    return credentials
+
+
 def create_suite(db: Session, data: TestSuiteCreate) -> TestSuite:
     existing = db.get(TestSuite, data.id) if data.id else None
     if existing:
@@ -1962,7 +2108,7 @@ def _merged_channel_credentials(channel: Channel, runtime: dict[str, Any] | None
         credentials.update(channel.auth_config_encrypted)
     if runtime:
         credentials.update(runtime)
-    return credentials
+    return resolve_channel_credentials(credentials)
 
 
 def _result_from_normalized(run_id: str, case: TestCase, channel: Channel, attempt: int, normalized: dict[str, Any]) -> Result:
@@ -3925,6 +4071,8 @@ async def execute_scheduled_channel_test(
         if scheduled and scheduled.test_scope == "scheduled_probe":
             return await execute_scheduled_probe_run(session_factory, scheduled_id, advance_next_run=advance_next_run)
     run_id: str | None = None
+    job_id: str | None = None
+    attempt_id: str | None = None
     max_retries = 0
     retry_interval_minutes = 5
     attempt_index = 0
@@ -3939,6 +4087,14 @@ async def execute_scheduled_channel_test(
                 channel = db.get(Channel, scheduled.channel_id)
                 if not channel:
                     raise ValueError("Channel not found")
+                if job_id is None:
+                    job = get_or_create_patrol_job_for_schedule(db, scheduled)
+                    job_id = job.id
+                else:
+                    job = db.get(PatrolJob, job_id)
+                    if not job:
+                        job = get_or_create_patrol_job_for_schedule(db, scheduled)
+                        job_id = job.id
                 max_retries = max(0, scheduled.max_retries)
                 retry_interval_minutes = max(1, scheduled.retry_interval_minutes)
                 use_mock = scheduled.use_mock
@@ -3961,6 +4117,8 @@ async def execute_scheduled_channel_test(
                 )
                 run_id = run.id
                 run.scheduled_test_id = scheduled.id
+                attempt = start_patrol_job_attempt(db, job, attempt_index=attempt_index, run_id=run.id)
+                attempt_id = attempt.id
                 scheduled.last_run_id = run.id
                 scheduled.last_status = "running"
                 scheduled.last_error = None
@@ -3980,11 +4138,13 @@ async def execute_scheduled_channel_test(
                 if not scheduled or not run:
                     return run
                 if run.status == "completed":
+                    finish_patrol_job_attempt(db, job_id, attempt_id, status="completed", run_id=run.id)
                     release_scheduled_test_lock(db, scheduled, status=run.status, error=None)
                     await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
                     await create_alerts_for_run(session_factory, run.id, scheduled.id)
                     return run
                 if run.status != "failed" or attempt_index >= max_retries:
+                    finish_patrol_job_attempt(db, job_id, attempt_id, status=run.status, run_id=run.id, error=None if run.status != "failed" else "Run finished with status failed")
                     release_scheduled_test_lock(db, scheduled, status=run.status, error=f"Run finished with status {run.status}")
                     if run.status == "failed":
                         await create_alerts_for_run(session_factory, run.id, scheduled.id)
@@ -4003,6 +4163,7 @@ async def execute_scheduled_channel_test(
             if scheduled:
                 if advance_next_run:
                     scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
+                finish_patrol_job_attempt(db, job_id, attempt_id, status="failed", run_id=run_id, error=str(exc))
                 release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc))
                 logger.exception("scheduled_test_failed scheduled_id=%s run_id=%s", scheduled_id, run_id)
         return None
@@ -4190,6 +4351,8 @@ async def execute_scheduled_probe_run(
     *,
     advance_next_run: bool = True,
 ) -> Run | None:
+    job_id: str | None = None
+    attempt_id: str | None = None
     with session_factory() as db:
         scheduled = db.get(ScheduledChannelTest, scheduled_id)
         if not scheduled:
@@ -4209,6 +4372,8 @@ async def execute_scheduled_probe_run(
         scheduled.last_started_at = datetime.now(timezone.utc)
         scheduled.locked_by = SCHEDULER_INSTANCE_ID
         scheduled.locked_until = _lock_expiry()
+        job = get_or_create_patrol_job_for_schedule(db, scheduled)
+        job_id = job.id
         db.commit()
 
     model_payload: dict[str, Any] | None = None
@@ -4225,6 +4390,10 @@ async def execute_scheduled_probe_run(
             run = model_payload["run"]
             result = model_payload["result"]
             run.scheduled_test_id = scheduled.id
+            job = db.get(PatrolJob, job_id) if job_id else None
+            if job:
+                attempt = start_patrol_job_attempt(db, job, attempt_index=0, run_id=run.id)
+                attempt_id = attempt.id
             scheduled.last_run_id = run.id
             db.commit()
 
@@ -4235,6 +4404,7 @@ async def execute_scheduled_probe_run(
                 return run
             signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
             report = await build_scheduled_probe_report(session_factory, db, scheduled, run.id, model_payload, signature_result)
+            finish_patrol_job_attempt(db, job_id, attempt_id, status="completed", run_id=run.id)
             release_scheduled_test_lock(db, scheduled, status="completed", error=None)
             db.refresh(run)
 
@@ -4246,6 +4416,7 @@ async def execute_scheduled_probe_run(
             if scheduled:
                 if advance_next_run:
                     scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
+                finish_patrol_job_attempt(db, job_id, attempt_id, status="failed", run_id=run.id if run else None, error=str(exc))
                 release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc))
         return None
 
@@ -5748,6 +5919,8 @@ async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids
                 logger.exception("scheduler_claim_failed scheduled_id=%s", scheduled.id)
                 continue
             if claimed:
+                create_patrol_job_for_schedule(db, claimed)
+                db.commit()
                 due_ids.append(claimed.id)
     if due_ids:
         logger.info("scheduler_tick due=%d claimed=%d", len(schedules), len(due_ids))

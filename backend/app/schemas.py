@@ -701,12 +701,29 @@ class BulkDeleteRequest(BaseModel):
     ids: list[str] = Field(default_factory=list)
 
 
+class AuditLogRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    actor_id: str | None = None
+    actor_name: str | None = None
+    action: str
+    target_type: str
+    target_id: str
+    request_id: str | None = None
+    before_summary: dict[str, Any] | None = None
+    after_summary: dict[str, Any] | None = None
+    audit_metadata: dict[str, Any] | None = None
+    created_at: datetime | None = None
+
+
 class ScheduledTestHealthRead(BaseModel):
     enabled: bool
     instance_id: str
     last_tick_at: datetime | None = None
     stale_schedule_count: int
     overdue_schedule_count: int = 0
+    overdue_job_count: int = 0
+    stale_attempt_count: int = 0
     heartbeat_stale: bool = False
     queued_schedule_count: int
     running_schedule_count: int

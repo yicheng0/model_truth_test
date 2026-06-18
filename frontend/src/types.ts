@@ -18,6 +18,8 @@ export type JsonObject = Record<string, any>;
 export interface ChannelAuthConfig {
   [key: string]: unknown;
   api_key?: string;
+  secret_ref?: string;
+  credential_ref?: string;
   account_type?: string;
   request_protocol?: string;
   region?: string;

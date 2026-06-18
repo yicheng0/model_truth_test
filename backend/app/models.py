@@ -118,6 +118,42 @@ class ScheduledChannelTest(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class PatrolJob(Base):
+    __tablename__ = "patrol_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scheduled_test_id: Mapped[str] = mapped_column(ForeignKey("scheduled_channel_tests.id"), nullable=False, index=True)
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="queued", index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job_metadata: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
+
+
+class PatrolJobAttempt(Base):
+    __tablename__ = "patrol_job_attempts"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("patrol_jobs.id"), nullable=False, index=True)
+    attempt_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="running", index=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), nullable=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_metadata: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
+
+
 class ChannelAlert(Base):
     __tablename__ = "channel_alerts"
 
@@ -281,4 +317,20 @@ class ClaudeCodeEvidence(Base):
     risk_level: Mapped[str] = mapped_column(String(20), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    actor_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    actor_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    target_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    request_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    before_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    audit_metadata: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

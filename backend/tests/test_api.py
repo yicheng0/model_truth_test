@@ -30,7 +30,7 @@ from app import database as database_module
 from app.database import SessionLocal, engine, init_db
 from app.job_store import InMemoryJobStore
 from app.main import app, cors_origins
-from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
+from app.models import AuditLog, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate, TestSuiteCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
@@ -59,7 +59,7 @@ def reset_database() -> None:
                 sidecar.unlink()
     init_db()
     with SessionLocal() as db:
-        for model in [ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel, ChannelTaxonomySetting, FeishuBroadcastSetting]:
+        for model in [AuditLog, PatrolJobAttempt, PatrolJob, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel, ChannelTaxonomySetting, FeishuBroadcastSetting]:
             db.execute(delete(model))
         db.commit()
         db.expunge_all()
@@ -270,7 +270,18 @@ def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["instance_id"]
-    assert {"enabled", "instance_id", "stale_schedule_count", "overdue_schedule_count", "heartbeat_stale", "queued_schedule_count", "running_schedule_count", "next_due_at"} <= set(payload)
+    assert {
+        "enabled",
+        "instance_id",
+        "stale_schedule_count",
+        "overdue_schedule_count",
+        "overdue_job_count",
+        "stale_attempt_count",
+        "heartbeat_stale",
+        "queued_schedule_count",
+        "running_schedule_count",
+        "next_due_at",
+    } <= set(payload)
 
 
 def test_scheduled_tests_schema_backfill_migration_adds_missing_columns(tmp_path: Path) -> None:
@@ -578,7 +589,7 @@ def test_reset_database_clears_custom_state_and_restores_defaults() -> None:
 def test_seed_demo_data_uses_minimal_defaults_without_restored_fixture_side_effects() -> None:
     init_db()
     with SessionLocal() as db:
-        for model in [ChannelTaxonomySetting, FeishuBroadcastSetting, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
+        for model in [AuditLog, PatrolJobAttempt, PatrolJob, ChannelTaxonomySetting, FeishuBroadcastSetting, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
             db.execute(delete(model))
         db.commit()
         seed_demo_data(db)
@@ -623,7 +634,7 @@ def test_restored_fixture_does_not_include_api_keys() -> None:
 def test_list_endpoints_self_heal_empty_seed_tables() -> None:
     reset_database()
     with SessionLocal() as db:
-        for model in [ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
+        for model in [AuditLog, PatrolJobAttempt, PatrolJob, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
             db.execute(delete(model))
         db.commit()
 
@@ -647,7 +658,7 @@ def test_list_endpoints_self_heal_empty_seed_tables() -> None:
 def test_admin_reseed_restores_missing_seed_data_without_secret_overwrite() -> None:
     reset_database()
     with SessionLocal() as db:
-        for model in [ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
+        for model in [AuditLog, PatrolJobAttempt, PatrolJob, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel]:
             db.execute(delete(model))
         db.commit()
         create_channel(
@@ -2127,9 +2138,17 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
 
     with SessionLocal() as db:
         report = db.scalar(select(Report).where(Report.run_id == updated_schedule["last_run_id"], Report.channel_id == "negative_sample"))
+        job = db.scalar(select(PatrolJob).where(PatrolJob.scheduled_test_id == schedule["id"], PatrolJob.run_id == updated_schedule["last_run_id"]))
+        attempt = db.scalar(select(PatrolJobAttempt).where(PatrolJobAttempt.job_id == job.id)) if job else None
 
     assert report is not None
     assert report.evidence["signature_interop"]["ok"] is True
+    assert job is not None
+    assert job.status == "completed"
+    assert job.run_id == updated_schedule["last_run_id"]
+    assert attempt is not None
+    assert attempt.status == "completed"
+    assert attempt.run_id == updated_schedule["last_run_id"]
 
 
 def test_scheduled_test_tick_claims_overdue_schedule_and_advances_next_run(monkeypatch) -> None:
@@ -2154,10 +2173,14 @@ def test_scheduled_test_tick_claims_overdue_schedule_and_advances_next_run(monke
     with SessionLocal() as db:
         scheduled = db.get(ScheduledChannelTest, schedule["id"])
         assert scheduled is not None
+        job = db.scalar(select(PatrolJob).where(PatrolJob.scheduled_test_id == schedule["id"]))
         assert scheduled.last_status == "queued"
         assert scheduled.next_run_at is not None
         assert scheduled.next_run_at > old_next.replace(tzinfo=None)
         assert scheduled.locked_until is not None
+        assert job is not None
+        assert job.status == "queued"
+        assert job.run_id is None
 
 
 def test_scheduled_channel_test_supports_simplified_probe_create() -> None:
@@ -2205,6 +2228,62 @@ def test_run_scheduled_test_now_returns_queued_before_background_execution(monke
     assert payload["last_status"] == "queued"
     assert payload["last_run_id"] is None
     assert executed == [schedule["id"]]
+
+
+def test_scheduled_test_operations_write_audit_logs(monkeypatch) -> None:
+    async def fake_execute_scheduled_channel_test(session_factory, scheduled_id, *, advance_next_run=True):  # noqa: ANN001, ARG001
+        return None
+
+    monkeypatch.setattr("app.main.execute_scheduled_channel_test", fake_execute_scheduled_channel_test)
+    reset_database()
+    actor_headers = {"X-Actor": "patrol-operator", "X-Request-Id": "req-audit-123"}
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/scheduled-tests",
+            headers=actor_headers,
+            json={
+                "name": "audited patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "enabled": True,
+            },
+        )
+        assert created.status_code == 200
+        schedule = created.json()
+
+        updated = client.patch(
+            f"/api/scheduled-tests/{schedule['id']}",
+            headers=actor_headers,
+            json={"name": "audited patrol updated", "interval_minutes": 120, "enabled": True},
+        )
+        assert updated.status_code == 200
+
+        run_now = client.post(f"/api/scheduled-tests/{schedule['id']}/run-now", headers=actor_headers)
+        assert run_now.status_code == 200
+
+        deleted = client.delete(
+            f"/api/scheduled-tests/{schedule['id']}",
+            headers={**actor_headers, **ADMIN_HEADERS},
+        )
+        assert deleted.status_code == 200
+
+        audit_response = client.get("/api/audit-logs", params={"target_id": schedule["id"]})
+
+    assert audit_response.status_code == 200
+    audit_logs = audit_response.json()
+    actions = [item["action"] for item in audit_logs]
+    assert actions == [
+        "scheduled_test.delete",
+        "scheduled_test.run_now",
+        "scheduled_test.update",
+        "scheduled_test.create",
+    ]
+    assert all(item["actor_id"] == "patrol-operator" for item in audit_logs)
+    assert all(item["request_id"] == "req-audit-123" for item in audit_logs)
+    update_log = next(item for item in audit_logs if item["action"] == "scheduled_test.update")
+    assert update_log["before_summary"]["interval_minutes"] == 60
+    assert update_log["after_summary"]["interval_minutes"] == 120
+    assert update_log["audit_metadata"]["changed_fields"] == ["enabled", "interval_minutes", "name"]
 
 
 def test_scheduled_channel_test_supports_run_window() -> None:
@@ -3182,6 +3261,39 @@ def test_channel_update_preserves_existing_secret_when_redacted_placeholder_is_s
     assert stored.auth_config["request_protocol"] == "anthropic_messages"
 
 
+def test_channel_secret_ref_is_redacted_in_api_response_and_resolved_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("CLAUDE_PATROL_TEST_API_KEY", "sk-env-secret-abcdef")
+    reset_database()
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/channels",
+            json={
+                "name": "Env Secret Channel",
+                "provider_type": "anthropic",
+                "model_name": "claude-test",
+                "auth_config": {
+                    "secret_ref": "env:CLAUDE_PATROL_TEST_API_KEY",
+                    "request_protocol": "anthropic_messages",
+                },
+                "enabled": True,
+            },
+        )
+        channel_id = created.json()["id"]
+
+    assert created.status_code == 200
+    created_blob = json.dumps(created.json(), ensure_ascii=False)
+    assert "CLAUDE_PATROL_TEST_API_KEY" not in created_blob
+    assert "sk-env-secret-abcdef" not in created_blob
+    assert "[REDACTED]" in created.json()["auth_config"]["secret_ref"]
+
+    with SessionLocal() as db:
+        stored = db.get(Channel, channel_id)
+        assert stored is not None
+        assert stored.auth_config["secret_ref"] == "env:CLAUDE_PATROL_TEST_API_KEY"
+        assert _merged_channel_credentials(stored, {})["api_key"] == "sk-env-secret-abcdef"
+        assert _merged_channel_credentials(stored, {"api_key": "runtime-key"})["api_key"] == "runtime-key"
+
+
 def test_channel_delete_rejects_referenced_channel() -> None:
     reset_database()
     with SessionLocal() as db:
@@ -3479,6 +3591,89 @@ def test_runtime_secret_is_redacted_from_stored_results_api_and_report_download(
     assert "[REDACTED]" in json.dumps(results_payload, ensure_ascii=False)
     assert report_response.status_code == 200
     assert secret not in report_response.text
+
+
+def test_env_secret_ref_secret_is_redacted_from_stored_results_and_report(monkeypatch) -> None:
+    reset_database()
+    secret = "sk-env-ref-secret-abcdef"
+    monkeypatch.setenv("CLAUDE_PATROL_ENV_REF_SECRET", secret)
+
+    async def fake_anthropic_call(channel, raw_request, credentials):  # noqa: ANN001
+        assert credentials["api_key"] == secret
+        return {
+            "type": "message",
+            "id": "msg_01envsecretref",
+            "model": channel.model_name,
+            "role": "assistant",
+            "content": [{"type": "text", "text": f"ok x-api-key={secret}"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 8, "output_tokens": 3},
+            "debug": {"api_key": secret, "secret_ref": "env:CLAUDE_PATROL_ENV_REF_SECRET"},
+        }
+
+    monkeypatch.setattr("app.services._anthropic_compatible_call", fake_anthropic_call)
+
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="env_secret_ref_suite", name="Env Secret Ref Suite"))
+        create_case(
+            db,
+            TestCaseCreate(
+                id="env_secret_ref_case",
+                suite_id="env_secret_ref_suite",
+                module="protocol",
+                title="Env secret ref case",
+                prompt="Return a normal response.",
+                request_params={"max_tokens": 16, "temperature": 0},
+                scoring_rules={"quick": True},
+            ),
+        )
+        channel = create_channel(
+            db,
+            ChannelCreate(
+                id="env_secret_ref_channel",
+                name="Env Secret Ref Channel",
+                provider_type="anthropic",
+                role="candidate",
+                base_url="https://provider.example",
+                model_name="claude-test",
+                auth_config={"secret_ref": "env:CLAUDE_PATROL_ENV_REF_SECRET"},
+            ),
+        )
+        run = create_run(
+            db,
+            RunCreate(
+                name="Env secret ref run",
+                suite_id="env_secret_ref_suite",
+                channel_ids={"candidate": [channel.id]},
+                repeat_count=1,
+                concurrency=1,
+                use_mock=False,
+                test_scope="quick",
+            ),
+        )
+        run_id = run.id
+
+    asyncio.run(execute_run(SessionLocal, run_id, use_mock=False))
+
+    with SessionLocal() as db:
+        result = db.scalar(select(Result).where(Result.run_id == run_id))
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert result is not None
+        assert report is not None
+        stored_blob = json.dumps(
+            {
+                "normalized_response": result.normalized_response,
+                "raw_request": result.raw_request,
+                "raw_response": result.raw_response,
+                "report_evidence": report.evidence,
+                "report_markdown": report.markdown,
+            },
+            ensure_ascii=False,
+        )
+
+    assert secret not in stored_blob
+    assert "CLAUDE_PATROL_ENV_REF_SECRET" not in stored_blob
+    assert "[REDACTED]" in stored_blob
 
 
 def test_channel_models_endpoint_returns_model_ids(monkeypatch) -> None:

@@ -129,4 +129,18 @@ npm run build
 - 禁止在报告、日志、截图、告警和 seeded fixtures 中保存密钥明文。
 - 为渠道、巡检计划、告警复审、报告删除和通知设置增加权限控制与操作审计。
 - 调整真实 provider 调用行为前，先核对当前官方 API 文档，避免巡检规则因接口变更产生误报。
+### 凭证引用
+
+渠道 `auth_config` 支持使用环境变量引用来避免在数据库中直接保存 API Key 明文：
+
+```json
+{
+  "auth_config": {
+    "secret_ref": "env:ANTHROPIC_API_KEY",
+    "request_protocol": "anthropic_messages"
+  }
+}
+```
+
+运行时会把 `secret_ref` / `credential_ref` 解析为 `api_key`。同一次 run 传入的 runtime credentials 仍然优先于渠道配置。当前已支持 `env:NAME` 形式；Vault、KMS、云 Secret Manager 属于后续企业级扩展。
 

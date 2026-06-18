@@ -20,10 +20,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .admin import require_admin, require_configured_admin
+from .audit import audit_actor, audit_log_read, record_audit_log, scheduled_test_audit_summary
 from .database import SessionLocal, get_db, init_db
 from .claude_code_check import claude_code_check_steps, claude_code_status, run_claude_code_check, run_claude_code_check_with_progress
 from .job_store import InMemoryJobStore
-from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ClaudeCodeEvidence, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .models import AuditLog, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ClaudeCodeEvidence, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .restored_seed import restored_seed_data
 from .suite_seed import DEFAULT_SUITE_ID, default_cases
 from .schemas import (
@@ -32,6 +33,7 @@ from .schemas import (
     BaselineSnapshotRead,
     BaselineSnapshotUpdate,
     ArenaRunCreate,
+    AuditLogRead,
     ChannelAlertRead,
     ChannelAlertReviewUpdate,
     ClaudeCodeCheckCreate,
@@ -1217,6 +1219,24 @@ def validate_baseline(baseline_id: str, db: Session = Depends(get_db)) -> Baseli
         return snapshot
 
 
+@app.get("/api/audit-logs", response_model=list[AuditLogRead])
+def list_audit_logs(
+    action: str | None = Query(default=None),
+    target_type: str | None = Query(default=None),
+    target_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> list[dict[str, object]]:
+    stmt = select(AuditLog).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(limit)
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    if target_type:
+        stmt = stmt.where(AuditLog.target_type == target_type)
+    if target_id:
+        stmt = stmt.where(AuditLog.target_id == target_id)
+    return [audit_log_read(log) for log in db.scalars(stmt).all()]
+
+
 @app.get("/api/settings/feishu-broadcast", response_model=FeishuBroadcastSettingRead)
 def get_feishu_broadcast_setting(db: Session = Depends(get_db)) -> dict[str, object]:
     return feishu_setting_read(get_or_create_feishu_setting(db))
@@ -1265,9 +1285,24 @@ def list_scheduled_tests(
 
 
 @app.post("/api/scheduled-tests", response_model=ScheduledChannelTestRead)
-def add_scheduled_test(data: ScheduledChannelTestCreate, db: Session = Depends(get_db)) -> ScheduledChannelTest:
+def add_scheduled_test(
+    data: ScheduledChannelTestCreate,
+    actor: dict[str, str | None] = Depends(audit_actor),
+    db: Session = Depends(get_db),
+) -> ScheduledChannelTest:
     try:
-        return create_scheduled_channel_test(db, data)
+        scheduled = create_scheduled_channel_test(db, data)
+        record_audit_log(
+            db,
+            actor=actor,
+            action="scheduled_test.create",
+            target_type="scheduled_test",
+            target_id=scheduled.id,
+            after_summary=scheduled_test_audit_summary(scheduled),
+        )
+        db.commit()
+        db.refresh(scheduled)
+        return scheduled
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1318,10 +1353,16 @@ def get_scheduled_test(scheduled_id: str, db: Session = Depends(get_db)) -> dict
 
 
 @app.patch("/api/scheduled-tests/{scheduled_id}", response_model=ScheduledChannelTestRead)
-def update_scheduled_test(scheduled_id: str, data: ScheduledChannelTestUpdate, db: Session = Depends(get_db)) -> ScheduledChannelTest:
+def update_scheduled_test(
+    scheduled_id: str,
+    data: ScheduledChannelTestUpdate,
+    actor: dict[str, str | None] = Depends(audit_actor),
+    db: Session = Depends(get_db),
+) -> ScheduledChannelTest:
     scheduled = db.get(ScheduledChannelTest, scheduled_id)
     if not scheduled:
         raise HTTPException(status_code=404, detail="Scheduled test not found")
+    before_summary = scheduled_test_audit_summary(scheduled)
     previous = {
         "channel_id": scheduled.channel_id,
         "suite_id": scheduled.suite_id,
@@ -1345,6 +1386,17 @@ def update_scheduled_test(scheduled_id: str, data: ScheduledChannelTestUpdate, d
     schedule_fields = {"interval_minutes", "run_window_start", "run_window_end"}
     if schedule_fields.intersection(data.model_fields_set) and "next_run_at" not in data.model_fields_set:
         scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
+    db.flush()
+    record_audit_log(
+        db,
+        actor=actor,
+        action="scheduled_test.update",
+        target_type="scheduled_test",
+        target_id=scheduled.id,
+        before_summary=before_summary,
+        after_summary=scheduled_test_audit_summary(scheduled),
+        metadata={"changed_fields": sorted(data.model_fields_set)},
+    )
     db.commit()
     db.refresh(scheduled)
     return scheduled
@@ -1353,12 +1405,14 @@ def update_scheduled_test(scheduled_id: str, data: ScheduledChannelTestUpdate, d
 @app.delete("/api/scheduled-tests/{scheduled_id}")
 def delete_scheduled_test(
     scheduled_id: str,
+    actor: dict[str, str | None] = Depends(audit_actor),
     _admin: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     scheduled = db.get(ScheduledChannelTest, scheduled_id)
     if not scheduled:
         raise HTTPException(status_code=404, detail="Scheduled test not found")
+    before_summary = scheduled_test_audit_summary(scheduled)
     # Detach references so orphaned runs/alerts don't break the frontend.
     for alert in db.scalars(select(ChannelAlert).where(ChannelAlert.scheduled_test_id == scheduled_id)).all():
         alert.scheduled_test_id = None
@@ -1366,6 +1420,14 @@ def delete_scheduled_test(
         run.scheduled_test_id = None
     db.flush()
     db.delete(scheduled)
+    record_audit_log(
+        db,
+        actor=actor,
+        action="scheduled_test.delete",
+        target_type="scheduled_test",
+        target_id=scheduled_id,
+        before_summary=before_summary,
+    )
     db.commit()
     return {"deleted": True}
 
@@ -1374,6 +1436,7 @@ def delete_scheduled_test(
 async def run_scheduled_test_now(
     scheduled_id: str,
     background_tasks: BackgroundTasks,
+    actor: dict[str, str | None] = Depends(audit_actor),
     db: Session = Depends(get_db),
 ) -> ScheduledChannelTestRead:
     scheduled = db.get(ScheduledChannelTest, scheduled_id)
@@ -1385,6 +1448,16 @@ async def run_scheduled_test_now(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     claimed = claim_scheduled_test(db, scheduled.id, force=True)
     if claimed:
+        record_audit_log(
+            db,
+            actor=actor,
+            action="scheduled_test.run_now",
+            target_type="scheduled_test",
+            target_id=claimed.id,
+            after_summary=scheduled_test_audit_summary(claimed),
+        )
+        db.commit()
+        db.refresh(claimed)
         background_tasks.add_task(execute_scheduled_channel_test, SessionLocal, claimed.id)
         scheduled = claimed
     else:

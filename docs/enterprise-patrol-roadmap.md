@@ -113,86 +113,31 @@
 
 ## 4. 分阶段开发路线图
 
-## Phase 0：现状固化与风险清点
-
-目标：在不大改业务的前提下，给后续改造建立安全边界和测试基线。
-
-### 任务
-
-- [ ] 补充当前自动巡检架构说明：调度器、scheduled test、run、result、report、alert 的关系。
-- [ ] 梳理当前 API 路由清单，标注兼容接口和主接口。
-- [ ] 梳理当前数据模型字段，标注敏感字段和证据字段。
-- [ ] 给自动巡检关键链路增加回归测试：创建计划、run-now、调度 tick、生成 report、生成 alert、飞书 skipped/sent/failed。
-- [ ] 明确当前 `auth_config_encrypted` 不是强加密的事实，避免误导部署文档。
-
-### 验收
-
-- [ ] 新增 `docs/current-architecture.md`。
-- [ ] 新增自动巡检链路测试或补齐已有测试断点。
-- [ ] README 标注生产部署前密钥治理限制。
-
-## Phase 1：密钥治理与脱敏强化
-
-目标：企业上线前先解决凭证风险。
-
-### 任务
-
-- [ ] 将渠道凭证从普通 `auth_config` 里拆出：
-  - `auth_config` 保存非敏感配置。
-  - `secret_ref` 或 `credential_ref` 指向外部 Secret。
-- [ ] 支持环境变量 Secret 引用，例如 `env:ANTHROPIC_API_KEY`。
-- [ ] 预留 Vault/KMS/Secret Manager provider 接口。
-- [ ] 后端统一 `CredentialResolver`：运行时按 channel + secret_ref 解析凭证。
-- [ ] 前端不回显明文 key，只显示 masked preview 和 configured 状态。
-- [ ] 对 raw request、raw response、report、alert、日志进行统一脱敏检查。
-- [ ] 增加 secret 泄露单元测试：API key 不得出现在 DB report markdown、alert message、日志文本中。
-
-### 验收
-
-- [ ] 创建/更新 channel 不再要求把 API key 明文存入 DB。
-- [ ] 真实调用仍可通过 runtime credentials 或 secret_ref 工作。
-- [ ] mock 模式不受影响。
-- [ ] 测试覆盖常见 key/header/token 脱敏。
-
-## Phase 2：审计日志与权限边界
-
-目标：让企业知道谁改了什么，先实现轻量内控。
-
-### 任务
-
-- [ ] 新增 `audit_logs` 表。
-- [ ] 记录操作类型：channel create/update/delete、schedule create/update/delete/run-now、alert review/delete、report delete、setting update、credential change。
-- [ ] 每条记录包含 actor、action、target_type、target_id、before/after diff 摘要、request id、created_at。
-- [ ] 当前没有完整登录时，可先使用 `X-Admin-Token` / `X-Actor` / 本地默认 actor 过渡。
-- [ ] 删除类接口统一要求 admin 依赖。
-- [ ] 前端管理操作增加确认和操作人提示。
-
-### 验收
-
-- [ ] 管理操作能在审计日志查询到。
-- [ ] 删除 report/alert/schedule 有审计记录。
-- [ ] 审计记录不包含密钥明文。
-
 ## Phase 3：调度可靠性升级
 
-目标：从“进程内定时循环”升级到“可恢复、可追踪、可多实例安全运行”。
+目标：从“进程内定时循环”继续升级到“可恢复、可多实例安全运行”。
 
-### 任务
+已完成基线：
 
-- [ ] 新增 `scheduled_jobs` 或 `patrol_jobs` 表。
-- [ ] 新增 `patrol_job_attempts` 表。
-- [ ] 每次计划到期先创建 job，再由 worker claim job。
-- [ ] attempt 记录：queued_at、started_at、finished_at、status、error、timeout_seconds、worker_id、run_id。
-- [ ] 支持退避重试：retry_interval、max_retries、jitter。
-- [ ] 调度器健康检查增加：overdue jobs、stale attempts、worker heartbeat、last claim。
-- [ ] 兼容现有 `ScheduledChannelTest.last_*` 字段，用作摘要缓存。
+- 已新增 `patrol_jobs` 表。
+- 已新增 `patrol_job_attempts` 表。
+- 自动巡检执行会记录 job/attempt 历史，包括 started_at、finished_at、status、error、timeout_seconds、worker_id、run_id。
+- 调度器健康检查已增加 overdue job 和 stale attempt 计数。
+- 现有 `ScheduledChannelTest.last_*` 字段继续作为摘要缓存。
+- 每次巡检可以在数据库中看到 job 和 attempt 历史。
+- 调度 tick claim 到期计划后会先创建 queued job，执行阶段复用该 job。
+
+### 剩余任务
+
+- [ ] 将现有 schedule-lock 驱动执行进一步升级为 worker 直接 claim job 的完整队列式流程。
+- [ ] 支持退避重试：retry_interval、max_retries、jitter，并将重试原因写入 attempt metadata。
+- [ ] 调度器健康检查继续增加 worker heartbeat、last claim、active worker 列表。
 - [ ] 支持启动时恢复 stale job，并将未完成 run 标记为 failed/interrupted。
 
-### 验收
+### 剩余验收
 
 - [ ] 服务重启后未完成任务可恢复或明确失败。
 - [ ] 多实例下同一 job 不重复执行。
-- [ ] 每次巡检可以看到 job 和 attempt 历史。
 
 ## Phase 4：巡检策略模板化
 
@@ -536,7 +481,7 @@ npm run build
 
 ### M1：企业内测安全版
 
-包含 Phase 0、1、2 的核心内容。
+已完成当前文档、密钥基线和自动巡检计划审计基线；剩余权限/RBAC 可在后续企业认证模块继续扩展。
 
 成功标准：可以安全给内部团队长期试用，不担心密钥泄露和操作不可追溯。
 
@@ -560,10 +505,6 @@ npm run build
 
 ## 11. 首批落地任务建议
 
-建议下一轮优先做以下 5 个小步，风险低且收益高：
+建议下一轮优先做以下 1 个小步，风险低且收益高：
 
-1. 新增 `docs/current-architecture.md`，固化当前自动巡检链路。
-2. README 增加生产部署安全说明，明确当前凭证治理限制。
-3. 新增 `AuditLog` 模型和最小审计写入工具。
-4. 为 scheduled test 的 create/update/delete/run-now 写审计记录。
-5. 将飞书通知相关函数从 `services.py` 拆到独立模块，并保证测试通过。
+1. 将飞书通知相关函数从 `services.py` 拆到独立模块，并保证测试通过。
