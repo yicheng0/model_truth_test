@@ -54,6 +54,7 @@ from .suite_seed import default_cases, default_suite
 SCHEDULE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 SCHEDULER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 SCHEDULER_LOCK_MINUTES = int(os.getenv("SCHEDULER_LOCK_MINUTES", "30") or "30")
+SCHEDULED_TEST_TASK_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_TEST_TASK_TIMEOUT_SECONDS", "21600") or "21600")
 SCHEDULER_LAST_TICK_AT: datetime | None = None
 if not logging.getLogger().handlers and not logging.getLogger("claude_eval").handlers:
     logging.basicConfig(
@@ -237,6 +238,24 @@ def recover_stale_scheduled_tests(db: Session, *, now: datetime | None = None) -
     return recovered
 
 
+def refresh_active_scheduled_test_locks(db: Session, scheduled_ids: set[str], *, now: datetime | None = None) -> int:
+    if not scheduled_ids:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    result = db.execute(
+        update(ScheduledChannelTest)
+        .where(
+            ScheduledChannelTest.id.in_(scheduled_ids),
+            ScheduledChannelTest.locked_by == SCHEDULER_INSTANCE_ID,
+            ScheduledChannelTest.last_status.in_(["queued", "running"]),
+        )
+        .values(locked_until=_lock_expiry(now))
+    )
+    if result.rowcount:
+        db.commit()
+    return int(result.rowcount or 0)
+
+
 def scheduled_tests_health(db: Session) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     try:
@@ -254,17 +273,36 @@ def scheduled_tests_health(db: Session) -> dict[str, Any]:
                 next_due_candidates.append(_as_utc(schedule.next_run_at))
         except Exception:
             logger.warning("scheduled_tests_health: invalid next_run_at schedule_id=%s", schedule.id, exc_info=True)
+    overdue_schedule_count = 0
+    for schedule in enabled:
+        try:
+            if (
+                schedule.next_run_at
+                and _as_utc(schedule.next_run_at) <= now
+                and not _schedule_lock_active(schedule, now)
+                and schedule.last_status not in {"queued", "running"}
+            ):
+                overdue_schedule_count += 1
+        except Exception:
+            logger.warning("scheduled_tests_health: invalid overdue schedule_id=%s", schedule.id, exc_info=True)
     for schedule in schedules:
         try:
             if schedule.last_status in {"queued", "running"} and schedule.locked_until and _as_utc(schedule.locked_until) <= now:
                 stale_schedule_count += 1
         except Exception:
             logger.warning("scheduled_tests_health: invalid locked_until schedule_id=%s", schedule.id, exc_info=True)
+    heartbeat_stale = bool(
+        scheduler_enabled()
+        and SCHEDULER_LAST_TICK_AT is not None
+        and _as_utc(SCHEDULER_LAST_TICK_AT) < now - timedelta(seconds=180)
+    )
     return {
         "enabled": scheduler_enabled(),
         "instance_id": SCHEDULER_INSTANCE_ID,
         "last_tick_at": SCHEDULER_LAST_TICK_AT,
         "stale_schedule_count": stale_schedule_count,
+        "overdue_schedule_count": overdue_schedule_count,
+        "heartbeat_stale": heartbeat_stale,
         "queued_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "queued"),
         "running_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "running"),
         "next_due_at": min(next_due_candidates, default=None),
@@ -4196,7 +4234,7 @@ async def execute_scheduled_probe_run(
             if not scheduled or not run:
                 return run
             signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
-            report = build_scheduled_probe_report(db, scheduled, run.id, model_payload, signature_result)
+            report = await build_scheduled_probe_report(session_factory, db, scheduled, run.id, model_payload, signature_result)
             release_scheduled_test_lock(db, scheduled, status="completed", error=None)
             db.refresh(run)
 
@@ -4212,7 +4250,8 @@ async def execute_scheduled_probe_run(
         return None
 
 
-def build_scheduled_probe_report(
+async def build_scheduled_probe_report(
+    session_factory: sessionmaker[Session],
     db: Session,
     scheduled: ScheduledChannelTest,
     run_id: str,
@@ -4238,6 +4277,10 @@ def build_scheduled_probe_report(
     probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
     raw_score = min(probe_scores) if probe_scores else (result.score if isinstance(result, Result) else 0)
     classification = scheduled_probe_classification(model_requests, signature_evidence, sorted(labels), raw_score)
+    rule_classification = dict(classification)
+    ai_judge = await scheduled_probe_ai_judge(session_factory, model_requests, signature_evidence, sorted(labels), classification)
+    if ai_judge:
+        labels.add("patrol_ai_reviewed")
     score = classification["score"]
     classification_status = str(classification["status"])
     classification_label = str(classification["label"])
@@ -4260,6 +4303,13 @@ def build_scheduled_probe_report(
         "classification_status": classification_status,
         "classification_label": classification_label,
         "classification_reason": classification_reason,
+        "rule_classification": {
+            "classification_status": rule_classification.get("status"),
+            "classification_label": rule_classification.get("label"),
+            "classification_reason": rule_classification.get("reason"),
+            "score": rule_classification.get("score"),
+        },
+        "ai_judge": ai_judge,
         "test_scope": "scheduled_probe",
     }
     summary = f"自动巡检完成：{classification_label}。{classification_reason}"
@@ -4358,6 +4408,18 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
     signature_time = signature.get("completed_at") or signature.get("created_at") or evidence.get("completed_at") or "-"
     classification_label = evidence.get("classification_label") or evidence.get("detected_provider_hint") or "未分类"
     classification_reason = evidence.get("classification_reason") or "-"
+    ai_judge = evidence.get("ai_judge") if isinstance(evidence.get("ai_judge"), dict) else None
+    ai_judge_section = ""
+    if ai_judge:
+        ai_judge_section = f"""
+## AI 疑难复核
+
+- 裁判渠道：{ai_judge.get('judge_channel_name') or ai_judge.get('judge_channel_id') or '本地兜底'}
+- 是否真实调用：{'是' if ai_judge.get('attempted') else '否'}
+- 复核判定：{ai_judge.get('classification_label') or ai_judge.get('classification_status') or '-'}
+- 置信度：{ai_judge.get('confidence') if ai_judge.get('confidence') is not None else '-'}
+- 说明：{ai_judge.get('reason') or '-'}
+"""
     return f"""# {channel.name} - 自动巡检资源报告
 
 ## 基本信息
@@ -4378,6 +4440,7 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 {model_rows}
 
+{ai_judge_section}
 ## Thinking Signature 互通
 
 - 状态：{signature.get("status") or "-"}
@@ -4443,12 +4506,20 @@ def scheduled_probe_classification(
 ) -> dict[str, Any]:
     label_set = set(labels)
     normalized_score = _safe_float(score)
+    provider_hint = scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels)
     if _scheduled_probe_all_parameter_unsupported(model_requests):
         return {
             "status": "aws_resource",
             "label": "AWS 资源",
             "reason": "三项自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理。",
             "score": max(normalized_score, 95),
+        }
+    if provider_hint == "疑似 AWS/Bedrock" and _scheduled_probe_has_native_aws_shape(model_requests, label_set):
+        return {
+            "status": "aws_resource",
+            "label": "AWS 资源",
+            "reason": "巡检探针存在 AWS/Bedrock message id 或签名证据，虽有中间层错误，仍按低置信 AWS 资源处理并交由 AI 复核。",
+            "score": max(normalized_score, 90),
         }
     if _has_expected_claude_probe(model_requests, label_set):
         return {
@@ -4463,10 +4534,216 @@ def scheduled_probe_classification(
         normalized_score = min(normalized_score, 60)
     return {
         "status": "anomaly",
-        "label": scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels),
+        "label": provider_hint,
         "reason": "巡检探针未命中预期 Claude/AWS 资源形态，需要复审。",
         "score": normalized_score,
     }
+
+
+def _scheduled_probe_has_native_aws_shape(model_requests: list[dict[str, Any]], labels: set[str]) -> bool:
+    if not labels.intersection({"thinking_temperature_not_rejected", "unexpected_error_response", "provider_error_variant"}):
+        return False
+    return any(
+        str(item.get("message_id") or "").startswith("msg_bdrk_")
+        or str(item.get("message_channel_type") or "") == "AWS Bedrock"
+        for item in model_requests
+    )
+
+
+def scheduled_probe_needs_ai_judge(model_requests: list[dict[str, Any]], labels: list[str], classification: dict[str, Any]) -> bool:
+    if not model_requests:
+        return False
+    label_set = {str(label) for label in labels}
+    if str(classification.get("status") or "") == "anomaly":
+        return True
+    unsupported = [_probe_parameter_unsupported(item) for item in model_requests]
+    if any(unsupported) and not all(unsupported):
+        return True
+    error_text = "\n".join(str(item.get("error") or "") for item in model_requests).lower()
+    if "overloaded" in error_text:
+        return True
+    message_types = {str(item.get("message_channel_type") or "") for item in model_requests}
+    if "thinking_temperature_not_rejected" in label_set and any(
+        str(item.get("message_id") or "").startswith(("msg_bdrk_", "msg_")) or str(item.get("message_channel_type") or "") in {"AWS Bedrock", "Anthropic"}
+        for item in model_requests
+    ):
+        return True
+    blocking = label_set.intersection(BLOCKING_SCHEDULED_PROBE_LABELS | {"unexpected_error_response", "thinking_adaptive_enabled_wrong_error"})
+    return bool(blocking and message_types.intersection({"AWS Bedrock", "Anthropic"}))
+
+
+def _patrol_judge_reference_channel(db: Session) -> Channel | None:
+    preferred_roles = ("gold", "official_cloud", "reference")
+    for role in preferred_roles:
+        channel = db.scalar(
+            select(Channel)
+            .where(Channel.enabled.is_(True), Channel.role == role)
+            .order_by(Channel.name)
+            .limit(1)
+        )
+        if channel:
+            return channel
+    return db.scalar(
+        select(Channel)
+        .where(Channel.enabled.is_(True), Channel.is_reference.is_(True))
+        .order_by(Channel.name)
+        .limit(1)
+    )
+
+
+def _patrol_ai_judge_prompt(model_requests: list[dict[str, Any]], signature_evidence: dict[str, Any], labels: list[str], classification: dict[str, Any]) -> str:
+    evidence = {
+        "rule_classification": {
+            "classification_status": classification.get("status"),
+            "classification_label": classification.get("label"),
+            "confidence": "low",
+            "reason": classification.get("reason"),
+            "score": classification.get("score"),
+        },
+        "labels": labels,
+        "model_requests": [
+            {
+                "key": item.get("key"),
+                "title": item.get("title"),
+                "labels": item.get("labels") if isinstance(item.get("labels"), list) else [],
+                "score": item.get("score"),
+                "message_id_prefix": str(item.get("message_id") or "")[:16],
+                "message_channel_type": item.get("message_channel_type"),
+                "request_id": item.get("request_id"),
+                "request_protocol": item.get("request_protocol"),
+                "provider_type": item.get("channel_provider_type"),
+                "account_type": item.get("channel_account_type"),
+                "provider_endpoint": item.get("provider_endpoint"),
+                "error_excerpt": str(item.get("error") or "")[:800],
+            }
+            for item in model_requests
+            if isinstance(item, dict)
+        ],
+        "signature_interop": {
+            "status": signature_evidence.get("status"),
+            "reason": str(signature_evidence.get("reason") or "")[:800],
+            "source_message_channel_type": signature_evidence.get("source_message_channel_type"),
+            "relay_message_channel_type": signature_evidence.get("relay_message_channel_type"),
+            "source_message_id_prefix": str(signature_evidence.get("source_message_id") or "")[:16],
+            "relay_message_id_prefix": str(signature_evidence.get("relay_message_id") or "")[:16],
+        },
+    }
+    return (
+        "你是 Claude 渠道自动巡检的复核裁判。只根据给定脱敏证据判断渠道形态，"
+        "不要凭模型自称判断。输出严格 JSON，不要 Markdown。JSON 字段必须为："
+        "classification_status(claude/aws_resource/anomaly), classification_label, confidence(0-1), "
+        "reason, evidence_refs(array), recommended_labels(array)。\n\n"
+        f"证据：{json.dumps(redact_secrets(evidence), ensure_ascii=False, default=str)}"
+    )
+
+
+def _fallback_patrol_ai_judge(model_requests: list[dict[str, Any]], labels: list[str], classification: dict[str, Any], reason: str) -> dict[str, Any]:
+    label_set = {str(label) for label in labels}
+    unsupported_count = sum(1 for item in model_requests if _probe_parameter_unsupported(item))
+    has_native_message = any(
+        str(item.get("message_id") or "").startswith(("msg_bdrk_", "msg_")) or str(item.get("message_channel_type") or "") in {"AWS Bedrock", "Anthropic"}
+        for item in model_requests
+    )
+    if unsupported_count == len(model_requests) and model_requests:
+        status, label, confidence, judge_reason = "aws_resource", "AWS 资源", 0.78, "全部探针呈现参数不支持/原生拒绝形态。"
+    elif has_native_message and label_set.intersection({"thinking_temperature_not_rejected", "unexpected_error_response", "provider_error_variant"}):
+        status, label, confidence, judge_reason = "claude", "Claude 资源", 0.72, "存在 Claude/AWS message id 家族证据，但探针返回不完全一致。"
+    else:
+        status = str(classification.get("status") or "anomaly")
+        label = str(classification.get("label") or "来源特征不明确")
+        confidence = 0.45
+        judge_reason = "证据不足，保持规则低置信结论。"
+    return {
+        "enabled": True,
+        "attempted": False,
+        "fallback": True,
+        "error": reason,
+        "judge_channel_id": None,
+        "classification_status": status,
+        "classification_label": label,
+        "confidence": confidence,
+        "reason": judge_reason,
+        "evidence_refs": [str(item.get("key") or item.get("title") or "probe") for item in model_requests[:3]],
+        "recommended_labels": sorted(label_set),
+    }
+
+
+def _parse_patrol_ai_judge_response(text: str, judge_channel: Channel) -> dict[str, Any]:
+    raw = (text or "").strip()
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    payload = json.loads(match.group(0) if match else raw)
+    status = str(payload.get("classification_status") or payload.get("status") or "anomaly")
+    if status not in {"claude", "aws_resource", "anomaly"}:
+        status = "anomaly"
+    labels = payload.get("recommended_labels") if isinstance(payload.get("recommended_labels"), list) else []
+    refs = payload.get("evidence_refs") if isinstance(payload.get("evidence_refs"), list) else []
+    return {
+        "enabled": True,
+        "attempted": True,
+        "fallback": False,
+        "judge_channel_id": judge_channel.id,
+        "judge_channel_name": judge_channel.name,
+        "classification_status": status,
+        "classification_label": str(payload.get("classification_label") or ("AWS 资源" if status == "aws_resource" else "Claude 资源" if status == "claude" else "来源特征不明确")),
+        "confidence": max(0.0, min(1.0, _safe_float(payload.get("confidence")))),
+        "reason": str(payload.get("reason") or "AI 复核未返回说明")[:1000],
+        "evidence_refs": [str(item)[:200] for item in refs],
+        "recommended_labels": [str(item)[:100] for item in labels],
+    }
+
+
+async def scheduled_probe_ai_judge(
+    session_factory: sessionmaker[Session],
+    model_requests: list[dict[str, Any]],
+    signature_evidence: dict[str, Any],
+    labels: list[str],
+    classification: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not scheduled_probe_needs_ai_judge(model_requests, labels, classification):
+        return None
+    with session_factory() as db:
+        judge_channel = _patrol_judge_reference_channel(db)
+        if not judge_channel:
+            return _fallback_patrol_ai_judge(model_requests, labels, classification, "未找到启用的官方参考裁判渠道")
+        credentials = _merged_channel_credentials(judge_channel, {})
+        missing = _missing_live_credentials(judge_channel, credentials)
+        if missing:
+            fallback = _fallback_patrol_ai_judge(model_requests, labels, classification, missing)
+            fallback["judge_channel_id"] = judge_channel.id
+            fallback["judge_channel_name"] = judge_channel.name
+            return fallback
+        suite = _manual_probe_suite(db)
+        case = TestCase(
+            id=new_id("case"),
+            suite_id=suite.id,
+            module="scheduled_probe",
+            sort_order=999,
+            title="自动巡检 AI 疑难复核",
+            prompt=_patrol_ai_judge_prompt(model_requests, signature_evidence, labels, classification),
+            system_prompt="你是只输出 JSON 的巡检证据裁判。",
+            request_params={"max_tokens": 700, "temperature": 0},
+            scoring_rules={},
+            is_hidden=True,
+            enabled=True,
+        )
+        db.add(case)
+        db.commit()
+        try:
+            normalized = await invoke_channel(judge_channel, case, 1, dict(credentials), use_mock=False)
+            if normalized.get("error"):
+                fallback = _fallback_patrol_ai_judge(model_requests, labels, classification, str(normalized.get("error")))
+                fallback["judge_channel_id"] = judge_channel.id
+                fallback["judge_channel_name"] = judge_channel.name
+                return fallback
+            parsed = _parse_patrol_ai_judge_response(str(normalized.get("content_text") or ""), judge_channel)
+            parsed["request_id"] = request_id_from_normalized(normalized)
+            parsed["message_id"] = normalized.get("provider_message_id")
+            return redact_secrets(parsed)
+        except Exception as exc:
+            fallback = _fallback_patrol_ai_judge(model_requests, labels, classification, str(exc))
+            fallback["judge_channel_id"] = judge_channel.id
+            fallback["judge_channel_name"] = judge_channel.name
+            return fallback
 
 
 def _has_expected_claude_probe(model_requests: list[dict[str, Any]], labels: set[str]) -> bool:
@@ -4710,6 +4987,7 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
     classification_status = evidence.get("classification_status")
     classification_label = evidence.get("classification_label")
     classification_reason = evidence.get("classification_reason")
+    ai_judge = evidence.get("ai_judge") if isinstance(evidence.get("ai_judge"), dict) else None
     model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
     model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
     if not model_requests and model_request:
@@ -4729,6 +5007,7 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
             "classification_status": classification_status,
             "classification_label": classification_label,
             "classification_reason": classification_reason,
+            "ai_judge": ai_judge,
             "model_request": {
                 "status": _probe_summary_status(model_request),
                 "channel_id": model_request.get("channel_id") or model_channel_id,
@@ -5407,51 +5686,118 @@ def smart_patrol_daily_text(report: dict[str, Any], setting: FeishuBroadcastSett
     )
 
 
+async def _run_scheduled_test_with_timeout(
+    session_factory: sessionmaker[Session],
+    scheduled_id: str,
+    *,
+    timeout_seconds: int,
+) -> None:
+    try:
+        await asyncio.wait_for(
+            execute_scheduled_channel_test(session_factory, scheduled_id, advance_next_run=False),
+            timeout=max(1, timeout_seconds),
+        )
+    except asyncio.TimeoutError:
+        now = datetime.now(timezone.utc)
+        error = f"自动巡检任务超过 {max(1, timeout_seconds)} 秒未完成，系统已超时释放调度锁"
+        logger.error("scheduled_test_timeout scheduled_id=%s timeout_seconds=%d", scheduled_id, timeout_seconds)
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            if scheduled:
+                run = db.get(Run, scheduled.last_run_id) if scheduled.last_run_id else None
+                if run and run.status in {"pending", "running"}:
+                    run.status = "failed"
+                    run.finished_at = now
+                scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
+                release_scheduled_test_lock(db, scheduled, status="failed", error=error, finished_at=now)
+    except Exception as exc:
+        now = datetime.now(timezone.utc)
+        logger.exception("scheduled_test_task_failed scheduled_id=%s", scheduled_id)
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            if scheduled:
+                run = db.get(Run, scheduled.last_run_id) if scheduled.last_run_id else None
+                if run and run.status in {"pending", "running"}:
+                    run.status = "failed"
+                    run.finished_at = now
+                scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
+                release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc), finished_at=now)
+
+
+async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids: set[str] | None = None) -> list[str]:
+    await send_daily_patrol_report(session_factory)
+    now = datetime.now(timezone.utc)
+    due_ids: list[str] = []
+    active_ids = active_ids or set()
+    with session_factory() as db:
+        if active_ids:
+            refresh_active_scheduled_test_locks(db, active_ids, now=now)
+        recover_stale_scheduled_tests(db, now=now)
+        schedules = db.scalars(
+            select(ScheduledChannelTest)
+            .where(ScheduledChannelTest.enabled.is_(True), ScheduledChannelTest.next_run_at <= _naive_utc(now))
+            .order_by(ScheduledChannelTest.next_run_at)
+        ).all()
+        for scheduled in schedules:
+            if scheduled.id in active_ids:
+                continue
+            try:
+                claimed = claim_scheduled_test(db, scheduled.id, now=now, advance_next_run=True)
+            except Exception:
+                db.rollback()
+                logger.exception("scheduler_claim_failed scheduled_id=%s", scheduled.id)
+                continue
+            if claimed:
+                due_ids.append(claimed.id)
+    if due_ids:
+        logger.info("scheduler_tick due=%d claimed=%d", len(schedules), len(due_ids))
+    return due_ids
+
+
 async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_seconds: int = 60) -> None:
     global SCHEDULER_LAST_TICK_AT
-    _tracked_tasks: set[asyncio.Task[Any]] = set()
+    _tracked_tasks: dict[str, asyncio.Task[Any]] = {}
+
+    def _track_task(scheduled_id: str, task: asyncio.Task[Any]) -> None:
+        def _cleanup(done_task: asyncio.Task[Any]) -> None:
+            current = _tracked_tasks.get(scheduled_id)
+            if current is done_task:
+                _tracked_tasks.pop(scheduled_id, None)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Scheduled test task failed scheduled_id=%s", scheduled_id)
+
+        _tracked_tasks[scheduled_id] = task
+        task.add_done_callback(_cleanup)
+
     try:
         while True:
             SCHEDULER_LAST_TICK_AT = datetime.now(timezone.utc)
             try:
-                await send_daily_patrol_report(session_factory)
-                now = datetime.now(timezone.utc)
-                due_ids: list[str] = []
-                with session_factory() as db:
-                    recover_stale_scheduled_tests(db, now=now)
-                    schedules = db.scalars(
-                        select(ScheduledChannelTest)
-                        .where(ScheduledChannelTest.enabled.is_(True), ScheduledChannelTest.next_run_at <= _naive_utc(now))
-                        .order_by(ScheduledChannelTest.next_run_at)
-                    ).all()
-                    for scheduled in schedules:
-                        claimed = claim_scheduled_test(db, scheduled.id, now=now, advance_next_run=True)
-                        if claimed:
-                            due_ids.append(claimed.id)
-                if due_ids:
-                    logger.info("scheduler_tick due=%d claimed=%d", len(schedules), len(due_ids))
-                tasks = [
-                    asyncio.create_task(execute_scheduled_channel_test(session_factory, sid, advance_next_run=False))
-                    for sid in due_ids
-                ]
-                _tracked_tasks.update(tasks)
-                for task in asyncio.as_completed(tasks):
-                    try:
-                        await task
-                    except Exception:
-                        logger.exception("Scheduled test task failed")
-                    finally:
-                        _tracked_tasks.discard(task)
+                active_ids = {scheduled_id for scheduled_id, task in _tracked_tasks.items() if not task.done()}
+                due_ids = await scheduled_test_tick(session_factory, active_ids)
+                for sid in due_ids:
+                    task = asyncio.create_task(
+                        _run_scheduled_test_with_timeout(
+                            session_factory,
+                            sid,
+                            timeout_seconds=SCHEDULED_TEST_TASK_TIMEOUT_SECONDS,
+                        )
+                    )
+                    _track_task(sid, task)
             except Exception:
                 logger.exception("Scheduled test loop tick failed")
             await asyncio.sleep(max(5, poll_seconds))
     except asyncio.CancelledError:
         logger.info("scheduler_shutting_down tracked_tasks=%d", len(_tracked_tasks))
-        for task in _tracked_tasks:
+        for task in list(_tracked_tasks.values()):
             task.cancel()
-            if _tracked_tasks:
-                await asyncio.gather(*_tracked_tasks, return_exceptions=True)
-                _tracked_tasks.clear()
+        if _tracked_tasks:
+            await asyncio.gather(*_tracked_tasks.values(), return_exceptions=True)
+            _tracked_tasks.clear()
         raise
 
 
@@ -8181,6 +8527,7 @@ LABEL_EXPLANATIONS = {
     "request_failed": "请求失败，未获得可评分响应。",
     "channel_preflight_failed": "渠道预检失败，已停止该渠道剩余题目的正式请求。",
     "signature_interop_failed": "Thinking Signature 互通检测未通过，relay 无法复用 source 生成的签名 thinking block。",
+    "patrol_ai_reviewed": "自动巡检规则结论置信度较低，已调用官方参考渠道或本地兜底逻辑进行 AI 疑难复核。",
     "thinking_temperature_not_rejected": "启用 thinking 时携带非 1 temperature 未被上游拒绝，疑似中间层改写或非原生协议。",
     "thinking_adaptive_enabled_not_rejected": "thinking.adaptive.enabled 未被上游拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。",
     "thinking_adaptive_enabled_wrong_error": "上游返回了错误，但错误内容不是 thinking.adaptive.enabled 目标参数的原生拒绝。",

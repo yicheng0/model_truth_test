@@ -628,6 +628,42 @@ class ScheduledChannelTestRead(ScheduledChannelTestBase):
     updated_at: datetime | None = None
 
 
+class NewApiSyncRequest(BaseModel):
+    base_url: str = Field(min_length=1, max_length=1000)
+    admin_access_token: str = Field(min_length=1, max_length=2000)
+    relay_token: str = Field(min_length=1, max_length=2000)
+    page_size: int = Field(default=200, ge=1, le=500)
+    status: str = "enabled"
+    group: str | None = Field(default=None, max_length=200)
+    tag: str | None = Field(default=None, max_length=200)
+    model_keyword: str = Field(default="claude", max_length=200)
+    default_interval_minutes: int = Field(default=1440, ge=5, le=43200)
+    enabled: bool = True
+
+
+class NewApiSyncItemRead(BaseModel):
+    new_api_channel_id: str
+    channel_id: str
+    name: str
+    model_name: str | None = None
+    provider_type: str
+    action: str
+    schedule_action: str
+    reason: str | None = None
+
+
+class NewApiSyncRead(BaseModel):
+    base_url: str
+    total_remote: int
+    matched: int
+    create_count: int
+    update_count: int
+    skip_count: int
+    schedule_create_count: int
+    schedule_exists_count: int
+    items: list[NewApiSyncItemRead]
+
+
 class ChannelAlertRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -670,6 +706,8 @@ class ScheduledTestHealthRead(BaseModel):
     instance_id: str
     last_tick_at: datetime | None = None
     stale_schedule_count: int
+    overdue_schedule_count: int = 0
+    heartbeat_stale: bool = False
     queued_schedule_count: int
     running_schedule_count: int
     next_due_at: datetime | None = None

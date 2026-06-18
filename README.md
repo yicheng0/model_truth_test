@@ -119,3 +119,14 @@ npm run build
 - 真实模型请求探针：发送 thinking temperature、Web Search tool、thinking.adaptive.enabled 等参数探针，记录 `message.id`、request id、协议和 endpoint。
 
 告警会携带 run、report、message id、request id 和 source/relay message id 等证据，方便复审定位。自动巡检默认不使用 mock，也不需要手动选择测试集、渠道指纹、重复次数、并发度或评分阈值；这些旧字段仅用于兼容已有数据。
+## 生产部署安全说明
+
+当前项目支持运行时传入 API Key，并在报告、告警和原始请求/响应证据中尽量执行脱敏；但现有 `Channel.auth_config_encrypted` 字段在模型层仍是 JSON 配置字段，不能仅凭字段名视为已经完成企业级强加密或 KMS/Vault 托管。
+
+生产部署前建议优先完成：
+
+- 使用 Secret 引用、环境变量引用、KMS、Vault 或云 Secret Manager 托管 provider 凭证。
+- 禁止在报告、日志、截图、告警和 seeded fixtures 中保存密钥明文。
+- 为渠道、巡检计划、告警复审、报告删除和通知设置增加权限控制与操作审计。
+- 调整真实 provider 调用行为前，先核对当前官方 API 文档，避免巡检规则因接口变更产生误报。
+

@@ -1,4 +1,4 @@
-import type { Channel, Result, Run, RunResults } from './types';
+import type { Channel, PatrolAiJudgeEvidence, Result, Run, RunResults } from './types';
 import { formatChannelDisplayName } from './channelCredentials';
 
 export type PatrolModelRequestEvidence = {
@@ -54,6 +54,7 @@ export type PatrolEvidence = {
   classificationStatus?: string | null;
   classificationLabel?: string | null;
   classificationReason?: string | null;
+  aiJudge?: PatrolAiJudgeEvidence | null;
   modelRequests: PatrolModelRequestEvidence[];
   signature?: PatrolSignatureEvidence | null;
 };
@@ -105,8 +106,27 @@ export function extractPatrolEvidence(results: RunResults, preferredReportId?: s
     classificationStatus: asNullableString(evidence.classification_status),
     classificationLabel: asNullableString(evidence.classification_label),
     classificationReason: asNullableString(evidence.classification_reason),
+    aiJudge: normalizeAiJudge(asRecord(evidence.ai_judge)),
     modelRequests: hydratedModelRequests,
     signature: normalizeSignature(asRecord(evidence.signature_interop)),
+  };
+}
+
+function normalizeAiJudge(value?: Record<string, unknown> | null): PatrolAiJudgeEvidence | null {
+  if (!value) return null;
+  return {
+    enabled: Boolean(value.enabled),
+    attempted: Boolean(value.attempted),
+    fallback: Boolean(value.fallback),
+    judge_channel_id: asNullableString(value.judge_channel_id),
+    judge_channel_name: asNullableString(value.judge_channel_name),
+    classification_status: asNullableString(value.classification_status),
+    classification_label: asNullableString(value.classification_label),
+    confidence: typeof value.confidence === 'number' ? value.confidence : null,
+    reason: asNullableString(value.reason),
+    evidence_refs: asStringArray(value.evidence_refs),
+    recommended_labels: asStringArray(value.recommended_labels),
+    error: asNullableString(value.error),
   };
 }
 

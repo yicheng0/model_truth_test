@@ -1,5 +1,5 @@
-import { Button, Card, Descriptions, Drawer, Space, Typography, message } from 'antd';
-import { ClipboardCopy } from 'lucide-react';
+import { Button, Card, Descriptions, Drawer, Popconfirm, Space, Typography, message } from 'antd';
+import { ClipboardCopy, Trash2 } from 'lucide-react';
 import type { ChannelAlert } from '../types';
 import {
   alertChannelId,
@@ -20,6 +20,8 @@ type AlertLogDrawerProps = {
   channelName: string;
   channelDisplayId: string;
   onClose: () => void;
+  onDeleteRun?: (alert: ChannelAlert) => void;
+  deletingRun?: boolean;
 };
 
 async function copyText(text: string, successText: string) {
@@ -27,7 +29,7 @@ async function copyText(text: string, successText: string) {
   message.success(successText);
 }
 
-export default function AlertLogDrawer({ alert, channelName, channelDisplayId, onClose }: AlertLogDrawerProps) {
+export default function AlertLogDrawer({ alert, channelName, channelDisplayId, onClose, onDeleteRun, deletingRun = false }: AlertLogDrawerProps) {
   const requestId = alert ? alertRequestId(alert) : '';
   const messageId = alert ? alertResponseId(alert) : '';
   const error = alert ? alertErrorText(alert) : '';
@@ -59,7 +61,23 @@ export default function AlertLogDrawer({ alert, channelName, channelDisplayId, o
       open={Boolean(alert)}
       onClose={onClose}
       width={560}
-      extra={alert ? <Button icon={<ClipboardCopy size={15} />} onClick={() => void copyText(logText, '日志已复制')}>复制日志</Button> : null}
+      extra={alert ? (
+        <Space>
+          <Button icon={<ClipboardCopy size={15} />} onClick={() => void copyText(logText, '日志已复制')}>复制日志</Button>
+          {onDeleteRun ? (
+            <Popconfirm
+              title="删除关联巡检日志"
+              description="会删除这条告警关联的巡检任务、结果、报告和关联告警。确定删除吗？"
+              okText="删除日志"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => onDeleteRun(alert)}
+            >
+              <Button danger icon={<Trash2 size={15} />} loading={deletingRun}>删除关联日志</Button>
+            </Popconfirm>
+          ) : null}
+        </Space>
+      ) : null}
     >
       {alert ? (
         <Space direction="vertical" size={16} style={{ width: '100%' }}>

@@ -134,6 +134,42 @@ export type ChannelCreate = {
   enabled?: boolean;
 };
 
+export type NewApiSyncRequest = {
+  base_url: string;
+  admin_access_token: string;
+  relay_token: string;
+  page_size?: number;
+  status?: string;
+  group?: string | null;
+  tag?: string | null;
+  model_keyword?: string;
+  default_interval_minutes?: number;
+  enabled?: boolean;
+};
+
+export type NewApiSyncItem = {
+  new_api_channel_id: string;
+  channel_id: string;
+  name: string;
+  model_name?: string | null;
+  provider_type: string;
+  action: string;
+  schedule_action: string;
+  reason?: string | null;
+};
+
+export type NewApiSyncResult = {
+  base_url: string;
+  total_remote: number;
+  matched: number;
+  create_count: number;
+  update_count: number;
+  skip_count: number;
+  schedule_create_count: number;
+  schedule_exists_count: number;
+  items: NewApiSyncItem[];
+};
+
 export type SignatureInteropResult = {
   ok: boolean;
   status: 'pass' | 'fail' | string;
@@ -628,6 +664,21 @@ export type ScheduledProbeModelRequest = {
   error?: string | null;
 };
 
+export type PatrolAiJudgeEvidence = {
+  enabled?: boolean;
+  attempted?: boolean;
+  fallback?: boolean;
+  judge_channel_id?: string | null;
+  judge_channel_name?: string | null;
+  classification_status?: 'claude' | 'aws_resource' | 'anomaly' | string | null;
+  classification_label?: string | null;
+  confidence?: number | null;
+  reason?: string | null;
+  evidence_refs?: string[];
+  recommended_labels?: string[];
+  error?: string | null;
+};
+
 export type RunChannel = {
   id: string;
   run_id: string;
@@ -973,6 +1024,7 @@ export type ScheduledChannelTest = {
     classification_status?: 'claude' | 'aws_resource' | 'anomaly' | string | null;
     classification_label?: string | null;
     classification_reason?: string | null;
+    ai_judge?: PatrolAiJudgeEvidence | null;
   } | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -1011,6 +1063,8 @@ export type ScheduledTestsHealth = {
   instance_id: string;
   last_tick_at?: string | null;
   stale_schedule_count: number;
+  overdue_schedule_count?: number;
+  heartbeat_stale?: boolean;
   queued_schedule_count: number;
   running_schedule_count: number;
   next_due_at?: string | null;

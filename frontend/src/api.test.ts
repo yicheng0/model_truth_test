@@ -243,6 +243,45 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('previews new-api sync with admin key', async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+      removeItem: (key: string) => {
+        storage.delete(key);
+      },
+    });
+    setAdminApiKey('test-admin-key');
+    const payload = {
+      base_url: 'https://new-api.example',
+      admin_access_token: 'admin-token',
+      relay_token: 'sk-relay',
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ base_url: 'https://new-api.example', total_remote: 1, matched: 1, create_count: 1, update_count: 0, skip_count: 0, schedule_create_count: 1, schedule_exists_count: 0, items: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await api.previewNewApiSync(payload);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/integrations/new-api/preview',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ 'X-Admin-Key': 'test-admin-key' }),
+        body: JSON.stringify(payload),
+      }),
+    );
+    setAdminApiKey('');
+    vi.unstubAllGlobals();
+    fetchMock.mockRestore();
+  });
+
   it('saves custom model names as channel taxonomy options', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

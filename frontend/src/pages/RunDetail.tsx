@@ -188,6 +188,14 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
         <div className="monitor-stat-card"><span>Signature</span><strong><Tag color={evidenceStatusColor(signature?.status)}>{signature?.status ?? '待确认'}</Tag></strong></div>
       </div>
       {classificationText ? <Typography.Text type="secondary">判定：{classificationText}{evidence.classificationReason ? `，${evidence.classificationReason}` : ''}</Typography.Text> : null}
+      {evidence.aiJudge ? (
+        <Alert
+          type={evidence.aiJudge.classification_status === 'anomaly' ? 'warning' : 'info'}
+          showIcon
+          message={`AI 疑难复核：${evidence.aiJudge.classification_label ?? evidence.aiJudge.classification_status ?? '已复核'}`}
+          description={`裁判：${evidence.aiJudge.judge_channel_name ?? evidence.aiJudge.judge_channel_id ?? (evidence.aiJudge.fallback ? '本地兜底' : '-')}；置信度：${typeof evidence.aiJudge.confidence === 'number' ? Math.round(evidence.aiJudge.confidence * 100) + '%' : '-'}；${evidence.aiJudge.reason ?? ''}`}
+        />
+      ) : null}
       {evidence.modelRequests[0] ? (
         <Typography.Text type="secondary">
           Message ID：{evidence.modelRequests[0].messageId ?? '-'} · Request ID：{evidence.modelRequests[0].requestId ?? '-'}

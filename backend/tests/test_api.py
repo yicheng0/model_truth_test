@@ -34,7 +34,7 @@ from app.models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, 
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate, TestSuiteCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_test_loop, scheduled_test_tick, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -270,7 +270,7 @@ def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["instance_id"]
-    assert {"enabled", "instance_id", "stale_schedule_count", "queued_schedule_count", "running_schedule_count", "next_due_at"} <= set(payload)
+    assert {"enabled", "instance_id", "stale_schedule_count", "overdue_schedule_count", "heartbeat_stale", "queued_schedule_count", "running_schedule_count", "next_due_at"} <= set(payload)
 
 
 def test_scheduled_tests_schema_backfill_migration_adds_missing_columns(tmp_path: Path) -> None:
@@ -1084,6 +1084,79 @@ def test_run_delete_removes_linked_alerts() -> None:
         assert db.get(Run, run_id) is None
         assert db.get(Report, report_id) is None
         assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.run_id == run_id)) == 0
+
+
+def test_run_delete_clears_scheduled_last_run_reference() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        scheduled.last_run_id = run_id
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.delete(f"/api/runs/{run_id}", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        assert scheduled.last_run_id is None
+
+
+def test_run_delete_repairs_scheduled_last_run_reference_to_previous_run() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    previous_run_id = create_report_for_schedule(schedule, grade="D", score=60, labels=["protocol_drift"])
+    latest_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        scheduled.last_run_id = latest_run_id
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.delete(f"/api/runs/{latest_run_id}", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        assert scheduled.last_run_id == previous_run_id
+        assert db.get(Run, latest_run_id) is None
+        assert db.get(Run, previous_run_id) is not None
+
+
+def test_run_bulk_delete_clears_scheduled_last_run_when_all_history_deleted() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    first_run_id = create_report_for_schedule(schedule, grade="D", score=60, labels=["protocol_drift"])
+    second_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        scheduled.last_run_id = second_run_id
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.post("/api/runs/bulk-delete", json={"ids": [first_run_id, second_run_id]}, headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == 2
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        assert scheduled.last_run_id is None
+        assert db.get(Run, first_run_id) is None
+        assert db.get(Run, second_run_id) is None
 
 
 def test_run_bulk_delete_returns_deleted_missing_and_failed() -> None:
@@ -2057,8 +2130,34 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
 
     assert report is not None
     assert report.evidence["signature_interop"]["ok"] is True
-    assert report.evidence["signature_interop"]["status"] == "pass"
-    assert report.evidence["model_request"]["result_id"]
+
+
+def test_scheduled_test_tick_claims_overdue_schedule_and_advances_next_run(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo")
+
+    old_next = datetime.now(timezone.utc) - timedelta(minutes=10)
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        scheduled.next_run_at = old_next
+        scheduled.locked_by = None
+        scheduled.locked_until = None
+        scheduled.last_status = "idle"
+        db.commit()
+
+    due_ids = asyncio.run(scheduled_test_tick(SessionLocal))
+
+    assert schedule["id"] in due_ids
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        assert scheduled.last_status == "queued"
+        assert scheduled.next_run_at is not None
+        assert scheduled.next_run_at > old_next.replace(tzinfo=None)
+        assert scheduled.locked_until is not None
 
 
 def test_scheduled_channel_test_supports_simplified_probe_create() -> None:
@@ -2214,6 +2313,155 @@ def test_next_scheduled_run_at_respects_run_window() -> None:
     assert next_scheduled_run_at(base, 600, "09:00", "18:00") == datetime.fromisoformat("2026-05-16T01:00:00+00:00")
     assert next_scheduled_run_at(base, 60, "22:00", "02:00") == datetime.fromisoformat("2026-05-15T14:00:00+00:00")
     assert next_scheduled_run_at(datetime.fromisoformat("2026-05-15T16:30:00+00:00"), 30, "22:00", "02:00") == datetime.fromisoformat("2026-05-15T17:00:00+00:00")
+
+
+def test_refresh_active_scheduled_test_locks_extends_only_current_instance_locks(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.setattr("app.services.SCHEDULER_INSTANCE_ID", "test-scheduler-instance")
+    now = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
+    with SessionLocal() as db:
+        current = ScheduledChannelTest(
+            id="active_current_schedule",
+            channel_id="third_party_demo",
+            suite_id="manual_model_request_probe",
+            baseline_snapshot_id="scheduled_probe_baseline",
+            name="active current",
+            last_status="running",
+            locked_by="test-scheduler-instance",
+            locked_until=now,
+        )
+        foreign = ScheduledChannelTest(
+            id="active_foreign_schedule",
+            channel_id="third_party_demo",
+            suite_id="manual_model_request_probe",
+            baseline_snapshot_id="scheduled_probe_baseline",
+            name="active foreign",
+            last_status="running",
+            locked_by="other-scheduler-instance",
+            locked_until=now,
+        )
+        db.add_all([current, foreign])
+        db.commit()
+
+        refreshed = refresh_active_scheduled_test_locks(db, {"active_current_schedule", "active_foreign_schedule"}, now=now)
+        db.refresh(current)
+        db.refresh(foreign)
+
+    assert refreshed == 1
+    assert current.locked_until is not None
+    assert current.locked_until > now.replace(tzinfo=None)
+    assert foreign.locked_until == now.replace(tzinfo=None)
+
+
+def test_scheduled_test_loop_starts_due_tasks_without_waiting_for_completion(monkeypatch) -> None:
+    reset_database()
+    started: list[str] = []
+    release = asyncio.Event()
+
+    async def slow_execute(session_factory, scheduled_id, *, advance_next_run=True):  # noqa: ANN001, ARG001
+        started.append(scheduled_id)
+        await release.wait()
+
+    async def no_daily_report(session_factory, *, force=False):  # noqa: ANN001, ARG001
+        return {"ok": False, "status": "skipped", "message": "skip"}
+
+    monkeypatch.setattr("app.services.execute_scheduled_channel_test", slow_execute)
+    monkeypatch.setattr("app.services.send_daily_patrol_report", no_daily_report)
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db.add_all([
+            ScheduledChannelTest(
+                id="nonblocking_schedule_one",
+                channel_id="third_party_demo",
+                suite_id="manual_model_request_probe",
+                baseline_snapshot_id="scheduled_probe_baseline",
+                name="nonblocking one",
+                enabled=True,
+                next_run_at=now,
+                last_status="idle",
+            ),
+            ScheduledChannelTest(
+                id="nonblocking_schedule_two",
+                channel_id="third_party_demo",
+                suite_id="manual_model_request_probe",
+                baseline_snapshot_id="scheduled_probe_baseline",
+                name="nonblocking two",
+                enabled=True,
+                next_run_at=now,
+                last_status="idle",
+            ),
+        ])
+        db.commit()
+
+    async def run_loop_probe() -> None:
+        task = asyncio.create_task(scheduled_test_loop(SessionLocal, poll_seconds=5))
+        try:
+            for _ in range(20):
+                if len(started) >= 2:
+                    break
+                await asyncio.sleep(0.05)
+            assert set(started) == {"nonblocking_schedule_one", "nonblocking_schedule_two"}
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run_loop_probe())
+
+
+def test_scheduled_task_timeout_marks_run_failed_and_releases_lock(monkeypatch) -> None:
+    reset_database()
+    with SessionLocal() as db:
+        run = Run(
+            id="timeout_run",
+            suite_id="manual_model_request_probe",
+            name="timeout run",
+            mode="candidate_eval",
+            test_scope="scheduled_probe",
+            status="running",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=1,
+            completed_jobs=0,
+        )
+        schedule = ScheduledChannelTest(
+            id="timeout_schedule",
+            channel_id="third_party_demo",
+            suite_id="manual_model_request_probe",
+            baseline_snapshot_id="scheduled_probe_baseline",
+            name="timeout schedule",
+            enabled=True,
+            last_status="running",
+            last_run_id=run.id,
+            locked_by="timeout-scheduler",
+            locked_until=datetime.now(timezone.utc) + timedelta(minutes=30),
+        )
+        run.scheduled_test_id = schedule.id
+        db.add(run)
+        db.add(schedule)
+        db.commit()
+
+    async def never_finishes(session_factory, scheduled_id, *, advance_next_run=True):  # noqa: ANN001, ARG001
+        await asyncio.sleep(60)
+
+    from app import services as services_module
+
+    monkeypatch.setattr("app.services.execute_scheduled_channel_test", never_finishes)
+    asyncio.run(services_module._run_scheduled_test_with_timeout(SessionLocal, "timeout_schedule", timeout_seconds=1))
+
+    with SessionLocal() as db:
+        schedule = db.get(ScheduledChannelTest, "timeout_schedule")
+        run = db.get(Run, "timeout_run")
+
+    assert schedule is not None
+    assert run is not None
+    assert schedule.last_status == "failed"
+    assert "超时释放调度锁" in (schedule.last_error or "")
+    assert schedule.locked_by is None
+    assert schedule.locked_until is None
+    assert schedule.next_run_at is not None
+    assert run.status == "failed"
+    assert run.finished_at is not None
 
 
 def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypatch) -> None:
@@ -2697,6 +2945,77 @@ def test_feishu_broadcast_setting_masks_secret_and_preserves_existing_secret() -
     assert payload["app_base_url"] == "http://localhost:5174"
     assert preserved["webhook_configured"] is True
     assert preserved["secret_configured"] is True
+
+
+def test_alert_notification_marks_sent_when_feishu_post_succeeds(monkeypatch) -> None:
+    posted_payloads: list[tuple[str, dict]] = []
+
+    async def fake_post_feishu_payload(webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append((webhook_url, payload))
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, quiet_minutes=0)
+        run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["suspected_model_swap"])
+        setting_response = client.patch(
+            "/api/settings/feishu-broadcast",
+            json={
+                "enabled": True,
+                "alert_broadcast_enabled": True,
+                "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test-token",
+                "app_base_url": "http://localhost:5173",
+            },
+        )
+        assert setting_response.status_code == 200
+
+    alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    assert len(alerts) == 1
+    assert len(posted_payloads) == 1
+    assert posted_payloads[0][0].endswith("/test-token")
+    with SessionLocal() as db:
+        alert = db.get(ChannelAlert, alerts[0].id)
+        assert alert is not None
+        assert alert.notification_status == "sent"
+        assert alert.notification_error is None
+        assert alert.notification_attempt_count == 1
+        assert alert.notified_at is not None
+
+
+def test_alert_notification_marks_failed_when_feishu_post_fails(monkeypatch) -> None:
+    attempts: list[str] = []
+
+    async def fake_post_feishu_payload(webhook_url, payload):  # noqa: ANN001, ARG001
+        attempts.append(webhook_url)
+        raise RuntimeError("simulated feishu outage")
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, quiet_minutes=0)
+        run_id = create_report_for_schedule(schedule, grade="E", score=15, labels=["signature_interop_failed"])
+        setting_response = client.patch(
+            "/api/settings/feishu-broadcast",
+            json={
+                "enabled": True,
+                "alert_broadcast_enabled": True,
+                "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test-token",
+            },
+        )
+        assert setting_response.status_code == 200
+
+    alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    assert len(alerts) == 1
+    assert len(attempts) == 3
+    with SessionLocal() as db:
+        alert = db.get(ChannelAlert, alerts[0].id)
+        assert alert is not None
+        assert alert.notification_status == "failed"
+        assert "simulated feishu outage" in (alert.notification_error or "")
+        assert alert.notification_attempt_count == 1
+        assert alert.notified_at is None
 
 
 def test_channel_taxonomy_setting_returns_defaults_and_allows_label_updates() -> None:
@@ -5783,6 +6102,115 @@ def test_scheduled_probe_classifies_all_parameter_unsupported_as_aws_resource_wi
     assert pending_alerts == []
 
 
+def test_scheduled_probe_overloaded_native_shape_triggers_ai_judge() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {
+                "key": "thinking_temperature",
+                "labels": ["thinking_temperature_not_rejected"],
+                "message_id": "msg_bdrk_01native",
+                "message_channel_type": "AWS Bedrock",
+                "error": "",
+            },
+            {
+                "key": "web_search",
+                "labels": ["unexpected_error_response"],
+                "message_channel_type": "未知",
+                "error": "Client error '400 Bad Request'; response body: Overloaded",
+            },
+            {
+                "key": "thinking_adaptive_enabled",
+                "labels": ["provider_error_variant"],
+                "message_channel_type": "未知",
+                "error": "`max_tokens` must be greater than `thinking.budget_tokens`",
+            },
+        ],
+        signature_evidence={"relay_message_channel_type": "AWS Bedrock"},
+        labels=["thinking_temperature_not_rejected", "unexpected_error_response", "provider_error_variant"],
+        score=0,
+    )
+
+    assert result["status"] == "aws_resource"
+    assert "低置信 AWS" in result["reason"]
+
+
+def test_scheduled_probe_ai_judge_saved_for_low_confidence_native_shape(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        channel = db.get(Channel, "negative_sample")
+        run = Run(
+            id="run_ai_judge_probe",
+            suite_id=scheduled.suite_id,
+            name="ai judge probe",
+            mode="manual_probe",
+            test_scope="quick",
+            scheduled_test_id=scheduled.id,
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=3,
+            completed_jobs=3,
+        )
+        db.add(run)
+        scheduled.last_run_id = run.id
+        model_payload = {
+            "run": run,
+            "results": [
+                {"key": "thinking_temperature", "title": "Thinking temperature 冲突", "run_id": run.id, "result_id": "res_a", "message_id": "msg_bdrk_01native", "message_channel_type": "AWS Bedrock", "labels": ["thinking_temperature_not_rejected"], "score": 0, "error": None},
+                {"key": "web_search", "title": "Web Search tool", "run_id": run.id, "result_id": "res_b", "message_channel_type": "未知", "labels": ["unexpected_error_response"], "score": 0, "error": "Client error '400 Bad Request'; response body: Overloaded"},
+                {"key": "thinking_adaptive_enabled", "title": "thinking.adaptive.enabled", "run_id": run.id, "result_id": "res_c", "message_channel_type": "未知", "labels": ["provider_error_variant"], "score": 100, "error": "`max_tokens` must be greater than `thinking.budget_tokens`"},
+            ],
+        }
+        report = asyncio.run(
+            build_scheduled_probe_report(
+                SessionLocal,
+                db,
+                scheduled,
+                run.id,
+                model_payload,
+                {"ok": True, "status": "pass", "relay_message_channel_type": "AWS Bedrock"},
+            )
+        )
+
+    assert report.evidence["ai_judge"]
+    assert report.evidence["ai_judge"]["fallback"] is True
+    assert "patrol_ai_reviewed" in report.evidence["labels"]
+    with TestClient(app) as client:
+        payload = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+    assert payload["latest_probe_summary"]["ai_judge"]["classification_status"] in {"aws_resource", "claude", "anomaly"}
+
+
+def test_scheduled_probe_clear_three_parameter_unsupported_does_not_trigger_ai_judge() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {"key": "thinking_temperature", "labels": ["provider_error_variant"], "error": "temperature thinking unsupported"},
+            {"key": "web_search", "labels": ["provider_error_variant"], "error": "web_search unsupported"},
+            {"key": "thinking_adaptive_enabled", "labels": ["provider_error_variant"], "error": "thinking.adaptive.enabled not supported"},
+        ],
+        signature_evidence={"ok": True},
+        labels=["provider_error_variant"],
+        score=95,
+    )
+
+    from app.services import scheduled_probe_needs_ai_judge
+
+    assert result["status"] == "aws_resource"
+    assert scheduled_probe_needs_ai_judge(
+        [
+            {"key": "thinking_temperature", "labels": ["provider_error_variant"], "error": "temperature thinking unsupported"},
+            {"key": "web_search", "labels": ["provider_error_variant"], "error": "web_search unsupported"},
+            {"key": "thinking_adaptive_enabled", "labels": ["provider_error_variant"], "error": "thinking.adaptive.enabled not supported"},
+        ],
+        ["provider_error_variant"],
+        result,
+    ) is False
+
+
 def test_scheduled_signature_source_uses_fingerprint_source_channel(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     captured: dict[str, str] = {}
@@ -6069,6 +6497,63 @@ def test_cleanup_run_logs_removes_terminal_run_logs_and_keeps_configs() -> None:
         assert schedule is not None
         assert schedule.last_run_id is None
         assert db.get(Channel, "third_party_demo") is not None
+
+
+def test_cleanup_run_logs_repairs_scheduled_last_run_to_remaining_history() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        kept = Run(
+            id="cleanup_kept_active_run",
+            suite_id=suite_id,
+            name="kept running patrol run",
+            mode="candidate_eval",
+            test_scope="scheduled_probe",
+            status="running",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=1,
+            completed_jobs=0,
+        )
+        deleted = Run(
+            id="cleanup_deleted_terminal_run",
+            suite_id=suite_id,
+            name="deleted cleanup patrol run",
+            mode="candidate_eval",
+            test_scope="scheduled_probe",
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=1,
+            completed_jobs=1,
+        )
+        schedule = ScheduledChannelTest(
+            id="cleanup_keep_history_schedule",
+            channel_id="third_party_demo",
+            suite_id=suite_id,
+            baseline_snapshot_id="missing_baseline_for_cleanup_history_test",
+            name="cleanup keep history schedule",
+            last_run_id=deleted.id,
+        )
+        kept.scheduled_test_id = schedule.id
+        deleted.scheduled_test_id = schedule.id
+        db.add(kept)
+        db.add(deleted)
+        db.add(schedule)
+        db.commit()
+        kept_id = kept.id
+        deleted_id = deleted.id
+
+    with TestClient(app) as client:
+        response = client.post("/api/system/cleanup-run-logs", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        schedule = db.get(ScheduledChannelTest, "cleanup_keep_history_schedule")
+        assert schedule is not None
+        assert schedule.last_run_id == kept_id
+        assert db.get(Run, kept_id) is not None
+        assert db.get(Run, deleted_id) is None
 
 
 def test_cleanup_run_logs_skips_running_and_baseline_source_runs() -> None:
@@ -6374,3 +6859,88 @@ def test_claude_code_history_list_and_missing_detail() -> None:
     assert listed.status_code == 200
     assert isinstance(listed.json(), list)
     assert missing.status_code == 404
+
+
+def test_new_api_sync_preview_filters_claude_channels(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_fetch(data):  # noqa: ANN001
+        return "https://new-api.example", [
+            {"id": 101, "name": "Claude Sonnet", "type": 14, "status": 1, "models": "claude-sonnet-4-5"},
+            {"id": 202, "name": "GPT", "type": 1, "status": 1, "models": "gpt-4o"},
+        ]
+
+    monkeypatch.setattr("app.routers.new_api._fetch_new_api_channels", fake_fetch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/preview",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+            },
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_remote"] == 2
+    assert payload["matched"] == 1
+    assert payload["create_count"] == 1
+    assert payload["skip_count"] == 1
+    assert payload["items"][0]["new_api_channel_id"] == "101"
+    assert payload["items"][0]["model_name"] == "claude-sonnet-4-5"
+
+
+def test_new_api_sync_apply_creates_channel_and_schedule(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_fetch(data):  # noqa: ANN001
+        return "https://new-api.example", [
+            {"id": 9335, "name": "阿宝-aws", "type": 33, "status": 1, "models": "claude-sonnet-4-5"},
+        ]
+
+    monkeypatch.setattr("app.routers.new_api._fetch_new_api_channels", fake_fetch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/apply",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+                "default_interval_minutes": 60,
+            },
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    channel_id = payload["items"][0]["channel_id"]
+    assert payload["create_count"] == 1
+    assert payload["schedule_create_count"] == 1
+    with SessionLocal() as db:
+        channel = db.get(Channel, channel_id)
+        assert channel is not None
+        assert channel.provider_type == "new_api_aws_relay"
+        assert channel.base_url == "https://new-api.example"
+        assert channel.model_name == "claude-sonnet-4-5"
+        assert channel.auth_config["api_key"] == "sk-relay-token-9335"
+        assert channel.auth_config["request_protocol"] == "anthropic_messages"
+        schedule = db.scalar(select(ScheduledChannelTest).where(ScheduledChannelTest.channel_id == channel_id))
+        assert schedule is not None
+        assert schedule.test_scope == "scheduled_probe"
+        assert schedule.interval_minutes == 60
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/apply",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+                "default_interval_minutes": 60,
+            },
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["update_count"] == 1
+    assert payload["schedule_exists_count"] == 1

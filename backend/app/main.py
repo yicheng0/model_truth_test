@@ -122,6 +122,7 @@ from .routers.reports import router as reports_router
 from .routers.seed import router as seed_router
 from .routers.suites import router as suites_router
 from .routers.system import router as system_router
+from .routers.new_api import router as new_api_router
 
 
 @asynccontextmanager
@@ -158,6 +159,7 @@ app.include_router(reports_router)
 app.include_router(seed_router)
 app.include_router(suites_router)
 app.include_router(system_router)
+app.include_router(new_api_router)
 
 
 JOB_TTL = timedelta(hours=6)
@@ -1575,7 +1577,7 @@ def cancel_run_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, st
     return {"status": run.status}
 
 
-def _delete_run_by_id(db: Session, run_id: str) -> bool:
+def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True, excluded_run_ids: set[str] | None = None) -> bool:
     run = db.get(Run, run_id)
     if not run:
         return False
@@ -1586,6 +1588,8 @@ def _delete_run_by_id(db: Session, run_id: str) -> bool:
         conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
         if conflict:
             raise HTTPException(status_code=409, detail=conflict)
+    if repair_refs:
+        _repair_scheduled_last_run_refs_before_delete(db, excluded_run_ids or {run_id})
     db.execute(delete(ChannelAlert).where(ChannelAlert.run_id == run_id))
     db.execute(delete(RunChannel).where(RunChannel.run_id == run_id))
     db.execute(delete(Result).where(Result.run_id == run_id))
@@ -1598,6 +1602,47 @@ def _delete_run_by_id(db: Session, run_id: str) -> bool:
     return True
 
 
+def _repair_scheduled_last_run_refs_before_delete(db: Session, run_ids: set[str]) -> int:
+    if not run_ids:
+        return 0
+    scheduled_refs = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(run_ids))).all())
+    for scheduled in scheduled_refs:
+        fallback_run_id = db.scalar(
+            select(Run.id)
+            .where(
+                Run.scheduled_test_id == scheduled.id,
+                Run.id.not_in(run_ids),
+            )
+            .order_by(Run.created_at.desc(), Run.id.desc())
+            .limit(1)
+        )
+        scheduled.last_run_id = fallback_run_id
+    return len(scheduled_refs)
+
+
+def _preflight_deletable_run_ids(db: Session, run_ids: list[str]) -> tuple[set[str], list[str], dict[str, str]]:
+    deletable: set[str] = set()
+    missing: list[str] = []
+    failed: dict[str, str] = {}
+    for run_id in run_ids:
+        try:
+            run = db.get(Run, run_id)
+            if not run:
+                missing.append(run_id)
+                continue
+            if run.status == "running":
+                raise HTTPException(status_code=409, detail="Running runs must be canceled before deletion")
+            source_snapshots = list(db.scalars(select(BaselineSnapshot).where(BaselineSnapshot.source_run_id == run_id)).all())
+            for snapshot in source_snapshots:
+                conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
+                if conflict:
+                    raise HTTPException(status_code=409, detail=conflict)
+            deletable.add(run_id)
+        except HTTPException as exc:
+            failed[run_id] = str(exc.detail)
+    return deletable, missing, failed
+
+
 @app.post("/api/runs/bulk-delete")
 def bulk_delete_runs(
     data: BulkDeleteRequest,
@@ -1606,15 +1651,16 @@ def bulk_delete_runs(
 ) -> dict[str, object]:
     if not data.ids:
         return {"deleted": 0, "missing": [], "failed": {}}
+    run_ids = list(dict.fromkeys(str(item).strip() for item in data.ids if str(item).strip()))
+    deletable_ids, missing, failed = _preflight_deletable_run_ids(db, run_ids)
+    _repair_scheduled_last_run_refs_before_delete(db, deletable_ids)
     deleted = 0
-    missing: list[str] = []
-    failed: dict[str, str] = {}
-    for run_id in dict.fromkeys(str(item).strip() for item in data.ids if str(item).strip()):
+    for run_id in run_ids:
+        if run_id not in deletable_ids:
+            continue
         try:
-            if _delete_run_by_id(db, run_id):
+            if _delete_run_by_id(db, run_id, repair_refs=False):
                 deleted += 1
-            else:
-                missing.append(run_id)
         except HTTPException as exc:
             failed[run_id] = str(exc.detail)
     db.commit()

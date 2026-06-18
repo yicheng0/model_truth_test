@@ -23,6 +23,8 @@ import type {
   FeishuBroadcastSetting,
   FeishuBroadcastUpdate,
   ModelRequestTestResult,
+  NewApiSyncRequest,
+  NewApiSyncResult,
   Report,
   ReportCompare,
   ReportDetail,
@@ -165,6 +167,10 @@ export const api = {
   updateChannel: (id: string, payload: Partial<ChannelCreate>) =>
     request<Channel>(`/api/channels/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteChannel: (id: string) => request<{ deleted: boolean }>(`/api/channels/${id}`, { method: 'DELETE', headers: adminHeaders() }),
+  previewNewApiSync: (payload: NewApiSyncRequest) =>
+    request<NewApiSyncResult>('/api/integrations/new-api/preview', { method: 'POST', headers: adminHeaders(), body: JSON.stringify(payload) }),
+  applyNewApiSync: (payload: NewApiSyncRequest) =>
+    request<NewApiSyncResult>('/api/integrations/new-api/apply', { method: 'POST', headers: adminHeaders(), body: JSON.stringify(payload) }),
   healthCheck: (id: string) => request<Record<string, unknown>>(`/api/channels/${id}/health-check`, { method: 'POST' }),
   signatureInteropTest: (payload: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) =>
     request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),

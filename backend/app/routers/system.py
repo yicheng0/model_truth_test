@@ -179,8 +179,17 @@ def cleanup_run_logs(
     if dry_run:
         return payload
 
+    candidate_run_id_set = set(candidate_run_ids)
     for scheduled in scheduled_refs:
-        scheduled.last_run_id = None
+        scheduled.last_run_id = db.scalar(
+            select(Run.id)
+            .where(
+                Run.scheduled_test_id == scheduled.id,
+                Run.id.not_in(candidate_run_id_set),
+            )
+            .order_by(Run.created_at.desc(), Run.id.desc())
+            .limit(1)
+        )
     db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(candidate_run_ids)))
     db.execute(delete(RunChannel).where(RunChannel.run_id.in_(candidate_run_ids)))
     db.execute(delete(Result).where(Result.run_id.in_(candidate_run_ids)))

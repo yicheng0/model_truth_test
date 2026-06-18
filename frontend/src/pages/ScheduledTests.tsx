@@ -2,14 +2,14 @@ import { useDeferredValue, useEffect, useMemo, useState, type Key } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Col, Collapse, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
-import { BarChart3, Bell, CalendarClock, Edit3, Eye, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
+import { BarChart3, Bell, CalendarClock, DownloadCloud, Edit3, Eye, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../channelCredentials';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { buildPatrolRunDetailLink } from '../patrolNavigation';
 import { formatDateTime } from '../time';
-import type { Channel, ChannelAlert, ChannelAlertStatus, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
+import type { Channel, ChannelAlert, ChannelAlertStatus, NewApiSyncRequest, NewApiSyncResult, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
 import { buildScheduleBasePayload, intervalText, type ScheduleFormValues } from '../scheduledTestsUtils';
 import { buildFeishuBroadcastUpdate, type FeishuBroadcastFormValues } from './feishuBroadcast';
 import {
@@ -42,6 +42,7 @@ type FeishuFormValues = FeishuBroadcastFormValues & {
 type AlertTimeRange = [Dayjs | null, Dayjs | null] | null;
 type AlertResultFilter = 'all' | 'success' | 'failure';
 type ScheduledTab = 'plans' | 'alerts' | 'report' | 'feishu';
+type NewApiSyncFormValues = NewApiSyncRequest;
 const alertStatusLabel: Record<string, string> = {
   pending_review: '待复审',
   confirmed_issue: '确认问题',
@@ -235,6 +236,7 @@ export default function ScheduledTests() {
   const [scheduleForm] = Form.useForm<ScheduleFormValues>();
   const [reviewForm] = Form.useForm<ReviewFormValues>();
   const [feishuForm] = Form.useForm<FeishuFormValues>();
+  const [newApiForm] = Form.useForm<NewApiSyncFormValues>();
   const [editingSchedule, setEditingSchedule] = useState<ScheduledChannelTest | null>(null);
   const [reviewingAlert, setReviewingAlert] = useState<ChannelAlert | null>(null);
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
@@ -245,12 +247,15 @@ export default function ScheduledTests() {
   const [selectedAlertRowKeys, setSelectedAlertRowKeys] = useState<Key[]>([]);
   const [selectedRecentAlertRowKeys, setSelectedRecentAlertRowKeys] = useState<Key[]>([]);
   const [deletingAlertId, setDeletingAlertId] = useState<string | null>(null);
+  const [deletingAlertRunId, setDeletingAlertRunId] = useState<string | null>(null);
   const [resendingAlertIds, setResendingAlertIds] = useState<Set<string>>(() => new Set());
   const [openAlertLog, setOpenAlertLog] = useState<ChannelAlert | null>(null);
   const [activeTab, setActiveTab] = useState<ScheduledTab>(queryTab);
   const [reportRange, setReportRange] = useState('7d');
   const [runningScheduleId, setRunningScheduleId] = useState<string | null>(null);
   const [deletingScheduleId, setDeletingScheduleId] = useState<string | null>(null);
+  const [newApiModalOpen, setNewApiModalOpen] = useState(false);
+  const [newApiPreview, setNewApiPreview] = useState<NewApiSyncResult | null>(null);
   const runWindowEnabled = Form.useWatch('run_window_enabled', scheduleForm);
   const deferredAlertIdQuery = useDeferredValue(alertIdQuery);
   const reportDates = useMemo(() => reportRangeToDates(reportRange), [reportRange]);
@@ -417,6 +422,24 @@ export default function ScheduledTests() {
     onError: (error) => message.error(getErrorMessage(error)),
   });
 
+  const deleteAlertRun = useMutation({
+    mutationFn: api.deleteRun,
+    onSuccess: async (_, runId) => {
+      message.success('关联巡检日志已删除');
+      setOpenAlertLog((alert) => (alert?.run_id === runId ? null : alert));
+      setSelectedAlertRowKeys([]);
+      setSelectedRecentAlertRowKeys([]);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['alerts'] }),
+        queryClient.invalidateQueries({ queryKey: ['runs'] }),
+        queryClient.invalidateQueries({ queryKey: ['scheduledTests'] }),
+        queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] }),
+      ]);
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+    onSettled: () => setDeletingAlertRunId(null),
+  });
+
   const resend = useMutation({
     mutationFn: api.resendAlertNotification,
     onMutate: (id) => {
@@ -471,6 +494,51 @@ export default function ScheduledTests() {
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });
+
+  const previewNewApi = useMutation({
+    mutationFn: api.previewNewApiSync,
+    onSuccess: (result) => {
+      setNewApiPreview(result);
+      message.success(`发现 ${result.matched} 个 Claude 相关 new-api 渠道`);
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
+
+  const applyNewApi = useMutation({
+    mutationFn: api.applyNewApiSync,
+    onSuccess: async (result) => {
+      setNewApiPreview(result);
+      message.success(`同步完成：创建 ${result.create_count} 个，更新 ${result.update_count} 个，新增巡检计划 ${result.schedule_create_count} 个`);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['channels'] }),
+        queryClient.invalidateQueries({ queryKey: ['scheduledTests'] }),
+      ]);
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
+
+  function openNewApiSync() {
+    setNewApiPreview(null);
+    newApiForm.resetFields();
+    newApiForm.setFieldsValue({
+      page_size: 200,
+      status: 'enabled',
+      model_keyword: 'claude',
+      default_interval_minutes: 1440,
+      enabled: true,
+    });
+    setNewApiModalOpen(true);
+  }
+
+  async function previewNewApiSync() {
+    const values = await newApiForm.validateFields();
+    previewNewApi.mutate(values);
+  }
+
+  async function applyNewApiSync() {
+    const values = await newApiForm.validateFields();
+    applyNewApi.mutate(values);
+  }
 
   function openCreateSchedule() {
     setEditingSchedule(null);
@@ -543,6 +611,24 @@ export default function ScheduledTests() {
   function deleteOneAlert(alert: ChannelAlert) {
     setDeletingAlertId(alert.id);
     deleteAlert.mutate(alert.id);
+  }
+
+  function deleteLinkedAlertRun(alert: ChannelAlert) {
+    if (!alert.run_id) {
+      message.warning('这条告警没有关联巡检日志');
+      return;
+    }
+    setDeletingAlertRunId(alert.run_id);
+    deleteAlertRun.mutate(alert.run_id);
+  }
+
+  function deleteScheduleRun(runId?: string | null) {
+    if (!runId) {
+      message.warning('这个计划没有关联巡检日志');
+      return;
+    }
+    setDeletingAlertRunId(runId);
+    deleteAlertRun.mutate(runId);
   }
 
   function deleteSelectedAlerts() {
@@ -648,7 +734,10 @@ export default function ScheduledTests() {
                         自动巡检会执行 Thinking Signature 互通检测和多项真实模型请求探针，用响应 ID 判断渠道来源特征。
                       </Typography.Paragraph>
                     </div>
-                    <Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>
+                    <Space wrap>
+                      <Button icon={<DownloadCloud size={16} />} size="large" onClick={openNewApiSync}>从 new-api 同步</Button>
+                      <Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>
+                    </Space>
                   </div>
                   <div className="patrol-guide-steps">
                     {patrolGuideSteps.map((step, index) => (
@@ -681,7 +770,12 @@ export default function ScheduledTests() {
                 </section>
                 <Card
                   title={<span className="card-title-with-icon"><CalendarClock size={18} />按渠道自动巡检</span>}
-                  extra={<Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>}
+                  extra={(
+                    <Space wrap>
+                      <Button icon={<DownloadCloud size={16} />} onClick={openNewApiSync}>从 new-api 同步</Button>
+                      <Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>
+                    </Space>
+                  )}
                   bordered={false}
                 >
                   {schedulerHealthError ? (
@@ -691,6 +785,21 @@ export default function ScheduledTests() {
                       style={{ marginBottom: 12 }}
                       message="调度器健康检查暂不可用"
                       description={getErrorMessage(schedulerHealthError)}
+                    />
+                  ) : null}
+                  {schedulerHealth.data && (!schedulerHealth.data.enabled || schedulerHealth.data.heartbeat_stale || (schedulerHealth.data.overdue_schedule_count ?? 0) > 0) ? (
+                    <Alert
+                      type={(schedulerHealth.data.overdue_schedule_count ?? 0) > 0 ? 'error' : 'warning'}
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message="自动巡检调度异常"
+                      description={
+                        !schedulerHealth.data.enabled
+                          ? '后端自动调度器已停用，请检查 AUTO_SCHEDULER_ENABLED。'
+                          : schedulerHealth.data.heartbeat_stale
+                            ? '后端调度器心跳过旧，可能已经停止。'
+                            : `有 ${schedulerHealth.data.overdue_schedule_count ?? 0} 个计划已过执行时间但尚未被认领，请确认后端服务仍在运行。`
+                      }
                     />
                   ) : null}
                   <Row gutter={[12, 12]} className="scheduler-health-row">
@@ -777,7 +886,21 @@ export default function ScheduledTests() {
                         title: '上次运行',
                         width: 260,
                         render: (_, schedule) => (
-                          schedule.last_run_id ? <Link to={`/runs/${schedule.last_run_id}`}>{schedule.last_run_id}</Link> : '-'
+                          schedule.last_run_id ? (
+                            <Space direction="vertical" size={4}>
+                              <Link to={`/runs/${schedule.last_run_id}`}>{schedule.last_run_id}</Link>
+                              <Popconfirm
+                                title="删除本次巡检日志"
+                                description="会删除这次巡检任务、结果、报告和关联告警，并清空本计划的上次运行引用。确定删除吗？"
+                                okText="删除日志"
+                                cancelText="取消"
+                                okButtonProps={{ danger: true }}
+                                onConfirm={() => deleteScheduleRun(schedule.last_run_id)}
+                              >
+                                <Button danger size="small" icon={<Trash2 size={14} />} loading={deletingAlertRunId === schedule.last_run_id}>删除日志</Button>
+                              </Popconfirm>
+                            </Space>
+                          ) : '-'
                         ),
                       },
                       {
@@ -1334,6 +1457,119 @@ export default function ScheduledTests() {
       />
 
       <Modal
+        title="从 new-api 同步 Claude 资源"
+        open={newApiModalOpen}
+        onCancel={() => setNewApiModalOpen(false)}
+        footer={(
+          <Space wrap>
+            <Button onClick={() => setNewApiModalOpen(false)}>关闭</Button>
+            <Button onClick={previewNewApiSync} loading={previewNewApi.isPending}>预览差异</Button>
+            <Button type="primary" onClick={applyNewApiSync} loading={applyNewApi.isPending} disabled={!newApiPreview}>
+              应用同步
+            </Button>
+          </Space>
+        )}
+        width={920}
+        destroyOnClose
+        forceRender
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="安全同步模式"
+          description="系统只读取 new-api 渠道元数据，并使用 relay token 指定渠道巡检；不会读取 new-api 上游渠道 Key。接口需要本系统 Admin Key。"
+        />
+        <Form form={newApiForm} layout="vertical" requiredMark={false}>
+          <Row gutter={12}>
+            <Col xs={24} md={12}>
+              <Form.Item label="new-api 地址" name="base_url" rules={[{ required: true, message: '请输入 new-api 地址' }]}>
+                <Input placeholder="https://new-api.example.com" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="模型关键词" name="model_keyword">
+                <Input placeholder="claude" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="Admin access token" name="admin_access_token" rules={[{ required: true, message: '请输入 new-api 管理访问 token' }]}>
+                <Input.Password placeholder="new-api 用户 access token" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="Relay token" name="relay_token" rules={[{ required: true, message: '请输入 new-api relay token' }]}>
+                <Input.Password placeholder="sk-..." />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item label="状态" name="status">
+                <Select options={[{ value: 'enabled', label: '仅启用渠道' }, { value: 'all', label: '全部渠道' }]} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item label="分页大小" name="page_size">
+                <InputNumber min={1} max={500} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item label="默认巡检间隔（分钟）" name="default_interval_minutes">
+                <InputNumber min={5} max={43200} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="分组过滤（可选）" name="group">
+                <Input placeholder="留空则不过滤" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="标签过滤（可选）" name="tag">
+                <Input placeholder="只同步指定 new-api tag" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item name="enabled" valuePropName="checked" label="同步后状态">
+                <Checkbox>同步渠道和新巡检计划默认启用</Checkbox>
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+        {newApiPreview ? (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Row gutter={[12, 12]}>
+              <Col xs={12} md={6}><Statistic title="远端渠道" value={newApiPreview.total_remote} /></Col>
+              <Col xs={12} md={6}><Statistic title="Claude 匹配" value={newApiPreview.matched} /></Col>
+              <Col xs={12} md={6}><Statistic title="创建 / 更新" value={`${newApiPreview.create_count} / ${newApiPreview.update_count}`} /></Col>
+              <Col xs={12} md={6}><Statistic title="新增巡检计划" value={newApiPreview.schedule_create_count} /></Col>
+            </Row>
+            <Table
+              size="small"
+              rowKey="channel_id"
+              pagination={{ pageSize: 6 }}
+              dataSource={newApiPreview.items}
+              columns={[
+                { title: 'new-api ID', dataIndex: 'new_api_channel_id', width: 110 },
+                { title: '渠道名称', dataIndex: 'name' },
+                { title: '模型', dataIndex: 'model_name', width: 180, render: (value) => value || '-' },
+                {
+                  title: '渠道',
+                  dataIndex: 'action',
+                  width: 100,
+                  render: (value) => <Tag color={value === 'create' ? 'blue' : 'green'}>{value === 'create' ? '新建' : '更新'}</Tag>,
+                },
+                {
+                  title: '巡检计划',
+                  dataIndex: 'schedule_action',
+                  width: 110,
+                  render: (value) => <Tag color={value === 'create' ? 'blue' : 'default'}>{value === 'create' ? '新建' : '已存在'}</Tag>,
+                },
+              ]}
+            />
+          </Space>
+        ) : null}
+      </Modal>
+
+      <Modal
         title={editingSchedule ? '编辑自动巡检计划' : '新增自动巡检计划'}
         open={scheduleModalOpen}
         onCancel={() => setScheduleModalOpen(false)}
@@ -1436,6 +1672,8 @@ export default function ScheduledTests() {
         channelName={openAlertLogChannel?.name ?? ''}
         channelDisplayId={openAlertLogChannel?.displayId ?? ''}
         onClose={closeAlertLogDrawer}
+        onDeleteRun={deleteLinkedAlertRun}
+        deletingRun={Boolean(openAlertLog?.run_id && deletingAlertRunId === openAlertLog.run_id)}
       />
     </Space>
   );
