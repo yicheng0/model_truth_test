@@ -2476,7 +2476,7 @@ SCHEDULED_WEB_SEARCH_PARAMS: dict[str, Any] = {
     "stream": True,
     "tools": [
         {
-            "type": "web_search_20260209",
+            "type": "web_search_20260318",
             "name": "web_search",
             "max_uses": 5,
         },
@@ -2579,7 +2579,7 @@ def _claude_code_input_preview(config: dict[str, Any]) -> dict[str, Any] | None:
         return {
             "kind": "document_text",
             "title": "内置文档输入",
-            "summary": "系统把 marker 文本作为 document 类型输入，要求模型只返回 marker。",
+            "summary": "系统把 marker 文本作为普通 text content block 输入，避免部分中转 / Bedrock / Vertex 不支持 document block 导致误判。",
             "image_data_url": None,
             "document_text": CLAUDE_CODE_DOCUMENT_TEXT,
             "document_marker": "CC-DOC-742",
@@ -2736,7 +2736,6 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "prompt": "请识别图片主色，只输出 red 或 红色。",
             "request_params": {
                 "max_tokens": 64,
-                "temperature": 0,
                 "message_content": [
                     _claude_code_text_content("请识别图片主色，只输出 red 或 红色。"),
                     {
@@ -2759,7 +2758,6 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "prompt": "请识别图片主色，只输出 red 或 红色。",
             "request_params": {
                 "max_tokens": 64,
-                "temperature": 0,
                 "message_content": [
                     _claude_code_text_content("请识别图片主色，只输出 red 或 红色。"),
                     {"type": "image", "source": {"type": "url", "url": resolved_image_url}},
@@ -2775,17 +2773,9 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "prompt": "读取文档并只输出 marker。",
             "request_params": {
                 "max_tokens": 96,
-                "temperature": 0,
                 "message_content": [
-                    _claude_code_text_content("读取文档并只输出 marker。"),
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "text",
-                            "media_type": "text/plain",
-                            "data": CLAUDE_CODE_DOCUMENT_TEXT,
-                        },
-                    },
+                    _claude_code_text_content("读取以下文本并只输出 marker。"),
+                    _claude_code_text_content(CLAUDE_CODE_DOCUMENT_TEXT),
                 ],
             },
             "scoring_rules": {"required_all": ["CC-DOC-742"]},
@@ -2811,9 +2801,8 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             ),
             "request_params": {
                 "max_tokens": 900,
-                "temperature": 0,
                 "stream": True,
-                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                "tools": [{"type": "web_search_20260318", "name": "web_search", "max_uses": 3}],
             },
             "scoring_rules": {},
             "post_check": "web_search_reference",
@@ -3220,7 +3209,14 @@ def _claude_code_apply_probe_post_checks(
     score: float,
     labels: list[str],
 ) -> tuple[float, list[str]]:
-    if config.get("key") != "response_schema":
+    probe_key = str(config.get("key") or "")
+    if probe_key == "document_input" and not normalized.get("error"):
+        return score, sorted(set(labels) | {"multimodal_fallback_used"})
+    if probe_key == "image_url" and normalized.get("error") and _claude_probe_is_not_supported({"labels": labels, "evidence_excerpt": _claude_code_excerpt(normalized)}):
+        return 0.0, sorted(set(labels) | {"image_url_not_supported", "capability_not_supported"})
+    if probe_key == "document_block_input" and normalized.get("error") and _claude_probe_is_not_supported({"labels": labels, "evidence_excerpt": _claude_code_excerpt(normalized)}):
+        return 0.0, sorted(set(labels) | {"document_block_not_supported", "capability_not_supported"})
+    if probe_key != "response_schema":
         return score, labels
     adjusted_score = score
     adjusted_labels = set(labels)
@@ -3427,7 +3423,7 @@ def _claude_code_web_search_reference_score(normalized: dict[str, Any]) -> tuple
     unsupported_tokens = ["web_search", "web search", "unsupported", "not supported", "not available", "tool"]
     no_tool_tokens = ["工具调用次数", "工具调用", "用尽", "无法实时", "不能实时", "没有真实联网", "没有联网", "无法查询", "无法完成实时查询"]
     if any(token in combined for token in unsupported_tokens):
-        return 0.0, ["web_search_unsupported"]
+        return 0.0, ["web_search_not_supported"]
     if any(token in combined for token in no_tool_tokens):
         return 0.0, ["web_search_not_available"]
     return 0.0, ["web_search_evidence_missing"]
@@ -6628,6 +6624,11 @@ def _normalize_adaptive_thinking_body(body: dict[str, Any], model_name: str | No
     if profile != PROTOCOL_PROFILE_ADAPTIVE_THINKING:
         return profile, notes
 
+    for key in ("temperature", "top_p", "top_k"):
+        if key in body:
+            body.pop(key, None)
+            notes.append(f"removed {key} for Claude Opus 4.7+ adaptive-thinking protocol")
+
     thinking = body.get("thinking")
     if isinstance(thinking, dict):
         normalized_thinking: dict[str, Any] = {"type": "adaptive"}
@@ -6643,10 +6644,6 @@ def _normalize_adaptive_thinking_body(body: dict[str, Any], model_name: str | No
         body["thinking"] = normalized_thinking
 
     if isinstance(body.get("thinking"), dict) and body["thinking"].get("type") == "adaptive":
-        for key in ("temperature", "top_p", "top_k"):
-            if key in body:
-                body.pop(key, None)
-                notes.append(f"removed {key} for adaptive thinking request")
         effort = _effort_from_model_suffix(model_name) or "medium"
         output_config = body.get("output_config")
         if not isinstance(output_config, dict):
@@ -8992,6 +8989,10 @@ LABEL_EXPLANATIONS = {
     "signature_source_missing": "未找到可用的参考 source 渠道，无法执行 Thinking Signature 互通检测。",
     "provider_error_variant": "上游返回了等价的参数不支持原生约束错误，保留差异标签。",
     "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
+    "image_url_not_supported": "URL 图片输入不被当前渠道支持，常见于 Bedrock、Vertex 或部分中转；作为能力参考跳过。",
+    "document_block_not_supported": "document block 不被当前渠道支持；文本 fallback 仍可用于验证内容读取能力。",
+    "web_search_not_supported": "server-side Web Search 工具不被当前渠道支持，作为能力参考跳过。",
+    "multimodal_fallback_used": "多模态文档探针已使用普通 text content block fallback，避免 document block 兼容性误判。",
 }
 
 

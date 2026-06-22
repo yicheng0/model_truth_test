@@ -1704,7 +1704,7 @@ def test_websearch_seed_case_uses_web_search_probe_payload() -> None:
     assert case.title == "Web Search AWS 纯度报错探针"
     assert case.request_params["max_tokens"] == 900
     assert case.request_params["stream"] is True
-    assert case.request_params["tools"][0]["type"] == "web_search_20260209"
+    assert case.request_params["tools"][0]["type"] == "web_search_20260318"
     assert case.scoring_rules["expected_error_missing_label"] == "web_search_not_rejected"
 
 
@@ -1729,8 +1729,8 @@ def test_score_result_validates_web_search_expected_error() -> None:
             channel,
             case,
             {
-                "raw_response": {"error": {"message": "unsupported tool web_search_20260209"}},
-                "error": "unsupported tool web_search_20260209",
+                "raw_response": {"error": {"message": "unsupported tool web_search_20260318"}},
+                "error": "unsupported tool web_search_20260318",
                 "status_code": 500,
                 "content_text": "",
             },
@@ -4917,7 +4917,8 @@ def test_claude_code_web_search_reference_probe_is_unscored() -> None:
     config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "web_search_reference")
     assert config["severity"] == "reference"
     assert config["category"] == "web_capability"
-    assert config["request_params"]["tools"][0]["type"] == "web_search_20250305"
+    assert config["request_params"]["tools"][0]["type"] == "web_search_20260318"
+    assert "temperature" not in config["request_params"]
 
     probes = [
         {"title": "基础回显", "severity": "core", "status": "pass", "score": 100},
@@ -4968,6 +4969,54 @@ def test_legacy_claude_model_keeps_legacy_thinking_fields() -> None:
     assert body["temperature"] == 1
     assert notes == []
 
+
+
+def test_adaptive_thinking_model_removes_sampling_params_for_all_probes() -> None:
+    from app.services import _normalize_probe_body_for_model
+
+    body = {
+        "model": "claude-opus-4-7",
+        "max_tokens": 64,
+        "temperature": 0,
+        "top_p": 0.9,
+        "top_k": 40,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }
+
+    profile, notes = _normalize_probe_body_for_model(body, "claude-opus-4-7")
+
+    assert profile == "claude_adaptive_thinking"
+    assert "temperature" not in body
+    assert "top_p" not in body
+    assert "top_k" not in body
+    assert any("temperature" in note for note in notes)
+
+
+def test_claude_code_multimodal_probe_payloads_are_protocol_safe() -> None:
+    from app.services import CLAUDE_CODE_DOCUMENT_TEXT, CLAUDE_CODE_RED_PNG_BASE64, _claude_code_probe_configs
+
+    configs = {item["key"]: item for item in _claude_code_probe_configs(None)}
+
+    image_body = configs["image_base64"]["request_params"]
+    assert "temperature" not in image_body
+    assert image_body["message_content"][1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": CLAUDE_CODE_RED_PNG_BASE64},
+    }
+
+    document_body = configs["document_input"]["request_params"]
+    assert "temperature" not in document_body
+    assert all(block.get("type") == "text" for block in document_body["message_content"])
+    assert document_body["message_content"][1]["text"] == CLAUDE_CODE_DOCUMENT_TEXT
+
+
+def test_claude_code_web_search_reference_uses_latest_tool_version() -> None:
+    from app.services import _claude_code_probe_configs
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "web_search_reference")
+
+    assert config["request_params"]["tools"][0]["type"] == "web_search_20260318"
+    assert "temperature" not in config["request_params"]
 
 
 def test_claude_code_probe_configs_include_stronger_relay_probes() -> None:
@@ -5137,6 +5186,32 @@ def test_claude_code_response_schema_flags_openai_protocol_shape() -> None:
         "usage_missing",
     } <= set(payload["labels"])
     assert "returned_model" in payload["evidence_excerpt"]
+
+
+def test_claude_code_optional_capability_400_is_skipped() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    configs = {item["key"]: item for item in _claude_code_probe_configs(None)}
+    image_payload = _claude_code_probe_payload(
+        configs["image_url"],
+        None,
+        {"error": "400 Bad Request: image URL not supported by this channel", "raw_response": {"type": "error"}},
+        score=0,
+        labels=["request_failed"],
+    )
+    web_payload = _claude_code_probe_payload(
+        configs["web_search_reference"],
+        None,
+        {"error": "400 Bad Request: unsupported tool web_search_20260318", "raw_response": {"type": "error"}},
+        score=0,
+        labels=["request_failed"],
+    )
+
+    assert image_payload["status"] == "skipped"
+    assert "image_url_not_supported" in image_payload["labels"]
+    assert "capability_not_supported" in image_payload["labels"]
+    assert web_payload["status"] == "skipped"
+    assert web_payload["labels"] == ["web_search_not_supported"]
 
 
 def test_claude_code_web_search_reference_detects_server_tool_evidence() -> None:
@@ -5703,7 +5778,7 @@ def test_openai_request_passes_tools_and_stream(monkeypatch) -> None:
         assert channel is not None and case is not None
         asyncio.run(_openai_compatible_call(channel, build_raw_request(channel, case), {"api_key": "test-key"}))
 
-    assert captured["json"]["tools"][0]["type"] == "web_search_20260209"
+    assert captured["json"]["tools"][0]["type"] == "web_search_20260318"
     assert captured["json"]["stream"] is True
 
 

@@ -130,6 +130,26 @@ const LABELS: Record<string, LabelInfo> = {
     description: '该渠道不支持当前能力或字段组合，作为能力差异参考，不应单独判定为非 Claude。',
     priority: 42,
   },
+  image_url_not_supported: {
+    text: 'URL 图片不支持',
+    description: 'URL 图片输入依赖渠道能力；Bedrock、Vertex 或部分中转通常只支持 base64 图片。',
+    priority: 42,
+  },
+  document_block_not_supported: {
+    text: 'Document block 不支持',
+    description: 'document block 取决于渠道支持情况；文本内容读取已使用普通 text block fallback 验证。',
+    priority: 42,
+  },
+  web_search_not_supported: {
+    text: 'Web Search 不支持',
+    description: '该渠道不支持 Anthropic server-side Web Search；作为能力参考跳过，不单独影响 Claude 判断。',
+    priority: 42,
+  },
+  multimodal_fallback_used: {
+    text: '文本 fallback',
+    description: '文档探针使用普通 text content block 传入 marker，避免 document block 兼容性导致误判。',
+    priority: 18,
+  },
   signature_not_supported: {
     text: 'Signature 不支持',
     description: '当前链路不支持或未透传 Thinking Signature，说明 ClaudeCode 链路不可验证。',
@@ -214,7 +234,7 @@ export function probeDiagnosis(probe: ClaudeCodeDiagnosticProbe): string {
   const labels = probe.labels ?? [];
   if (probe.status === 'pass' && labels.length === 0) return '测试通过，未发现该项异常。';
   const evidence = `${probe.evidence_excerpt ?? ''}\n${probe.detail ?? ''}`.toLowerCase();
-  if (evidence.includes('400') && /(temperature|budget_tokens|output_config|thinking|display|cache_control)/.test(evidence)) {
+  if (evidence.includes('400') && /(temperature|top_p|top_k|budget_tokens|output_config|thinking|display|cache_control|image|document|web_search|web search|tool)/.test(evidence)) {
     return '上游返回 400，优先按 Opus 4.7+ 协议字段不兼容或中转网关字段改写问题处理。';
   }
   const primary = topRiskLabels([probe], 1)[0] ?? labels[0];

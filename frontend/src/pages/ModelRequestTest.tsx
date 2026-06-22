@@ -57,7 +57,7 @@ const AWS_WEB_SEARCH_PROBE_EXTRA_PARAMS = {
   stream: true,
   tools: [
     {
-      type: 'web_search_20260209',
+      type: 'web_search_20260318',
       name: 'web_search',
       max_uses: 5,
     },

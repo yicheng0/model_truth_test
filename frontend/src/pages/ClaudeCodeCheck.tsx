@@ -25,8 +25,8 @@ const SECTION_DESCRIPTIONS: Record<string, string> = {
   structure: 'Claude 基础响应结构、message 形态、usage、截断和协议行为。',
   behavior: '上下文、提示词防泄露以及运行时行为稳定性。',
   signature: 'ClaudeCode / Thinking Signature 专项能力；普通 Claude 资源不强制要求支持。',
-  multimodal: '图片 base64、图片 URL 和文档输入能力，仅作能力参考。',
-  web_capability: 'Anthropic server-side Web Search 支持情况，仅作参考，不参与风险评分。',
+  multimodal: '能力参考：图片 base64 优先；URL 图片和 document block 取决于渠道是否支持，不作为 Claude 真伪核心判断。',
+  web_capability: '能力参考：使用 web_search_20260318；不支持时跳过，不作为 Claude 真伪判断。',
 };
 
 function statusColor(status: string) {
@@ -653,7 +653,7 @@ export default function ClaudeCodeCheck() {
           <Typography.Text className="section-kicker">CLAUDE RESOURCE FINGERPRINT</Typography.Text>
           <Typography.Title level={2}>Claude 资源指纹检测</Typography.Title>
           <Typography.Paragraph>
-            输入 Claude 或第三方中转的 URL、API Key 和模型名，先判断是否 Claude-compatible；Opus 4.7+ 会自动归一化 adaptive thinking，避免旧 enabled / budget_tokens / temperature 字段导致 400。
+            输入 Claude 或第三方中转的 URL、API Key 和模型名，先判断是否 Claude-compatible；Opus 4.7+ 会自动归一化 adaptive thinking，并清洗旧 enabled / budget_tokens / temperature / top_p / top_k 字段，避免协议 400。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">临时凭据不落库</Tag>

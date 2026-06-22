@@ -737,7 +737,7 @@ describe('api request handling', () => {
       request_params: {
         max_tokens: 900,
         stream: true,
-        tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
+        tools: [{ type: 'web_search_20260318', name: 'web_search', max_uses: 5 }],
         expected_error_contains: 'web search',
       },
     });
@@ -752,7 +752,7 @@ describe('api request handling', () => {
           request_params: {
             max_tokens: 900,
             stream: true,
-            tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
+            tools: [{ type: 'web_search_20260318', name: 'web_search', max_uses: 5 }],
             expected_error_contains: 'web search',
           },
         }),
@@ -823,7 +823,7 @@ describe('api request handling', () => {
         max_tokens: 900,
         temperature: 0,
         stream: true,
-        tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
+        tools: [{ type: 'web_search_20260318', name: 'web_search', max_uses: 5 }],
         expected_error_any: ['web_search', 'unsupported', 'not available', 'tool', 'bedrock'],
         expected_error_missing_label: 'web_search_not_rejected',
       },
@@ -857,7 +857,7 @@ describe('api request handling', () => {
       '/api/channels/ch_1/model-request-test',
       expect.objectContaining({
         method: 'POST',
-        body: expect.stringContaining('web_search_20260209'),
+        body: expect.stringContaining('web_search_20260318'),
       }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -875,7 +875,7 @@ describe('api request handling', () => {
     expect(thinkingBody.request_params.output_config).toEqual({ effort: 'medium' });
     expect(thinkingBody.request_params.temperature).toBeUndefined();
     expect(thinkingBody.request_params.tools).toBeUndefined();
-    expect(webSearchBody.request_params.tools[0].type).toBe('web_search_20260209');
+    expect(webSearchBody.request_params.tools[0].type).toBe('web_search_20260318');
     expect(webSearchBody.request_params.thinking).toBeUndefined();
     expect(adaptiveBody.request_params.thinking).toEqual({ type: 'adaptive' });
     expect(adaptiveBody.request_params.output_config).toEqual({ effort: 'medium' });
