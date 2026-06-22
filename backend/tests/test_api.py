@@ -4928,6 +4928,48 @@ def test_claude_code_web_search_reference_probe_is_unscored() -> None:
     assert "Web Search" not in _claude_code_summary("low", probes)
 
 
+def test_adaptive_thinking_model_normalizes_legacy_thinking_fields() -> None:
+    from app.services import _normalize_probe_body_for_model
+
+    body = {
+        "model": "claude-opus-4-7",
+        "max_tokens": 2048,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "top_k": 40,
+        "thinking": {"type": "enabled", "budget_tokens": 1024, "adaptive": {"enabled": True}},
+    }
+
+    profile, notes = _normalize_probe_body_for_model(body, "claude-opus-4-7-high")
+
+    assert profile == "claude_adaptive_thinking"
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "high"}
+    assert "temperature" not in body
+    assert "top_p" not in body
+    assert "top_k" not in body
+    assert any("budget_tokens" in note for note in notes)
+
+
+def test_legacy_claude_model_keeps_legacy_thinking_fields() -> None:
+    from app.services import _normalize_probe_body_for_model
+
+    body = {
+        "model": "claude-opus-4-6",
+        "max_tokens": 2048,
+        "temperature": 1,
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+    }
+
+    profile, notes = _normalize_probe_body_for_model(body, "claude-opus-4-6")
+
+    assert profile == "claude_legacy"
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+    assert body["temperature"] == 1
+    assert notes == []
+
+
+
 def test_claude_code_probe_configs_include_stronger_relay_probes() -> None:
     from app.services import _claude_code_probe_configs, _claude_code_section_for_category
 
@@ -4940,6 +4982,10 @@ def test_claude_code_probe_configs_include_stronger_relay_probes() -> None:
     assert configs["tool_use_shape"]["scoring_rules"]["tool_id_prefix"] == "toolu_"
     assert configs["repeatability_nonce_pair"]["post_check"] == "repeatability_nonce_pair"
     assert _claude_code_section_for_category(configs["repeatability_nonce_pair"]["category"]) == "behavior"
+    assert configs["thinking_signature"]["request_params"]["thinking"] == {"type": "adaptive"}
+    assert configs["thinking_signature"]["request_params"]["output_config"] == {"effort": "medium"}
+    assert "budget_tokens" not in configs["thinking_signature"]["request_params"]["thinking"]
+    assert "temperature" not in configs["basic_echo"]["request_params"]
 
 
 def test_claude_code_strict_json_schema_scoring_labels() -> None:

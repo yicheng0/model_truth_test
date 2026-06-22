@@ -809,11 +809,10 @@ describe('api request handling', () => {
       run_name: '组合纯度检测 · thinking_temperature',
       request_params: {
         max_tokens: 2048,
-        temperature: 0.2,
-        thinking: { type: 'enabled', budget_tokens: 1024 },
-        reasoning_effort: 'medium',
-        expected_error_contains: 'temperature may only be set to 1 when thinking is enabled',
-        expected_error_missing_label: 'thinking_temperature_not_rejected',
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'medium' },
+        expected_error_any: ['adaptive', 'output_config', 'effort', 'thinking'],
+        expected_error_missing_label: 'thinking_adaptive_not_supported',
       },
     });
     await api.modelRequestTest('ch_1', {
@@ -835,15 +834,9 @@ describe('api request handling', () => {
       run_name: '组合纯度检测 · thinking_adaptive_enabled',
       request_params: {
         max_tokens: 2000,
-        temperature: 0,
-        thinking: {
-          type: 'enabled',
-          adaptive: { enabled: true },
-          budget_tokens: 8000,
-          max_tokens: 2000,
-        },
-        expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
-        expected_error_variant_any: ['temperature may only be set to 1 when thinking is enabled', 'temperature', 'thinking'],
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'medium' },
+        expected_error_variant_any: ['adaptive', 'output_config', 'effort', 'thinking'],
         expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
         expected_error_variant_label: 'provider_error_variant',
         expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
@@ -878,11 +871,15 @@ describe('api request handling', () => {
     const thinkingBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
     const webSearchBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
     const adaptiveBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body));
-    expect(thinkingBody.request_params.thinking).toEqual({ type: 'enabled', budget_tokens: 1024 });
+    expect(thinkingBody.request_params.thinking).toEqual({ type: 'adaptive' });
+    expect(thinkingBody.request_params.output_config).toEqual({ effort: 'medium' });
+    expect(thinkingBody.request_params.temperature).toBeUndefined();
     expect(thinkingBody.request_params.tools).toBeUndefined();
     expect(webSearchBody.request_params.tools[0].type).toBe('web_search_20260209');
     expect(webSearchBody.request_params.thinking).toBeUndefined();
-    expect(adaptiveBody.request_params.thinking.adaptive).toEqual({ enabled: true });
+    expect(adaptiveBody.request_params.thinking).toEqual({ type: 'adaptive' });
+    expect(adaptiveBody.request_params.output_config).toEqual({ effort: 'medium' });
+    expect(adaptiveBody.request_params.temperature).toBeUndefined();
     expect(adaptiveBody.request_params.tools).toBeUndefined();
     fetchMock.mockRestore();
   });
@@ -908,15 +905,9 @@ describe('api request handling', () => {
       run_name: '纯度检测 · thinking_adaptive_enabled',
       request_params: {
         max_tokens: 2000,
-        temperature: 0,
-        thinking: {
-          type: 'enabled',
-          adaptive: { enabled: true },
-          budget_tokens: 8000,
-          max_tokens: 2000,
-        },
-        expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
-        expected_error_variant_any: ['temperature may only be set to 1 when thinking is enabled', 'temperature', 'thinking'],
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'medium' },
+        expected_error_variant_any: ['adaptive', 'output_config', 'effort', 'thinking'],
         expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
         expected_error_variant_label: 'provider_error_variant',
         expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
@@ -933,15 +924,9 @@ describe('api request handling', () => {
           run_name: '纯度检测 · thinking_adaptive_enabled',
           request_params: {
             max_tokens: 2000,
-            temperature: 0,
-            thinking: {
-              type: 'enabled',
-              adaptive: { enabled: true },
-              budget_tokens: 8000,
-              max_tokens: 2000,
-            },
-            expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
-            expected_error_variant_any: ['temperature may only be set to 1 when thinking is enabled', 'temperature', 'thinking'],
+            thinking: { type: 'adaptive' },
+            output_config: { effort: 'medium' },
+            expected_error_variant_any: ['adaptive', 'output_config', 'effort', 'thinking'],
             expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
             expected_error_variant_label: 'provider_error_variant',
             expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',

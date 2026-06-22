@@ -359,10 +359,19 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
             <Tag color={riskColor(result.risk_level)}>风险 {result.risk_level}</Tag>
             <Tag color={result.ok ? 'green' : 'red'}>Claude 得分 {result.claude_score ?? result.score}</Tag>
             {typeof result.claude_code_score === 'number' ? <Tag>ClaudeCode 得分 {result.claude_code_score}</Tag> : null}
+            {result.protocol_profile ? <Tag color="blue">协议 {result.protocol_profile}</Tag> : null}
           </Space>
         )}
         description={result.classification_reason ? `${result.summary} · ${result.classification_reason}` : result.summary}
       />
+      {result.request_normalization_notes?.length ? (
+        <Alert
+          type="info"
+          showIcon
+          message="Opus 4.7+ 请求字段已归一化"
+          description={result.request_normalization_notes.join('；')}
+        />
+      ) : null}
       {riskLabels.length ? (
         <div className="claude-risk-row">
           <Typography.Text strong>关键风险</Typography.Text>
@@ -644,7 +653,7 @@ export default function ClaudeCodeCheck() {
           <Typography.Text className="section-kicker">CLAUDE RESOURCE FINGERPRINT</Typography.Text>
           <Typography.Title level={2}>Claude 资源指纹检测</Typography.Title>
           <Typography.Paragraph>
-            输入 Claude 或第三方中转的 URL、API Key 和模型名，先判断是否 Claude-compatible，再附加判断 ClaudeCode / Thinking Signature 链路能力。
+            输入 Claude 或第三方中转的 URL、API Key 和模型名，先判断是否 Claude-compatible；Opus 4.7+ 会自动归一化 adaptive thinking，避免旧 enabled / budget_tokens / temperature 字段导致 400。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">临时凭据不落库</Tag>

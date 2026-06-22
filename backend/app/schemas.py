@@ -175,6 +175,8 @@ class ClaudeCodeJobProbeRead(BaseModel):
     request_id: str | None = None
     request_protocol: str | None = None
     provider_endpoint: str | None = None
+    protocol_profile: str | None = None
+    request_normalization_notes: list[str] = Field(default_factory=list)
     latency_ms: int | float | None = None
     first_token_ms: int | float | None = None
     evidence_excerpt: str | None = None
@@ -244,6 +246,8 @@ class ClaudeCodeProbeResultRead(BaseModel):
     request_id: str | None = None
     request_protocol: str | None = None
     provider_endpoint: str | None = None
+    protocol_profile: str | None = None
+    request_normalization_notes: list[str] = Field(default_factory=list)
     latency_ms: int | float | None = None
     first_token_ms: int | float | None = None
     evidence_excerpt: str | None = None
@@ -282,6 +286,8 @@ class ClaudeCodeTestRead(BaseModel):
     capability_flags: dict[str, Any] = Field(default_factory=dict)
     claude_score: float | None = None
     claude_code_score: float | None = None
+    protocol_profile: str | None = None
+    request_normalization_notes: list[str] = Field(default_factory=list)
     probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
     sections: list[ClaudeCodeSectionRead] = Field(default_factory=list)
 

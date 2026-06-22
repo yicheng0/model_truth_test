@@ -41,13 +41,11 @@ type ComboProbeResult = {
 const AWS_THINKING_PROBE_PROMPT = '请用一句话回答：这是 thinking temperature 纯度探针。';
 const AWS_THINKING_PROBE_EXTRA_PARAMS = {
   max_tokens: 2048,
-  temperature: 0.2,
-  thinking: { type: 'enabled', budget_tokens: 1024 },
-  reasoning_effort: 'medium',
-  expected_error_contains: 'temperature may only be set to 1 when thinking is enabled',
-  expected_error_any: ['temperature', 'thinking'],
-  expected_error_variant_any: ['temperature', 'thinking'],
-  expected_error_missing_label: 'thinking_temperature_not_rejected',
+  thinking: { type: 'adaptive' },
+  output_config: { effort: 'medium' },
+  expected_error_any: ['adaptive', 'output_config', 'effort', 'thinking'],
+  expected_error_variant_any: ['adaptive', 'output_config', 'effort', 'thinking'],
+  expected_error_missing_label: 'thinking_adaptive_not_supported',
   expected_error_variant_label: 'provider_error_variant',
   expected_error_unexpected_label: 'unexpected_error_response',
 };
@@ -73,15 +71,11 @@ const AWS_WEB_SEARCH_PROBE_EXTRA_PARAMS = {
 const THINKING_ADAPTIVE_ENABLED_PROBE_PROMPT = '回复OK';
 const THINKING_ADAPTIVE_ENABLED_PROBE_EXTRA_PARAMS = {
   max_tokens: 2000,
-  temperature: 0,
   thinking: {
-    type: 'enabled',
-    adaptive: { enabled: true },
-    budget_tokens: 8000,
-    max_tokens: 2000,
+    type: 'adaptive',
   },
-  expected_error_required_all: ['enabled', 'not supported', 'output_config.effort'],
-  expected_error_variant_any: ['temperature may only be set to 1 when thinking is enabled', 'temperature', 'thinking'],
+  output_config: { effort: 'medium' },
+  expected_error_variant_any: ['adaptive', 'output_config', 'effort', 'thinking'],
   expected_error_missing_label: 'thinking_adaptive_enabled_not_rejected',
   expected_error_variant_label: 'provider_error_variant',
   expected_error_unexpected_label: 'thinking_adaptive_enabled_wrong_error',
@@ -90,10 +84,10 @@ const THINKING_ADAPTIVE_ENABLED_PROBE_EXTRA_PARAMS = {
 const PROBES: ProbeConfig[] = [
   {
     key: 'thinking_temperature',
-    title: 'Thinking temperature 冲突',
-    buttonLabel: '测试 Thinking 温度冲突',
-    fillLabel: '填入 Thinking 温度冲突',
-    description: '构造 thinking + 非 1 temperature，预期上游直接拒绝。',
+    title: 'Adaptive thinking 协议',
+    buttonLabel: '测试 Adaptive thinking',
+    fillLabel: '填入 Adaptive thinking',
+    description: '构造 Opus 4.7+ adaptive thinking + output_config.effort，不再发送旧 enabled/budget_tokens/temperature。',
     prompt: AWS_THINKING_PROBE_PROMPT,
     request_params: AWS_THINKING_PROBE_EXTRA_PARAMS,
     run_name: '纯度检测 · thinking_temperature',
@@ -114,10 +108,10 @@ const PROBES: ProbeConfig[] = [
   },
   {
     key: 'thinking_adaptive_enabled',
-    title: 'thinking.adaptive.enabled',
-    buttonLabel: '测试 adaptive.enabled',
-    fillLabel: '填入 adaptive.enabled',
-    description: '构造 AWS 不支持的 thinking.adaptive.enabled，预期上游直接拒绝。',
+    title: 'adaptive thinking effort',
+    buttonLabel: '测试 adaptive effort',
+    fillLabel: '填入 adaptive effort',
+    description: '构造 Opus 4.7+ adaptive thinking effort 探针，避免旧 adaptive.enabled 字段。',
     prompt: THINKING_ADAPTIVE_ENABLED_PROBE_PROMPT,
     request_params: THINKING_ADAPTIVE_ENABLED_PROBE_EXTRA_PARAMS,
     run_name: '纯度检测 · thinking_adaptive_enabled',

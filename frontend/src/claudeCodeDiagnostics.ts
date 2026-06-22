@@ -125,6 +125,16 @@ const LABELS: Record<string, LabelInfo> = {
     description: '上游请求失败，需先确认 base URL、模型名、密钥、协议和该能力是否被支持。',
     priority: 64,
   },
+  capability_not_supported: {
+    text: '能力不支持',
+    description: '该渠道不支持当前能力或字段组合，作为能力差异参考，不应单独判定为非 Claude。',
+    priority: 42,
+  },
+  signature_not_supported: {
+    text: 'Signature 不支持',
+    description: '当前链路不支持或未透传 Thinking Signature，说明 ClaudeCode 链路不可验证。',
+    priority: 46,
+  },
   provider_error_variant: {
     text: '错误形态变体',
     description: '上游返回了同类拒绝，但错误文案和官方参考不完全一致，通常作为轻微代理痕迹处理。',
@@ -203,6 +213,10 @@ export function topRiskLabels(probes: ClaudeCodeDiagnosticProbe[], limit = 6): s
 export function probeDiagnosis(probe: ClaudeCodeDiagnosticProbe): string {
   const labels = probe.labels ?? [];
   if (probe.status === 'pass' && labels.length === 0) return '测试通过，未发现该项异常。';
+  const evidence = `${probe.evidence_excerpt ?? ''}\n${probe.detail ?? ''}`.toLowerCase();
+  if (evidence.includes('400') && /(temperature|budget_tokens|output_config|thinking|display|cache_control)/.test(evidence)) {
+    return '上游返回 400，优先按 Opus 4.7+ 协议字段不兼容或中转网关字段改写问题处理。';
+  }
   const primary = topRiskLabels([probe], 1)[0] ?? labels[0];
   if (primary) return labelDescription(primary);
   if (probe.evidence_excerpt) return probe.evidence_excerpt;

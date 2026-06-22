@@ -302,6 +302,8 @@ export type ClaudeCodeProbeResult = {
   request_id?: string | null;
   request_protocol?: string | null;
   provider_endpoint?: string | null;
+  protocol_profile?: 'claude_legacy' | 'claude_adaptive_thinking' | 'unknown' | string | null;
+  request_normalization_notes?: string[];
   latency_ms?: number | null;
   first_token_ms?: number | null;
   evidence_excerpt?: string | null;
@@ -347,6 +349,8 @@ export type ClaudeCodeTestResult = {
   } | null;
   claude_score?: number | null;
   claude_code_score?: number | null;
+  protocol_profile?: 'claude_legacy' | 'claude_adaptive_thinking' | 'unknown' | string | null;
+  request_normalization_notes?: string[];
   probes: ClaudeCodeProbeResult[];
   sections: ClaudeCodeSection[];
 };
@@ -425,6 +429,8 @@ export type ClaudeCodeJobProbe = {
   request_id?: string | null;
   request_protocol?: string | null;
   provider_endpoint?: string | null;
+  protocol_profile?: 'claude_legacy' | 'claude_adaptive_thinking' | 'unknown' | string | null;
+  request_normalization_notes?: string[];
   latency_ms?: number | null;
   first_token_ms?: number | null;
   evidence_excerpt?: string | null;
