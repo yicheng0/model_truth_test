@@ -529,7 +529,7 @@ export default function ModelRequestTest() {
                 {runComboProbe.isPending ? '检测中' : '三项组合测试'}
               </Button>
               <Button onClick={() => navigate('/claude-code-check')} disabled={channels.isLoading || requestModel.isPending || runSingleProbe.isPending || runComboProbe.isPending} icon={<ShieldCheck size={16} />}>
-                打开 ClaudeCode 专页
+                打开 Claude 指纹专页
               </Button>
             </Space>
           </Form>

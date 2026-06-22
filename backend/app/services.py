@@ -2527,12 +2527,12 @@ CLAUDE_CODE_RED_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfE
 CLAUDE_CODE_DOCUMENT_TEXT = "ClaudeCode document marker: CC-DOC-742. Return this marker exactly."
 
 CLAUDE_CODE_SECTION_TITLES: dict[str, str] = {
-    "fingerprint": "LLM 指纹验证",
-    "structure": "结构完整性",
+    "fingerprint": "ClaudeCode 兼容指纹",
+    "structure": "Claude 基础结构",
     "behavior": "行为验证",
-    "signature": "签名校验",
-    "multimodal": "多模态能力",
-    "web_capability": "Web 能力参考",
+    "signature": "ClaudeCode / Thinking Signature",
+    "multimodal": "能力参考：多模态",
+    "web_capability": "能力参考：Web",
 }
 
 
@@ -3011,13 +3011,19 @@ async def create_claude_code_test(
     await emit(signature_config)
     probes.append(await _run_claude_code_signature_interop_probe(db, channel, source_channel_id, credentials_override=credentials_override))
     await emit(probes[-1])
+    probes = [_claude_code_normalize_optional_probe(probe) for probe in probes]
     score = _claude_code_score(probes)
+    claude_code_score = _claude_code_link_score(probes)
     risk_level = _claude_code_risk_level(score, probes)
+    classification = _claude_code_classification(probes, score, claude_code_score)
     return {
-        "ok": risk_level in {"low", "medium"} and not any(probe["status"] == "fail" and probe["severity"] == "core" for probe in probes),
+        "ok": classification["classification_status"] in {"claude", "aws_resource", "claude_code"} and risk_level in {"low", "medium"},
         "score": score,
         "risk_level": risk_level,
-        "summary": _claude_code_summary(risk_level, probes),
+        "summary": _claude_code_summary(risk_level, probes, classification),
+        "claude_score": score,
+        "claude_code_score": claude_code_score,
+        **classification,
         "probes": probes,
         "sections": _claude_code_sections(probes),
     }
@@ -3308,7 +3314,11 @@ def _claude_code_probe_status(config: dict[str, Any], score: float, labels: list
     severity = config.get("severity")
     label_set = set(labels)
     if str(severity) == "reference":
-        return "pass" if "web_search_supported" in label_set else "fail"
+        return "pass" if "web_search_supported" in label_set else "skipped"
+    if config.get("category") == "multimodal" and normalized.get("error") and _claude_probe_is_not_supported({"labels": labels, "evidence_excerpt": _claude_code_excerpt(normalized)}):
+        return "skipped"
+    if config.get("category") == "signature" and normalized.get("error") and _claude_probe_is_not_supported({"labels": labels, "evidence_excerpt": _claude_code_excerpt(normalized)}):
+        return "warning"
     if (
         config.get("post_check") == "thinking_signature"
         and not normalized.get("error")
@@ -3323,6 +3333,21 @@ def _claude_code_probe_status(config: dict[str, Any], score: float, labels: list
     if str(severity) == "weak":
         return "warning"
     return "fail"
+
+
+def _claude_code_normalize_optional_probe(probe: dict[str, Any]) -> dict[str, Any]:
+    section = _claude_probe_section(probe)
+    if section in CLAUDE_REFERENCE_SECTIONS and probe.get("status") == "fail" and _claude_probe_is_not_supported(probe):
+        normalized = dict(probe)
+        normalized["status"] = "skipped"
+        normalized["labels"] = sorted(set(str(label) for label in (probe.get("labels") or [])) | {"capability_not_supported"})
+        return normalized
+    if section == "signature" and probe.get("status") == "fail" and _claude_probe_is_not_supported(probe):
+        normalized = dict(probe)
+        normalized["status"] = "warning"
+        normalized["labels"] = sorted(set(str(label) for label in (probe.get("labels") or [])) | {"signature_not_supported"})
+        return normalized
+    return probe
 
 
 def _claude_code_probe_excerpt(config: dict[str, Any], normalized: dict[str, Any]) -> str:
@@ -3510,6 +3535,22 @@ async def _run_claude_code_signature_interop_probe(
             if credentials_override:
                 channel.auth_config_encrypted = original_auth
         ok = bool(payload.get("ok"))
+        error_excerpt = str(payload.get("reason") or payload.get("error") or "")
+        if not ok and _claude_probe_is_not_supported({"labels": ["signature_interop_failed"], "evidence_excerpt": error_excerpt}):
+            return {
+                **config,
+                "section": "signature",
+                "status": "warning",
+                "score": 0.0,
+                "labels": ["signature_not_supported"],
+                "run_id": None,
+                "result_id": None,
+                "message_id": payload.get("relay_message_id") or payload.get("source_message_id"),
+                "request_id": payload.get("relay_request_id") or payload.get("source_request_id"),
+                "request_protocol": None,
+                "provider_endpoint": payload.get("relay_endpoint"),
+                "evidence_excerpt": error_excerpt[:1200],
+            }
         return {
             **config,
             "section": "signature",
@@ -3522,27 +3563,97 @@ async def _run_claude_code_signature_interop_probe(
             "request_id": payload.get("relay_request_id") or payload.get("source_request_id"),
             "request_protocol": None,
             "provider_endpoint": payload.get("relay_endpoint"),
-            "evidence_excerpt": str(payload.get("reason") or "")[:1200],
+            "evidence_excerpt": error_excerpt[:1200],
         }
     except Exception as exc:
-        return {**_claude_code_failed_probe(config, str(exc)), "labels": ["signature_interop_failed"]}
+        probe = {**_claude_code_failed_probe(config, str(exc)), "labels": ["signature_interop_failed"]}
+        return _claude_code_normalize_optional_probe(probe)
 
 
-def _claude_code_score(probes: list[dict[str, Any]]) -> float:
-    weights = {"core": 1.0, "supporting": 0.55, "weak": 0.2}
+CLAUDE_CORE_SECTIONS = {"structure", "behavior"}
+CLAUDE_CODE_SECTIONS = {"signature", "fingerprint"}
+CLAUDE_REFERENCE_SECTIONS = {"multimodal", "web_capability"}
+CLAUDE_CORE_FAILURE_LABELS = {
+    "openai_shape_response",
+    "openai_protocol_fallback",
+    "message_id_openai_family",
+    "usage_missing",
+    "request_failed",
+    "invalid_request_not_rejected",
+    "tool_use_invalid",
+    "tool_id_mismatch",
+    "tool_name_mismatch",
+    "tool_input_mismatch",
+    "json_invalid",
+    "json_schema_invalid",
+}
+CLAUDE_NOT_SUPPORTED_TOKENS = (
+    "unsupported",
+    "not supported",
+    "not available",
+    "does not support",
+    "image",
+    "images",
+    "document",
+    "documents",
+    "vision",
+    "multimodal",
+    "thinking",
+    "signature",
+    "tool",
+    "400 bad request",
+    "invalid request",
+)
+
+
+def _claude_probe_section(probe: dict[str, Any]) -> str:
+    return str(probe.get("section") or _claude_code_section_for_category(str(probe.get("category") or "")))
+
+
+def _claude_probe_is_reference(probe: dict[str, Any]) -> bool:
+    return str(probe.get("severity")) == "reference" or _claude_probe_section(probe) in CLAUDE_REFERENCE_SECTIONS
+
+
+def _claude_probe_is_not_supported(probe: dict[str, Any]) -> bool:
+    text = _lower_text(" ".join(str(item) for item in (probe.get("labels") or [])))
+    text = f"{text}\n{_lower_text(str(probe.get('evidence_excerpt') or ''))}"
+    return any(token in text for token in CLAUDE_NOT_SUPPORTED_TOKENS)
+
+
+def _claude_probe_weight(probe: dict[str, Any]) -> float:
+    return {"core": 1.0, "supporting": 0.55, "weak": 0.2}.get(str(probe.get("severity")), 0.55)
+
+
+def _claude_score_for_sections(probes: list[dict[str, Any]], sections: set[str]) -> float:
     total = 0.0
     weighted = 0.0
     for probe in probes:
-        if probe.get("status") == "skipped" or probe.get("severity") == "reference":
+        if _claude_probe_section(probe) not in sections:
             continue
-        weight = weights.get(str(probe.get("severity")), 0.55)
+        if probe.get("status") == "skipped" or str(probe.get("severity")) == "reference":
+            continue
+        weight = _claude_probe_weight(probe)
         total += weight
         weighted += weight * float(probe.get("score") or 0)
     return round(weighted / total, 2) if total else 0.0
 
 
+def _claude_code_score(probes: list[dict[str, Any]]) -> float:
+    return _claude_score_for_sections(probes, CLAUDE_CORE_SECTIONS)
+
+
+def _claude_code_link_score(probes: list[dict[str, Any]]) -> float:
+    return _claude_score_for_sections(probes, CLAUDE_CODE_SECTIONS)
+
+
 def _claude_code_risk_level(score: float, probes: list[dict[str, Any]]) -> str:
-    core_failures = sum(1 for probe in probes if probe.get("severity") == "core" and probe.get("status") == "fail")
+    core_failures = sum(
+        1
+        for probe in probes
+        if _claude_probe_section(probe) in CLAUDE_CORE_SECTIONS
+        and probe.get("severity") == "core"
+        and probe.get("status") == "fail"
+    )
     if core_failures >= 3 or score < 60:
         return "critical"
     if core_failures or score < 75:
@@ -3552,24 +3663,85 @@ def _claude_code_risk_level(score: float, probes: list[dict[str, Any]]) -> str:
     return "low"
 
 
-def _claude_code_summary(risk_level: str, probes: list[dict[str, Any]]) -> str:
-    scored_probes = [probe for probe in probes if probe.get("severity") != "reference"]
-    failed = [probe["title"] for probe in scored_probes if probe.get("status") == "fail"]
-    warnings = [probe["title"] for probe in scored_probes if probe.get("status") == "warning"]
-    if risk_level == "low":
-        return "ClaudeCode 组合测试未发现核心异常，仍建议结合官方链路证据复核。"
+def _claude_code_capability_flags(probes: list[dict[str, Any]], claude_score: float, claude_code_score: float) -> dict[str, Any]:
+    signature_probes = [probe for probe in probes if _claude_probe_section(probe) == "signature"]
+    multimodal_probes = [probe for probe in probes if _claude_probe_section(probe) == "multimodal"]
+    signature_supported = any(probe.get("status") == "pass" for probe in signature_probes)
+    multimodal_supported = any(probe.get("status") == "pass" for probe in multimodal_probes)
+    return {
+        "is_claude_like": claude_score >= 75,
+        "is_claude_code_like": claude_score >= 75 and signature_supported and claude_code_score >= 70,
+        "signature_supported": signature_supported,
+        "multimodal_supported": multimodal_supported,
+    }
+
+
+def _claude_code_classification(probes: list[dict[str, Any]], claude_score: float, claude_code_score: float) -> dict[str, Any]:
+    flags = _claude_code_capability_flags(probes, claude_score, claude_code_score)
+    labels = {str(label) for probe in probes for label in (probe.get("labels") or [])}
+    message_ids = [str(probe.get("message_id") or "") for probe in probes]
+    has_openai_shape = bool(labels.intersection({"openai_shape_response", "openai_protocol_fallback", "message_id_openai_family"}))
+    has_aws_shape = any(mid.startswith("msg_bdrk_") for mid in message_ids)
+    core_failures = [probe for probe in probes if _claude_probe_section(probe) in CLAUDE_CORE_SECTIONS and probe.get("severity") == "core" and probe.get("status") == "fail"]
+
+    if flags["is_claude_code_like"]:
+        status = "claude_code"
+        label = "ClaudeCode 链路"
+        reason = "Claude 基础指纹通过，且 Thinking Signature / 互通专项证据可用。"
+    elif flags["is_claude_like"] and has_aws_shape:
+        status = "aws_resource"
+        label = "Claude 官方云资源"
+        reason = "Claude 基础指纹通过，message id 呈 AWS Bedrock 资源形态；ClaudeCode 专项能力仅作参考。"
+    elif flags["is_claude_like"]:
+        status = "claude"
+        label = "Claude 资源"
+        reason = "Claude 基础协议与行为指纹通过；未要求支持 ClaudeCode Thinking Signature 或多模态能力。"
+    elif has_openai_shape or claude_score < 40:
+        status = "non_claude"
+        label = "非 Claude 或协议漂移"
+        reason = "基础响应结构、message id、usage 或协议形态与 Claude Messages API 差异较大。"
+    else:
+        status = "anomaly"
+        label = "来源特征不明确"
+        reason = "Claude 基础指纹证据不足，需要结合原始请求响应复核。"
+
+    if core_failures and status in {"claude", "aws_resource", "claude_code"}:
+        reason = f"{reason} 仍有基础探针异常：" + "、".join(str(probe.get("title")) for probe in core_failures[:3])
+    return {
+        "classification_status": status,
+        "classification_label": label,
+        "classification_reason": reason,
+        "capability_flags": flags,
+    }
+
+
+def _claude_code_summary(risk_level: str, probes: list[dict[str, Any]], classification: dict[str, Any] | None = None) -> str:
+    classification = classification or {}
+    status = str(classification.get("classification_status") or "")
+    reason = str(classification.get("classification_reason") or "")
+    core_probes = [
+        probe
+        for probe in probes
+        if _claude_probe_section(probe) in CLAUDE_CORE_SECTIONS and str(probe.get("severity")) != "reference"
+    ]
+    failed = [probe["title"] for probe in core_probes if probe.get("status") == "fail"]
+    warnings = [probe["title"] for probe in core_probes if probe.get("status") == "warning"]
+    if status in {"claude", "aws_resource", "claude_code"} and risk_level in {"low", "medium"}:
+        return reason or "Claude 基础指纹未发现核心异常；ClaudeCode 专项和多模态能力作为附加参考。"
     details = []
+    if reason:
+        details.append(reason)
     if failed:
-        details.append(f"失败项：{'、'.join(failed[:6])}")
+        details.append(f"基础失败项：{'、'.join(failed[:6])}")
     if warnings:
-        details.append(f"警告项：{'、'.join(warnings[:6])}")
-    return "；".join(details) or "ClaudeCode 组合测试存在异常，需要查看原始证据。"
+        details.append(f"基础警告项：{'、'.join(warnings[:6])}")
+    return "；".join(details) or "Claude 资源指纹存在异常，需要查看原始证据。"
 
 
 def _claude_code_sections(probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for probe in probes:
-        grouped[str(probe.get("section") or _claude_code_section_for_category(str(probe.get("category") or "")))].append(probe)
+        grouped[_claude_probe_section(probe)].append(probe)
 
     items: list[dict[str, Any]] = []
     for key in ["fingerprint", "structure", "behavior", "signature", "multimodal", "web_capability"]:
@@ -3581,7 +3753,9 @@ def _claude_code_sections(probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         warning_count = sum(1 for probe in section_probes if probe.get("status") == "warning")
         skipped_count = sum(1 for probe in section_probes if probe.get("status") == "skipped")
         statuses = {str(probe.get("status")) for probe in section_probes}
-        if "fail" in statuses:
+        if key in CLAUDE_REFERENCE_SECTIONS and any(_claude_probe_is_not_supported(probe) for probe in section_probes):
+            status = "warning" if pass_count else "skipped"
+        elif "fail" in statuses:
             status = "fail"
         elif "warning" in statuses:
             status = "warning"
@@ -3682,6 +3856,7 @@ def claude_code_evidence_list(db: Session) -> list[dict[str, Any]]:
                 "fail_count": sum(1 for probe in probes if probe.get("status") == "fail"),
                 "warning_count": sum(1 for probe in probes if probe.get("status") == "warning"),
                 "created_at": item.created_at,
+                "result_payload": result_payload,
             }
         )
     return payload

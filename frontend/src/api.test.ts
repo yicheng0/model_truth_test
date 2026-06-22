@@ -457,6 +457,12 @@ describe('api request handling', () => {
           score: 96,
           risk_level: 'low',
           summary: 'ok',
+          classification_status: 'claude',
+          classification_label: 'Claude 资源',
+          classification_reason: 'Claude 基础协议与行为指纹通过',
+          capability_flags: { is_claude_like: true, is_claude_code_like: false, signature_supported: false, multimodal_supported: false },
+          claude_score: 96,
+          claude_code_score: 0,
           probes: [],
           sections: [],
         }),
@@ -636,7 +642,7 @@ describe('api request handling', () => {
         JSON.stringify([
           {
             id: 'cce_1',
-            channel_label: 'ClaudeCode 临时检测渠道',
+            channel_label: 'Claude 资源临时检测渠道',
             base_url: 'https://relay.example/v1',
             model_name: 'claude-sonnet-4-5',
             provider_type: 'third_party_anthropic',
@@ -648,6 +654,7 @@ describe('api request handling', () => {
             fail_count: 3,
             warning_count: 2,
             created_at: '2026-05-26T12:00:00Z',
+            result_payload: { ok: true, score: 96, risk_level: 'low', summary: 'Claude 资源', classification_status: 'claude', classification_label: 'Claude 资源', probes: [], sections: [] },
           },
         ]),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -669,7 +676,7 @@ describe('api request handling', () => {
       new Response(
         JSON.stringify({
           id: 'cce_1',
-          channel_label: 'ClaudeCode 临时检测渠道',
+          channel_label: 'Claude 资源临时检测渠道',
           base_url: 'https://relay.example/v1',
           model_name: 'claude-sonnet-4-5',
           provider_type: 'third_party_anthropic',
@@ -682,7 +689,7 @@ describe('api request handling', () => {
           risk_level: 'high',
           summary: '发现多模态问题',
           created_at: '2026-05-26T12:00:00Z',
-          result_payload: { ok: false, score: 82, risk_level: 'high', summary: '发现多模态问题', probes: [], sections: [] },
+          result_payload: { ok: false, score: 82, risk_level: 'high', summary: '发现多模态问题', classification_status: 'anomaly', classification_label: '来源特征不明确', probes: [], sections: [] },
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       ),

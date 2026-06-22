@@ -179,69 +179,64 @@ def _job_percent(completed_count: int, total_count: int) -> float:
 
 
 def _relay_job_sections(probes: list[dict[str, object]]) -> list[dict[str, object]]:
-    ordered = ["fingerprint", "structure", "behavior", "signature", "multimodal"]
+    ordered = ["fingerprint", "structure", "behavior", "signature", "multimodal", "web_capability"]
     titles = {
-        "fingerprint": "LLM 指纹验证",
-        "structure": "结构完整性",
+        "fingerprint": "ClaudeCode 兼容指纹",
+        "structure": "Claude 基础结构",
         "behavior": "行为验证",
-        "signature": "签名校验",
-        "multimodal": "多模态能力",
-        "web_capability": "Web 能力参考",
+        "signature": "ClaudeCode / Thinking Signature",
+        "multimodal": "能力参考：多模态",
+        "web_capability": "能力参考：Web",
     }
     grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
     for probe in probes:
         section = str(probe.get("section") or "")
         if section:
             grouped[section].append(probe)
-    items: list[dict[str, object]] = []
-    for key in [*ordered, "web_capability"]:
-        section_probes = grouped.get(key, [])
-        statuses = {str(item.get("status")) for item in section_probes}
-        if "running" in statuses:
-            status = "running"
-        elif "fail" in statuses:
+    sections = []
+    for key in ordered:
+        items = grouped.get(key, [])
+        if not items:
+            continue
+        statuses = {str(item.get("status")) for item in items}
+        if "fail" in statuses and key not in {"multimodal", "web_capability"}:
             status = "fail"
-        elif "warning" in statuses:
+        elif "warning" in statuses or ("fail" in statuses and key in {"multimodal", "web_capability"}):
             status = "warning"
-        elif statuses and statuses == {"queued"}:
-            status = "queued"
-        elif statuses and statuses == {"skipped"}:
+        elif statuses == {"skipped"}:
             status = "skipped"
-        elif section_probes:
-            status = "pass"
-        else:
+        elif "running" in statuses:
+            status = "running"
+        elif "queued" in statuses:
             status = "queued"
-        pass_count = sum(1 for item in section_probes if item.get("status") == "pass")
-        fail_count = sum(1 for item in section_probes if item.get("status") == "fail")
-        warning_count = sum(1 for item in section_probes if item.get("status") == "warning")
-        skipped_count = sum(1 for item in section_probes if item.get("status") == "skipped")
-        scored = [float(item.get("score") or 0) for item in section_probes if item.get("status") in {"pass", "fail", "warning", "skipped"}]
-        score = round(sum(scored) / len(scored), 2) if scored else 0.0
-        items.append(
+        else:
+            status = "pass"
+        completed_scores = [float(item.get("score") or 0) for item in items if str(item.get("status")) not in {"queued", "running", "skipped"}]
+        sections.append(
             {
                 "key": key,
-                "title": titles[key],
+                "title": titles.get(key, key),
                 "status": status,
-                "score": score,
-                "probe_count": len(section_probes),
-                "pass_count": pass_count,
-                "fail_count": fail_count,
-                "warning_count": warning_count,
-                "skipped_count": skipped_count,
-                "probes": section_probes,
+                "score": round(sum(completed_scores) / len(completed_scores), 2) if completed_scores else 0.0,
+                "probe_count": len(items),
+                "pass_count": sum(1 for item in items if item.get("status") == "pass"),
+                "fail_count": sum(1 for item in items if item.get("status") == "fail"),
+                "warning_count": sum(1 for item in items if item.get("status") == "warning"),
+                "skipped_count": sum(1 for item in items if item.get("status") == "skipped"),
+                "probes": items,
             }
         )
-    return items
+    return sections
 
 
 def _initial_relay_job_state(include_expensive_context: bool, image_url: str | None) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     section_titles = {
-        "fingerprint": "LLM 指纹验证",
-        "structure": "结构完整性",
+        "fingerprint": "ClaudeCode 兼容指纹",
+        "structure": "Claude 基础结构",
         "behavior": "行为验证",
-        "signature": "签名校验",
-        "multimodal": "多模态能力",
-        "web_capability": "Web 能力参考",
+        "signature": "ClaudeCode / Thinking Signature",
+        "multimodal": "能力参考：多模态",
+        "web_capability": "能力参考：Web",
     }
     probes: list[dict[str, object]] = []
     for config in _claude_code_probe_configs(image_url, include_expensive_context):
@@ -395,7 +390,7 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
         base_url = payload.base_url.strip()
         api_key = payload.api_key.strip()
         model_name = payload.model_name.strip()
-        channel_label = (payload.channel_label or "").strip() or "ClaudeCode 临时检测渠道"
+        channel_label = (payload.channel_label or "").strip() or "Claude 资源临时检测渠道"
         channel = Channel(
             id=f"ephemeral_claude_code_test_{job_id}",
             name=channel_label,
@@ -835,8 +830,8 @@ async def channel_claude_code_test(channel_id: str, data: ClaudeCodeTestCreate, 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("ClaudeCode test failed for channel %s", channel_id)
-        raise HTTPException(status_code=502, detail="ClaudeCode test failed") from exc
+        logger.exception("Claude resource fingerprint test failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Claude resource fingerprint test failed") from exc
 
 
 @app.post("/api/claude-code-test", response_model=ClaudeCodeTestRead)
@@ -844,7 +839,7 @@ async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Se
     base_url = data.base_url.strip()
     api_key = data.api_key.strip()
     model_name = data.model_name.strip()
-    channel_label = (data.channel_label or "").strip() or "ClaudeCode 临时检测渠道"
+    channel_label = (data.channel_label or "").strip() or "Claude 资源临时检测渠道"
     if not base_url:
         raise HTTPException(status_code=400, detail="Base URL is required")
     if not api_key:
@@ -879,8 +874,8 @@ async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Se
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Ephemeral ClaudeCode test failed")
-        raise HTTPException(status_code=502, detail="ClaudeCode test failed") from exc
+        logger.exception("Ephemeral Claude resource fingerprint test failed")
+        raise HTTPException(status_code=502, detail="Claude resource fingerprint test failed") from exc
 
 
 @app.post("/api/claude-code-test/jobs", response_model=ClaudeCodeJobCreateRead)

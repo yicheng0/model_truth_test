@@ -276,6 +276,12 @@ class ClaudeCodeTestRead(BaseModel):
     score: float
     risk_level: str
     summary: str
+    classification_status: str | None = None
+    classification_label: str | None = None
+    classification_reason: str | None = None
+    capability_flags: dict[str, Any] = Field(default_factory=dict)
+    claude_score: float | None = None
+    claude_code_score: float | None = None
     probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
     sections: list[ClaudeCodeSectionRead] = Field(default_factory=list)
 
@@ -312,6 +318,7 @@ class ClaudeCodeEvidenceListItemRead(BaseModel):
     fail_count: int = 0
     warning_count: int = 0
     created_at: datetime | None = None
+    result_payload: ClaudeCodeTestRead | None = None
 
 
 class TestSuiteBase(BaseModel):

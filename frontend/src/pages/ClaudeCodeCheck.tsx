@@ -21,11 +21,11 @@ type RelayFormValues = {
 };
 
 const SECTION_DESCRIPTIONS: Record<string, string> = {
-  fingerprint: '中转扩展字段、拒绝形态和非原生兼容行为，用于识别链路指纹。',
-  structure: '响应结构、message 形态、usage、截断和基础协议行为。',
+  fingerprint: 'ClaudeCode 兼容参数、拒绝形态和链路指纹；不作为普通 Claude 资源失败条件。',
+  structure: 'Claude 基础响应结构、message 形态、usage、截断和协议行为。',
   behavior: '上下文、提示词防泄露以及运行时行为稳定性。',
-  signature: 'Thinking signature 以及跨渠道 signature 互通。',
-  multimodal: '图片 base64、图片 URL 和文档输入能力。',
+  signature: 'ClaudeCode / Thinking Signature 专项能力；普通 Claude 资源不强制要求支持。',
+  multimodal: '图片 base64、图片 URL 和文档输入能力，仅作能力参考。',
   web_capability: 'Anthropic server-side Web Search 支持情况，仅作参考，不参与风险评分。',
 };
 
@@ -58,9 +58,25 @@ function riskColor(value?: string) {
 }
 
 function relayAlertType(result: ClaudeCodeTestResult): 'success' | 'warning' | 'error' {
+  if (['claude', 'aws_resource', 'claude_code'].includes(String(result.classification_status ?? ''))) return 'success';
+  if (result.classification_status === 'anomaly') return 'warning';
   if (result.risk_level === 'low' || result.risk_level === 'medium') return 'success';
   if (result.risk_level === 'high') return 'warning';
   return 'error';
+}
+
+function classificationColor(status?: string | null) {
+  if (status === 'claude_code') return 'purple';
+  if (status === 'claude' || status === 'aws_resource') return 'green';
+  if (status === 'anomaly' || status === 'unknown') return 'orange';
+  if (status === 'non_claude') return 'red';
+  return 'default';
+}
+
+function claudeCodeLinkLabel(result: ClaudeCodeTestResult) {
+  if (result.capability_flags?.is_claude_code_like) return '通过';
+  if (result.capability_flags?.signature_supported) return '部分支持';
+  return '未支持';
 }
 
 function probeCounts(probes: ClaudeCodeProbeResult[]) {
@@ -334,11 +350,18 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
         message={(
           <Space wrap>
             <span>{meta ? '历史检测结果' : '检测完成'}</span>
+            <Tag color={classificationColor(result.classification_status)}>
+              Claude 判断 {result.classification_label ?? result.classification_status ?? '未分类'}
+            </Tag>
+            <Tag color={result.capability_flags?.is_claude_code_like ? 'purple' : 'default'}>
+              ClaudeCode 链路 {claudeCodeLinkLabel(result)}
+            </Tag>
             <Tag color={riskColor(result.risk_level)}>风险 {result.risk_level}</Tag>
-            <Tag color={result.ok ? 'green' : 'red'}>得分 {result.score}</Tag>
+            <Tag color={result.ok ? 'green' : 'red'}>Claude 得分 {result.claude_score ?? result.score}</Tag>
+            {typeof result.claude_code_score === 'number' ? <Tag>ClaudeCode 得分 {result.claude_code_score}</Tag> : null}
           </Space>
         )}
-        description={result.summary}
+        description={result.classification_reason ? `${result.summary} · ${result.classification_reason}` : result.summary}
       />
       {riskLabels.length ? (
         <div className="claude-risk-row">
@@ -419,6 +442,11 @@ function HistoryCard({
           <Typography.Text strong>{item.model_name}</Typography.Text>
           <Tag color={riskColor(item.risk_level)}>{item.risk_level}</Tag>
           <Tag color={item.ok ? 'green' : 'red'}>{item.score}</Tag>
+          {item.result_payload?.classification_status ? (
+            <Tag color={classificationColor(item.result_payload.classification_status)}>
+              {item.result_payload.classification_label ?? item.result_payload.classification_status}
+            </Tag>
+          ) : null}
         </Space>
         <Typography.Text type="secondary">{item.channel_label}</Typography.Text>
         <Typography.Text ellipsis={{ tooltip: item.base_url }}>{item.base_url}</Typography.Text>
@@ -434,7 +462,7 @@ function HistoryCard({
         <Space wrap>
           <Button size="small" onClick={onSelect}>查看证据</Button>
           <Popconfirm
-            title="删除 ClaudeCode 历史"
+            title="删除 Claude 资源指纹历史"
             description="只会删除这条证据快照，不影响渠道或其它报告。确定删除吗？"
             okText="删除"
             okButtonProps={{ danger: true }}
@@ -515,7 +543,7 @@ export default function ClaudeCodeCheck() {
       setRelayResult(payload.result as ClaudeCodeTestResult);
       setSelectedHistoryId(null);
       void history.refetch();
-      message.success('ClaudeCode 中转检测完成，证据已保存');
+      message.success('Claude 资源指纹检测完成，证据已保存');
     } else if (payload.status === 'failed' && payload.error) {
       message.error(payload.error);
     }
@@ -588,7 +616,7 @@ export default function ClaudeCodeCheck() {
       </Space>
       {history.isError ? <Alert type="error" showIcon message="历史记录加载失败" description={getErrorMessage(history.error)} /> : null}
       {history.isLoading ? <Typography.Text type="secondary">正在加载历史记录...</Typography.Text> : null}
-      {!history.isLoading && !(history.data?.length) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 ClaudeCode 证据历史" /> : null}
+      {!history.isLoading && !(history.data?.length) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Claude 资源指纹证据历史" /> : null}
       {!history.isLoading && Boolean(history.data?.length) && !filteredHistory.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的历史记录" /> : null}
       {filteredHistory.map((item) => (
         <HistoryCard
@@ -613,10 +641,10 @@ export default function ClaudeCodeCheck() {
     <Space direction="vertical" size={24} className="page-stack">
       <div className="page-heading">
         <div>
-          <Typography.Text className="section-kicker">CLAUDE CODE RELAY</Typography.Text>
-          <Typography.Title level={2}>ClaudeCode 检测</Typography.Title>
+          <Typography.Text className="section-kicker">CLAUDE RESOURCE FINGERPRINT</Typography.Text>
+          <Typography.Title level={2}>Claude 资源指纹检测</Typography.Title>
           <Typography.Paragraph>
-            输入第三方中转的 URL、API Key 和模型名，按协议、多模态、Signature、上下文和兼容性分组查看检测结果。
+            输入 Claude 或第三方中转的 URL、API Key 和模型名，先判断是否 Claude-compatible，再附加判断 ClaudeCode / Thinking Signature 链路能力。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">临时凭据不落库</Tag>
@@ -675,7 +703,7 @@ export default function ClaudeCodeCheck() {
                     <Checkbox>启用扩展上下文阶梯</Checkbox>
                   </Form.Item>
                   <Button type="primary" htmlType="submit" icon={<Play size={16} />} loading={runRelayTest.isPending}>
-                    开始 ClaudeCode 检测
+                    开始 Claude 资源指纹检测
                   </Button>
                   <Typography.Text type="secondary">API Key 只随本次请求发送，后端不写入渠道配置。</Typography.Text>
                   <Typography.Text type="secondary">检测完成后会自动保存为右侧历史证据。</Typography.Text>
@@ -686,7 +714,7 @@ export default function ClaudeCodeCheck() {
             {relayRunning && relayJob.data ? (
               <Card bordered={false}>
                 <Space direction="vertical" size={12} className="full-width">
-                  <Typography.Text strong>正在运行中转接口组合检测</Typography.Text>
+                  <Typography.Text strong>正在运行 Claude 资源指纹检测</Typography.Text>
                   <Progress percent={relayJob.data.percent} status="active" />
                   <Typography.Text type="secondary">
                     当前测试：{relayJob.data.current_title || '准备中'}，已完成 {relayJob.data.completed_count} / {relayJob.data.total_count}

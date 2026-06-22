@@ -45,7 +45,7 @@ const navItems = [
   { key: '/', icon: Activity, label: '总览', to: '/' },
   { key: '/channels', icon: Network, label: '渠道管理', to: '/channels' },
   { key: '/cache-hit-rate-test', icon: DatabaseZap, label: '缓存命中率', to: '/cache-hit-rate-test' },
-  { key: '/claude-code-check', icon: TerminalSquare, label: 'Claude Code', to: '/claude-code-check' },
+  { key: '/claude-code-check', icon: TerminalSquare, label: 'Claude 指纹', to: '/claude-code-check' },
   { key: '/model-request-test', icon: Send, label: '模型请求', to: '/model-request-test' },
   { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
   { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },

@@ -335,6 +335,18 @@ export type ClaudeCodeTestResult = {
   score: number;
   risk_level: 'low' | 'medium' | 'high' | 'critical' | string;
   summary: string;
+  classification_status?: 'claude_code' | 'claude' | 'aws_resource' | 'non_claude' | 'anomaly' | 'unknown' | string | null;
+  classification_label?: string | null;
+  classification_reason?: string | null;
+  capability_flags?: {
+    is_claude_like?: boolean;
+    is_claude_code_like?: boolean;
+    signature_supported?: boolean;
+    multimodal_supported?: boolean;
+    [key: string]: unknown;
+  } | null;
+  claude_score?: number | null;
+  claude_code_score?: number | null;
   probes: ClaudeCodeProbeResult[];
   sections: ClaudeCodeSection[];
 };
@@ -475,6 +487,7 @@ export type ClaudeCodeHistoryItem = {
   fail_count: number;
   warning_count: number;
   created_at?: string | null;
+  result_payload?: ClaudeCodeTestResult | null;
 };
 
 export type ClaudeCodeHistoryDetail = {

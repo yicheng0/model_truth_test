@@ -4666,7 +4666,7 @@ def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> Non
     section_keys = {section["key"] for section in payload["sections"]}
     assert {"fingerprint", "structure", "behavior", "signature", "multimodal", "web_capability"} >= section_keys
     assert "structure" in section_keys
-    assert any(section["title"] == "结构完整性" for section in payload["sections"])
+    assert any(section["title"] == "Claude 基础结构" for section in payload["sections"])
 
 
 def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(monkeypatch) -> None:
@@ -4809,7 +4809,7 @@ def test_claude_code_relay_job_uses_default_channel_label_when_blank(monkeypatch
     reset_database()
 
     async def fake_create_test(db, channel, **kwargs):  # noqa: ANN001
-        assert channel.name == "ClaudeCode 临时检测渠道"
+        assert channel.name == "Claude 资源临时检测渠道"
         return {
             "ok": True,
             "score": 96,
@@ -4843,7 +4843,7 @@ def test_claude_code_relay_job_uses_default_channel_label_when_blank(monkeypatch
     with SessionLocal() as db:
         item = db.scalar(select(ClaudeCodeEvidence).order_by(ClaudeCodeEvidence.created_at.desc()))
         assert item is not None
-        assert item.channel_label == "ClaudeCode 临时检测渠道"
+        assert item.channel_label == "Claude 资源临时检测渠道"
 
 
 def test_claude_code_thinking_signature_latency_outlier_still_passes(monkeypatch) -> None:
@@ -5236,12 +5236,71 @@ def test_claude_code_web_search_reference_failure_does_not_lower_result(monkeypa
     payload = response.json()
     assert response.status_code == 200
     probe = next(item for item in payload["probes"] if item["key"] == "web_search_reference")
-    assert probe["status"] == "fail"
+    assert probe["status"] == "skipped"
     assert probe["severity"] == "reference"
     assert probe["labels"] == ["web_search_not_available"]
     assert payload["score"] == 100
     assert payload["risk_level"] == "low"
     assert "Web Search 能力参考" not in payload["summary"]
+
+
+def test_claude_fingerprint_classifies_plain_claude_when_optional_capabilities_unsupported() -> None:
+    from app.services import _claude_code_classification, _claude_code_risk_level, _claude_code_score, _claude_code_link_score, _claude_code_summary
+
+    probes = [
+        {"key": "response_schema", "title": "响应体 message 结构", "section": "structure", "severity": "core", "status": "pass", "score": 100, "labels": [], "message_id": "msg_01plain"},
+        {"key": "basic_echo", "title": "基础回显", "section": "structure", "severity": "core", "status": "pass", "score": 100, "labels": []},
+        {"key": "tool_use_shape", "title": "tool_use 结构", "section": "structure", "severity": "core", "status": "pass", "score": 100, "labels": []},
+        {"key": "context_ladder", "title": "上下文长度阶梯", "section": "behavior", "severity": "supporting", "status": "pass", "score": 100, "labels": []},
+        {"key": "thinking_signature", "title": "Thinking signature", "section": "signature", "severity": "core", "status": "warning", "score": 0, "labels": ["signature_not_supported"], "evidence_excerpt": "400 Bad Request: thinking signature not supported"},
+        {"key": "image_base64", "title": "图片输入 base64", "section": "multimodal", "severity": "core", "status": "skipped", "score": 0, "labels": ["capability_not_supported"], "evidence_excerpt": "image input not supported"},
+    ]
+
+    claude_score = _claude_code_score(probes)
+    claude_code_score = _claude_code_link_score(probes)
+    classification = _claude_code_classification(probes, claude_score, claude_code_score)
+
+    assert claude_score == 100
+    assert _claude_code_risk_level(claude_score, probes) == "low"
+    assert classification["classification_status"] == "claude"
+    assert classification["capability_flags"]["is_claude_like"] is True
+    assert classification["capability_flags"]["is_claude_code_like"] is False
+    assert "未要求支持 ClaudeCode" in _claude_code_summary("low", probes, classification)
+
+
+def test_claude_fingerprint_classifies_claude_code_when_signature_supported() -> None:
+    from app.services import _claude_code_classification, _claude_code_score, _claude_code_link_score
+
+    probes = [
+        {"key": "response_schema", "title": "响应体 message 结构", "section": "structure", "severity": "core", "status": "pass", "score": 100, "labels": [], "message_id": "msg_01code"},
+        {"key": "tool_use_shape", "title": "tool_use 结构", "section": "structure", "severity": "core", "status": "pass", "score": 100, "labels": []},
+        {"key": "thinking_signature", "title": "Thinking signature", "section": "signature", "severity": "core", "status": "pass", "score": 100, "labels": []},
+        {"key": "signature_interop", "title": "Thinking signature 互通", "section": "signature", "severity": "supporting", "status": "pass", "score": 100, "labels": []},
+    ]
+
+    claude_score = _claude_code_score(probes)
+    claude_code_score = _claude_code_link_score(probes)
+    classification = _claude_code_classification(probes, claude_score, claude_code_score)
+
+    assert classification["classification_status"] == "claude_code"
+    assert classification["capability_flags"]["signature_supported"] is True
+    assert classification["capability_flags"]["is_claude_code_like"] is True
+
+
+def test_claude_fingerprint_classifies_openai_shape_as_non_claude() -> None:
+    from app.services import _claude_code_classification, _claude_code_score
+
+    probes = [
+        {"key": "response_schema", "title": "响应体 message 结构", "section": "structure", "severity": "core", "status": "fail", "score": 0, "labels": ["openai_shape_response", "message_id_openai_family"], "message_id": "chatcmpl_123"},
+        {"key": "usage_tokens", "title": "Token 计数字段", "section": "structure", "severity": "core", "status": "fail", "score": 0, "labels": ["usage_missing"]},
+    ]
+
+    claude_score = _claude_code_score(probes)
+    classification = _claude_code_classification(probes, claude_score, 0)
+
+    assert claude_score == 0
+    assert classification["classification_status"] == "non_claude"
+
 
 
 def test_prompt_leak_accepts_official_english_refusal_and_reports_latency() -> None:
