@@ -88,7 +88,14 @@ $env:VITE_API_BASE_URL=""
 
 ```powershell
 cd backend
-python -m pytest
+.\scripts\check_backend.ps1
+```
+
+也可以直接使用当前虚拟环境运行：
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 前端：

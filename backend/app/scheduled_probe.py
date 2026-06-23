@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+EXPECTED_SCHEDULED_PROBE_KEYS = {
+    "thinking_temperature",
+    "web_search",
+    "thinking_adaptive_enabled",
+}
+
+EXPECTED_CLAUDE_PROBE_LABELS = {
+    "provider_error_variant",
+    "unexpected_error_response",
+    "thinking_adaptive_enabled_wrong_error",
+}
+BLOCKING_SCHEDULED_PROBE_LABELS = {
+    "thinking_adaptive_not_supported",
+    "thinking_temperature_not_rejected",
+    "web_search_not_rejected",
+    "thinking_adaptive_enabled_not_rejected",
+    "signature_interop_failed",
+}
+NATIVE_PARAMETER_UNSUPPORTED_PATTERN = re.compile(
+    r"400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool",
+    re.IGNORECASE,
+)
+
+
+def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
+    labels = ", ".join(evidence.get("labels") or []) or "未发现显著异常"
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    if not model_requests and isinstance(evidence.get("model_request"), dict):
+        model_requests = [evidence["model_request"]]
+    model_rows = "\n".join(
+        f"| {_scheduled_probe_display_title(item)} | {item.get('channel_name') or '-'} ({item.get('channel_id') or '-'}) | {_probe_status_text(item)} | {item.get('completed_at') or item.get('created_at') or '-'} | {item.get('message_id') or '-'} | {item.get('request_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
+        for item in model_requests
+        if isinstance(item, dict)
+    ) or "| - | - | - | - | - | - | - | - | - | - |"
+    signature = evidence.get("signature_interop") or {}
+    signature_time = signature.get("completed_at") or signature.get("created_at") or evidence.get("completed_at") or "-"
+    classification_label = evidence.get("classification_label") or evidence.get("detected_provider_hint") or "未分类"
+    classification_reason = evidence.get("classification_reason") or "-"
+    ai_judge = evidence.get("ai_judge") if isinstance(evidence.get("ai_judge"), dict) else None
+    ai_judge_section = ""
+    if ai_judge:
+        ai_judge_section = f"""
+## AI 疑难复核
+
+- 裁判渠道：{ai_judge.get('judge_channel_name') or ai_judge.get('judge_channel_id') or '本地兜底'}
+- 是否真实调用：{'是' if ai_judge.get('attempted') else '否'}
+- 复核判定：{ai_judge.get('classification_label') or ai_judge.get('classification_status') or '-'}
+- 置信度：{ai_judge.get('confidence') if ai_judge.get('confidence') is not None else '-'}
+- 说明：{ai_judge.get('reason') or '-'}
+"""
+    return f"""# {channel.name} - 自动巡检资源报告
+
+## 基本信息
+
+- 渠道：{channel.name}
+- 渠道 ID：{channel.id}
+- 声称模型：{channel.model_name or "未配置"}
+- 判定：{classification_label}
+- 判定说明：{classification_reason}
+- 评级：{grade}
+- 总分：{score:.1f} / 100
+- 结论：{summary}
+- 异常标签：{labels}
+
+## 真实模型请求
+
+| 参数探针 | 渠道 | 状态 | 时间 | Message ID | Request ID | 请求协议 | Provider endpoint | 标签 | 错误 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+{model_rows}
+
+{ai_judge_section}
+## Thinking Signature 互通
+
+- 状态：{signature.get("status") or "-"}
+- 检测时间：{signature_time}
+- Source 渠道：{signature.get("source_channel_name") or "-"} ({signature.get("source_channel_id") or "-"})
+- 来源 message id：{signature.get("source_message_id") or "-"}
+- 来源 request id：{signature.get("source_request_id") or "-"}
+- 来源渠道类型：{signature.get("source_message_channel_type") or "-"}
+- Relay 渠道：{signature.get("relay_channel_name") or "-"} ({signature.get("relay_channel_id") or "-"})
+- Relay message id：{signature.get("relay_message_id") or "-"}
+- Relay request id：{signature.get("relay_request_id") or "-"}
+- Relay 渠道类型：{signature.get("relay_message_channel_type") or "-"}
+- Signature 前缀：{", ".join(signature.get("signature_prefixes") or []) or "-"}
+- 协议 profile：source={signature.get("source_protocol_profile") or "-"} / relay={signature.get("relay_protocol_profile") or "-"}
+- 请求归一化：{"; ".join(signature.get("request_normalization_notes") or []) or "-"}
+- 判定：{signature.get("reason") or "-"}
+"""
+
+
+def _scheduled_probe_display_title(item: dict[str, Any]) -> str:
+    title = str(item.get("title") or item.get("key") or "-")
+    key = str(item.get("key") or "")
+    legacy_aliases = {
+        "thinking_temperature": "Thinking temperature 冲突",
+        "thinking_adaptive_enabled": "thinking.adaptive.enabled",
+    }
+    legacy = legacy_aliases.get(key)
+    if legacy and legacy not in title:
+        return f"{title}（原 {legacy}）"
+    return title
+
+
+def _probe_status_text(item: dict[str, Any]) -> str:
+    if item.get("error"):
+        return "请求错误"
+    labels = item.get("labels") if isinstance(item.get("labels"), list) else []
+    return "异常" if labels else "正常"
+
+
+def _probe_parameter_unsupported(item: dict[str, Any]) -> bool:
+    labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
+    if "provider_error_variant" in labels:
+        return True
+    error_text = " ".join(
+        str(item.get(field) or "")
+        for field in ("error", "response_text", "raw_response_text")
+        if str(item.get(field) or "").strip()
+    ).lower()
+    return bool(NATIVE_PARAMETER_UNSUPPORTED_PATTERN.search(error_text))
+
+
+def _scheduled_probe_all_parameter_unsupported(model_requests: list[dict[str, Any]]) -> bool:
+    request_keys = {str(item.get("key") or "") for item in model_requests}
+    if request_keys != EXPECTED_SCHEDULED_PROBE_KEYS:
+        return False
+    return all(_probe_parameter_unsupported(item) for item in model_requests)
+
+
+def scheduled_probe_classification(
+    model_requests: list[dict[str, Any]],
+    signature_evidence: dict[str, Any],
+    labels: list[str],
+    score: float,
+) -> dict[str, Any]:
+    label_set = set(labels)
+    normalized_score = _safe_float(score)
+    provider_hint = scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels)
+    if _scheduled_probe_all_parameter_unsupported(model_requests):
+        return {
+            "status": "aws_resource",
+            "label": "AWS 资源",
+            "reason": "三项自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理；4.7/4.8 adaptive thinking 新协议已归一化。",
+            "score": max(normalized_score, 95),
+        }
+    if _scheduled_probe_has_native_aws_shape(model_requests, label_set):
+        return {
+            "status": "aws_resource",
+            "label": "AWS 资源",
+            "reason": "巡检探针存在 AWS/Bedrock message id 或签名证据，虽有中间层错误，仍按低置信 AWS 资源处理并交由 AI 复核。",
+            "score": max(normalized_score, 90),
+        }
+    if _has_expected_claude_probe(model_requests, label_set) and "signature_interop_failed" not in label_set:
+        return {
+            "status": "claude",
+            "label": "Claude 资源",
+            "reason": "三项自动巡检探针均命中 Claude 原生参数拒绝形态，资源按 Claude 路径处理；4.7/4.8 adaptive thinking 新协议已归一化。",
+            "score": max(normalized_score, 95),
+        }
+    if label_set.intersection(BLOCKING_SCHEDULED_PROBE_LABELS) or label_set.intersection({"unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}):
+        normalized_score = min(normalized_score, 40)
+    if "signature_interop_failed" in label_set:
+        if _has_expected_claude_probe(model_requests, label_set):
+            return {
+                "status": "claude",
+                "label": "Claude 资源（Signature 链路不可验证）",
+                "reason": "Claude 基础资源探针命中原生参数拒绝形态，但 Thinking Signature 互通未通过；该失败仅表示 ClaudeCode/原生 thinking 链路不可验证，不单独等同于非 Claude。",
+                "score": max(min(normalized_score, 85), 75),
+            }
+        normalized_score = min(normalized_score, 60)
+    return {
+        "status": "anomaly",
+        "label": provider_hint,
+        "reason": "巡检探针未命中预期 Claude/AWS 资源形态，需要复审；Signature 失败仅表示 ClaudeCode/原生 thinking 链路不可验证，不单独等同于非 Claude。",
+        "score": normalized_score,
+    }
+
+
+def _scheduled_probe_has_native_aws_shape(model_requests: list[dict[str, Any]], labels: set[str]) -> bool:
+    if not labels.intersection({"thinking_temperature_not_rejected", "unexpected_error_response", "provider_error_variant"}):
+        return False
+    return any(
+        str(item.get("message_id") or "").startswith("msg_bdrk_")
+        or str(item.get("message_channel_type") or "") == "AWS Bedrock"
+        for item in model_requests
+    )
+
+
+def scheduled_probe_needs_ai_judge(model_requests: list[dict[str, Any]], labels: list[str], classification: dict[str, Any]) -> bool:
+    if not model_requests:
+        return False
+    label_set = {str(label) for label in labels}
+    if str(classification.get("status") or "") == "anomaly":
+        return True
+    unsupported = [_probe_parameter_unsupported(item) for item in model_requests]
+    if any(unsupported) and not all(unsupported):
+        return True
+    error_text = "\n".join(str(item.get("error") or "") for item in model_requests).lower()
+    if "overloaded" in error_text:
+        return True
+    message_types = {str(item.get("message_channel_type") or "") for item in model_requests}
+    if "thinking_temperature_not_rejected" in label_set and any(
+        str(item.get("message_id") or "").startswith(("msg_bdrk_", "msg_")) or str(item.get("message_channel_type") or "") in {"AWS Bedrock", "Anthropic"}
+        for item in model_requests
+    ):
+        return True
+    blocking = label_set.intersection(BLOCKING_SCHEDULED_PROBE_LABELS | {"unexpected_error_response", "thinking_adaptive_enabled_wrong_error"})
+    return bool(blocking and message_types.intersection({"AWS Bedrock", "Anthropic"}))
+
+
+def _has_expected_claude_probe(model_requests: list[dict[str, Any]], labels: set[str]) -> bool:
+    if "provider_error_variant" in labels:
+        return True
+    for item in model_requests:
+        item_labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
+        error = str(item.get("error") or "").lower()
+        if item_labels.intersection(EXPECTED_CLAUDE_PROBE_LABELS):
+            if "temperature" in error and "thinking" in error:
+                return True
+            if item_labels == {"provider_error_variant"}:
+                return True
+    return False
+
+
+def scheduled_provider_hint_from_evidence(model_requests: list[dict[str, Any]], signature_evidence: dict[str, Any], labels: list[str]) -> str:
+    types = [
+        " ".join(str(item.get("message_channel_type") or "") for item in model_requests),
+        str(signature_evidence.get("source_message_channel_type") or ""),
+        str(signature_evidence.get("relay_message_channel_type") or ""),
+    ]
+    joined = " ".join(types).lower()
+    if "thinking_temperature_not_rejected" in labels or "thinking_adaptive_not_supported" in labels or "thinking_adaptive_enabled_not_rejected" in labels:
+        return "疑似 adaptive thinking 中间层改写"
+    if "signature_interop_failed" in labels:
+        return "ClaudeCode Signature 链路不可验证"
+    if "bedrock" in joined or "aws" in joined:
+        return "疑似 AWS/Bedrock"
+    if "vertex" in joined:
+        return "疑似 Vertex"
+    if "claude" in joined or "anthropic" in joined:
+        return "疑似 Claude/Anthropic"
+    return "来源特征不明确"
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed == parsed and parsed not in (float("inf"), float("-inf")) else default
