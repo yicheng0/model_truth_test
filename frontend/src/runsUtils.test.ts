@@ -54,7 +54,7 @@ describe('runs utilities', () => {
             model_requests: [
               {
                 key: 'thinking_temperature',
-                title: 'Thinking temperature 冲突',
+                title: 'Adaptive thinking 协议',
                 channel_id: 'ch_1',
                 channel_name: 'Relay Channel',
                 result_id: 'res_1',
@@ -78,7 +78,7 @@ describe('runs utilities', () => {
               },
               {
                 key: 'thinking_adaptive_enabled',
-                title: 'thinking.adaptive.enabled',
+                title: 'Adaptive thinking effort',
                 result_id: 'res_3',
                 message_id: 'msg_01adaptive',
                 message_channel_type: 'Claude/Anthropic',
@@ -115,7 +115,7 @@ describe('runs utilities', () => {
     expect(evidence?.labels).toEqual(['signature_interop_failed']);
     expect(evidence?.detectedProviderHint).toBe('疑似逆向或中间层改写');
     expect(evidence?.modelRequests[0]).toMatchObject({
-      title: 'Thinking temperature 冲突',
+      title: 'Adaptive thinking 协议',
       channelId: 'ch_1',
       channelName: 'Relay Channel',
       resultId: 'res_1',
@@ -349,7 +349,7 @@ describe('runs utilities', () => {
             model_requests: [
               {
                 key: 'thinking_temperature',
-                title: 'Thinking temperature 冲突',
+                title: 'Adaptive thinking 协议',
                 channel_id: 'ch_2',
                 channel_name: 'Patrol Channel',
                 result_id: 'res_1',
@@ -369,7 +369,7 @@ describe('runs utilities', () => {
     const evidence = extractPatrolEvidence(results);
 
     expect(evidence?.modelRequests[0]).toMatchObject({
-      title: 'Thinking temperature 冲突',
+      title: 'Adaptive thinking 协议',
       status: 'ok',
       resultId: 'res_1',
       messageId: 'msg_1',

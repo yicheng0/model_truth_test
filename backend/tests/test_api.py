@@ -3815,9 +3815,91 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert calls[0]["url"] == "https://source.example/v1/messages"
     assert calls[1]["url"] == "https://relay.example/v1/messages"
     assert calls[1]["json"]["messages"][1]["content"][0]["signature"] == "sig-source-compatible"
+    assert calls[0]["json"]["thinking"] == {"type": "enabled", "budget_tokens": 2000}
+    assert calls[1]["json"]["thinking"] == {"type": "enabled", "budget_tokens": 2000}
     with SessionLocal() as db:
         assert db.get(Run, payload["run"]["id"]) is not None
         assert db.get(Result, payload["result"]["id"]) is not None
+
+
+def test_signature_interop_uses_adaptive_thinking_for_opus_48(monkeypatch) -> None:
+    reset_database()
+    calls: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            calls.append({"url": url, "json": json, "headers": headers})
+            request = httpx.Request("POST", url)
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_01source",
+                        "type": "message",
+                        "model": "claude-opus-4-8",
+                        "content": [
+                            {"type": "thinking", "thinking": "source thinking", "signature": "sig-source-compatible"},
+                            {"type": "text", "text": "source answer"},
+                        ],
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={"id": "msg_01relay", "type": "message", "model": "claude-opus-4-8", "content": [{"type": "text", "text": "relay answer"}]},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Source 48",
+                "provider_type": "anthropic",
+                "base_url": "https://source.example",
+                "model_name": "claude-opus-4-8-high",
+                "auth_config": {"api_key": "source-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Relay 48",
+                "provider_type": "anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-opus-4-8",
+                "auth_config": {"api_key": "relay-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert calls[0]["json"]["thinking"] == {"type": "adaptive"}
+    assert calls[0]["json"]["output_config"] == {"effort": "high"}
+    assert calls[1]["json"]["thinking"] == {"type": "adaptive"}
+    assert calls[1]["json"]["output_config"] == {"effort": "medium"}
+    assert "temperature" not in calls[0]["json"]
+    assert "budget_tokens" not in calls[0]["json"]["thinking"]
+    assert payload["source_protocol_profile"] == "claude_adaptive_thinking"
+    assert payload["relay_protocol_profile"] == "claude_adaptive_thinking"
+    assert any("4.7/4.8" in note for note in payload["request_normalization_notes"])
 
 
 def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> None:
@@ -4950,6 +5032,38 @@ def test_adaptive_thinking_model_normalizes_legacy_thinking_fields() -> None:
     assert "top_p" not in body
     assert "top_k" not in body
     assert any("budget_tokens" in note for note in notes)
+
+
+def test_opus_48_uses_adaptive_thinking_profile() -> None:
+    from app.services import _normalize_probe_body_for_model, claude_protocol_profile_for_model
+
+    body = {
+        "model": "claude-opus-4-8",
+        "max_tokens": 2048,
+        "temperature": 0,
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+    }
+
+    profile, notes = _normalize_probe_body_for_model(body, "claude-opus-4-8-max")
+
+    assert claude_protocol_profile_for_model("claude-opus-4-8") == "claude_adaptive_thinking"
+    assert profile == "claude_adaptive_thinking"
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "max"}
+    assert "temperature" not in body
+    assert any("4.7/4.8" in note for note in notes)
+
+
+def test_opus_48_bedrock_suffix_keeps_effort_hint() -> None:
+    from app.services import _normalize_probe_body_for_model
+
+    body = {"model": "anthropic.claude-opus-4-8-high-v1:0", "max_tokens": 2048, "thinking": {"type": "enabled", "budget_tokens": 1024}}
+
+    profile, _notes = _normalize_probe_body_for_model(body, "anthropic.claude-opus-4-8-high-v1:0")
+
+    assert profile == "claude_adaptive_thinking"
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "high"}
 
 
 def test_legacy_claude_model_keeps_legacy_thinking_fields() -> None:

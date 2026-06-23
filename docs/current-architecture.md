@@ -13,7 +13,7 @@
 
 - Thinking temperature 参数冲突探针。
 - Web Search tool 参数探针。
-- `thinking.adaptive.enabled` 参数探针。
+- `adaptive thinking effort` 参数探针。
 - Thinking Signature 互通检测。
 - 报告生成、风险分类、异常标签和告警通知。
 

@@ -116,7 +116,7 @@ npm run build
 巡检内容固定为 Thinking Signature 互通检测和多项真实模型请求探针：
 
 - Thinking Signature 互通检测：指纹源渠道生成带 signature 的 thinking block，再让待测渠道复用。
-- 真实模型请求探针：发送 thinking temperature、Web Search tool、thinking.adaptive.enabled 等参数探针，记录 `message.id`、request id、协议和 endpoint。
+- 真实模型请求探针：发送 adaptive thinking 协议、Web Search tool、adaptive thinking effort 等参数探针，记录 `message.id`、request id、协议和 endpoint。
 
 告警会携带 run、report、message id、request id 和 source/relay message id 等证据，方便复审定位。自动巡检默认不使用 mock，也不需要手动选择测试集、渠道指纹、重复次数、并发度或评分阈值；这些旧字段仅用于兼容已有数据。
 ## 生产部署安全说明

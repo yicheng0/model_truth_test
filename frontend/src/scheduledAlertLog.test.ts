@@ -160,7 +160,7 @@ describe('scheduled alert log helpers', () => {
       evidence_summary: {
         model_requests: [
           {
-            title: 'Thinking temperature 冲突',
+            title: 'Adaptive thinking 协议',
             request_id: 'req_456',
             labels: ['provider_error_variant'],
             error: "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'",
@@ -169,7 +169,7 @@ describe('scheduled alert log helpers', () => {
       },
     };
 
-    expect(alertErrorText(alert)).toBe('Thinking temperature 冲突：参数不支持');
+    expect(alertErrorText(alert)).toBe('Adaptive thinking 协议：参数不支持');
   });
 
   it('selects the failing probe and its completed time from multiple model requests', () => {
@@ -178,7 +178,7 @@ describe('scheduled alert log helpers', () => {
       evidence_summary: {
         model_requests: [
           {
-            title: 'Thinking temperature 冲突',
+            title: 'Adaptive thinking 协议',
             request_id: 'req_ok',
             completed_at: '2026-05-16T01:00:00Z',
             labels: [],
@@ -206,7 +206,7 @@ describe('scheduled alert log helpers', () => {
       evidence_summary: {
         model_requests: [
           {
-            title: 'thinking.adaptive.enabled',
+            title: 'Adaptive thinking effort',
             request_id: 'req_adaptive',
             created_at: '2026-05-16T01:03:04Z',
             labels: ['thinking_adaptive_enabled_not_rejected'],

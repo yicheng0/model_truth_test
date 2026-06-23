@@ -34,7 +34,7 @@
 - 调度锁：`locked_by`、`locked_until`、`last_status`、`next_run_at`。
 - 告警：`ChannelAlert`、dedupe、quiet window、飞书通知、日报。
 - 证据：`Result.raw_request`、`Result.raw_response`、`Report.evidence`、Markdown 报告。
-- 巡检探针：Thinking temperature 冲突、Web Search tool、thinking.adaptive.enabled、Thinking Signature 互通。
+- 巡检探针：Adaptive thinking 协议、Web Search tool、Adaptive thinking effort、Thinking Signature 互通。
 - 评分和标签：grade A-E、labels、red flags、classification。
 
 ### 2.2 主要短板

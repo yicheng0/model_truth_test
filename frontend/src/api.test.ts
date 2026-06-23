@@ -804,7 +804,7 @@ describe('api request handling', () => {
       );
 
     await api.modelRequestTest('ch_1', {
-      prompt: '请用一句话回答：这是 thinking temperature 纯度探针。',
+      prompt: '请用一句话回答：这是 adaptive thinking 协议纯度探针。',
       system_prompt: null,
       run_name: '组合纯度检测 · thinking_temperature',
       request_params: {
@@ -1009,7 +1009,7 @@ describe('api request handling', () => {
             model_requests: [
               {
                 key: 'thinking_temperature',
-                title: 'Thinking temperature 冲突',
+                title: 'Adaptive thinking 协议',
                 status: 'ok',
                 channel_id: 'ch_1',
                 channel_name: 'Relay Channel',
@@ -1037,7 +1037,7 @@ describe('api request handling', () => {
               },
               {
                 key: 'thinking_adaptive_enabled',
-                title: 'thinking.adaptive.enabled',
+                title: 'Adaptive thinking effort',
                 status: 'ok',
                 result_id: 'res_3',
                 message_id: 'msg_01adaptive',

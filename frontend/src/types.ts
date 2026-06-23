@@ -194,6 +194,9 @@ export type SignatureInteropResult = {
   relay_message_channel_type: string;
   relay_request_id?: string | null;
   relay_raw_excerpt: string;
+  source_protocol_profile?: string | null;
+  relay_protocol_profile?: string | null;
+  request_normalization_notes?: string[];
   fallback_note: string;
   steps: Array<{
     name: string;

@@ -38,7 +38,7 @@ type ComboProbeResult = {
   payload: ModelRequestTestResult;
 };
 
-const AWS_THINKING_PROBE_PROMPT = '请用一句话回答：这是 thinking temperature 纯度探针。';
+const AWS_THINKING_PROBE_PROMPT = '请用一句话回答：这是 adaptive thinking 协议纯度探针。';
 const AWS_THINKING_PROBE_EXTRA_PARAMS = {
   max_tokens: 2048,
   thinking: { type: 'adaptive' },
@@ -87,7 +87,7 @@ const PROBES: ProbeConfig[] = [
     title: 'Adaptive thinking 协议',
     buttonLabel: '测试 Adaptive thinking',
     fillLabel: '填入 Adaptive thinking',
-    description: '构造 Opus 4.7+ adaptive thinking + output_config.effort，不再发送旧 enabled/budget_tokens/temperature。',
+    description: '构造 Opus 4.7/4.8+ adaptive thinking + output_config.effort，不再发送旧 enabled/budget_tokens/temperature。',
     prompt: AWS_THINKING_PROBE_PROMPT,
     request_params: AWS_THINKING_PROBE_EXTRA_PARAMS,
     run_name: '纯度检测 · thinking_temperature',
@@ -111,7 +111,7 @@ const PROBES: ProbeConfig[] = [
     title: 'adaptive thinking effort',
     buttonLabel: '测试 adaptive effort',
     fillLabel: '填入 adaptive effort',
-    description: '构造 Opus 4.7+ adaptive thinking effort 探针，避免旧 adaptive.enabled 字段。',
+    description: '构造 Opus 4.7/4.8+ adaptive thinking effort 探针，避免旧 adaptive.enabled 字段。',
     prompt: THINKING_ADAPTIVE_ENABLED_PROBE_PROMPT,
     request_params: THINKING_ADAPTIVE_ENABLED_PROBE_EXTRA_PARAMS,
     run_name: '纯度检测 · thinking_adaptive_enabled',

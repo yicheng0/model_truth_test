@@ -96,6 +96,9 @@ class SignatureInteropTestRead(BaseModel):
     relay_message_channel_type: str
     relay_request_id: str | None = None
     relay_raw_excerpt: str
+    source_protocol_profile: str | None = None
+    relay_protocol_profile: str | None = None
+    request_normalization_notes: list[str] = Field(default_factory=list)
     fallback_note: str
     steps: list[SignatureInteropStepRead]
 

@@ -116,9 +116,29 @@ const LABELS: Record<string, LabelInfo> = {
     priority: 88,
   },
   signature_interop_failed: {
-    text: 'Signature 互通失败',
-    description: 'Relay 无法复用 source 生成的 thinking signature，可能不是同源 Claude Code 能力。',
+    text: 'Signature 链路不可验证',
+    description: 'Relay 无法复用 source 生成的 thinking signature，说明 ClaudeCode/原生 thinking 链路不可验证；不应单独等同于非 Claude。',
     priority: 90,
+  },
+  thinking_adaptive_not_supported: {
+    text: 'Adaptive thinking 异常',
+    description: 'Adaptive thinking 协议探针未命中预期拒绝，疑似中间层改写、吞参或当前模型/渠道不支持 4.7/4.8 新协议。',
+    priority: 66,
+  },
+  thinking_temperature_not_rejected: {
+    text: 'Adaptive thinking 改写',
+    description: 'Adaptive thinking/旧 temperature 冲突探针未命中预期拒绝，疑似中间层改写、吞参或非原生协议。',
+    priority: 66,
+  },
+  thinking_adaptive_enabled_not_rejected: {
+    text: 'Effort 探针异常',
+    description: 'Adaptive thinking effort 探针未命中预期拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。',
+    priority: 66,
+  },
+  thinking_adaptive_enabled_wrong_error: {
+    text: 'Effort 错误异常',
+    description: '上游返回了错误，但错误内容不是 adaptive thinking effort 目标参数的原生拒绝。',
+    priority: 64,
   },
   request_failed: {
     text: '请求失败',
@@ -235,7 +255,7 @@ export function probeDiagnosis(probe: ClaudeCodeDiagnosticProbe): string {
   if (probe.status === 'pass' && labels.length === 0) return '测试通过，未发现该项异常。';
   const evidence = `${probe.evidence_excerpt ?? ''}\n${probe.detail ?? ''}`.toLowerCase();
   if (evidence.includes('400') && /(temperature|top_p|top_k|budget_tokens|output_config|thinking|display|cache_control|image|document|web_search|web search|tool)/.test(evidence)) {
-    return '上游返回 400，优先按 Opus 4.7+ 协议字段不兼容或中转网关字段改写问题处理。';
+    return '上游返回 400，优先按 Opus 4.7/4.8+ 协议字段不兼容或中转网关字段改写问题处理。';
   }
   const primary = topRiskLabels([probe], 1)[0] ?? labels[0];
   if (primary) return labelDescription(primary);

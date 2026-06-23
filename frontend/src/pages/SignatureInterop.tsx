@@ -269,6 +269,12 @@ export default function SignatureInterop() {
               <Descriptions.Item label="Source endpoint" span={2}>{result.source_endpoint}</Descriptions.Item>
               <Descriptions.Item label="Relay endpoint" span={2}>{result.relay_endpoint}</Descriptions.Item>
               <Descriptions.Item label="Signature 前缀" span={2}>{result.signature_prefixes.join(', ')}</Descriptions.Item>
+              <Descriptions.Item label="协议 profile" span={2}>
+                source={result.source_protocol_profile || '-'} / relay={result.relay_protocol_profile || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="请求归一化" span={2}>
+                {result.request_normalization_notes?.join('；') || '-'}
+              </Descriptions.Item>
             </Descriptions>
             {result.run?.id ? (
               <Popconfirm

@@ -464,6 +464,7 @@ ALERT_RED_FLAGS = {
     "signature_interop_failed",
     "thinking_temperature_not_rejected",
     "unexpected_error_response",
+    "thinking_adaptive_not_supported",
     "web_search_not_rejected",
     "thinking_adaptive_enabled_not_rejected",
     "thinking_adaptive_enabled_wrong_error",
@@ -999,7 +1000,9 @@ SIGNATURE_FALLBACK_NOTE = """企业级 API 渠道（AWS/Vertex/Anthropic）
 Claude 三类渠道 id 特征：
 AWS：msg_bdrk_01xxx
 Vertex：msg_vrtx_01xxx
-Anthropic：msg_01xxx"""
+Anthropic：msg_01xxx
+
+注意：Thinking Signature 不互通只说明 ClaudeCode / 原生 thinking 链路不可验证，不能单独等同于非 Claude。Opus 4.7/4.8 会按 adaptive thinking + output_config.effort 新协议归一化请求。"""
 
 FEISHU_SETTING_ID = "global"
 CHANNEL_TAXONOMY_SETTING_ID = "global"
@@ -2457,8 +2460,8 @@ def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any
     return rules
 
 
-SCHEDULED_THINKING_TEMPERATURE_PROMPT = "请用一句话回答：这是自动巡检真实模型请求探针。"
-SCHEDULED_THINKING_TEMPERATURE_PARAMS: dict[str, Any] = {
+SCHEDULED_ADAPTIVE_THINKING_PROMPT = "请用一句话回答：这是自动巡检 adaptive thinking 协议探针。"
+SCHEDULED_ADAPTIVE_THINKING_PARAMS: dict[str, Any] = {
     "max_tokens": 2048,
     "thinking": {"type": "adaptive"},
     "output_config": {"effort": "medium"},
@@ -2487,8 +2490,8 @@ SCHEDULED_WEB_SEARCH_PARAMS: dict[str, Any] = {
     "expected_error_variant_label": "provider_error_variant",
 }
 
-SCHEDULED_THINKING_ADAPTIVE_PROMPT = "回复OK"
-SCHEDULED_THINKING_ADAPTIVE_PARAMS: dict[str, Any] = {
+SCHEDULED_ADAPTIVE_EFFORT_PROMPT = "回复OK"
+SCHEDULED_ADAPTIVE_EFFORT_PARAMS: dict[str, Any] = {
     "max_tokens": 2000,
     "thinking": {"type": "adaptive"},
     "output_config": {"effort": "medium"},
@@ -2501,9 +2504,9 @@ SCHEDULED_THINKING_ADAPTIVE_PARAMS: dict[str, Any] = {
 SCHEDULED_MODEL_REQUEST_PROBES: list[dict[str, Any]] = [
     {
         "key": "thinking_temperature",
-        "title": "Thinking temperature 冲突",
-        "prompt": SCHEDULED_THINKING_TEMPERATURE_PROMPT,
-        "request_params": SCHEDULED_THINKING_TEMPERATURE_PARAMS,
+        "title": "Adaptive thinking 协议",
+        "prompt": SCHEDULED_ADAPTIVE_THINKING_PROMPT,
+        "request_params": SCHEDULED_ADAPTIVE_THINKING_PARAMS,
     },
     {
         "key": "web_search",
@@ -2513,9 +2516,9 @@ SCHEDULED_MODEL_REQUEST_PROBES: list[dict[str, Any]] = [
     },
     {
         "key": "thinking_adaptive_enabled",
-        "title": "thinking.adaptive.enabled",
-        "prompt": SCHEDULED_THINKING_ADAPTIVE_PROMPT,
-        "request_params": SCHEDULED_THINKING_ADAPTIVE_PARAMS,
+        "title": "Adaptive thinking effort",
+        "prompt": SCHEDULED_ADAPTIVE_EFFORT_PROMPT,
+        "request_params": SCHEDULED_ADAPTIVE_EFFORT_PARAMS,
     },
 ]
 
@@ -4369,6 +4372,9 @@ async def attach_signature_interop_to_scheduled_run(
                 "relay_channel_id": relay.id if relay else scheduled.channel_id,
                 "relay_channel_name": relay.name if relay else None,
                 "fallback_note": SIGNATURE_FALLBACK_NOTE,
+                "source_protocol_profile": None,
+                "relay_protocol_profile": claude_protocol_profile_for_model(relay.model_name if relay else None),
+                "request_normalization_notes": [],
                 "labels": ["signature_source_missing"],
                 "steps": [
                     {
@@ -4392,6 +4398,9 @@ async def attach_signature_interop_to_scheduled_run(
                 "relay_channel_id": relay.id,
                 "relay_channel_name": relay.name,
                 "fallback_note": SIGNATURE_FALLBACK_NOTE,
+                "source_protocol_profile": claude_protocol_profile_for_model(source.model_name),
+                "relay_protocol_profile": claude_protocol_profile_for_model(relay.model_name),
+                "request_normalization_notes": [],
                 "steps": [
                     {
                         "name": "自动巡检 Signature 互通检测",
@@ -4425,6 +4434,9 @@ async def attach_signature_interop_to_scheduled_run(
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "source_channel_id": source_id,
             "relay_channel_id": relay_id,
+            "source_protocol_profile": None,
+            "relay_protocol_profile": None,
+            "request_normalization_notes": [],
             "fallback_note": SIGNATURE_FALLBACK_NOTE,
             "steps": [
                 {
@@ -4463,7 +4475,7 @@ def _attach_signature_interop_result_to_reports(
         report.evidence = safe_evidence
         if signature_result.get("status") != "skipped" and not signature_result.get("ok"):
             report.grade = worse_grade(report.grade, "D")
-            report.summary = f"{report.summary or _summary_for(report.grade)} Signature 互通检测未通过。"
+            report.summary = f"{report.summary or _summary_for(report.grade)} Signature 互通检测未通过，仅表示 ClaudeCode/原生 thinking 链路不可验证。"
         channel = db.get(Channel, report.channel_id)
         if channel:
             report.markdown = redact_text(report_markdown(channel, report.final_score, report.grade, report.summary or _summary_for(report.grade), safe_evidence))
@@ -4502,6 +4514,9 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "relay_request_id": result.get("relay_request_id"),
         "thinking_block_count": result.get("thinking_block_count"),
         "signature_prefixes": result.get("signature_prefixes") or [],
+        "source_protocol_profile": result.get("source_protocol_profile"),
+        "relay_protocol_profile": result.get("relay_protocol_profile"),
+        "request_normalization_notes": result.get("request_normalization_notes") or [],
         "fallback_note": result.get("fallback_note") or SIGNATURE_FALLBACK_NOTE,
         "steps": result.get("steps") or [],
     }
@@ -4718,7 +4733,7 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
     return [
         {
             "key": "thinking_temperature",
-            "title": "Thinking temperature 冲突",
+            "title": "Adaptive thinking 协议",
             "run_id": model_payload.get("run").id if model_payload.get("run") else None,
             "channel_id": model_payload.get("channel_id"),
             "channel_name": model_payload.get("channel_name"),
@@ -4799,6 +4814,8 @@ def scheduled_probe_markdown(channel: Channel, score: float, grade: str, summary
 - Relay request id：{signature.get("relay_request_id") or "-"}
 - Relay 渠道类型：{signature.get("relay_message_channel_type") or "-"}
 - Signature 前缀：{", ".join(signature.get("signature_prefixes") or []) or "-"}
+- 协议 profile：source={signature.get("source_protocol_profile") or "-"} / relay={signature.get("relay_protocol_profile") or "-"}
+- 请求归一化：{"; ".join(signature.get("request_normalization_notes") or []) or "-"}
 - 判定：{signature.get("reason") or "-"}
 """
 
@@ -4812,6 +4829,7 @@ def _probe_status_text(item: dict[str, Any]) -> str:
 
 EXPECTED_CLAUDE_PROBE_LABELS = {"provider_error_variant", "unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}
 BLOCKING_SCHEDULED_PROBE_LABELS = {
+    "thinking_adaptive_not_supported",
     "thinking_temperature_not_rejected",
     "web_search_not_rejected",
     "thinking_adaptive_enabled_not_rejected",
@@ -4856,7 +4874,7 @@ def scheduled_probe_classification(
         return {
             "status": "aws_resource",
             "label": "AWS 资源",
-            "reason": "三项自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理。",
+            "reason": "三项自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理；4.7/4.8 adaptive thinking 新协议已归一化。",
             "score": max(normalized_score, 95),
         }
     if provider_hint == "疑似 AWS/Bedrock" and _scheduled_probe_has_native_aws_shape(model_requests, label_set):
@@ -4866,21 +4884,28 @@ def scheduled_probe_classification(
             "reason": "巡检探针存在 AWS/Bedrock message id 或签名证据，虽有中间层错误，仍按低置信 AWS 资源处理并交由 AI 复核。",
             "score": max(normalized_score, 90),
         }
-    if _has_expected_claude_probe(model_requests, label_set):
+    if _has_expected_claude_probe(model_requests, label_set) and "signature_interop_failed" not in label_set:
         return {
             "status": "claude",
             "label": "Claude 资源",
-            "reason": "三项自动巡检探针均命中 Claude 原生参数拒绝形态，资源按 Claude 路径处理。",
+            "reason": "三项自动巡检探针均命中 Claude 原生参数拒绝形态，资源按 Claude 路径处理；4.7/4.8 adaptive thinking 新协议已归一化。",
             "score": max(normalized_score, 95),
         }
     if label_set.intersection(BLOCKING_SCHEDULED_PROBE_LABELS) or label_set.intersection({"unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}):
         normalized_score = min(normalized_score, 40)
     if "signature_interop_failed" in label_set:
+        if _has_expected_claude_probe(model_requests, label_set):
+            return {
+                "status": "claude",
+                "label": "Claude 资源（Signature 链路不可验证）",
+                "reason": "Claude 基础资源探针命中原生参数拒绝形态，但 Thinking Signature 互通未通过；该失败仅表示 ClaudeCode/原生 thinking 链路不可验证，不单独等同于非 Claude。",
+                "score": max(min(normalized_score, 85), 75),
+            }
         normalized_score = min(normalized_score, 60)
     return {
         "status": "anomaly",
         "label": provider_hint,
-        "reason": "巡检探针未命中预期 Claude/AWS 资源形态，需要复审。",
+        "reason": "巡检探针未命中预期 Claude/AWS 资源形态，需要复审；Signature 失败仅表示 ClaudeCode/原生 thinking 链路不可验证，不单独等同于非 Claude。",
         "score": normalized_score,
     }
 
@@ -5112,14 +5137,16 @@ def scheduled_provider_hint_from_evidence(model_requests: list[dict[str, Any]], 
         str(signature_evidence.get("relay_message_channel_type") or ""),
     ]
     joined = " ".join(types).lower()
+    if "thinking_temperature_not_rejected" in labels or "thinking_adaptive_not_supported" in labels or "thinking_adaptive_enabled_not_rejected" in labels:
+        return "疑似 adaptive thinking 中间层改写"
+    if "signature_interop_failed" in labels:
+        return "ClaudeCode Signature 链路不可验证"
     if "bedrock" in joined or "aws" in joined:
         return "疑似 AWS/Bedrock"
     if "vertex" in joined:
         return "疑似 Vertex"
     if "claude" in joined or "anthropic" in joined:
         return "疑似 Claude/Anthropic"
-    if "thinking_temperature_not_rejected" in labels or "signature_interop_failed" in labels:
-        return "疑似逆向或中间层改写"
     return "来源特征不明确"
 
 
@@ -5407,6 +5434,9 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
                 "relay_message_channel_type": signature.get("relay_message_channel_type"),
                 "relay_request_id": signature.get("relay_request_id"),
                 "signature_prefixes": signature.get("signature_prefixes") or [],
+                "source_protocol_profile": signature.get("source_protocol_profile"),
+                "relay_protocol_profile": signature.get("relay_protocol_profile"),
+                "request_normalization_notes": signature.get("request_normalization_notes") or [],
             },
             "labels": labels,
             "label_explanations": label_explanations,
@@ -6611,7 +6641,7 @@ def claude_protocol_profile_for_model(model_name: str | None) -> str:
 def _effort_from_model_suffix(model_name: str | None) -> str | None:
     model = str(model_name or "").lower()
     for suffix in ADAPTIVE_EFFORT_SUFFIXES:
-        if model.endswith(f"-{suffix}"):
+        if re.search(rf"-{re.escape(suffix)}(?:-[a-z0-9:.]+)?$", model):
             return suffix
     if model.endswith("-thinking"):
         return "high"
@@ -6627,7 +6657,7 @@ def _normalize_adaptive_thinking_body(body: dict[str, Any], model_name: str | No
     for key in ("temperature", "top_p", "top_k"):
         if key in body:
             body.pop(key, None)
-            notes.append(f"removed {key} for Claude Opus 4.7+ adaptive-thinking protocol")
+            notes.append(f"removed {key} for Claude Opus 4.7/4.8 adaptive-thinking protocol")
 
     thinking = body.get("thinking")
     if isinstance(thinking, dict):
@@ -6636,11 +6666,11 @@ def _normalize_adaptive_thinking_body(body: dict[str, Any], model_name: str | No
         if display in {"summarized", "omitted"}:
             normalized_thinking["display"] = display
         if thinking.get("type") != "adaptive":
-            notes.append("normalized thinking.type to adaptive for Claude Opus 4.7+")
+            notes.append("normalized thinking.type to adaptive for Claude Opus 4.7/4.8")
         if "budget_tokens" in thinking:
-            notes.append("removed unsupported thinking.budget_tokens for Claude Opus 4.7+")
+            notes.append("removed unsupported thinking.budget_tokens for Claude Opus 4.7/4.8")
         if isinstance(thinking.get("adaptive"), dict):
-            notes.append("removed legacy thinking.adaptive object for Claude Opus 4.7+")
+            notes.append("removed legacy thinking.adaptive object for Claude Opus 4.7/4.8")
         body["thinking"] = normalized_thinking
 
     if isinstance(body.get("thinking"), dict) and body["thinking"].get("type") == "adaptive":
@@ -6662,6 +6692,20 @@ def _attach_request_normalization_metadata(body: dict[str, Any], profile: str, n
 
 def _normalize_probe_body_for_model(body: dict[str, Any], model_name: str | None) -> tuple[str, list[str]]:
     return _normalize_adaptive_thinking_body(body, model_name)
+
+
+def _signature_thinking_request_body(model_name: str, messages: list[dict[str, Any]], *, stream: bool = False) -> tuple[dict[str, Any], str, list[str]]:
+    body: dict[str, Any] = {
+        "model": model_name,
+        "max_tokens": 4000,
+        "thinking": {"type": "enabled", "budget_tokens": 2000},
+        "messages": messages,
+    }
+    if stream:
+        body["stream"] = True
+    protocol_profile, normalization_notes = _normalize_probe_body_for_model(body, model_name)
+    _remove_probe_only_params(body)
+    return body, protocol_profile, normalization_notes
 
 
 class _AutoLiveCallNonRetryableError(RuntimeError):
@@ -6894,20 +6938,19 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         {
             "name": "步骤 A：请求 Source thinking",
             "status": "running",
-            "detail": f"向 {source.name} 发起 Anthropic Messages thinking 请求",
+            "detail": f"向 {source.name} 发起 Anthropic Messages thinking 请求（按模型自动适配 legacy / 4.7/4.8 adaptive thinking 协议）",
             "excerpt": source_endpoint,
         }
     ]
 
+    source_payload, source_protocol_profile, source_normalization_notes = _signature_thinking_request_body(
+        str(model),
+        [{"role": "user", "content": SIGNATURE_TEST_PROMPT_A}],
+    )
     response_a = await _signature_messages_call(
         source_endpoint,
         source_credentials["api_key"],
-        {
-            "model": model,
-            "max_tokens": 4000,
-            "thinking": {"type": "enabled", "budget_tokens": 2000},
-            "messages": [{"role": "user", "content": SIGNATURE_TEST_PROMPT_A}],
-        },
+        source_payload,
     )
     steps[0] = {
         "name": "步骤 A：请求 Source thinking",
@@ -6934,24 +6977,22 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     )
 
     model = response_a.get("model") or model
-    relay_payload: dict[str, Any] = {
-        "model": relay_credentials.get("model") or relay.model_name or model,
-        "max_tokens": 4000,
-        "thinking": {"type": "enabled", "budget_tokens": 2000},
-        "messages": [
+    relay_model = str(relay_credentials.get("model") or relay.model_name or model)
+    relay_payload, relay_protocol_profile, relay_normalization_notes = _signature_thinking_request_body(
+        relay_model,
+        [
             {"role": "user", "content": SIGNATURE_TEST_PROMPT_A},
             {"role": "assistant", "content": source_content},
             {"role": "user", "content": SIGNATURE_TEST_PROMPT_B},
         ],
-    }
-    if stream:
-        relay_payload["stream"] = True
+        stream=stream,
+    )
 
     steps.append(
         {
             "name": "步骤 B：发送 Relay 复用请求",
             "status": "running",
-            "detail": f"向 {relay.name} 发送包含 source assistant content 的三段 messages",
+            "detail": f"向 {relay.name} 发送包含 source assistant content 的三段 messages（{relay_protocol_profile}）",
             "excerpt": relay_endpoint,
         }
     )
@@ -6985,6 +7026,9 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             response_b={"error": raw},
             thinking_blocks=thinking_blocks,
             steps=steps,
+            source_protocol_profile=source_protocol_profile,
+            relay_protocol_profile=relay_protocol_profile,
+            request_normalization_notes=source_normalization_notes + relay_normalization_notes,
         )
 
     raw_b = json.dumps(response_b, ensure_ascii=False)
@@ -7014,6 +7058,9 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         response_b=response_b,
         thinking_blocks=thinking_blocks,
         steps=steps,
+        source_protocol_profile=source_protocol_profile,
+        relay_protocol_profile=relay_protocol_profile,
+        request_normalization_notes=source_normalization_notes + relay_normalization_notes,
     )
 
 
@@ -7124,6 +7171,9 @@ def _signature_interop_error_result(source: Channel, relay: Channel, stream: boo
         "relay_message_channel_type": "未知",
         "relay_request_id": None,
         "relay_raw_excerpt": error,
+        "source_protocol_profile": claude_protocol_profile_for_model(source.model_name),
+        "relay_protocol_profile": claude_protocol_profile_for_model(relay.model_name),
+        "request_normalization_notes": [],
         "fallback_note": SIGNATURE_FALLBACK_NOTE,
         "steps": [
             {
@@ -7193,6 +7243,9 @@ def _signature_interop_result(
     response_b: dict[str, Any],
     thinking_blocks: list[dict[str, Any]],
     steps: list[dict[str, str | None]],
+    source_protocol_profile: str | None = None,
+    relay_protocol_profile: str | None = None,
+    request_normalization_notes: list[str] | None = None,
 ) -> dict[str, Any]:
     relay_raw_excerpt = json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:3000]
     source_message_id = response_a.get("id")
@@ -7217,6 +7270,9 @@ def _signature_interop_result(
         "relay_message_channel_type": classify_claude_message_id(relay_message_id),
         "relay_request_id": request_id_from_payload(response_b),
         "relay_raw_excerpt": relay_raw_excerpt,
+        "source_protocol_profile": source_protocol_profile,
+        "relay_protocol_profile": relay_protocol_profile,
+        "request_normalization_notes": sorted({str(note) for note in (request_normalization_notes or []) if str(note)}),
         "fallback_note": SIGNATURE_FALLBACK_NOTE,
         "steps": steps,
     }
@@ -8890,6 +8946,7 @@ SCORING_DIMENSION_LABELS = {
         "stop_sequence_leaked",
         "invalid_request_not_rejected",
         "thinking_temperature_not_rejected",
+        "thinking_adaptive_not_supported",
         "thinking_adaptive_enabled_not_rejected",
         "thinking_adaptive_enabled_wrong_error",
     },
@@ -8981,11 +9038,12 @@ LABEL_EXPLANATIONS = {
     "invalid_request_not_rejected": "无效请求没有被正确拒绝。",
     "request_failed": "请求失败，未获得可评分响应。",
     "channel_preflight_failed": "渠道预检失败，已停止该渠道剩余题目的正式请求。",
-    "signature_interop_failed": "Thinking Signature 互通检测未通过，relay 无法复用 source 生成的签名 thinking block。",
+    "signature_interop_failed": "Thinking Signature 互通检测未通过，relay 无法复用 source 生成的签名 thinking block；这表示 ClaudeCode/原生 thinking 链路不可验证，不单独等同于非 Claude。",
     "patrol_ai_reviewed": "自动巡检规则结论置信度较低，已调用官方参考渠道或本地兜底逻辑进行 AI 疑难复核。",
-    "thinking_temperature_not_rejected": "启用 thinking 时携带非 1 temperature 未被上游拒绝，疑似中间层改写或非原生协议。",
-    "thinking_adaptive_enabled_not_rejected": "thinking.adaptive.enabled 未被上游拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。",
-    "thinking_adaptive_enabled_wrong_error": "上游返回了错误，但错误内容不是 thinking.adaptive.enabled 目标参数的原生拒绝。",
+    "thinking_adaptive_not_supported": "Adaptive thinking 协议探针未命中预期拒绝，疑似中间层改写、吞参或当前模型/渠道不支持 4.7/4.8 新协议。",
+    "thinking_temperature_not_rejected": "Adaptive thinking/旧 temperature 冲突探针未命中预期拒绝，疑似中间层改写、吞参或非原生协议。",
+    "thinking_adaptive_enabled_not_rejected": "Adaptive thinking effort 探针未命中预期拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。",
+    "thinking_adaptive_enabled_wrong_error": "上游返回了错误，但错误内容不是 adaptive thinking effort 目标参数的原生拒绝。",
     "signature_source_missing": "未找到可用的参考 source 渠道，无法执行 Thinking Signature 互通检测。",
     "provider_error_variant": "上游返回了等价的参数不支持原生约束错误，保留差异标签。",
     "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
@@ -9202,6 +9260,8 @@ def signature_interop_markdown(signature: Any) -> str:
         f"- 原因：{signature.get('reason') or '-'}\n"
         f"- Source：{signature.get('source_channel_id') or '-'} / {signature.get('source_message_channel_type') or '-'}\n"
         f"- Relay：{signature.get('relay_channel_id') or '-'} / {signature.get('relay_message_channel_type') or '-'}\n"
+        f"- 协议 profile：source={signature.get('source_protocol_profile') or '-'} / relay={signature.get('relay_protocol_profile') or '-'}\n"
+        f"- 请求归一化：{'; '.join(signature.get('request_normalization_notes') or []) or '-'}\n"
         f"- 兜底说明：{signature.get('fallback_note') or SIGNATURE_FALLBACK_NOTE}\n"
         f"{step_lines}"
     )

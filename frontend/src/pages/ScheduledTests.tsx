@@ -70,7 +70,7 @@ const patrolGuideSteps = [
   { title: '准备渠道', description: '先在渠道管理里建好候选渠道，确认模型、Base URL 和 Key 能正常请求。' },
   { title: '新建巡检计划', description: '只选择待测渠道和执行间隔，系统固定跑 Signature 互通和真实模型请求。' },
   { title: '查看判断依据', description: '告警会返回 run、report、message id、request id 和 source/relay 响应 ID。' },
-  { title: '复审处理', description: '根据疑似 AWS、逆向或 Signature 不互通等标签确认问题，必要时重发飞书通知。' },
+  { title: '复审处理', description: '根据疑似 AWS、逆向、adaptive thinking 改写或 Signature 链路不可验证等标签确认问题，必要时重发飞书通知。' },
 ];
 
 const patrolParameterFaq = [
@@ -82,12 +82,12 @@ const patrolParameterFaq = [
   {
     key: 'signature',
     label: 'Signature 互通检测看什么？',
-    children: 'source 渠道先生成带 signature 的 thinking block，再让待测渠道复用。失败会标记 signature_interop_failed。',
+    children: 'source 渠道按模型协议生成带 signature 的 thinking block，再让待测渠道复用；失败会标记 signature_interop_failed，但只代表 ClaudeCode/原生 thinking 链路不可验证。',
   },
   {
     key: 'model_request',
     label: '真实模型请求看什么？',
-    children: '系统发送 thinking temperature、web search、thinking.adaptive.enabled 三个探针，记录 message id、request id、协议和 endpoint，用于判断参数不支持、AWS/Bedrock、Claude/Anthropic 或中间层改写。',
+    children: '系统发送 adaptive thinking 协议、web search、adaptive thinking effort 三个探针，记录 message id、request id、协议和 endpoint，用于判断参数不支持、AWS/Bedrock、Claude/Anthropic 或中间层改写。',
   },
   {
     key: 'alert_ids',
@@ -731,7 +731,7 @@ export default function ScheduledTests() {
                     <div>
                       <Typography.Title level={4}>自动巡检配置教程</Typography.Title>
                       <Typography.Paragraph type="secondary">
-                        自动巡检会执行 Thinking Signature 互通检测和多项真实模型请求探针，用响应 ID 判断渠道来源特征。
+                        自动巡检会执行 Thinking Signature 互通检测和多项真实模型请求探针，并按 Opus 4.7/4.8+ adaptive thinking 新协议归一化请求，用响应 ID 和协议证据判断渠道来源特征。
                       </Typography.Paragraph>
                     </div>
                     <Space wrap>
@@ -1586,7 +1586,7 @@ export default function ScheduledTests() {
             showIcon
             style={{ marginBottom: 16 }}
             message="固定巡检内容"
-            description="系统会自动执行 Thinking Signature 互通检测和多项真实模型请求探针，不需要再选择测试集、渠道指纹或评分阈值。"
+            description="系统会自动执行 Thinking Signature 互通检测和多项真实模型请求探针；Opus 4.7/4.8+ 会自动使用 adaptive thinking + output_config.effort 新协议，不需要再选择测试集、渠道指纹或评分阈值。"
           />
           <Form.Item label="计划名称" name="name" rules={[{ required: true, message: '请输入计划名称' }]}>
             <Input placeholder="第三方 Sonnet 渠道每日巡检" />

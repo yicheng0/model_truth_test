@@ -368,7 +368,7 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
         <Alert
           type="info"
           showIcon
-          message="Opus 4.7+ 请求字段已归一化"
+          message="Opus 4.7/4.8+ 请求字段已归一化"
           description={result.request_normalization_notes.join('；')}
         />
       ) : null}
@@ -653,7 +653,7 @@ export default function ClaudeCodeCheck() {
           <Typography.Text className="section-kicker">CLAUDE RESOURCE FINGERPRINT</Typography.Text>
           <Typography.Title level={2}>Claude 资源指纹检测</Typography.Title>
           <Typography.Paragraph>
-            输入 Claude 或第三方中转的 URL、API Key 和模型名，先判断是否 Claude-compatible；Opus 4.7+ 会自动归一化 adaptive thinking，并清洗旧 enabled / budget_tokens / temperature / top_p / top_k 字段，避免协议 400。
+            输入 Claude 或第三方中转的 URL、API Key 和模型名，先判断是否 Claude-compatible；Opus 4.7/4.8+ 会自动归一化 adaptive thinking，并清洗旧 enabled / budget_tokens / temperature / top_p / top_k 字段，避免协议 400。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">临时凭据不落库</Tag>
