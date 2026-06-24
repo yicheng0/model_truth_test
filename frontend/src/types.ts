@@ -216,6 +216,38 @@ export type ModelRequestTestResult = {
   provider_endpoint?: string | null;
 };
 
+export type OpenAIResourceCheckRequest = {
+  base_url?: string | null;
+  api_key: string;
+  organization?: string | null;
+  project?: string | null;
+  model?: string | null;
+  include_response_probe?: boolean;
+};
+
+export type OpenAIResourceEvidenceItem = {
+  key: string;
+  status: 'ok' | 'warning' | 'fail' | 'info' | string;
+  detail: string;
+  value?: unknown;
+};
+
+export type OpenAIResourceCheckResult = {
+  classification: 'official_openai_direct_likely' | 'openai_compatible_proxy' | 'suspicious_proxy_or_rewrite' | 'invalid_or_unverified' | string;
+  confidence_score: number;
+  summary: string;
+  labels: string[];
+  base_url: string;
+  normalized_base_url: string;
+  host?: string | null;
+  models_endpoint: string;
+  response_endpoint?: string | null;
+  request_id?: string | null;
+  latency_ms?: number | null;
+  evidence: OpenAIResourceEvidenceItem[];
+  raw_evidence: Record<string, unknown>;
+};
+
 export type CacheHitRateAttempt = {
   attempt_index: number;
   result: Result;

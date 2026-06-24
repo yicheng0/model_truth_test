@@ -405,6 +405,53 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('sends OpenAI resource checks through the transient endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          classification: 'official_openai_direct_likely',
+          confidence_score: 90,
+          summary: 'ok',
+          labels: [],
+          base_url: 'https://api.openai.com/v1',
+          normalized_base_url: 'https://api.openai.com/v1',
+          host: 'api.openai.com',
+          models_endpoint: 'https://api.openai.com/v1/models',
+          request_id: 'req_123',
+          latency_ms: 123,
+          evidence: [],
+          raw_evidence: {},
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.openAIResourceCheck({
+      base_url: 'https://api.openai.com/v1',
+      api_key: 'sk-test',
+      organization: null,
+      project: null,
+      model: 'gpt-4.1-mini',
+      include_response_probe: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/openai-resource-check',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          base_url: 'https://api.openai.com/v1',
+          api_key: 'sk-test',
+          organization: null,
+          project: null,
+          model: 'gpt-4.1-mini',
+          include_response_probe: true,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('sends ClaudeCode tests through the isolated channel endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

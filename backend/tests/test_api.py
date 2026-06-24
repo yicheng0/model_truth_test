@@ -3717,6 +3717,133 @@ def test_channel_models_endpoint_returns_model_ids(monkeypatch) -> None:
     assert response.json() == ["claude-haiku-4-5-20251001", "claude-sonnet-4-6"]
 
 
+def test_openai_resource_check_classifies_official_endpoint(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            assert url == "https://api.openai.com/v1/models"
+            assert headers["authorization"] == "Bearer sk-official-secret"
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "gpt-4.1-mini", "object": "model"}]},
+                headers={"x-request-id": "req_official_123", "content-type": "application/json"},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/openai-resource-check", json={"api_key": "sk-official-secret"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["classification"] == "official_openai_direct_likely"
+    assert payload["request_id"] == "req_official_123"
+    assert payload["host"] == "api.openai.com"
+    assert "sk-official-secret" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_openai_resource_check_classifies_compatible_proxy(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "gpt-4o-mini", "object": "model"}]},
+                headers={"x-request-id": "relay_req_123"},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/openai-resource-check", json={"base_url": "https://relay.example/v1", "api_key": "sk-relay-secret"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["classification"] == "openai_compatible_proxy"
+    assert "non_official_host" in payload["labels"]
+    assert "sk-relay-secret" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_openai_resource_check_flags_missing_request_id(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"object": "list", "data": []}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/openai-resource-check", json={"api_key": "sk-no-request-id-secret"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["classification"] == "official_openai_direct_likely"
+    assert "request_id_missing" in payload["labels"]
+
+
+def test_openai_resource_check_invalid_auth_is_unverified_and_redacted(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                401,
+                json={"error": {"message": "Incorrect API key provided: sk-invalid-secret", "type": "invalid_request_error"}},
+                headers={"x-request-id": "req_invalid_123"},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/openai-resource-check", json={"api_key": "sk-invalid-secret"})
+
+    payload = response.json()
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 200
+    assert payload["classification"] == "invalid_or_unverified"
+    assert "models_http_error" in payload["labels"]
+    assert "sk-invalid-secret" not in blob
+    assert "[REDACTED]" in blob
+
+
 def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypatch) -> None:
     reset_database()
     calls: list[dict] = []

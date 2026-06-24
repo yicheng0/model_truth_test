@@ -16,6 +16,7 @@ const ScheduledTests = lazy(() => import('./pages/ScheduledTests'));
 const SignatureInterop = lazy(() => import('./pages/SignatureInterop'));
 const CacheHitRateTest = lazy(() => import('./pages/CacheHitRateTest'));
 const ModelRequestTest = lazy(() => import('./pages/ModelRequestTest'));
+const OpenAIResourceCheck = lazy(() => import('./pages/OpenAIResourceCheck'));
 const ClaudeCodeCheck = lazy(() => import('./pages/ClaudeCodeCheck'));
 const ReportsPage = lazy(() => import('./pages/ReportsPage'));
 const ReportDetailPage = lazy(() => import('./pages/ReportDetailPage'));
@@ -47,6 +48,7 @@ const navItems = [
   { key: '/cache-hit-rate-test', icon: DatabaseZap, label: '缓存命中率', to: '/cache-hit-rate-test' },
   { key: '/claude-code-check', icon: TerminalSquare, label: 'Claude 指纹', to: '/claude-code-check' },
   { key: '/model-request-test', icon: Send, label: '模型请求', to: '/model-request-test' },
+  { key: '/openai-resource-check', icon: ShieldCheck, label: 'OpenAI 直连', to: '/openai-resource-check' },
   { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
   { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },
   { key: '/baselines', icon: Database, label: '渠道指纹', to: '/baselines' },
@@ -141,6 +143,7 @@ function Shell() {
               <Route path="/channels" element={<Channels />} />
               <Route path="/cache-hit-rate-test" element={<CacheHitRateTest />} />
               <Route path="/model-request-test" element={<ModelRequestTest />} />
+              <Route path="/openai-resource-check" element={<OpenAIResourceCheck />} />
               <Route path="/claude-code-check" element={<ClaudeCodeCheck />} />
               <Route path="/signature-interop" element={<SignatureInterop />} />
               <Route path="/test-cases" element={<TestCases />} />

@@ -43,6 +43,7 @@ from .schemas import (
     FeishuBroadcastSettingUpdate,
     CacheHitRateTestCreate,
     ModelRequestTestCreate,
+    OpenAIResourceCheckCreate,
     ReportRead,
     ResultRead,
     RunCreate,
@@ -2264,6 +2265,259 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
         "request_id": request_id_from_normalized(normalized),
         "request_protocol": normalized.get("request_protocol"),
         "provider_endpoint": normalized.get("provider_endpoint"),
+    }
+
+
+OPENAI_OFFICIAL_BASE_URL = "https://api.openai.com/v1"
+OPENAI_SAFE_RESPONSE_HEADERS = (
+    "x-request-id",
+    "openai-request-id",
+    "request-id",
+    "content-type",
+    "openai-processing-ms",
+    "openai-organization",
+    "openai-version",
+    "cf-ray",
+)
+
+
+def _normalize_openai_resource_base_url(value: str | None) -> str:
+    base_url = (value or OPENAI_OFFICIAL_BASE_URL).strip()
+    if not base_url:
+        base_url = OPENAI_OFFICIAL_BASE_URL
+    if "://" not in base_url:
+        base_url = f"https://{base_url}"
+    base_url = base_url.rstrip("/")
+    for suffix in ("/models", "/responses", "/chat/completions"):
+        if base_url.endswith(suffix):
+            base_url = base_url[: -len(suffix)]
+            break
+    return base_url.rstrip("/")
+
+
+def _safe_openai_response_headers(headers: Any) -> dict[str, str]:
+    output: dict[str, str] = {}
+    for name in OPENAI_SAFE_RESPONSE_HEADERS:
+        value = headers.get(name) if hasattr(headers, "get") else None
+        if value:
+            output[name] = str(value)
+    return output
+
+
+def _json_shape_summary(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"type": type(payload).__name__}
+    summary: dict[str, Any] = {"keys": sorted(str(key) for key in payload.keys())[:30]}
+    object_value = payload.get("object")
+    if object_value is not None:
+        summary["object"] = object_value
+    data = payload.get("data")
+    if isinstance(data, list):
+        summary["data_count"] = len(data)
+        if data and isinstance(data[0], dict):
+            summary["first_data_keys"] = sorted(str(key) for key in data[0].keys())[:20]
+            if data[0].get("object") is not None:
+                summary["first_data_object"] = data[0].get("object")
+    error = payload.get("error")
+    if isinstance(error, dict):
+        summary["error_keys"] = sorted(str(key) for key in error.keys())[:20]
+        for key in ("type", "code", "param"):
+            if error.get(key) is not None:
+                summary[f"error_{key}"] = error.get(key)
+    return summary
+
+
+async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[str, Any]:
+    base_url = _normalize_openai_resource_base_url(data.base_url)
+    parsed = httpx.URL(base_url)
+    host = parsed.host
+    labels: set[str] = set()
+    evidence: list[dict[str, Any]] = []
+    raw_evidence: dict[str, Any] = {
+        "base_url": base_url,
+        "official_reference_base_url": OPENAI_OFFICIAL_BASE_URL,
+        "docs": {
+            "api_overview": "https://developers.openai.com/api/reference/overview/",
+            "list_models": "https://developers.openai.com/api/reference/resources/models/methods/list/",
+        },
+    }
+
+    if parsed.scheme == "https":
+        evidence.append({"key": "scheme", "status": "ok", "detail": "使用 HTTPS 连接。", "value": parsed.scheme})
+    else:
+        labels.add("non_https_endpoint")
+        evidence.append({"key": "scheme", "status": "fail", "detail": "官方 OpenAI API 应使用 HTTPS。", "value": parsed.scheme})
+
+    is_official_host = parsed.scheme == "https" and host == "api.openai.com"
+    if is_official_host:
+        evidence.append({"key": "host", "status": "ok", "detail": "目标 host 为 api.openai.com。", "value": host})
+    else:
+        labels.add("non_official_host")
+        evidence.append({"key": "host", "status": "warning", "detail": "目标 host 不是 api.openai.com，更像 OpenAI-compatible 代理或私有网关。", "value": host})
+
+    headers = {
+        "authorization": f"Bearer {data.api_key}",
+        "content-type": "application/json",
+    }
+    if data.organization:
+        headers["OpenAI-Organization"] = data.organization
+    if data.project:
+        headers["OpenAI-Project"] = data.project
+
+    models_url = _openai_models_url(base_url)
+    response_url = _openai_responses_url(base_url) if data.include_response_probe else None
+    raw_evidence["models_endpoint"] = models_url
+    raw_evidence["response_endpoint"] = response_url
+    request_id: str | None = None
+    total_latency_ms = 0
+    models_ok = False
+    response_probe_ok: bool | None = None
+
+    timeout = httpx.Timeout(connect=10, read=30, write=10, pool=10)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            started = time.perf_counter()
+            models_response = await client.get(models_url, headers=headers)
+            models_latency_ms = int((time.perf_counter() - started) * 1000)
+            total_latency_ms += models_latency_ms
+            request_id = request_id_from_headers(models_response.headers)
+            models_headers = _safe_openai_response_headers(models_response.headers)
+            try:
+                models_payload: Any = models_response.json()
+            except ValueError:
+                models_payload = {"_non_json_excerpt": models_response.text[:500]}
+            raw_evidence["models"] = redact_secrets(
+                {
+                    "status_code": models_response.status_code,
+                    "latency_ms": models_latency_ms,
+                    "headers": models_headers,
+                    "shape": _json_shape_summary(models_payload),
+                    "error_detail": redact_text(_response_error_detail(models_response)) if models_response.status_code >= 400 else None,
+                }
+            )
+
+            if models_response.status_code == 200:
+                evidence.append({"key": "models_http_status", "status": "ok", "detail": "GET /models 返回 200。", "value": 200})
+            else:
+                labels.add("models_http_error")
+                evidence.append({"key": "models_http_status", "status": "fail", "detail": "GET /models 未返回 200。", "value": models_response.status_code})
+
+            if request_id:
+                evidence.append({"key": "request_id", "status": "ok", "detail": "响应头包含可追踪 request id。", "value": request_id})
+            else:
+                labels.add("request_id_missing")
+                evidence.append({"key": "request_id", "status": "warning", "detail": "响应头缺少 x-request-id/openai-request-id/request-id。", "value": None})
+
+            models_data = models_payload.get("data") if isinstance(models_payload, dict) else None
+            first_model = models_data[0] if isinstance(models_data, list) and models_data else None
+            models_ok = (
+                isinstance(models_payload, dict)
+                and models_payload.get("object") == "list"
+                and isinstance(models_data, list)
+                and (first_model is None or isinstance(first_model, dict))
+            )
+            if models_ok:
+                evidence.append({"key": "models_shape", "status": "ok", "detail": "模型列表符合 OpenAI list object 形态。", "value": raw_evidence["models"]["shape"]})
+            else:
+                labels.add("models_shape_mismatch")
+                evidence.append({"key": "models_shape", "status": "fail", "detail": "模型列表响应不符合 object=list 且 data=[] 的形态。", "value": raw_evidence["models"]["shape"]})
+
+            if data.include_response_probe and response_url:
+                body = {
+                    "model": data.model or "gpt-4.1-mini",
+                    "input": "Reply with exactly: ok",
+                    "max_output_tokens": 8,
+                }
+                started = time.perf_counter()
+                response_probe = await client.post(response_url, headers=headers, json=body)
+                response_latency_ms = int((time.perf_counter() - started) * 1000)
+                total_latency_ms += response_latency_ms
+                request_id = request_id or request_id_from_headers(response_probe.headers)
+                response_headers = _safe_openai_response_headers(response_probe.headers)
+                try:
+                    response_payload: Any = response_probe.json()
+                except ValueError:
+                    response_payload = {"_non_json_excerpt": response_probe.text[:500]}
+                raw_evidence["response_probe"] = redact_secrets(
+                    {
+                        "status_code": response_probe.status_code,
+                        "latency_ms": response_latency_ms,
+                        "headers": response_headers,
+                        "shape": _json_shape_summary(response_payload),
+                        "error_detail": redact_text(_response_error_detail(response_probe)) if response_probe.status_code >= 400 else None,
+                    }
+                )
+                response_probe_ok = (
+                    response_probe.status_code == 200
+                    and isinstance(response_payload, dict)
+                    and str(response_payload.get("object") or "").startswith("response")
+                    and bool(response_payload.get("id"))
+                )
+                if response_probe_ok:
+                    evidence.append({"key": "responses_probe", "status": "ok", "detail": "POST /responses 返回 OpenAI Responses API 形态。", "value": raw_evidence["response_probe"]["shape"]})
+                else:
+                    labels.add("responses_probe_failed")
+                    evidence.append({"key": "responses_probe", "status": "warning", "detail": "POST /responses 未返回预期 Responses API 形态。", "value": raw_evidence["response_probe"]["shape"]})
+    except Exception as exc:
+        message = redact_text(_message_from_exception(exc))[:1000]
+        labels.add("network_or_auth_failure")
+        evidence.append({"key": "network_request", "status": "fail", "detail": "联网验证请求失败，无法确认资源形态。", "value": message})
+        raw_evidence["error"] = message
+
+    has_failed_evidence = any(item["status"] == "fail" for item in evidence)
+    if "network_or_auth_failure" in labels or ("models_http_error" in labels and not models_ok):
+        classification = "invalid_or_unverified"
+    elif not is_official_host and models_ok:
+        classification = "openai_compatible_proxy"
+    elif is_official_host and models_ok and not has_failed_evidence:
+        classification = "official_openai_direct_likely"
+    elif not is_official_host:
+        classification = "openai_compatible_proxy"
+    else:
+        classification = "suspicious_proxy_or_rewrite"
+
+    score = 0.0
+    if parsed.scheme == "https":
+        score += 15
+    if is_official_host:
+        score += 35
+    if models_ok:
+        score += 25
+    if request_id:
+        score += 15
+    if response_probe_ok is True:
+        score += 10
+    elif response_probe_ok is False:
+        score -= 10
+    if classification == "invalid_or_unverified":
+        score = min(score, 35)
+    elif classification == "openai_compatible_proxy":
+        score = min(score, 65)
+    elif classification == "suspicious_proxy_or_rewrite":
+        score = min(score, 70)
+    score = max(0.0, min(100.0, score))
+
+    summaries = {
+        "official_openai_direct_likely": "证据显示该资源高度符合 OpenAI 官方 API 直连特征，但仍应表述为高一致性而非绝对证明。",
+        "openai_compatible_proxy": "该资源具备 OpenAI-compatible 形态，但 endpoint 不是官方 api.openai.com，更像中转、代理或私有兼容网关。",
+        "suspicious_proxy_or_rewrite": "该资源部分证据与官方 OpenAI API 不一致，存在代理改写或响应形态漂移风险。",
+        "invalid_or_unverified": "认证、网络或响应失败导致证据不足，无法验证为官方 OpenAI 直连资源。",
+    }
+    raw_evidence = redact_secrets(raw_evidence)
+    return {
+        "classification": classification,
+        "confidence_score": round(score, 2),
+        "summary": summaries[classification],
+        "labels": sorted(labels),
+        "base_url": data.base_url or OPENAI_OFFICIAL_BASE_URL,
+        "normalized_base_url": base_url,
+        "host": host,
+        "models_endpoint": models_url,
+        "response_endpoint": response_url,
+        "request_id": request_id,
+        "latency_ms": total_latency_ms or None,
+        "evidence": evidence,
+        "raw_evidence": raw_evidence,
     }
 
 
@@ -6583,6 +6837,15 @@ def _openai_models_url(base_url: str | None) -> str:
     if normalized.endswith("/v1"):
         return f"{normalized}/models"
     return f"{normalized}/v1/models"
+
+
+def _openai_responses_url(base_url: str | None) -> str:
+    normalized = (base_url or "").rstrip("/")
+    if normalized.endswith("/responses"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/responses"
+    return f"{normalized}/v1/responses"
 
 
 def _raise_for_status_with_body(response: httpx.Response) -> None:

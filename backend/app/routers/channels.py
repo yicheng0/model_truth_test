@@ -21,6 +21,8 @@ from ..schemas import (
     ChannelUpdate,
     ModelRequestTestCreate,
     ModelRequestTestRead,
+    OpenAIResourceCheckCreate,
+    OpenAIResourceCheckRead,
     RunRead,
     SignatureInteropTestCreate,
     SignatureInteropTestRead,
@@ -30,6 +32,7 @@ from ..services import (
     create_cache_hit_rate_test,
     create_channel,
     create_model_request_test,
+    create_openai_resource_check,
     create_signature_interop_test,
     fetch_channel_models,
 )
@@ -195,6 +198,17 @@ async def channel_model_request_test(channel_id: str, data: ModelRequestTestCrea
     except Exception as exc:
         logger.exception("Model request test failed for channel %s", channel_id)
         raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+
+
+@router.post("/api/openai-resource-check", response_model=OpenAIResourceCheckRead)
+async def openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[str, object]:
+    try:
+        return await create_openai_resource_check(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("OpenAI resource check failed")
+        raise HTTPException(status_code=502, detail="OpenAI resource check failed") from exc
 
 
 @router.post("/api/channels/{channel_id}/cache-hit-rate-test", response_model=CacheHitRateTestRead)

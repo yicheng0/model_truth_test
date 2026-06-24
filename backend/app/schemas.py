@@ -110,6 +110,15 @@ class ModelRequestTestCreate(BaseModel):
     run_name: str | None = Field(default=None, max_length=200)
 
 
+class OpenAIResourceCheckCreate(BaseModel):
+    base_url: str | None = Field(default="https://api.openai.com/v1", max_length=500)
+    api_key: str = Field(min_length=1, max_length=4096)
+    organization: str | None = Field(default=None, max_length=200)
+    project: str | None = Field(default=None, max_length=200)
+    model: str | None = Field(default=None, max_length=200)
+    include_response_probe: bool = False
+
+
 class CacheHitRateTestCreate(BaseModel):
     test_count: int = Field(default=10, ge=1, le=30)
     interval_seconds: float = Field(default=3, ge=0, le=30)
@@ -1065,6 +1074,34 @@ class ModelRequestTestRead(BaseModel):
     message_channel_type: str
     request_protocol: str | None = None
     provider_endpoint: str | None = None
+
+
+class OpenAIResourceEvidenceItem(BaseModel):
+    key: str
+    status: Literal["ok", "warning", "fail", "info"]
+    detail: str
+    value: Any | None = None
+
+
+class OpenAIResourceCheckRead(BaseModel):
+    classification: Literal[
+        "official_openai_direct_likely",
+        "openai_compatible_proxy",
+        "suspicious_proxy_or_rewrite",
+        "invalid_or_unverified",
+    ]
+    confidence_score: float
+    summary: str
+    labels: list[str] = Field(default_factory=list)
+    base_url: str
+    normalized_base_url: str
+    host: str | None = None
+    models_endpoint: str
+    response_endpoint: str | None = None
+    request_id: str | None = None
+    latency_ms: int | None = None
+    evidence: list[OpenAIResourceEvidenceItem] = Field(default_factory=list)
+    raw_evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class CacheHitRateAttemptRead(BaseModel):
