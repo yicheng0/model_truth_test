@@ -3739,20 +3739,41 @@ def test_openai_resource_check_classifies_official_endpoint(monkeypatch) -> None
                 request=request,
             )
 
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(
+                    200,
+                    json={"id": "chatcmpl_123", "object": "chat.completion", "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 1}},
+                    headers={"x-request-id": "req_chat_123"},
+                    request=request,
+                )
+            return httpx.Response(
+                400,
+                json={"error": {"message": "max_output_tokens must be greater than or equal to 16", "type": "invalid_request_error", "code": "integer_below_min_value", "param": "max_output_tokens"}},
+                headers={"x-request-id": "req_validation_123"},
+                request=request,
+            )
+
     monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
 
     with TestClient(app) as client:
-        response = client.post("/api/openai-resource-check", json={"api_key": "sk-official-secret"})
+        response = client.post("/api/openai-resource-check", json={"api_key": "sk-official-secret", "include_response_probe": False})
 
     payload = response.json()
     assert response.status_code == 200
     assert payload["classification"] == "official_openai_direct_likely"
+    assert payload["directness"] == "official_direct"
+    assert payload["upstream_assessment"] == "official_upstream_likely"
     assert payload["request_id"] == "req_official_123"
     assert payload["host"] == "api.openai.com"
+    assert payload["selected_model"] == "gpt-4.1-mini"
     assert "sk-official-secret" not in json.dumps(payload, ensure_ascii=False)
 
 
-def test_openai_resource_check_classifies_compatible_proxy(monkeypatch) -> None:
+def test_openai_resource_check_classifies_relay_with_official_like_upstream(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
     class FakeClient:
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             pass
@@ -3767,24 +3788,36 @@ def test_openai_resource_check_classifies_compatible_proxy(monkeypatch) -> None:
             request = httpx.Request("GET", url)
             return httpx.Response(
                 200,
-                json={"object": "list", "data": [{"id": "gpt-4o-mini", "object": "model"}]},
-                headers={"x-request-id": "relay_req_123"},
+                json={"object": "list", "data": [{"id": "gpt-4.1-mini", "object": "model"}]},
                 request=request,
             )
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            calls.append((url, json))
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_123", "object": "chat.completion", "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}, request=request)
+            if json.get("max_output_tokens") == 16:
+                return httpx.Response(200, json={"id": "resp_123", "object": "response", "model": json["model"], "output": [], "usage": {}}, request=request)
+            return httpx.Response(400, json={"error": {"message": "max_output_tokens too small", "type": "invalid_request_error", "code": "integer_below_min_value", "param": "max_output_tokens"}}, request=request)
 
     monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
 
     with TestClient(app) as client:
-        response = client.post("/api/openai-resource-check", json={"base_url": "https://relay.example/v1", "api_key": "sk-relay-secret"})
+        response = client.post("/api/openai-resource-check", json={"base_url": "https://relay.example/v1", "api_key": "sk-relay-secret", "include_response_probe": True})
 
     payload = response.json()
     assert response.status_code == 200
     assert payload["classification"] == "openai_compatible_proxy"
+    assert payload["directness"] == "relay_or_proxy"
+    assert payload["upstream_assessment"] == "official_upstream_likely"
+    assert payload["upstream_score"] >= 80
     assert "non_official_host" in payload["labels"]
+    assert any(url.endswith("/responses") and body.get("max_output_tokens") == 16 for url, body in calls)
     assert "sk-relay-secret" not in json.dumps(payload, ensure_ascii=False)
 
 
-def test_openai_resource_check_flags_missing_request_id(monkeypatch) -> None:
+def test_openai_resource_check_records_middleware_wrapper_without_failing(monkeypatch) -> None:
     class FakeClient:
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             pass
@@ -3797,7 +3830,50 @@ def test_openai_resource_check_flags_missing_request_id(monkeypatch) -> None:
 
         async def get(self, url, headers):  # noqa: ANN001
             request = httpx.Request("GET", url)
-            return httpx.Response(200, json={"object": "list", "data": []}, request=request)
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-4o-mini", "object": "model"}]}, request=request)
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_123", "object": "chat.completion", "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}, request=request)
+            return httpx.Response(
+                400,
+                json={"error": {"message": "invalid max_output_tokens", "type": "invalid_request_error", "code": "integer_below_min_value"}, "rix_api_error": {"code": "integer_below_min_value"}},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/openai-resource-check", json={"base_url": "https://relay.example/v1", "api_key": "sk-relay-secret", "include_response_probe": True})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["upstream_assessment"] in {"official_upstream_likely", "openai_compatible_unverified"}
+    assert "middleware_wrapper_trace" in payload["labels"]
+    assert any(item.get("group") == "Middleware Trace" for item in payload["evidence"])
+
+
+def test_openai_resource_check_flags_missing_request_id_as_non_blocking(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-4.1-mini"}]}, request=request)
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_123", "object": "chat.completion", "choices": []}, request=request)
+            return httpx.Response(400, json={"error": {"message": "bad", "type": "invalid_request_error", "code": "integer_below_min_value"}}, request=request)
 
     monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
 
@@ -3806,7 +3882,7 @@ def test_openai_resource_check_flags_missing_request_id(monkeypatch) -> None:
 
     payload = response.json()
     assert response.status_code == 200
-    assert payload["classification"] == "official_openai_direct_likely"
+    assert payload["upstream_assessment"] == "official_upstream_likely"
     assert "request_id_missing" in payload["labels"]
 
 
@@ -3839,10 +3915,37 @@ def test_openai_resource_check_invalid_auth_is_unverified_and_redacted(monkeypat
     blob = json.dumps(payload, ensure_ascii=False)
     assert response.status_code == 200
     assert payload["classification"] == "invalid_or_unverified"
+    assert payload["upstream_assessment"] == "invalid_or_unverified"
     assert "models_http_error" in payload["labels"]
     assert "sk-invalid-secret" not in blob
     assert "[REDACTED]" in blob
 
+
+def test_openai_resource_check_non_json_response_is_unverified(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(502, text="<html>bad gateway sk-non-json-secret</html>", request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/openai-resource-check", json={"base_url": "https://relay.example/v1", "api_key": "sk-non-json-secret"})
+
+    payload = response.json()
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 200
+    assert payload["upstream_assessment"] == "invalid_or_unverified"
+    assert "sk-non-json-secret" not in blob
 
 def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypatch) -> None:
     reset_database()

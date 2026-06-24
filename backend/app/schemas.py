@@ -1081,6 +1081,7 @@ class OpenAIResourceEvidenceItem(BaseModel):
     status: Literal["ok", "warning", "fail", "info"]
     detail: str
     value: Any | None = None
+    group: str | None = None
 
 
 class OpenAIResourceCheckRead(BaseModel):
@@ -1091,13 +1092,23 @@ class OpenAIResourceCheckRead(BaseModel):
         "invalid_or_unverified",
     ]
     confidence_score: float
+    directness: Literal["official_direct", "relay_or_proxy"]
+    upstream_assessment: Literal[
+        "official_upstream_likely",
+        "openai_compatible_unverified",
+        "suspicious_rewrite",
+        "invalid_or_unverified",
+    ]
+    upstream_score: float
     summary: str
     labels: list[str] = Field(default_factory=list)
     base_url: str
     normalized_base_url: str
     host: str | None = None
     models_endpoint: str
+    chat_endpoint: str | None = None
     response_endpoint: str | None = None
+    selected_model: str | None = None
     request_id: str | None = None
     latency_ms: int | None = None
     evidence: list[OpenAIResourceEvidenceItem] = Field(default_factory=list)

@@ -230,18 +230,24 @@ export type OpenAIResourceEvidenceItem = {
   status: 'ok' | 'warning' | 'fail' | 'info' | string;
   detail: string;
   value?: unknown;
+  group?: string | null;
 };
 
 export type OpenAIResourceCheckResult = {
   classification: 'official_openai_direct_likely' | 'openai_compatible_proxy' | 'suspicious_proxy_or_rewrite' | 'invalid_or_unverified' | string;
   confidence_score: number;
+  directness?: 'official_direct' | 'relay_or_proxy' | string;
+  upstream_assessment?: 'official_upstream_likely' | 'openai_compatible_unverified' | 'suspicious_rewrite' | 'invalid_or_unverified' | string;
+  upstream_score?: number;
   summary: string;
   labels: string[];
   base_url: string;
   normalized_base_url: string;
   host?: string | null;
   models_endpoint: string;
+  chat_endpoint?: string | null;
   response_endpoint?: string | null;
+  selected_model?: string | null;
   request_id?: string | null;
   latency_ms?: number | null;
   evidence: OpenAIResourceEvidenceItem[];
