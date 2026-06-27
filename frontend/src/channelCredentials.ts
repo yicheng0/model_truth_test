@@ -174,13 +174,11 @@ export function inferChannelAccountType(channel?: ChannelDisplayInput | null) {
 export function normalizeChannelNickname(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
   const rawName = nonEmptyText(channel?.name);
   if (!rawName) return '';
-  const channelNumber = inferChannelNumber(channel, fallbackId);
   const accountType = inferChannelAccountType(channel);
   const accountTypeDisplay = accountTypeSlug(accountType);
   const tokens = channelNameTokens(rawName);
   if (!tokens.length) return '';
   const cleaned = tokens.filter((token, index) => {
-    if (index === 0 && channelNumber && token === channelNumber) return false;
     const normalized = token.toLowerCase();
     if (normalized === 'tokenflow' || normalized === 'relay') return false;
     if (normalized === 'claude' && accountType && accountType !== 'claude') return false;
@@ -197,10 +195,9 @@ export function channelDisplayAccountType(channel?: ChannelDisplayInput | null) 
 
 export function formatChannelDisplayName(channel?: ChannelDisplayInput | null, fallbackId?: string | null) {
   const rawId = nonEmptyText(channel?.id) || nonEmptyText(fallbackId);
-  const channelNumber = inferChannelNumber(channel, fallbackId);
   const name = normalizeChannelNickname(channel, fallbackId);
   const accountType = channelDisplayAccountType(channel);
-  const parts = [channelNumber, name, accountType ? accountTypeSlug(accountType) : ''].filter(Boolean);
+  const parts = [name, accountType ? accountTypeSlug(accountType) : ''].filter(Boolean);
   if (parts.length) return parts.join('-');
   return rawId || '-';
 }

@@ -121,7 +121,7 @@ describe('channel credential helpers', () => {
         name: '鬼手',
         auth_config: { account_type: 'aws' },
       }),
-    ).toBe('8678-鬼手-aws');
+    ).toBe('鬼手-aws');
     expect(formatChannelDisplayName({ name: '鬼手', account_type: 'aws' })).toBe('鬼手-aws');
     expect(formatChannelDisplayName(null, 'legacy_channel')).toBe('legacy_channel');
   });
@@ -133,7 +133,7 @@ describe('channel credential helpers', () => {
         name: '风雨',
         auth_config: { account_type: 'aws' },
       }),
-    ).toBe('9029-风雨-aws');
+    ).toBe('风雨-aws');
     expect(
       formatChannelDisplayName({
         id: '9029-tokenflow-aws',
@@ -154,7 +154,7 @@ describe('channel credential helpers', () => {
 
     expect(inferChannelNumber(legacy)).toBe('9335');
     expect(inferChannelAccountType(legacy)).toBe('aws');
-    expect(normalizeChannelNickname(legacy)).toBe('阿宝');
-    expect(normalizeChannelNickname({ name: '8559-风雨-aws', channel_number: '8559', account_type: 'aws' })).toBe('风雨');
+    expect(normalizeChannelNickname(legacy)).toBe('9335-阿宝');
+    expect(normalizeChannelNickname({ name: '8559-风雨-aws', channel_number: '8559', account_type: 'aws' })).toBe('8559-风雨');
   });
 });

@@ -7175,12 +7175,13 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     source_endpoint = _anthropic_messages_url(source_credentials.get("base_url") or source.base_url)
     relay_endpoint = _anthropic_messages_url(relay_credentials.get("base_url") or relay.base_url)
     model = source_credentials.get("model") or source.model_name or "claude-opus-4-6"
-    steps: list[dict[str, str | None]] = [
+    steps: list[dict[str, Any]] = [
         {
             "name": "步骤 A：请求 Source thinking",
             "status": "running",
             "detail": f"向 {source.name} 发起 Anthropic Messages thinking 请求（按模型自动适配 legacy / 4.7/4.8 adaptive thinking 协议）",
             "excerpt": source_endpoint,
+            "endpoint": source_endpoint,
         }
     ]
 
@@ -7188,26 +7189,143 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         str(model),
         [{"role": "user", "content": SIGNATURE_TEST_PROMPT_A}],
     )
-    response_a = await _signature_messages_call(
+    response_a, source_meta = await _signature_messages_call(
         source_endpoint,
         source_credentials["api_key"],
         source_payload,
     )
-    steps[0] = {
-        "name": "步骤 A：请求 Source thinking",
-        "status": "ok",
-        "detail": f"Source 返回 message id：{response_a.get('id') or '-'}",
-        "excerpt": json.dumps(_redact_signature_payload(response_a), ensure_ascii=False)[:1200],
-    }
+    if not source_meta.get("ok"):
+        steps[0] = _signature_step_from_meta(
+            "步骤 A：请求 Source thinking",
+            source_meta,
+            success_detail="Source 请求成功",
+            fail_detail="Source 请求失败",
+        )
+        steps.append(
+            {
+                "name": "Signature 校验",
+                "status": "fail",
+                "detail": "Source 请求失败，未获得可校验的 thinking signature",
+                "excerpt": None,
+            }
+        )
+        steps.append(
+            {
+                "name": "步骤 B：发送 Relay 复用请求",
+                "status": "wait",
+                "detail": "Source 未成功，未发起 Relay 请求",
+                "excerpt": None,
+                "endpoint": relay_endpoint,
+            }
+        )
+        steps.append({"name": "最终判定", "status": "fail", "detail": "source 请求失败", "excerpt": None})
+        return _signature_interop_result(
+            ok=False,
+            reason="source 请求失败",
+            source=source,
+            relay=relay,
+            source_endpoint=source_endpoint,
+            relay_endpoint=relay_endpoint,
+            model=str(model),
+            response_a=response_a if isinstance(response_a, dict) else {"error": source_meta.get("error")},
+            response_b={"error": "Source 请求失败，Relay 未执行"},
+            thinking_blocks=[],
+            steps=steps,
+            source_protocol_profile=source_protocol_profile,
+            relay_protocol_profile=claude_protocol_profile_for_model(relay.model_name),
+            request_normalization_notes=source_normalization_notes,
+        )
+
+    steps[0] = _signature_step_from_meta(
+        "步骤 A：请求 Source thinking",
+        source_meta,
+        success_detail=f"Source 返回 message id：{source_meta.get('message_id') or '-'}",
+        fail_detail="Source 请求失败",
+    )
     source_content = response_a.get("content") if isinstance(response_a, dict) else None
     if not isinstance(source_content, list):
-        raise ValueError("source 响应缺少 content 数组，无法进行 signature 互通检测")
+        steps.append(
+            {
+                "name": "Signature 校验",
+                "status": "fail",
+                "detail": "source 响应缺少 content 数组，无法进行 signature 互通检测",
+                "excerpt": json.dumps(_redact_signature_payload(response_a), ensure_ascii=False)[:1200],
+            }
+        )
+        steps.append({"name": "步骤 B：发送 Relay 复用请求", "status": "wait", "detail": "Signature 校验失败，未发起 Relay 请求", "endpoint": relay_endpoint})
+        steps.append({"name": "最终判定", "status": "fail", "detail": "source 响应缺少 content 数组", "excerpt": None})
+        return _signature_interop_result(
+            ok=False,
+            reason="source 响应缺少 content 数组，无法进行 signature 互通检测",
+            source=source,
+            relay=relay,
+            source_endpoint=source_endpoint,
+            relay_endpoint=relay_endpoint,
+            model=str(response_a.get("model") or model) if isinstance(response_a, dict) else str(model),
+            response_a=response_a,
+            response_b={"error": "Signature 校验失败，Relay 未执行"},
+            thinking_blocks=[],
+            steps=steps,
+            source_protocol_profile=source_protocol_profile,
+            relay_protocol_profile=claude_protocol_profile_for_model(relay.model_name),
+            request_normalization_notes=source_normalization_notes,
+        )
     thinking_blocks = [block for block in source_content if isinstance(block, dict) and block.get("type") == "thinking"]
     if not thinking_blocks:
-        raise ValueError("source 响应中没有 thinking block，无法进行 signature 互通检测")
+        steps.append(
+            {
+                "name": "Signature 校验",
+                "status": "fail",
+                "detail": "source 响应中没有 thinking block，无法进行 signature 互通检测",
+                "excerpt": json.dumps(_redact_signature_payload(source_content), ensure_ascii=False)[:1200],
+            }
+        )
+        steps.append({"name": "步骤 B：发送 Relay 复用请求", "status": "wait", "detail": "Signature 校验失败，未发起 Relay 请求", "endpoint": relay_endpoint})
+        steps.append({"name": "最终判定", "status": "fail", "detail": "source 响应中没有 thinking block", "excerpt": None})
+        return _signature_interop_result(
+            ok=False,
+            reason="source 响应中没有 thinking block，无法进行 signature 互通检测",
+            source=source,
+            relay=relay,
+            source_endpoint=source_endpoint,
+            relay_endpoint=relay_endpoint,
+            model=str(response_a.get("model") or model),
+            response_a=response_a,
+            response_b={"error": "Signature 校验失败，Relay 未执行"},
+            thinking_blocks=[],
+            steps=steps,
+            source_protocol_profile=source_protocol_profile,
+            relay_protocol_profile=claude_protocol_profile_for_model(relay.model_name),
+            request_normalization_notes=source_normalization_notes,
+        )
     missing_signature = [index for index, block in enumerate(thinking_blocks) if not block.get("signature")]
     if missing_signature:
-        raise ValueError(f"source thinking block 缺少 signature 字段，block 索引：{missing_signature}")
+        steps.append(
+            {
+                "name": "Signature 校验",
+                "status": "fail",
+                "detail": f"source thinking block 缺少 signature 字段，block 索引：{missing_signature}",
+                "excerpt": json.dumps(_redact_signature_payload(thinking_blocks), ensure_ascii=False)[:1200],
+            }
+        )
+        steps.append({"name": "步骤 B：发送 Relay 复用请求", "status": "wait", "detail": "Signature 校验失败，未发起 Relay 请求", "endpoint": relay_endpoint})
+        steps.append({"name": "最终判定", "status": "fail", "detail": "source thinking block 缺少 signature 字段", "excerpt": None})
+        return _signature_interop_result(
+            ok=False,
+            reason=f"source thinking block 缺少 signature 字段，block 索引：{missing_signature}",
+            source=source,
+            relay=relay,
+            source_endpoint=source_endpoint,
+            relay_endpoint=relay_endpoint,
+            model=str(response_a.get("model") or model),
+            response_a=response_a,
+            response_b={"error": "Signature 校验失败，Relay 未执行"},
+            thinking_blocks=thinking_blocks,
+            steps=steps,
+            source_protocol_profile=source_protocol_profile,
+            relay_protocol_profile=claude_protocol_profile_for_model(relay.model_name),
+            request_normalization_notes=source_normalization_notes,
+        )
     steps.append(
         {
             "name": "Signature 校验",
@@ -7235,36 +7353,30 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             "status": "running",
             "detail": f"向 {relay.name} 发送包含 source assistant content 的三段 messages（{relay_protocol_profile}）",
             "excerpt": relay_endpoint,
+            "endpoint": relay_endpoint,
         }
     )
-    try:
-        response_b = await _signature_messages_call(relay_endpoint, relay_credentials["api_key"], relay_payload)
-    except RuntimeError as exc:
-        raw = str(exc)
-        steps[-1] = {
-            "name": "步骤 B：发送 Relay 复用请求",
-            "status": "fail",
-            "detail": "Relay 请求失败",
-            "excerpt": raw[:1200],
-        }
-        steps.append(
-            {
-                "name": "最终判定",
-                "status": "fail",
-                "detail": "signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败",
-                "excerpt": None,
-            }
+    response_b, relay_meta = await _signature_messages_call(relay_endpoint, relay_credentials["api_key"], relay_payload)
+    if not relay_meta.get("ok"):
+        raw = str(relay_meta.get("error") or "")
+        reason = "signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败"
+        steps[-1] = _signature_step_from_meta(
+            "步骤 B：发送 Relay 复用请求",
+            relay_meta,
+            success_detail="Relay 请求成功",
+            fail_detail=reason,
         )
+        steps.append({"name": "最终判定", "status": "fail", "detail": reason, "excerpt": None})
         return _signature_interop_result(
             ok=False,
-            reason="signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败",
+            reason=reason,
             source=source,
             relay=relay,
             source_endpoint=source_endpoint,
             relay_endpoint=relay_endpoint,
             model=str(model),
             response_a=response_a,
-            response_b={"error": raw},
+            response_b=response_b if isinstance(response_b, dict) else {"error": raw},
             thinking_blocks=thinking_blocks,
             steps=steps,
             source_protocol_profile=source_protocol_profile,
@@ -7280,12 +7392,14 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         if ok
         else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw_b else "relay 请求失败")
     )
-    steps[-1] = {
-        "name": "步骤 B：发送 Relay 复用请求",
-        "status": "ok" if ok else "fail",
-        "detail": f"Relay 返回 {response_b.get('type') or 'unknown'}，message id：{response_b.get('id') or '-'}",
-        "excerpt": json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:1200],
-    }
+    relay_meta["ok"] = ok
+    relay_meta["message_id"] = response_b.get("id")
+    steps[-1] = _signature_step_from_meta(
+        "步骤 B：发送 Relay 复用请求",
+        relay_meta,
+        success_detail=f"Relay 返回 {response_b.get('type') or 'unknown'}，message id：{response_b.get('id') or '-'}",
+        fail_detail=reason,
+    )
     steps.append({"name": "最终判定", "status": "ok" if ok else "fail", "detail": reason, "excerpt": None})
     return _signature_interop_result(
         ok=ok,
@@ -7369,7 +7483,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
             "created_at": started_at.isoformat(),
         },
         raw_response=result_payload,
-        metrics={"status_code": 200 if result_payload.get("ok") else 500, "error_type": "signature_interop" if error else None},
+        metrics={"status_code": 200 if result_payload.get("ok") else 500, "error_type": "signature_interop" if (error or not result_payload.get("ok")) else None},
         score=100 if result_payload.get("ok") else 0,
         labels=[] if result_payload.get("ok") else ["signature_interop_failed"],
     )
@@ -7411,7 +7525,7 @@ def _signature_interop_error_result(source: Channel, relay: Channel, stream: boo
         "relay_message_id": None,
         "relay_message_channel_type": "未知",
         "relay_request_id": None,
-        "relay_raw_excerpt": error,
+        "relay_raw_excerpt": redact_text(error),
         "source_protocol_profile": claude_protocol_profile_for_model(source.model_name),
         "relay_protocol_profile": claude_protocol_profile_for_model(relay.model_name),
         "request_normalization_notes": [],
@@ -7422,6 +7536,7 @@ def _signature_interop_error_result(source: Channel, relay: Channel, stream: boo
                 "status": "fail",
                 "detail": error,
                 "excerpt": f"stream={stream}",
+                "error": redact_text(error),
             }
         ],
     }
@@ -7434,7 +7549,29 @@ def _validate_signature_test_channel(channel: Channel, credentials: dict[str, An
         raise ValueError(f"{label} 渠道缺少 Base URL，无法检测 thinking signature")
 
 
-async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _signature_response_excerpt(payload: Any) -> str:
+    if isinstance(payload, dict):
+        return json.dumps(_redact_signature_payload(payload), ensure_ascii=False)[:1200]
+    return str(payload or "")[:1200]
+
+
+def _signature_step_from_meta(name: str, meta: dict[str, Any], *, success_detail: str, fail_detail: str) -> dict[str, Any]:
+    ok = bool(meta.get("ok"))
+    return {
+        "name": name,
+        "status": "ok" if ok else "fail",
+        "detail": success_detail if ok else fail_detail,
+        "excerpt": meta.get("excerpt"),
+        "endpoint": meta.get("endpoint"),
+        "http_status": meta.get("http_status"),
+        "request_id": meta.get("request_id"),
+        "message_id": meta.get("message_id"),
+        "latency_ms": meta.get("latency_ms"),
+        "error": meta.get("error"),
+    }
+
+
+async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     headers = {
         "content-type": "application/json",
         "x-api-key": api_key,
@@ -7443,12 +7580,52 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
         "anthropic-beta": "interleaved-thinking-2025-05-14",
     }
     timeout = httpx.Timeout(connect=10, read=120, write=10, pool=10)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-        response = await client.post(endpoint, headers=headers, json=payload)
-        _raise_for_status_with_body(response)
-        if payload.get("stream"):
-            return _parse_signature_stream_response(response.text)
-        return response.json()
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.post(endpoint, headers=headers, json=payload)
+    except Exception as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        error = redact_text(_message_from_exception(exc))[:1200]
+        return {"error": error}, {
+            "ok": False,
+            "endpoint": endpoint,
+            "http_status": None,
+            "request_id": None,
+            "message_id": None,
+            "latency_ms": latency_ms,
+            "error": error,
+            "excerpt": error,
+        }
+
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    request_id = request_id_from_headers(response.headers)
+    if payload.get("stream"):
+        parsed = _parse_signature_stream_response(response.text)
+    else:
+        try:
+            parsed = response.json()
+        except ValueError:
+            parsed = {"error": response.text[:2000]}
+    if isinstance(parsed, dict):
+        parsed = attach_response_metadata(parsed, response)
+    else:
+        parsed = {"payload": parsed}
+    ok = 200 <= response.status_code < 300
+    error = None if ok else _response_error_detail(response) or str(parsed.get("error") or "HTTP request failed")
+    if error:
+        error = redact_text(str(error))[:1200]
+    meta = {
+        "ok": ok,
+        "endpoint": endpoint,
+        "http_status": response.status_code,
+        "request_id": request_id or request_id_from_payload(parsed),
+        "message_id": parsed.get("id") if isinstance(parsed, dict) else None,
+        "latency_ms": latency_ms,
+        "error": error,
+        "excerpt": _signature_response_excerpt(parsed),
+    }
+    return parsed, meta
 
 
 def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
@@ -7483,7 +7660,7 @@ def _signature_interop_result(
     response_a: dict[str, Any],
     response_b: dict[str, Any],
     thinking_blocks: list[dict[str, Any]],
-    steps: list[dict[str, str | None]],
+    steps: list[dict[str, Any]],
     source_protocol_profile: str | None = None,
     relay_protocol_profile: str | None = None,
     request_normalization_notes: list[str] | None = None,
@@ -7532,6 +7709,8 @@ def _redact_signature_payload(value: Any) -> Any:
         return redacted
     if isinstance(value, list):
         return [_redact_signature_payload(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
     return value
 
 

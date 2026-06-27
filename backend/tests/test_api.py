@@ -4041,6 +4041,13 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
         "步骤 B：发送 Relay 复用请求",
         "最终判定",
     ]
+    assert payload["steps"][0]["http_status"] == 200
+    assert payload["steps"][0]["request_id"] == "req_source_123"
+    assert payload["steps"][0]["message_id"] == "msg_bdrk_01source"
+    assert isinstance(payload["steps"][0]["latency_ms"], int)
+    assert payload["steps"][2]["http_status"] == 200
+    assert payload["steps"][2]["request_id"] == "req_relay_456"
+    assert payload["steps"][2]["message_id"] == "msg_vrtx_01relay"
     assert payload["steps"][-1]["status"] == "ok"
     assert calls[0]["url"] == "https://source.example/v1/messages"
     assert calls[1]["url"] == "https://relay.example/v1/messages"
@@ -4475,6 +4482,53 @@ def test_model_request_test_persists_missing_key_failure() -> None:
     assert payload["result"]["normalized_response"]["request_attempted"] is False
     assert "缺少 API Key" in payload["result"]["normalized_response"]["error"]
 
+
+
+
+def test_signature_interop_persists_source_http_failure(monkeypatch) -> None:
+    reset_database()
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                502,
+                json={"error": {"message": "source upstream failed", "request_id": "req_source_fail"}},
+                headers={"x-request-id": "req_source_header"},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Signature Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Signature Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+        response = client.post("/api/channels/signature-interop-test", json={"source_channel_id": source_id, "relay_channel_id": relay_id})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["run"]["status"] == "failed"
+    assert payload["steps"][0]["status"] == "fail"
+    assert payload["steps"][0]["http_status"] == 502
+    assert payload["steps"][0]["request_id"] == "req_source_header"
+    assert payload["steps"][2]["status"] == "wait"
+    assert "Relay 未执行" in payload["relay_raw_excerpt"]
 
 def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
     reset_database()

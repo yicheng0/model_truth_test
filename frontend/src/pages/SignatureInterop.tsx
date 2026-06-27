@@ -65,6 +65,40 @@ function resultTone(result: SignatureInteropResult) {
   return result.ok ? 'success' : 'error';
 }
 
+function compactStepValue(value: string | number | null | undefined, suffix = '') {
+  if (value === null || value === undefined || value === '') return '-';
+  return `${value}${suffix}`;
+}
+
+function requestRows(result: SignatureInteropResult) {
+  const sourceStep = result.steps.find((step) => step.name.includes('Source'));
+  const relayStep = result.steps.find((step) => step.name.includes('Relay'));
+  return [
+    {
+      key: 'source',
+      label: 'Source 第一次请求',
+      endpoint: sourceStep?.endpoint || result.source_endpoint,
+      status: sourceStep?.status,
+      http_status: sourceStep?.http_status,
+      request_id: sourceStep?.request_id || result.source_request_id,
+      message_id: sourceStep?.message_id || result.source_message_id,
+      latency_ms: sourceStep?.latency_ms,
+      error: sourceStep?.error,
+    },
+    {
+      key: 'relay',
+      label: 'Relay 第二次请求',
+      endpoint: relayStep?.endpoint || result.relay_endpoint,
+      status: relayStep?.status,
+      http_status: relayStep?.http_status,
+      request_id: relayStep?.request_id || result.relay_request_id,
+      message_id: relayStep?.message_id || result.relay_message_id,
+      latency_ms: relayStep?.latency_ms,
+      error: relayStep?.error,
+    },
+  ];
+}
+
 export default function SignatureInterop() {
   const queryClient = useQueryClient();
   const [form] = Form.useForm<{ source_channel_id: string; relay_channel_id: string; stream?: boolean }>();
@@ -226,6 +260,14 @@ export default function SignatureInterop() {
             description: (
               <Space direction="vertical" size={8} className="full-width">
                 <Typography.Text>{step.detail}</Typography.Text>
+                <Space size={8} wrap>
+                  {step.endpoint ? <Tag>endpoint: {step.endpoint}</Tag> : null}
+                  {step.http_status != null ? <Tag color={step.http_status >= 200 && step.http_status < 300 ? 'green' : 'red'}>HTTP {step.http_status}</Tag> : null}
+                  {step.latency_ms != null ? <Tag color="blue">{step.latency_ms} ms</Tag> : null}
+                  {step.request_id ? <Tag color="purple">req {step.request_id}</Tag> : null}
+                  {step.message_id ? <Tag color="cyan">msg {step.message_id}</Tag> : null}
+                </Space>
+                {step.error ? <Alert type="error" showIcon message="步骤错误" description={step.error} /> : null}
                 {step.excerpt ? <pre className="signature-step-excerpt">{step.excerpt}</pre> : null}
               </Space>
             ),
@@ -290,6 +332,31 @@ export default function SignatureInterop() {
                 </Button>
               </Popconfirm>
             ) : null}
+          </Card>
+
+          <Card title="请求链路摘要" bordered={false}>
+            <Table
+              rowKey="key"
+              size="small"
+              pagination={false}
+              dataSource={requestRows(result)}
+              columns={[
+                { title: '请求', dataIndex: 'label', width: 150 },
+                {
+                  title: '状态',
+                  dataIndex: 'status',
+                  width: 90,
+                  render: (value: string) => <Tag color={value === 'ok' ? 'green' : value === 'fail' ? 'red' : 'default'}>{value || '-'}</Tag>,
+                },
+                { title: 'HTTP', dataIndex: 'http_status', width: 90, render: (value: number | null) => compactStepValue(value) },
+                { title: '耗时', dataIndex: 'latency_ms', width: 100, render: (value: number | null) => compactStepValue(value, ' ms') },
+                { title: 'Request ID', dataIndex: 'request_id', width: 180, render: (value: string | null) => value || '-' },
+                { title: 'Message ID', dataIndex: 'message_id', width: 220, render: (value: string | null) => value || '-' },
+                { title: 'Endpoint', dataIndex: 'endpoint', width: 260, render: (value: string | null) => value || '-' },
+                { title: 'Error', dataIndex: 'error', width: 260, render: (value: string | null) => value || '-' },
+              ]}
+              scroll={{ x: 1350 }}
+            />
           </Card>
 
           <Card title="兜底渠道说明" bordered={false}>

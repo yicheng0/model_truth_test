@@ -72,6 +72,12 @@ class SignatureInteropStepRead(BaseModel):
     status: str
     detail: str
     excerpt: str | None = None
+    endpoint: str | None = None
+    http_status: int | None = None
+    request_id: str | None = None
+    message_id: str | None = None
+    latency_ms: int | None = None
+    error: str | None = None
 
 
 class SignatureInteropTestRead(BaseModel):

@@ -421,7 +421,7 @@ describe('runs utilities', () => {
     });
 
     expect(evidence?.modelRequests[0].channelAccountType).toBe('aws');
-    expect(formatPatrolChannel({ id: '8890-tokenflow-aws', name: '鬼手', accountType: 'aws' }, '8890-tokenflow-aws')).toBe('8890-鬼手-aws');
+    expect(formatPatrolChannel({ id: '8890-tokenflow-aws', name: '鬼手', accountType: 'aws' }, '8890-tokenflow-aws')).toBe('鬼手-aws');
   });
 
   it('classifies native rejection probe status as parameter unsupported', () => {

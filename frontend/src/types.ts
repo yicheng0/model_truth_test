@@ -203,6 +203,12 @@ export type SignatureInteropResult = {
     status: 'ok' | 'fail' | 'running' | string;
     detail: string;
     excerpt?: string | null;
+    endpoint?: string | null;
+    http_status?: number | null;
+    request_id?: string | null;
+    message_id?: string | null;
+    latency_ms?: number | null;
+    error?: string | null;
   }>;
 };
 
