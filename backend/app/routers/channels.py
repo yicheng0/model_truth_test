@@ -240,6 +240,43 @@ def channel_health(channel_id: str, db: Session = Depends(get_db)) -> dict[str, 
     }
 
 
+def _signature_interop_payload_from_result(db: Session, result: Result) -> dict[str, object]:
+    payload = result.raw_response if isinstance(result.raw_response, dict) else {}
+    signature = payload.get("signature_interop") if isinstance(payload.get("signature_interop"), dict) else payload
+    if not isinstance(signature, dict):
+        raise HTTPException(status_code=404, detail="Signature result not found")
+    run = db.get(Run, result.run_id)
+    enriched: dict[str, object] = dict(signature)
+    if run:
+        enriched["run"] = run_read(db, run)
+    enriched["result"] = result
+    return enriched
+
+
+@router.get("/api/channels/signature-interop-test/latest", response_model=SignatureInteropTestRead)
+def latest_channel_signature_interop_test(
+    source_channel_id: str,
+    relay_channel_id: str,
+    stream: bool = False,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    rows = list(
+        db.scalars(
+            select(Result)
+            .where(Result.raw_request["test_type"].as_string() == "signature_interop")
+            .where(Result.raw_request["source_channel_id"].as_string() == source_channel_id)
+            .where(Result.raw_request["relay_channel_id"].as_string() == relay_channel_id)
+            .order_by(Result.created_at.desc(), Result.id.desc())
+            .limit(10)
+        ).all()
+    )
+    for result in rows:
+        raw_request = result.raw_request if isinstance(result.raw_request, dict) else {}
+        if bool(raw_request.get("stream", False)) == bool(stream):
+            return _signature_interop_payload_from_result(db, result)
+    raise HTTPException(status_code=404, detail="未找到这组 Source/Relay 的 Signature 检测日志")
+
+
 @router.post("/api/channels/signature-interop-test", response_model=SignatureInteropTestRead)
 async def channel_signature_interop_test(data: SignatureInteropTestCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     source = db.get(Channel, data.source_channel_id)

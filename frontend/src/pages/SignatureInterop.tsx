@@ -9,6 +9,8 @@ import type { Channel, SignatureInteropResult } from '../types';
 
 type DisplayStep = SignatureInteropResult['steps'][number];
 
+type SignatureInteropFormValues = { source_channel_id: string; relay_channel_id: string; stream?: boolean };
+
 const defaultSteps: DisplayStep[] = [
   { name: '步骤 A：请求 Source thinking', status: 'wait', detail: '等待开始检测', excerpt: null },
   { name: 'Signature 校验', status: 'wait', detail: '等待 source 返回 thinking block 后校验 signature', excerpt: null },
@@ -101,7 +103,7 @@ function requestRows(result: SignatureInteropResult) {
 
 export default function SignatureInterop() {
   const queryClient = useQueryClient();
-  const [form] = Form.useForm<{ source_channel_id: string; relay_channel_id: string; stream?: boolean }>();
+  const [form] = Form.useForm<SignatureInteropFormValues>();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<SignatureInteropResult | null>(null);
   const [displaySteps, setDisplaySteps] = useState<DisplayStep[]>(defaultSteps);
@@ -116,24 +118,37 @@ export default function SignatureInterop() {
     label: `${formatChannelDisplayName(channel)} · ${channel.model_name || '未配置模型'}`,
   }));
 
+  function applySignatureResult(payload: SignatureInteropResult) {
+    setResult(payload);
+    setDisplaySteps(payload.steps);
+    if (payload.ok) {
+      message.success('Signature 互通检测通过');
+    } else {
+      message.warning('Signature 互通检测未通过');
+    }
+  }
+
   const signatureInterop = useMutation({
     mutationFn: api.signatureInteropTest,
-    onSuccess: (payload) => {
-      setResult(payload);
-      setDisplaySteps(payload.steps);
-      if (payload.ok) {
-        message.success('Signature 互通检测通过');
-      } else {
-        message.warning('Signature 互通检测未通过');
-      }
-    },
-    onError: (error) => {
+    onSuccess: applySignatureResult,
+    onError: async (error) => {
+      const values = form.getFieldsValue();
       const detail = error instanceof Error ? error.message : '请检查渠道配置和后端日志。';
+      if (values.source_channel_id && values.relay_channel_id) {
+        try {
+          const latest = await api.latestSignatureInteropTest({ ...values, stream: values.stream ?? false });
+          applySignatureResult(latest);
+          message.warning('检测请求返回失败，但已从后端日志恢复最新 Signature 证据');
+          return;
+        } catch {
+          // Fall through to the explicit no-log diagnostic below.
+        }
+      }
       setDisplaySteps([
-        { ...defaultSteps[0], status: 'fail', detail: '检测请求未完成' },
+        { ...defaultSteps[0], status: 'fail', detail: '检测请求未完成，且后端未找到这组 Source/Relay 的 Signature 检测日志', error: detail },
         defaultSteps[1],
         defaultSteps[2],
-        { ...defaultSteps[3], status: 'fail', detail },
+        { ...defaultSteps[3], status: 'fail', detail: `请求失败：${detail}`, error: detail },
       ]);
       message.error(error instanceof Error ? error.message : 'Signature 互通检测失败');
     },
@@ -149,7 +164,7 @@ export default function SignatureInterop() {
     onError: (error) => message.error(getErrorMessage(error)),
   });
 
-  function submit(values: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) {
+  function submit(values: SignatureInteropFormValues) {
     setResult(null);
     setDisplaySteps([
       { ...defaultSteps[0], status: 'running', detail: '正在向 source 渠道发起 Anthropic Messages thinking 请求' },

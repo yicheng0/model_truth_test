@@ -85,7 +85,19 @@ describe('channel credential helpers', () => {
     });
   });
 
-  it('stores account type and maps it to the internal provider type', () => {
+  it('stores account type without auto-generating API keys from channel numbers', () => {
+    const authConfig = buildChannelAuthConfig(
+      { channel_number: '9333', account_type: 'aws', request_protocol: 'aws_bedrock' },
+      {},
+    );
+
+    expect(authConfig).toEqual({
+      account_type: 'aws',
+      request_protocol: 'aws_bedrock',
+    });
+  });
+
+  it('stores explicit API keys and maps account type to the internal provider type', () => {
     const authConfig = buildChannelAuthConfig(
       { api_key: 'aws-key', account_type: 'aws', request_protocol: 'aws_bedrock' },
       {},

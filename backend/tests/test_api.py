@@ -4092,8 +4092,13 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
             "/api/channels/signature-interop-test",
             json={"source_channel_id": source_id, "relay_channel_id": relay_id},
         )
+        latest_response = client.get(
+            "/api/channels/signature-interop-test/latest",
+            params={"source_channel_id": source_id, "relay_channel_id": relay_id, "stream": "false"},
+        )
 
     payload = response.json()
+    latest_payload = latest_response.json()
     assert response.status_code == 200
     assert payload["ok"] is True
     assert payload["status"] == "pass"
@@ -4121,6 +4126,9 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert payload["steps"][2]["request_id"] == "req_relay_456"
     assert payload["steps"][2]["message_id"] == "msg_vrtx_01relay"
     assert payload["steps"][-1]["status"] == "ok"
+    assert latest_response.status_code == 200
+    assert latest_payload["result"]["id"] == payload["result"]["id"]
+    assert latest_payload["source_request_id"] == "req_source_123"
     assert calls[0]["url"] == "https://source.example/v1/messages"
     assert calls[1]["url"] == "https://relay.example/v1/messages"
     assert calls[1]["json"]["messages"][1]["content"][0]["signature"] == "sig-source-compatible"
@@ -4591,8 +4599,10 @@ def test_signature_interop_persists_source_http_failure(monkeypatch) -> None:
             json={"name": "Signature Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True},
         ).json()["id"]
         response = client.post("/api/channels/signature-interop-test", json={"source_channel_id": source_id, "relay_channel_id": relay_id})
+        latest_response = client.get("/api/channels/signature-interop-test/latest", params={"source_channel_id": source_id, "relay_channel_id": relay_id})
 
     payload = response.json()
+    latest_payload = latest_response.json()
     assert response.status_code == 200
     assert payload["ok"] is False
     assert payload["run"]["status"] == "failed"
@@ -4601,6 +4611,21 @@ def test_signature_interop_persists_source_http_failure(monkeypatch) -> None:
     assert payload["steps"][0]["request_id"] == "req_source_header"
     assert payload["steps"][2]["status"] == "wait"
     assert "Relay 未执行" in payload["relay_raw_excerpt"]
+    assert latest_response.status_code == 200
+    assert latest_payload["result"]["id"] == payload["result"]["id"]
+    assert latest_payload["steps"][0]["http_status"] == 502
+
+
+def test_signature_interop_latest_returns_404_without_matching_log() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/channels/signature-interop-test/latest",
+            params={"source_channel_id": "missing_source", "relay_channel_id": "missing_relay"},
+        )
+
+    assert response.status_code == 404
+
 
 def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
     reset_database()

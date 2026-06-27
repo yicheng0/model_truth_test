@@ -230,7 +230,7 @@ export function buildChannelAuthConfig(
   const authConfig: Record<string, unknown> = { ...(existingAuthConfig ?? {}) };
   const explicitApiKey = trimmedValue(values.api_key);
   const existingApiKey = typeof existingAuthConfig?.api_key === 'string' ? existingAuthConfig.api_key : undefined;
-  const apiKey = explicitApiKey ?? (existingAuthConfig ? undefined : buildTokenflowApiKey(values.channel_number));
+  const apiKey = explicitApiKey;
   if (apiKey) {
     authConfig.api_key = apiKey;
   } else if (isRedactedSecretPlaceholder(existingApiKey)) {

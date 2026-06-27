@@ -1063,6 +1063,40 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('fetches latest signature interop evidence for recovery', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          status: 'fail',
+          reason: 'source 请求失败',
+          source_channel_id: 'source_1',
+          relay_channel_id: 'relay_1',
+          source_endpoint: 'https://source.example/v1/messages',
+          relay_endpoint: 'https://relay.example/v1/messages',
+          model: 'claude-opus-4-6',
+          thinking_block_count: 0,
+          signature_prefixes: [],
+          source_message_channel_type: '未知',
+          relay_message_channel_type: '未知',
+          relay_raw_excerpt: '{}',
+          fallback_note: '',
+          steps: [{ name: '步骤 A：请求 Source thinking', status: 'fail', detail: 'Source 请求失败', http_status: 502 }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const result = await api.latestSignatureInteropTest({ source_channel_id: 'source_1', relay_channel_id: 'relay_1', stream: false });
+
+    expect(result.steps[0].http_status).toBe(502);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/signature-interop-test/latest?source_channel_id=source_1&relay_channel_id=relay_1&stream=false',
+      expect.objectContaining({ headers: expect.objectContaining({ 'Content-Type': 'application/json' }) }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('creates simplified scheduled patrol tests with fixed probe settings', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

@@ -7477,6 +7477,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         attempt_index=1,
         normalized_response=normalized,
         raw_request={
+            "test_type": "signature_interop",
             "source_channel_id": source.id,
             "relay_channel_id": relay.id,
             "stream": stream,

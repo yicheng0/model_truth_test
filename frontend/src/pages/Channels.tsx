@@ -9,13 +9,8 @@ import {
   buildChannelAuthConfig,
   canonicalChannelName,
   formatChannelDisplayName,
-  buildTokenflowApiKey,
-  buildTokenflowChannelId,
   defaultAccountType,
   inferChannelAccountType,
-  inferChannelNumber,
-  isValidChannelNumber,
-  parseTokenflowChannelNumber,
   providerTypeForAccountType,
 } from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
@@ -23,7 +18,6 @@ import type { Channel, ChannelCreate, ChannelDeleteResult } from '../types';
 
 type ChannelFormValues = {
   name: string;
-  channel_number?: string;
   model_name?: string | string[];
   base_url?: string;
   api_key?: string;
@@ -55,9 +49,7 @@ function channelAccountType(channel: Channel) {
 }
 
 function channelApiKeyMode(channel: Channel) {
-  const channelNumber = parseTokenflowChannelNumber(channel.id);
-  const automaticKey = buildTokenflowApiKey(channelNumber);
-  return automaticKey && channelApiKey(channel) === automaticKey ? '自动生成' : channelApiKey(channel) ? '已覆盖' : '未配置';
+  return channelApiKey(channel) ? '已配置' : '未配置';
 }
 
 function preferredFetchedModel(models: string[]) {
@@ -80,17 +72,6 @@ export default function Channels() {
   const [editForm] = Form.useForm<ChannelFormValues>();
   const [editing, setEditing] = useState<Channel | null>(null);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
-  const createDisplayName = formatChannelDisplayName({
-    channel_number: Form.useWatch('channel_number', createForm),
-    name: Form.useWatch('name', createForm),
-    account_type: Form.useWatch('account_type', createForm) || defaultAccountType,
-  });
-  const editDisplayName = formatChannelDisplayName({
-    id: editing?.id,
-    name: Form.useWatch('name', editForm),
-    account_type: Form.useWatch('account_type', editForm) || defaultAccountType,
-  }, editing?.id);
-
   const invalidate = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['channels'] }),
@@ -193,7 +174,6 @@ export default function Channels() {
     setFetchedModels([]);
     editForm.setFieldsValue({
       name: formatChannelDisplayName(channel, channel.id) || channel.name,
-      channel_number: inferChannelNumber(channel, channel.id) || parseTokenflowChannelNumber(channel.id),
       model_name: channel.model_name ? [channel.model_name] : [],
       base_url: channel.base_url ?? '',
       api_key: '',
@@ -207,16 +187,13 @@ export default function Channels() {
   function channelPayload(values: ChannelFormValues, existing?: Channel | null): ChannelCreate {
     const modelName = firstSelectValue(values.model_name);
     const accountType = values.account_type || defaultAccountType;
-    const channelNumber = values.channel_number?.trim();
     const name = canonicalChannelName({
       id: existing?.id,
       name: values.name,
-      channel_number: existing ? undefined : channelNumber,
       account_type: accountType,
       auth_config: existing?.auth_config,
     }, existing?.id) || values.name.trim();
     return {
-      ...(existing || !channelNumber ? {} : { id: buildTokenflowChannelId(channelNumber, accountType) }),
       name,
       provider_type: providerTypeForAccountType(accountType),
       is_reference: values.is_reference ?? false,
@@ -251,7 +228,7 @@ export default function Channels() {
           <Typography.Text className="section-kicker">CHANNELS</Typography.Text>
           <Typography.Title level={2}>渠道管理</Typography.Title>
           <Typography.Paragraph>
-            主流程只需要配置渠道名称、渠道编号和账号类型；这里的渠道名称会直接用于自动巡检、告警和日志定位，系统会自动生成渠道 ID 和 API Key。
+            主流程只需要配置渠道名称和账号类型；这里的渠道名称会直接用于自动巡检、告警和日志定位，Base URL 与 API Key 请在高级配置中手动填写。
           </Typography.Paragraph>
         </div>
         <Space wrap>
@@ -267,24 +244,10 @@ export default function Channels() {
             <Form.Item name="name" label="渠道名称" rules={[{ required: true, message: '请输入渠道名称' }]} extra="用于自动巡检、复审告警和日志定位，建议填容易识别的名字。">
               <Input size="large" placeholder="例如：APIPro 生产中转" />
             </Form.Item>
-            <Form.Item
-              name="channel_number"
-              label="渠道编号"
-              rules={[
-                { required: true, message: '请输入渠道编号，例如 9333' },
-                { validator: (_, value) => (isValidChannelNumber(value) ? Promise.resolve() : Promise.reject(new Error('只允许字母、数字、下划线和短横线'))) },
-              ]}
-              extra="保存后渠道 ID 会按“编号-tokenflow-类型”生成，例如 9333-tokenflow-aws。"
-            >
-              <Input size="large" placeholder="9333" />
-            </Form.Item>
             <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
               <Select size="large" options={accountTypeOptions} />
             </Form.Item>
           </div>
-          <Typography.Text type="secondary">
-            前端显示名：<Typography.Text code>{createDisplayName}</Typography.Text>
-          </Typography.Text>
           <Collapse
             className="channel-advanced"
             items={[
@@ -302,8 +265,8 @@ export default function Channels() {
                     <Form.Item name="base_url" label="Base URL" help="自动探测会先试 Anthropic Messages，再试 OpenAI Chat Completions；也可以显式选择协议。">
                       <Input size="large" placeholder="https://api.example.com 或 https://api.example.com/v1" />
                     </Form.Item>
-                    <Form.Item name="api_key" label="API Key 覆盖" extra="留空时自动使用 sk--渠道编号。">
-                      <Input size="large" autoComplete="off" placeholder="默认自动生成" />
+                    <Form.Item name="api_key" label="API Key">
+                      <Input size="large" autoComplete="off" placeholder="手动输入 API Key" />
                     </Form.Item>
                     <Form.Item name="is_reference" label="指纹源渠道" valuePropName="checked" initialValue={false}>
                       <Switch checkedChildren="指纹源" unCheckedChildren="待测" />
@@ -383,7 +346,7 @@ export default function Channels() {
               width: 120,
               render: (_: unknown, channel) => {
                 const mode = channelApiKeyMode(channel);
-                return <Tag color={mode === '自动生成' ? 'blue' : mode === '已覆盖' ? 'green' : undefined}>{mode}</Tag>;
+                return <Tag color={mode === '已配置' ? 'green' : undefined}>{mode}</Tag>;
               },
             },
             {
@@ -446,15 +409,9 @@ export default function Channels() {
           <Form.Item name="name" label="渠道名称" rules={[{ required: true, message: '请输入渠道名称' }]} extra="修改后会同步影响自动巡检、复审告警和日志里的展示名称。">
             <Input placeholder="例如：APIPro 生产中转" />
           </Form.Item>
-          <Form.Item name="channel_number" label="渠道编号" extra="已有渠道不会修改 ID；修改编号只会用于重新生成默认 API Key。">
-            <Input placeholder="9333" />
-          </Form.Item>
           <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
             <Select options={accountTypeOptions} />
           </Form.Item>
-          <Typography.Text type="secondary">
-            前端显示名：<Typography.Text code>{editDisplayName}</Typography.Text>
-          </Typography.Text>
           <Collapse
             className="channel-advanced"
             items={[
@@ -481,8 +438,8 @@ export default function Channels() {
                     <Form.Item name="base_url" label="Base URL" help="自动探测会先试 Anthropic Messages，再试 OpenAI Chat Completions；也可以显式选择协议。">
                       <Input placeholder="https://api.example.com 或 https://api.example.com/v1" />
                     </Form.Item>
-                    <Form.Item name="api_key" label="API Key 覆盖" extra="留空时自动使用 sk--渠道编号。">
-                      <Input autoComplete="off" placeholder="默认自动生成" />
+                    <Form.Item name="api_key" label="API Key">
+                      <Input autoComplete="off" placeholder="留空则保留已有 API Key" />
                     </Form.Item>
                     <Form.Item name="enabled" label="状态" valuePropName="checked">
                       <Switch checkedChildren="启用" unCheckedChildren="停用" />
