@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Form, Popconfirm, Select, Space, Steps, Switch, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Descriptions, Form, Popconfirm, Select, Space, Steps, Table, Tag, Typography, message } from 'antd';
 import { Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
@@ -17,6 +17,15 @@ const defaultSteps: DisplayStep[] = [
   { name: '步骤 B：发送 Relay 复用请求', status: 'wait', detail: '等待发送包含 source assistant content 的 relay 请求', excerpt: null },
   { name: '最终判定', status: 'wait', detail: '等待 relay 响应后判断是否互通', excerpt: null },
 ];
+
+
+function createClientProbeId() {
+  return `sig_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 const builtinChannelIds = [
   {
@@ -107,6 +116,8 @@ export default function SignatureInterop() {
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<SignatureInteropResult | null>(null);
   const [displaySteps, setDisplaySteps] = useState<DisplayStep[]>(defaultSteps);
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const activeProbeRef = useRef<string | null>(null);
 
   const availableChannels = useMemo(
     () => (channels.data ?? []).filter((channel) => channel.enabled && channel.base_url && channelApiKey(channel)),
@@ -119,6 +130,7 @@ export default function SignatureInterop() {
   }));
 
   function applySignatureResult(payload: SignatureInteropResult) {
+    setRecoveryMessage(null);
     setResult(payload);
     setDisplaySteps(payload.steps);
     if (payload.ok) {
@@ -131,26 +143,51 @@ export default function SignatureInterop() {
   const signatureInterop = useMutation({
     mutationFn: api.signatureInteropTest,
     onSuccess: applySignatureResult,
-    onError: async (error) => {
-      const values = form.getFieldsValue();
+    onError: async (error, variables) => {
+      const values = variables ?? form.getFieldsValue();
       const detail = error instanceof Error ? error.message : '请检查渠道配置和后端日志。';
+      const clientProbeId = variables?.client_probe_id ?? activeProbeRef.current ?? undefined;
       if (values.source_channel_id && values.relay_channel_id) {
-        try {
-          const latest = await api.latestSignatureInteropTest({ ...values, stream: values.stream ?? false });
-          applySignatureResult(latest);
-          message.warning('检测请求返回失败，但已从后端日志恢复最新 Signature 证据');
-          return;
-        } catch {
-          // Fall through to the explicit no-log diagnostic below.
+        setRecoveryMessage('同步请求失败或超时；后台检测可能仍在运行，正在按本次关联 ID 拉取日志。');
+        setDisplaySteps([
+          {
+            ...defaultSteps[0],
+            status: 'running',
+            detail: '后台检测可能仍在运行，正在拉取本次 Signature 日志',
+            excerpt: `client_probe_id=${clientProbeId || '-'}; source=${values.source_channel_id}; relay=${values.relay_channel_id}`,
+          },
+          { ...defaultSteps[1], status: 'running', detail: '等待后端日志写入后恢复 Signature 校验证据' },
+          { ...defaultSteps[2], status: 'running', detail: '等待后端日志写入后恢复 Relay 请求证据' },
+          { ...defaultSteps[3], status: 'running', detail: `原始同步错误：${detail}`, error: detail },
+        ]);
+        for (let attempt = 1; attempt <= 45; attempt += 1) {
+          try {
+            const latest = await api.latestSignatureInteropTest({
+              source_channel_id: values.source_channel_id,
+              relay_channel_id: values.relay_channel_id,
+              stream: true,
+              client_probe_id: clientProbeId,
+            });
+            if (!clientProbeId || latest.client_probe_id === clientProbeId) {
+              applySignatureResult(latest);
+              message.warning('检测请求返回失败，但已从后端日志恢复本次 Signature 证据');
+              return;
+            }
+          } catch {
+            // 日志可能尚未提交；继续轮询直到超时。
+          }
+          setRecoveryMessage(`同步请求失败或超时；正在拉取后台日志（${attempt}/45）。`);
+          await sleep(2000);
         }
       }
+      setRecoveryMessage(null);
       setDisplaySteps([
-        { ...defaultSteps[0], status: 'fail', detail: '检测请求未完成，且后端未找到这组 Source/Relay 的 Signature 检测日志', error: detail },
+        { ...defaultSteps[0], status: 'fail', detail: '未找到本次检测日志；后端可能未生成日志，或请求在进入后端前已被代理中断', error: detail, excerpt: `client_probe_id=${clientProbeId || '-'}` },
         defaultSteps[1],
         defaultSteps[2],
-        { ...defaultSteps[3], status: 'fail', detail: `请求失败：${detail}`, error: detail },
+        { ...defaultSteps[3], status: 'fail', detail: `请求失败：${detail}。可去日志页按时间/渠道排查。`, error: detail },
       ]);
-      message.error(error instanceof Error ? error.message : 'Signature 互通检测失败');
+      message.error('Signature 互通检测失败，且未找到本次检测日志');
     },
   });
   const deleteRun = useMutation({
@@ -165,21 +202,24 @@ export default function SignatureInterop() {
   });
 
   function submit(values: SignatureInteropFormValues) {
+    const clientProbeId = createClientProbeId();
+    activeProbeRef.current = clientProbeId;
+    setRecoveryMessage(null);
     setResult(null);
     setDisplaySteps([
-      { ...defaultSteps[0], status: 'running', detail: '正在向 source 渠道发起 Anthropic Messages thinking 请求' },
+      { ...defaultSteps[0], status: 'running', detail: '正在向 source 渠道发起 Anthropic Messages thinking 请求（Relay 默认使用流式）', excerpt: `client_probe_id=${clientProbeId}` },
       defaultSteps[1],
       defaultSteps[2],
       defaultSteps[3],
     ]);
-    signatureInterop.mutate({ ...values, stream: values.stream ?? false });
+    signatureInterop.mutate({ ...values, stream: true, client_probe_id: clientProbeId });
   }
 
   function fillDefaults() {
     form.setFieldsValue({
       source_channel_id: availableChannels.find((channel) => channel.is_reference)?.id ?? availableChannels[0]?.id,
       relay_channel_id: availableChannels.find((channel) => !channel.is_reference)?.id ?? availableChannels[1]?.id ?? availableChannels[0]?.id,
-      stream: false,
+      stream: true,
     });
   }
 
@@ -190,7 +230,7 @@ export default function SignatureInterop() {
           <Typography.Text className="section-kicker">SIGNATURE INTEROP</Typography.Text>
           <Typography.Title level={2}>Thinking Signature 互通检测</Typography.Title>
           <Typography.Paragraph>
-            用 source 渠道生成带 signature 的 thinking block，再发送给 relay 渠道验证跨渠道复用是否被接受。
+            用 source 渠道生成带 signature 的 thinking block，再以流式请求发送给 relay 渠道验证跨渠道复用是否被接受。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">可检测渠道 {availableChannels.length}</Tag>
@@ -206,6 +246,7 @@ export default function SignatureInterop() {
             layout="vertical"
             onFinish={submit}
             onValuesChange={() => {
+              setRecoveryMessage(null);
               setResult(null);
               setDisplaySteps(defaultSteps);
             }}
@@ -217,8 +258,8 @@ export default function SignatureInterop() {
               <Form.Item name="relay_channel_id" label="Relay 渠道" rules={[{ required: true, message: '请选择 relay 渠道' }]}>
                 <Select options={channelOptions} loading={channels.isLoading} placeholder="选择复用 signature 的渠道" />
               </Form.Item>
-              <Form.Item name="stream" label="Streaming" valuePropName="checked" initialValue={false}>
-                <Switch checkedChildren="启用" unCheckedChildren="关闭" />
+              <Form.Item label="请求模式">
+                <Tag color="blue">已默认启用流式</Tag>
               </Form.Item>
             </div>
             <Space wrap>
@@ -257,14 +298,16 @@ export default function SignatureInterop() {
         </Space>
       </Card>
 
-      {signatureInterop.isError ? (
+      {recoveryMessage ? (
+        <Alert type="warning" showIcon message="正在恢复检测证据" description={recoveryMessage} />
+      ) : signatureInterop.isError && !result ? (
         <Alert
           type="error"
           showIcon
           message="检测请求失败"
           description={signatureInterop.error instanceof Error ? signatureInterop.error.message : '请检查渠道配置和后端日志。'}
         />
-        ) : null}
+      ) : null}
 
       <Card title="检测过程" bordered={false}>
         <Steps
@@ -304,6 +347,7 @@ export default function SignatureInterop() {
               <Descriptions.Item label="任务">
                 {result.run?.id ? <Typography.Text copyable>{result.run.id}</Typography.Text> : '-'}
               </Descriptions.Item>
+              <Descriptions.Item label="关联 ID">{result.client_probe_id ? <Typography.Text copyable>{result.client_probe_id}</Typography.Text> : '-'}</Descriptions.Item>
               <Descriptions.Item label="结果">
                 {result.result?.id ? <Typography.Text copyable>{result.result.id}</Typography.Text> : '-'}
               </Descriptions.Item>
@@ -378,7 +422,8 @@ export default function SignatureInterop() {
             <pre className="signature-note">{result.fallback_note}</pre>
           </Card>
 
-          <Card title="Relay 原始响应摘要" bordered={false}>
+          <Card title={result.ok ? 'Relay 原始响应摘要' : 'Relay 原始响应 / 错误摘要'} bordered={false}>
+            {!result.ok ? <Alert type="error" showIcon message="Signature 检测未通过" description={result.reason} style={{ marginBottom: 12 }} /> : null}
             <pre className="output-drawer-pre">{result.relay_raw_excerpt}</pre>
           </Card>
         </Space>

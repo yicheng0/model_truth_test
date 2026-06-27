@@ -4090,7 +4090,11 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
         ).json()["id"]
         response = client.post(
             "/api/channels/signature-interop-test",
-            json={"source_channel_id": source_id, "relay_channel_id": relay_id},
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id, "client_probe_id": "probe-pass-1"},
+        )
+        latest_by_probe_response = client.get(
+            "/api/channels/signature-interop-test/latest",
+            params={"source_channel_id": source_id, "relay_channel_id": relay_id, "stream": "false", "client_probe_id": "probe-pass-1"},
         )
         latest_response = client.get(
             "/api/channels/signature-interop-test/latest",
@@ -4099,6 +4103,7 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
 
     payload = response.json()
     latest_payload = latest_response.json()
+    latest_by_probe_payload = latest_by_probe_response.json()
     assert response.status_code == 200
     assert payload["ok"] is True
     assert payload["status"] == "pass"
@@ -4107,6 +4112,8 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert payload["result"]["score"] == 100
     assert payload["created_at"]
     assert payload["completed_at"]
+    assert payload["client_probe_id"] == "probe-pass-1"
+    assert payload["result"]["raw_request"]["client_probe_id"] == "probe-pass-1"
     assert payload["source_message_channel_type"] == "AWS Bedrock"
     assert payload["source_request_id"] == "req_source_123"
     assert payload["relay_message_channel_type"] == "Vertex"
@@ -4127,7 +4134,10 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert payload["steps"][2]["message_id"] == "msg_vrtx_01relay"
     assert payload["steps"][-1]["status"] == "ok"
     assert latest_response.status_code == 200
+    assert latest_by_probe_response.status_code == 200
     assert latest_payload["result"]["id"] == payload["result"]["id"]
+    assert latest_by_probe_payload["result"]["id"] == payload["result"]["id"]
+    assert latest_by_probe_payload["client_probe_id"] == "probe-pass-1"
     assert latest_payload["source_request_id"] == "req_source_123"
     assert calls[0]["url"] == "https://source.example/v1/messages"
     assert calls[1]["url"] == "https://relay.example/v1/messages"
@@ -4298,6 +4308,141 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
     assert payload["source_message_channel_type"] == "Anthropic"
     assert payload["steps"][-1]["status"] == "fail"
     assert "signature 不兼容" in payload["steps"][-1]["detail"]
+
+
+def test_signature_interop_streaming_extracts_relay_message_id(monkeypatch) -> None:
+    reset_database()
+    calls: list[dict] = []
+
+    relay_stream = "\n".join([
+        'event: message_start',
+        'data: {"type":"message_start","message":{"id":"msg_01relay_stream","type":"message","model":"claude-opus-4-6","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"relay streamed"}}',
+        '',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+        '',
+    ])
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            calls.append({"url": url, "json": json, "headers": headers})
+            request = httpx.Request("POST", url)
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_01source_stream",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "content": [
+                            {"type": "thinking", "thinking": "source thinking", "signature": "sig-source-stream"},
+                            {"type": "text", "text": "source answer"},
+                        ],
+                    },
+                    request=request,
+                )
+            return httpx.Response(200, text=relay_stream, headers={"x-request-id": "req_relay_stream"}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Streaming Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Streaming Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id, "stream": True},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert calls[1]["json"]["stream"] is True
+    assert payload["relay_message_id"] == "msg_01relay_stream"
+    assert payload["relay_request_id"] == "req_relay_stream"
+    assert payload["steps"][2]["message_id"] == "msg_01relay_stream"
+    assert payload["steps"][2]["request_id"] == "req_relay_stream"
+    assert "relay streamed" in payload["relay_raw_excerpt"]
+    assert "message_start" in payload["relay_raw_excerpt"]
+
+
+def test_signature_interop_streaming_error_exposes_relay_error(monkeypatch) -> None:
+    reset_database()
+    calls = 0
+    relay_stream_error = "\n".join([
+        'event: error',
+        'data: {"type":"error","error":{"type":"invalid_request_error","message":"Invalid `signature` in `thinking` block","request_id":"req_stream_error"}}',
+        '',
+    ])
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={"id": "msg_01source", "type": "message", "model": "claude-opus-4-6", "content": [{"type": "thinking", "thinking": "source thinking", "signature": "sig-bad"}]},
+                    request=request,
+                )
+            return httpx.Response(200, text=relay_stream_error, headers={"x-request-id": "req_header_stream"}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Streaming Error Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Streaming Error Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id, "stream": True},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert "signature 不兼容" in payload["reason"]
+    assert payload["steps"][2]["status"] == "fail"
+    assert payload["steps"][2]["http_status"] == 200
+    assert payload["steps"][2]["request_id"] == "req_header_stream"
+    assert "Invalid `signature`" in payload["steps"][2]["error"]
+    assert "req_stream_error" in payload["steps"][2]["error"]
+    assert "Invalid `signature`" in payload["relay_raw_excerpt"]
 
 
 def test_signature_interop_rejects_source_without_signature(monkeypatch) -> None:
@@ -4614,6 +4759,74 @@ def test_signature_interop_persists_source_http_failure(monkeypatch) -> None:
     assert latest_response.status_code == 200
     assert latest_payload["result"]["id"] == payload["result"]["id"]
     assert latest_payload["steps"][0]["http_status"] == 502
+
+
+def test_signature_interop_latest_client_probe_id_does_not_return_old_same_channel_log() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Source Probe", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Relay Probe", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        case = TestCaseModel(id="case_sig_probe", suite_id="claude_full_35", sort_order=9001, module="protocol", title="sig", prompt="sig")
+        old_run = Run(id="run_sig_old", suite_id="claude_full_35", name="old", mode="manual_probe", test_scope="quick", status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1, started_at=now, finished_at=now)
+        new_run = Run(id="run_sig_new", suite_id="claude_full_35", name="new", mode="manual_probe", test_scope="quick", status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1, started_at=now, finished_at=now)
+        old_payload = {"ok": True, "status": "pass", "reason": "old", "client_probe_id": "probe-old", "source_channel_id": source_id, "relay_channel_id": relay_id, "source_endpoint": "https://source.example/v1/messages", "relay_endpoint": "https://relay.example/v1/messages", "model": "claude-opus-4-6", "thinking_block_count": 1, "signature_prefixes": ["old"], "source_message_channel_type": "Anthropic", "relay_message_channel_type": "Anthropic", "relay_raw_excerpt": "{}", "fallback_note": "", "steps": [{"name": "最终判定", "status": "ok", "detail": "old"}]}
+        new_payload = {**old_payload, "reason": "new", "client_probe_id": "probe-new", "signature_prefixes": ["new"], "steps": [{"name": "最终判定", "status": "ok", "detail": "new"}]}
+        db.add_all([case, old_run, new_run])
+        db.add(Result(id="res_sig_old", run_id=old_run.id, test_case_id=case.id, channel_id=relay_id, attempt_index=1, normalized_response={"signature_interop": old_payload}, raw_request={"test_type": "signature_interop", "source_channel_id": source_id, "relay_channel_id": relay_id, "stream": False, "client_probe_id": "probe-old"}, raw_response=old_payload, metrics={}, score=100, labels=[]))
+        db.add(Result(id="res_sig_new", run_id=new_run.id, test_case_id=case.id, channel_id=relay_id, attempt_index=1, normalized_response={"signature_interop": new_payload}, raw_request={"test_type": "signature_interop", "source_channel_id": source_id, "relay_channel_id": relay_id, "stream": False, "client_probe_id": "probe-new"}, raw_response=new_payload, metrics={}, score=100, labels=[]))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/channels/signature-interop-test/latest",
+            params={"source_channel_id": source_id, "relay_channel_id": relay_id, "stream": "false", "client_probe_id": "probe-old"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["client_probe_id"] == "probe-old"
+    assert payload["result"]["id"] == "res_sig_old"
+
+
+def test_signature_interop_latest_supports_legacy_raw_response_shape() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Legacy Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Legacy Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+
+    now = datetime.now(timezone.utc)
+    legacy_payload = {"ok": False, "status": "fail", "reason": "legacy", "source_channel_id": source_id, "relay_channel_id": relay_id, "source_endpoint": "https://source.example/v1/messages", "relay_endpoint": "https://relay.example/v1/messages", "model": "claude-opus-4-6", "thinking_block_count": 0, "signature_prefixes": [], "source_message_channel_type": "未知", "relay_message_channel_type": "未知", "relay_raw_excerpt": "{}", "fallback_note": "", "steps": [{"name": "步骤 A：请求 Source thinking", "status": "fail", "detail": "legacy fail", "http_status": 502}]}
+    with SessionLocal() as db:
+        case = TestCaseModel(id="case_sig_legacy", suite_id="claude_full_35", sort_order=9002, module="protocol", title="legacy", prompt="legacy")
+        run = Run(id="run_sig_legacy", suite_id="claude_full_35", name="legacy", mode="manual_probe", test_scope="quick", status="failed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1, started_at=now, finished_at=now)
+        db.add_all([case, run])
+        db.add(Result(id="res_sig_legacy", run_id=run.id, test_case_id=case.id, channel_id=relay_id, attempt_index=1, normalized_response={}, raw_request={}, raw_response=legacy_payload, metrics={}, score=0, labels=["signature_interop_failed"]))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/channels/signature-interop-test/latest",
+            params={"source_channel_id": source_id, "relay_channel_id": relay_id, "stream": "false"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["id"] == "res_sig_legacy"
+    assert response.json()["steps"][0]["http_status"] == 502
 
 
 def test_signature_interop_latest_returns_404_without_matching_log() -> None:

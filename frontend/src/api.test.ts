@@ -1049,7 +1049,7 @@ describe('api request handling', () => {
       ),
     );
 
-    const result = await api.signatureInteropTest({ source_channel_id: 'source_1', relay_channel_id: 'relay_1' });
+    const result = await api.signatureInteropTest({ source_channel_id: 'source_1', relay_channel_id: 'relay_1', stream: true, client_probe_id: 'probe-ui-1' });
 
     expect(result.source_request_id).toBe('req_source_123');
     expect(result.relay_request_id).toBe('req_relay_456');
@@ -1057,7 +1057,7 @@ describe('api request handling', () => {
       '/api/channels/signature-interop-test',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ source_channel_id: 'source_1', relay_channel_id: 'relay_1' }),
+        body: JSON.stringify({ source_channel_id: 'source_1', relay_channel_id: 'relay_1', stream: true, client_probe_id: 'probe-ui-1' }),
       }),
     );
     fetchMock.mockRestore();
@@ -1087,11 +1087,11 @@ describe('api request handling', () => {
       ),
     );
 
-    const result = await api.latestSignatureInteropTest({ source_channel_id: 'source_1', relay_channel_id: 'relay_1', stream: false });
+    const result = await api.latestSignatureInteropTest({ source_channel_id: 'source_1', relay_channel_id: 'relay_1', stream: true, client_probe_id: 'probe-ui-1' });
 
     expect(result.steps[0].http_status).toBe(502);
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/channels/signature-interop-test/latest?source_channel_id=source_1&relay_channel_id=relay_1&stream=false',
+      '/api/channels/signature-interop-test/latest?source_channel_id=source_1&relay_channel_id=relay_1&stream=true&client_probe_id=probe-ui-1',
       expect.objectContaining({ headers: expect.objectContaining({ 'Content-Type': 'application/json' }) }),
     );
     fetchMock.mockRestore();

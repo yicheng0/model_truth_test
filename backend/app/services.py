@@ -7419,7 +7419,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     )
 
 
-async def create_signature_interop_test(db: Session, source: Channel, relay: Channel, stream: bool = False) -> dict[str, Any]:
+async def create_signature_interop_test(db: Session, source: Channel, relay: Channel, stream: bool = False, client_probe_id: str | None = None) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc)
     case = _manual_probe_case(
         db,
@@ -7431,6 +7431,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
             "relay_channel_id": relay.id,
             "stream": stream,
             "test_type": "signature_interop",
+            "client_probe_id": client_probe_id,
         },
     )
     run = Run(
@@ -7459,6 +7460,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         error = str(exc)
         result_payload = _signature_interop_error_result(source, relay, stream, error)
 
+    result_payload["client_probe_id"] = client_probe_id
     finished_at = datetime.now(timezone.utc)
     normalized = {
         "content_text": result_payload.get("reason"),
@@ -7481,6 +7483,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
             "source_channel_id": source.id,
             "relay_channel_id": relay.id,
             "stream": stream,
+            "client_probe_id": client_probe_id,
             "created_at": started_at.isoformat(),
         },
         raw_response=result_payload,
@@ -7501,6 +7504,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         "result": result,
         "created_at": started_at,
         "completed_at": finished_at,
+        "client_probe_id": client_probe_id,
     }
 
 
@@ -7612,8 +7616,9 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
         parsed = attach_response_metadata(parsed, response)
     else:
         parsed = {"payload": parsed}
-    ok = 200 <= response.status_code < 300
-    error = None if ok else _response_error_detail(response) or str(parsed.get("error") or "HTTP request failed")
+    payload_error = _signature_payload_error_detail(parsed)
+    ok = 200 <= response.status_code < 300 and not payload_error
+    error = payload_error if payload_error else (None if ok else _response_error_detail(response) or str(parsed.get("error") or "HTTP request failed"))
     if error:
         error = redact_text(str(error))[:1200]
     meta = {
@@ -7629,12 +7634,37 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
     return parsed, meta
 
 
+def _signature_payload_error_detail(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if payload.get("type") == "error" or error:
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("code") or error.get("type")
+            request_id = error.get("request_id") or payload.get("request_id") or request_id_from_payload(payload)
+            if message:
+                return f"{message} request_id={request_id}" if request_id else str(message)
+            return json.dumps(_redact_signature_payload(error), ensure_ascii=False)[:1000]
+        if isinstance(error, str):
+            return error
+        message = payload.get("message")
+        if message:
+            return str(message)
+        return json.dumps(_redact_signature_payload(payload), ensure_ascii=False)[:1000]
+    return None
+
+
 def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
     events: list[str] = []
+    message: dict[str, Any] = {"type": "message", "id": None, "content": []}
+    content_blocks: dict[int, dict[str, Any]] = {}
     for line in raw.splitlines():
         line = line.strip()
         if line.startswith("event:"):
-            events.append(line.split(":", 1)[1].strip())
+            event_name = line.split(":", 1)[1].strip()
+            if event_name:
+                events.append(event_name)
+            continue
         if not line.startswith("data:"):
             continue
         data = line.split(":", 1)[1].strip()
@@ -7644,9 +7674,59 @@ def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
             payload = json.loads(data)
         except ValueError:
             continue
-        if isinstance(payload, dict) and payload.get("type") == "error":
+        if not isinstance(payload, dict):
+            continue
+        payload_type = payload.get("type")
+        if payload_type == "error" or payload.get("error"):
+            payload = dict(payload)
+            payload["stream_events"] = events
+            payload["raw_stream_excerpt"] = raw[:2000]
             return payload
-    return {"type": "message", "id": None, "content": [], "stream_events": events, "raw_stream_excerpt": raw[:2000]}
+        if payload_type == "message_start" and isinstance(payload.get("message"), dict):
+            started_message = payload["message"]
+            message.update({key: value for key, value in started_message.items() if key != "content"})
+            if isinstance(started_message.get("content"), list):
+                message["content"] = started_message["content"]
+            continue
+        if payload_type == "content_block_start":
+            index = payload.get("index")
+            block = payload.get("content_block")
+            if isinstance(index, int) and isinstance(block, dict):
+                content_blocks[index] = dict(block)
+            continue
+        if payload_type == "content_block_delta":
+            index = payload.get("index")
+            delta = payload.get("delta")
+            if not isinstance(index, int) or not isinstance(delta, dict):
+                continue
+            block = content_blocks.setdefault(index, {"type": "text", "text": ""})
+            delta_type = delta.get("type")
+            if delta_type == "text_delta":
+                block["type"] = block.get("type") or "text"
+                block["text"] = str(block.get("text") or "") + str(delta.get("text") or "")
+            elif delta_type == "thinking_delta":
+                block["type"] = "thinking"
+                block["thinking"] = str(block.get("thinking") or "") + str(delta.get("thinking") or "")
+            elif delta_type == "signature_delta":
+                block["type"] = "thinking"
+                block["signature"] = str(block.get("signature") or "") + str(delta.get("signature") or "")
+            elif delta_type == "input_json_delta":
+                block["partial_json"] = str(block.get("partial_json") or "") + str(delta.get("partial_json") or "")
+            continue
+        if payload_type == "message_delta":
+            delta = payload.get("delta")
+            if isinstance(delta, dict):
+                message.update(delta)
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                existing_usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+                message["usage"] = {**existing_usage, **usage}
+            continue
+    if content_blocks:
+        message["content"] = [content_blocks[index] for index in sorted(content_blocks)]
+    message["stream_events"] = events
+    message["raw_stream_excerpt"] = raw[:2000]
+    return message
 
 
 def _signature_interop_result(

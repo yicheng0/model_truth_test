@@ -240,17 +240,44 @@ def channel_health(channel_id: str, db: Session = Depends(get_db)) -> dict[str, 
     }
 
 
-def _signature_interop_payload_from_result(db: Session, result: Result) -> dict[str, object]:
+def _signature_interop_signature_from_result(result: Result) -> dict[str, object] | None:
     payload = result.raw_response if isinstance(result.raw_response, dict) else {}
     signature = payload.get("signature_interop") if isinstance(payload.get("signature_interop"), dict) else payload
+    if not isinstance(signature, dict) or not isinstance(signature.get("steps"), list):
+        normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+        normalized_signature = normalized.get("signature_interop")
+        signature = normalized_signature if isinstance(normalized_signature, dict) else None
+    if not isinstance(signature, dict) or not isinstance(signature.get("steps"), list):
+        return None
+    return signature
+
+
+def _signature_interop_payload_from_result(db: Session, result: Result) -> dict[str, object]:
+    signature = _signature_interop_signature_from_result(result)
     if not isinstance(signature, dict):
         raise HTTPException(status_code=404, detail="Signature result not found")
+    raw_request = result.raw_request if isinstance(result.raw_request, dict) else {}
     run = db.get(Run, result.run_id)
     enriched: dict[str, object] = dict(signature)
+    if raw_request.get("client_probe_id") and not enriched.get("client_probe_id"):
+        enriched["client_probe_id"] = raw_request.get("client_probe_id")
     if run:
         enriched["run"] = run_read(db, run)
     enriched["result"] = result
     return enriched
+
+
+def _signature_interop_matches(result: Result, *, source_channel_id: str, relay_channel_id: str, stream: bool) -> bool:
+    signature = _signature_interop_signature_from_result(result)
+    if not signature:
+        return False
+    raw_request = result.raw_request if isinstance(result.raw_request, dict) else {}
+    source_id = raw_request.get("source_channel_id") or signature.get("source_channel_id")
+    relay_id = raw_request.get("relay_channel_id") or signature.get("relay_channel_id")
+    if source_id != source_channel_id or relay_id != relay_channel_id:
+        return False
+    raw_stream = raw_request.get("stream", signature.get("stream", False))
+    return bool(raw_stream) == bool(stream)
 
 
 @router.get("/api/channels/signature-interop-test/latest", response_model=SignatureInteropTestRead)
@@ -258,23 +285,34 @@ def latest_channel_signature_interop_test(
     source_channel_id: str,
     relay_channel_id: str,
     stream: bool = False,
+    client_probe_id: str | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
+    if client_probe_id:
+        rows = list(
+            db.scalars(
+                select(Result)
+                .where(Result.raw_request["client_probe_id"].as_string() == client_probe_id)
+                .order_by(Result.created_at.desc(), Result.id.desc())
+                .limit(20)
+            ).all()
+        )
+        for result in rows:
+            if _signature_interop_signature_from_result(result):
+                return _signature_interop_payload_from_result(db, result)
+
     rows = list(
         db.scalars(
             select(Result)
-            .where(Result.raw_request["test_type"].as_string() == "signature_interop")
-            .where(Result.raw_request["source_channel_id"].as_string() == source_channel_id)
-            .where(Result.raw_request["relay_channel_id"].as_string() == relay_channel_id)
+            .where(Result.channel_id == relay_channel_id)
             .order_by(Result.created_at.desc(), Result.id.desc())
-            .limit(10)
+            .limit(200)
         ).all()
     )
     for result in rows:
-        raw_request = result.raw_request if isinstance(result.raw_request, dict) else {}
-        if bool(raw_request.get("stream", False)) == bool(stream):
+        if _signature_interop_matches(result, source_channel_id=source_channel_id, relay_channel_id=relay_channel_id, stream=stream):
             return _signature_interop_payload_from_result(db, result)
-    raise HTTPException(status_code=404, detail="未找到这组 Source/Relay 的 Signature 检测日志")
+    raise HTTPException(status_code=404, detail="未找到本次 Signature 检测日志")
 
 
 @router.post("/api/channels/signature-interop-test", response_model=SignatureInteropTestRead)
@@ -285,7 +323,7 @@ async def channel_signature_interop_test(data: SignatureInteropTestCreate, db: S
         raise HTTPException(status_code=404, detail="Source channel not found")
     if not relay:
         raise HTTPException(status_code=404, detail="Relay channel not found")
-    payload = await create_signature_interop_test(db, source, relay, data.stream)
+    payload = await create_signature_interop_test(db, source, relay, data.stream, data.client_probe_id)
     if isinstance(payload.get("run"), Run):
         payload["run"] = run_read(db, payload["run"])
     return payload

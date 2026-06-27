@@ -175,10 +175,10 @@ export const api = {
   applyNewApiSync: (payload: NewApiSyncRequest) =>
     request<NewApiSyncResult>('/api/integrations/new-api/apply', { method: 'POST', headers: adminHeaders(), body: JSON.stringify(payload) }),
   healthCheck: (id: string) => request<Record<string, unknown>>(`/api/channels/${id}/health-check`, { method: 'POST' }),
-  signatureInteropTest: (payload: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) =>
+  signatureInteropTest: (payload: { source_channel_id: string; relay_channel_id: string; stream?: boolean; client_probe_id?: string }) =>
     request<SignatureInteropResult>('/api/channels/signature-interop-test', { method: 'POST', body: JSON.stringify(payload) }),
-  latestSignatureInteropTest: (payload: { source_channel_id: string; relay_channel_id: string; stream?: boolean }) =>
-    request<SignatureInteropResult>(`/api/channels/signature-interop-test/latest${queryString({ source_channel_id: payload.source_channel_id, relay_channel_id: payload.relay_channel_id, stream: String(payload.stream ?? false) })}`),
+  latestSignatureInteropTest: (payload: { source_channel_id: string; relay_channel_id: string; stream?: boolean; client_probe_id?: string }) =>
+    request<SignatureInteropResult>(`/api/channels/signature-interop-test/latest${queryString({ source_channel_id: payload.source_channel_id, relay_channel_id: payload.relay_channel_id, stream: String(payload.stream ?? false), client_probe_id: payload.client_probe_id })}`),
   modelRequestTest: (channelId: string, payload: { prompt: string; system_prompt?: string | null; request_params?: Record<string, unknown>; run_name?: string | null }) =>
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
   openAIResourceCheck: (payload: OpenAIResourceCheckRequest) =>

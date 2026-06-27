@@ -193,6 +193,7 @@ export type SignatureInteropResult = {
   result?: Result | null;
   created_at?: string | null;
   completed_at?: string | null;
+  client_probe_id?: string | null;
   source_channel_id: string;
   relay_channel_id: string;
   source_endpoint: string;

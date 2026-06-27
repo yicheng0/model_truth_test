@@ -65,6 +65,7 @@ class SignatureInteropTestCreate(BaseModel):
     source_channel_id: str
     relay_channel_id: str
     stream: bool = False
+    client_probe_id: str | None = Field(default=None, max_length=120)
 
 
 class SignatureInteropStepRead(BaseModel):
@@ -88,6 +89,7 @@ class SignatureInteropTestRead(BaseModel):
     result: "ResultRead | None" = None
     created_at: datetime | None = None
     completed_at: datetime | None = None
+    client_probe_id: str | None = None
     source_channel_id: str
     relay_channel_id: str
     source_endpoint: str
