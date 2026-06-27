@@ -121,19 +121,21 @@ describe('channel credential helpers', () => {
         name: '鬼手',
         auth_config: { account_type: 'aws' },
       }),
-    ).toBe('鬼手-aws');
-    expect(formatChannelDisplayName({ name: '鬼手', account_type: 'aws' })).toBe('鬼手-aws');
+    ).toBe('鬼手');
+    expect(formatChannelDisplayName({ name: '鬼手', account_type: 'aws' })).toBe('鬼手');
+    expect(formatChannelDisplayName({ name: '1', account_type: 'reverse' })).toBe('1');
+    expect(formatChannelDisplayName({ name: '9333-鬼手', account_type: 'aws' })).toBe('9333-鬼手');
     expect(formatChannelDisplayName(null, 'legacy_channel')).toBe('legacy_channel');
   });
 
-  it('normalizes tokenflow channel display names without duplicated name fragments', () => {
+  it('uses the explicit channel name as the display name', () => {
     expect(
       formatChannelDisplayName({
         id: '9029-tokenflow-aws',
         name: '风雨',
         auth_config: { account_type: 'aws' },
       }),
-    ).toBe('风雨-aws');
+    ).toBe('风雨');
     expect(
       formatChannelDisplayName({
         id: '9029-tokenflow-aws',
@@ -146,7 +148,7 @@ describe('channel credential helpers', () => {
         id: 'ch_312aeef14fd0',
         name: '9335-阿宝-claude-aws-relay',
       }),
-    ).toBe('9335-阿宝-aws');
+    ).toBe('9335-阿宝-claude-aws-relay');
   });
 
   it('extracts clean channel form values from legacy display names', () => {
@@ -154,7 +156,7 @@ describe('channel credential helpers', () => {
 
     expect(inferChannelNumber(legacy)).toBe('9335');
     expect(inferChannelAccountType(legacy)).toBe('aws');
-    expect(normalizeChannelNickname(legacy)).toBe('9335-阿宝');
-    expect(normalizeChannelNickname({ name: '8559-风雨-aws', channel_number: '8559', account_type: 'aws' })).toBe('8559-风雨');
+    expect(normalizeChannelNickname(legacy)).toBe('9335-阿宝-claude-aws-relay');
+    expect(normalizeChannelNickname({ name: '8559-风雨-aws', channel_number: '8559', account_type: 'aws' })).toBe('8559-风雨-aws');
   });
 });
