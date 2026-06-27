@@ -19,7 +19,7 @@ import {
   providerTypeForAccountType,
 } from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
-import type { Channel, ChannelCreate } from '../types';
+import type { Channel, ChannelCreate, ChannelDeleteResult } from '../types';
 
 type ChannelFormValues = {
   name: string;
@@ -131,10 +131,22 @@ export default function Channels() {
     },
   });
 
+  function deleteSummary(payload: ChannelDeleteResult) {
+    const related = [
+      payload.deleted_runs ? `${payload.deleted_runs} 个任务` : '',
+      payload.deleted_results ? `${payload.deleted_results} 条结果` : '',
+      payload.deleted_reports ? `${payload.deleted_reports} 份报告` : '',
+      payload.deleted_alerts ? `${payload.deleted_alerts} 条告警` : '',
+      payload.deleted_schedules ? `${payload.deleted_schedules} 个巡检计划` : '',
+      payload.deleted_baselines ? `${payload.deleted_baselines} 条指纹` : '',
+    ].filter(Boolean);
+    return related.length ? `渠道已删除，并清理 ${related.join('、')}` : '渠道已删除';
+  }
+
   const remove = useMutation({
     mutationFn: api.deleteChannel,
-    onSuccess: async () => {
-      message.success('渠道已删除');
+    onSuccess: async (payload) => {
+      message.success(deleteSummary(payload));
       await invalidate();
     },
     onError: (error) => {
@@ -394,7 +406,7 @@ export default function Channels() {
                   {(
                     <Popconfirm
                       title="删除渠道"
-                      description="删除后不会再出现在新测评任务中。确定删除吗？"
+                      description="会同步删除该渠道关联的巡检计划、日志、结果、报告、告警和指纹。确定删除吗？"
                       okText="删除"
                       cancelText="取消"
                       okButtonProps={{ danger: true }}

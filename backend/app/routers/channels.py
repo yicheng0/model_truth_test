@@ -4,13 +4,11 @@ import logging
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
-from ..admin import require_admin
 from ..database import get_db
-from ..models import BaselineResult, Channel, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest
+from ..models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest
 from ..redaction import merge_redacted_config
 from ..seed_utils import ensure_seed_data_when_empty
 from ..schemas import (
@@ -115,41 +113,117 @@ def update_channel(channel_id: str, data: ChannelUpdate, db: Session = Depends(g
     return channel
 
 
-def _channel_delete_conflict_reason(db: Session, channel_id: str) -> str | None:
-    checks = [
-        (select(RunChannel.id).where(RunChannel.channel_id == channel_id).limit(1), "该渠道已被检测任务引用，不能删除"),
-        (select(Result.id).where(Result.channel_id == channel_id).limit(1), "该渠道已有检测结果，不能删除"),
-        (select(Comparison.id).where(Comparison.candidate_channel_id == channel_id).limit(1), "该渠道已被对比结果引用，不能删除"),
-        (select(Report.id).where(Report.channel_id == channel_id).limit(1), "该渠道已有报告引用，不能删除"),
-        (select(ChannelAlert.id).where(ChannelAlert.channel_id == channel_id).limit(1), "该渠道已有巡检告警引用，不能删除"),
-        (select(ScheduledChannelTest.id).where(ScheduledChannelTest.channel_id == channel_id).limit(1), "该渠道已被自动巡检计划引用，不能删除"),
-        (select(BaselineResult.id).where(BaselineResult.channel_id == channel_id).limit(1), "该渠道已有渠道指纹引用，不能删除"),
-    ]
-    for stmt, reason in checks:
-        if db.scalar(stmt) is not None:
-            return reason
-    return None
+def _count_for(db: Session, model: type, *criteria) -> int:  # noqa: ANN001
+    if not criteria:
+        return int(db.scalar(select(func.count()).select_from(model)) or 0)
+    return int(db.scalar(select(func.count()).select_from(model).where(*criteria)) or 0)
+
+
+def _id_set_for(db: Session, model: type, *criteria) -> set[str]:  # noqa: ANN001
+    if not criteria:
+        return {str(item) for item in db.scalars(select(model.id)).all()}
+    return {str(item) for item in db.scalars(select(model.id).where(*criteria)).all()}
+
+
+def _channel_delete_run_ids(db: Session, channel_id: str) -> set[str]:
+    run_ids = set(db.scalars(select(RunChannel.run_id).where(RunChannel.channel_id == channel_id)).all())
+    run_ids.update(db.scalars(select(Result.run_id).where(Result.channel_id == channel_id)).all())
+    run_ids.update(db.scalars(select(Report.run_id).where(Report.channel_id == channel_id)).all())
+    run_ids.update(db.scalars(select(ChannelAlert.run_id).where(ChannelAlert.channel_id == channel_id)).all())
+    run_ids.update(db.scalars(select(Comparison.run_id).where(Comparison.candidate_channel_id == channel_id)).all())
+    run_ids.update(db.scalars(select(PatrolJob.run_id).where(PatrolJob.channel_id == channel_id, PatrolJob.run_id.is_not(None))).all())
+    return {str(run_id) for run_id in run_ids if run_id}
+
+
+def _run_ids_deletable_after_channel_cleanup(db: Session, run_ids: set[str], channel_id: str) -> set[str]:
+    deletable: set[str] = set()
+    for run_id in run_ids:
+        other_run_channels = _count_for(db, RunChannel, RunChannel.run_id == run_id, RunChannel.channel_id != channel_id)
+        other_results = _count_for(db, Result, Result.run_id == run_id, Result.channel_id != channel_id)
+        other_reports = _count_for(db, Report, Report.run_id == run_id, Report.channel_id != channel_id)
+        other_alerts = _count_for(db, ChannelAlert, ChannelAlert.run_id == run_id, ChannelAlert.channel_id != channel_id)
+        other_comparisons = _count_for(db, Comparison, Comparison.run_id == run_id, Comparison.candidate_channel_id != channel_id)
+        other_jobs = _count_for(db, PatrolJob, PatrolJob.run_id == run_id, PatrolJob.channel_id != channel_id)
+        if not any([other_run_channels, other_results, other_reports, other_alerts, other_comparisons, other_jobs]):
+            deletable.add(run_id)
+    return deletable
+
+
+def _delete_channel_and_related_data(db: Session, channel: Channel) -> dict[str, object]:
+    channel_id = channel.id
+    touched_run_ids = _channel_delete_run_ids(db, channel_id)
+    deletable_run_ids = _run_ids_deletable_after_channel_cleanup(db, touched_run_ids, channel_id)
+    baseline_source_run_ids = set(db.scalars(select(BaselineSnapshot.source_run_id).where(BaselineSnapshot.source_run_id.in_(deletable_run_ids))).all()) if deletable_run_ids else set()
+    deletable_run_ids -= {str(run_id) for run_id in baseline_source_run_ids if run_id}
+
+    job_ids = set(db.scalars(select(PatrolJob.id).where(PatrolJob.channel_id == channel_id)).all())
+    job_ids.update(db.scalars(select(PatrolJob.id).where(PatrolJob.run_id.in_(deletable_run_ids))).all() if deletable_run_ids else [])
+
+    run_channel_ids = _id_set_for(db, RunChannel, RunChannel.channel_id == channel_id)
+    result_ids = _id_set_for(db, Result, Result.channel_id == channel_id)
+    comparison_ids = _id_set_for(db, Comparison, Comparison.candidate_channel_id == channel_id)
+    report_ids = _id_set_for(db, Report, Report.channel_id == channel_id)
+    alert_ids = _id_set_for(db, ChannelAlert, ChannelAlert.channel_id == channel_id)
+    if deletable_run_ids:
+        run_channel_ids |= _id_set_for(db, RunChannel, RunChannel.run_id.in_(deletable_run_ids))
+        result_ids |= _id_set_for(db, Result, Result.run_id.in_(deletable_run_ids))
+        comparison_ids |= _id_set_for(db, Comparison, Comparison.run_id.in_(deletable_run_ids))
+        report_ids |= _id_set_for(db, Report, Report.run_id.in_(deletable_run_ids))
+        alert_ids |= _id_set_for(db, ChannelAlert, ChannelAlert.run_id.in_(deletable_run_ids))
+
+    stats = {
+        "deleted": True,
+        "deleted_runs": len(deletable_run_ids),
+        "deleted_run_channels": len(run_channel_ids),
+        "deleted_results": len(result_ids),
+        "deleted_comparisons": len(comparison_ids),
+        "deleted_reports": len(report_ids),
+        "deleted_alerts": len(alert_ids),
+        "deleted_schedules": _count_for(db, ScheduledChannelTest, ScheduledChannelTest.channel_id == channel_id),
+        "deleted_baselines": _count_for(db, BaselineResult, BaselineResult.channel_id == channel_id),
+        "deleted_patrol_jobs": len(job_ids),
+    }
+
+    schedule_ids = set(db.scalars(select(ScheduledChannelTest.id).where(ScheduledChannelTest.channel_id == channel_id)).all())
+    if job_ids:
+        db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_ids)))
+        db.execute(delete(PatrolJob).where(PatrolJob.id.in_(job_ids)))
+    if schedule_ids:
+        db.execute(delete(ChannelAlert).where(ChannelAlert.scheduled_test_id.in_(schedule_ids)))
+        db.execute(delete(ScheduledChannelTest).where(ScheduledChannelTest.id.in_(schedule_ids)))
+
+    db.execute(delete(ChannelAlert).where(ChannelAlert.channel_id == channel_id))
+    db.execute(delete(BaselineResult).where(BaselineResult.channel_id == channel_id))
+    db.execute(delete(Report).where(Report.channel_id == channel_id))
+    db.execute(delete(Comparison).where(Comparison.candidate_channel_id == channel_id))
+    db.execute(delete(Result).where(Result.channel_id == channel_id))
+    db.execute(delete(RunChannel).where(RunChannel.channel_id == channel_id))
+
+    if deletable_run_ids:
+        db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(deletable_run_ids)))
+        db.execute(update(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(deletable_run_ids)).values(last_run_id=None))
+        db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(deletable_run_ids)))
+        db.execute(delete(Report).where(Report.run_id.in_(deletable_run_ids)))
+        db.execute(delete(Comparison).where(Comparison.run_id.in_(deletable_run_ids)))
+        db.execute(delete(Result).where(Result.run_id.in_(deletable_run_ids)))
+        db.execute(delete(RunChannel).where(RunChannel.run_id.in_(deletable_run_ids)))
+        db.execute(delete(Run).where(Run.id.in_(deletable_run_ids)))
+
+    db.delete(channel)
+    return stats
 
 
 @router.delete("/api/channels/{channel_id}")
 def remove_channel(
     channel_id: str,
-    _admin: None = Depends(require_admin),
     db: Session = Depends(get_db),
-) -> dict[str, bool]:
+) -> dict[str, object]:
     channel = db.get(Channel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    conflict = _channel_delete_conflict_reason(db, channel_id)
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
-    try:
-        db.delete(channel)
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="该渠道仍被其他记录引用，不能删除") from exc
-    return {"deleted": True}
+    payload = _delete_channel_and_related_data(db, channel)
+    db.commit()
+    return payload
 
 
 @router.post("/api/channels/{channel_id}/health-check")

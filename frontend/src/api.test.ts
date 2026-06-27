@@ -90,6 +90,38 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('deletes channels without requiring the admin key', async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+      removeItem: (key: string) => {
+        storage.delete(key);
+      },
+    });
+    setAdminApiKey('test-admin-key');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ deleted: true, deleted_runs: 1, deleted_results: 2 }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    const payload = await api.deleteChannel('ch_1');
+
+    expect(payload.deleted).toBe(true);
+    expect(payload.deleted_runs).toBe(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/channels/ch_1',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: expect.not.objectContaining({ 'X-Admin-Key': 'test-admin-key' }),
+      }),
+    );
+    setAdminApiKey('');
+    vi.unstubAllGlobals();
+    fetchMock.mockRestore();
+  });
+
   it('adds the admin key to destructive requests when configured', async () => {
     const storage = new Map<string, string>();
     vi.stubGlobal('localStorage', {

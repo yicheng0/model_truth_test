@@ -12,6 +12,19 @@ export type Channel = {
 
 export type ChannelRole = string;
 
+export type ChannelDeleteResult = {
+  deleted: boolean;
+  deleted_runs?: number;
+  deleted_run_channels?: number;
+  deleted_results?: number;
+  deleted_comparisons?: number;
+  deleted_reports?: number;
+  deleted_alerts?: number;
+  deleted_schedules?: number;
+  deleted_baselines?: number;
+  deleted_patrol_jobs?: number;
+};
+
 /** Legacy — prefer narrower interfaces below. */
 export type JsonObject = Record<string, any>;
 

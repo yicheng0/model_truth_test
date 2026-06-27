@@ -3294,7 +3294,7 @@ def test_channel_secret_ref_is_redacted_in_api_response_and_resolved_from_env(mo
         assert _merged_channel_credentials(stored, {"api_key": "runtime-key"})["api_key"] == "runtime-key"
 
 
-def test_channel_delete_rejects_referenced_channel() -> None:
+def test_channel_delete_cascades_referenced_channel_without_admin_key() -> None:
     reset_database()
     with SessionLocal() as db:
         run = Run(
@@ -3305,25 +3305,96 @@ def test_channel_delete_rejects_referenced_channel() -> None:
             status="completed",
             repeat_count=1,
             concurrency=1,
-            total_jobs=0,
-            completed_jobs=0,
+            total_jobs=1,
+            completed_jobs=1,
+        )
+        report = Report(
+            id="report_references_channel_delete",
+            run_id=run.id,
+            channel_id="third_party_demo",
+            final_score=60,
+            grade="D",
+            summary="delete me",
+        )
+        schedule = ScheduledChannelTest(
+            id="schedule_references_channel_delete",
+            channel_id="third_party_demo",
+            suite_id="claude_full_35",
+            baseline_snapshot_id="snapshot_unused_delete",
+            name="delete schedule",
+            last_run_id=run.id,
+        )
+        job = PatrolJob(
+            id="job_references_channel_delete",
+            scheduled_test_id=schedule.id,
+            channel_id="third_party_demo",
+            status="queued",
+            run_id=run.id,
         )
         db.add(run)
-        db.add(
-            RunChannel(
-                id="run_channel_references_delete",
-                run_id=run.id,
-                channel_id="third_party_demo",
-                role_in_run="candidate",
-            )
-        )
+        db.add(RunChannel(id="run_channel_references_delete", run_id=run.id, channel_id="third_party_demo", role_in_run="candidate"))
+        db.add(Result(id="result_references_channel_delete", run_id=run.id, test_case_id="case_builtin_math_json", channel_id="third_party_demo", normalized_response={}, raw_request={}, raw_response={}, metrics={}, score=0, labels=[]))
+        db.add(Comparison(id="comparison_references_channel_delete", run_id=run.id, test_case_id="case_builtin_math_json", candidate_channel_id="third_party_demo", final_score=0))
+        db.add(report)
+        db.add(ChannelAlert(id="alert_references_channel_delete", scheduled_test_id=schedule.id, run_id=run.id, report_id=report.id, channel_id="third_party_demo", grade="D", final_score=60))
+        db.add(schedule)
+        db.add(job)
+        db.add(PatrolJobAttempt(id="attempt_references_channel_delete", job_id=job.id, run_id=run.id, status="running"))
+        db.add(BaselineResult(id="baseline_result_references_channel_delete", baseline_snapshot_id="snapshot_unused_delete", test_case_id="case_builtin_math_json", channel_id="third_party_demo", role_in_baseline="candidate"))
         db.commit()
 
     with TestClient(app) as client:
-        response = client.delete("/api/channels/third_party_demo", headers=ADMIN_HEADERS)
+        response = client.delete("/api/channels/third_party_demo")
 
-    assert response.status_code == 409
-    assert "不能删除" in response.json()["detail"]
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["deleted"] is True
+    assert payload["deleted_runs"] == 1
+    assert payload["deleted_results"] >= 1
+    assert payload["deleted_reports"] >= 1
+    assert payload["deleted_alerts"] >= 1
+    assert payload["deleted_schedules"] >= 1
+    assert payload["deleted_baselines"] >= 1
+    with SessionLocal() as db:
+        assert db.get(Channel, "third_party_demo") is None
+        assert db.get(Run, "run_references_channel_delete") is None
+        assert db.get(ScheduledChannelTest, "schedule_references_channel_delete") is None
+        assert db.get(PatrolJob, "job_references_channel_delete") is None
+
+
+def test_channel_delete_keeps_shared_run_for_other_channels() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        run = Run(
+            id="run_shared_channel_delete",
+            suite_id="claude_full_35",
+            name="shared channel delete",
+            mode="candidate_eval",
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=2,
+            completed_jobs=2,
+        )
+        db.add(run)
+        db.add(RunChannel(id="run_channel_delete_target", run_id=run.id, channel_id="third_party_demo", role_in_run="candidate"))
+        db.add(RunChannel(id="run_channel_delete_other", run_id=run.id, channel_id="anthropic_official", role_in_run="gold"))
+        db.add(Result(id="result_delete_target", run_id=run.id, test_case_id="case_builtin_math_json", channel_id="third_party_demo", normalized_response={}, raw_request={}, raw_response={}, metrics={}, score=0, labels=[]))
+        db.add(Result(id="result_delete_other", run_id=run.id, test_case_id="case_builtin_math_json", channel_id="anthropic_official", normalized_response={}, raw_request={}, raw_response={}, metrics={}, score=100, labels=[]))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.delete("/api/channels/third_party_demo")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_runs"] == 0
+    with SessionLocal() as db:
+        assert db.get(Channel, "third_party_demo") is None
+        assert db.get(Run, "run_shared_channel_delete") is not None
+        assert db.get(Result, "result_delete_target") is None
+        assert db.get(Result, "result_delete_other") is not None
+        assert db.get(RunChannel, "run_channel_delete_target") is None
+        assert db.get(RunChannel, "run_channel_delete_other") is not None
 
 
 def test_channel_delete_succeeds_for_unreferenced_channel() -> None:
@@ -3339,11 +3410,12 @@ def test_channel_delete_succeeds_for_unreferenced_channel() -> None:
                 "enabled": True,
             },
         )
-        deleted = client.delete("/api/channels/temp_channel", headers=ADMIN_HEADERS)
+        deleted = client.delete("/api/channels/temp_channel")
 
     assert created.status_code == 200
     assert deleted.status_code == 200
-    assert deleted.json() == {"deleted": True}
+    assert deleted.json()["deleted"] is True
+    assert deleted.json()["deleted_runs"] == 0
 
 
 def test_runtime_credentials_merge_channel_api_key_and_per_run_override() -> None:

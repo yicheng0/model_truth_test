@@ -3,6 +3,7 @@ import type {
   BaselineBuildCreate,
   BaselineSnapshot,
   Channel,
+  ChannelDeleteResult,
   ChannelCreate,
   ChannelAlert,
   CacheHitRateJobCreate,
@@ -168,7 +169,7 @@ export const api = {
   createChannel: (payload: ChannelCreate) => request<Channel>('/api/channels', { method: 'POST', body: JSON.stringify(payload) }),
   updateChannel: (id: string, payload: Partial<ChannelCreate>) =>
     request<Channel>(`/api/channels/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  deleteChannel: (id: string) => request<{ deleted: boolean }>(`/api/channels/${id}`, { method: 'DELETE', headers: adminHeaders() }),
+  deleteChannel: (id: string) => request<ChannelDeleteResult>(`/api/channels/${id}`, { method: 'DELETE' }),
   previewNewApiSync: (payload: NewApiSyncRequest) =>
     request<NewApiSyncResult>('/api/integrations/new-api/preview', { method: 'POST', headers: adminHeaders(), body: JSON.stringify(payload) }),
   applyNewApiSync: (payload: NewApiSyncRequest) =>
