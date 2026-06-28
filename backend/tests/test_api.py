@@ -4259,6 +4259,156 @@ def test_gemini_resource_check_invalid_auth_is_unverified_and_redacted(monkeypat
     assert "[REDACTED]" in blob
 
 
+def test_gemini_resource_check_records_detailed_official_shape(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "models/gemini-2.0-flash",
+                            "baseModelId": "gemini-2.0-flash",
+                            "version": "001",
+                            "displayName": "Gemini 2.0 Flash",
+                            "inputTokenLimit": 1048576,
+                            "outputTokenLimit": 8192,
+                            "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                        }
+                    ]
+                },
+                request=request,
+            )
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if json.get("contents") == []:
+                return httpx.Response(400, json={"error": {"code": 400, "message": "invalid contents", "status": "INVALID_ARGUMENT"}}, request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {"role": "model", "parts": [{"text": "ok"}]},
+                            "finishReason": "STOP",
+                            "safetyRatings": [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "probability": "NEGLIGIBLE"}],
+                        }
+                    ],
+                    "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 1, "totalTokenCount": 5},
+                    "modelVersion": "gemini-2.0-flash",
+                    "responseId": "resp_detailed",
+                    "promptFeedback": {"safetyRatings": []},
+                },
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/gemini-resource-check", json={"base_url": "https://relay.example/v1beta", "api_key": "gemini-detailed-secret", "include_embedding_probe": False})
+
+    payload = response.json()
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 200
+    assert payload["upstream_assessment"] == "official_upstream_likely"
+    assert payload["raw_evidence"]["models"]["shape_checks"]["first_model"]["has_token_limits"] is True
+    generate_checks = payload["raw_evidence"]["generate_probe"]["shape_checks"]
+    assert generate_checks["has_usage_metadata"] is True
+    assert generate_checks["has_model_version"] is True
+    assert generate_checks["has_response_id"] is True
+    assert generate_checks["safety_ratings_count"] == 1
+    assert "gemini-detailed-secret" not in blob
+
+
+def test_gemini_resource_check_warns_on_missing_optional_metadata(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"models": [{"name": "models/gemini-2.0-flash", "supportedGenerationMethods": ["generateContent"]}]}, request=request)
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if json.get("contents") == []:
+                return httpx.Response(400, json={"error": {"code": 400, "message": "invalid contents", "status": "INVALID_ARGUMENT"}}, request=request)
+            return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}]}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/gemini-resource-check", json={"base_url": "https://relay.example/v1beta", "api_key": "gemini-metadata-secret", "include_embedding_probe": False})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["classification"] == "gemini_compatible_proxy"
+    assert "usage_missing" in payload["labels"]
+    assert "gemini_metadata_missing" in payload["labels"]
+    assert "gemini_safety_ratings_missing" in payload["labels"]
+    assert payload["raw_evidence"]["generate_probe"]["shape_checks"]["ok"] is True
+
+
+def test_gemini_resource_check_parses_sse_like_stream_chunks(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"models": [{"name": "models/gemini-2.0-flash", "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]}]}, request=request)
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if json.get("contents") == []:
+                return httpx.Response(400, json={"error": {"code": 400, "message": "invalid contents", "status": "INVALID_ARGUMENT"}}, request=request)
+            if url.endswith(":streamGenerateContent?key=gemini-sse-secret"):
+                return httpx.Response(
+                    200,
+                    text='data: {"candidates":[{"content":{"parts":[{"text":"o"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4},"modelVersion":"gemini-2.0-flash","responseId":"resp_stream"}\n\ndata: [DONE]\n',
+                    headers={"content-type": "text/event-stream"},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP", "safetyRatings": []}], "usageMetadata": {"promptTokenCount": 4}, "modelVersion": "gemini-2.0-flash", "responseId": "resp_generate"},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/gemini-resource-check", json={"base_url": "https://relay.example/v1beta", "api_key": "gemini-sse-secret", "include_embedding_probe": False})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["raw_evidence"]["stream_probe"]["shape_checks"]["ok"] is True
+    assert payload["raw_evidence"]["stream_probe"]["shape_checks"]["chunk_count"] == 1
+    assert "stream_shape_mismatch" not in payload["labels"]
+
+
 def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypatch) -> None:
     reset_database()
     calls: list[dict] = []

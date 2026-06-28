@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Descriptions, Form, Input, Space, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Collapse, Descriptions, Form, Input, Space, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { ShieldCheck } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
@@ -73,7 +73,20 @@ export default function GeminiResourceCheck() {
   const [result, setResult] = useState<GeminiResourceCheckResult | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
 
-  const groupedEvidence = useMemo(() => result?.evidence ?? [], [result]);
+  const evidence = useMemo(() => result?.evidence ?? [], [result]);
+  const groupedEvidence = useMemo(() => {
+    const groups = new Map<string, GeminiResourceEvidenceItem[]>();
+    for (const item of evidence) {
+      const group = item.group || 'Other';
+      groups.set(group, [...(groups.get(group) ?? []), item]);
+    }
+    const order = ['Endpoint', 'Models', 'GenerateContent', 'Streaming', 'Embeddings', 'Validation Error', 'Middleware Trace', 'Other'];
+    return [...groups.entries()].sort(([left], [right]) => {
+      const leftIndex = order.indexOf(left);
+      const rightIndex = order.indexOf(right);
+      return (leftIndex === -1 ? 999 : leftIndex) - (rightIndex === -1 ? 999 : rightIndex);
+    });
+  }, [evidence]);
 
   const runCheck = useMutation({
     mutationFn: (values: FormValues) => {
@@ -171,12 +184,45 @@ export default function GeminiResourceCheck() {
               <Descriptions.Item label="Embedding Endpoint" span={2}>{result.embedding_endpoint || '-'}</Descriptions.Item>
             </Descriptions>
             <Alert type={result.upstream_assessment === 'official_upstream_likely' ? 'success' : 'warning'} showIcon message={result.summary} />
+            <Card size="small" title="官方响应字段对照（按 Google Gemini API 文档）">
+              <Descriptions size="small" column={1}>
+                <Descriptions.Item label="Models">
+                  <Typography.Text code>models[]</Typography.Text>、<Typography.Text code>name</Typography.Text>、<Typography.Text code>supportedGenerationMethods</Typography.Text>、
+                  <Typography.Text code>inputTokenLimit/outputTokenLimit</Typography.Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="GenerateContent">
+                  <Typography.Text code>candidates[].content.parts[]</Typography.Text>、<Typography.Text code>finishReason</Typography.Text>、
+                  <Typography.Text code>safetyRatings</Typography.Text>、<Typography.Text code>usageMetadata</Typography.Text>、<Typography.Text code>modelVersion/responseId</Typography.Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="Streaming">
+                  <Typography.Text code>streamGenerateContent</Typography.Text> 应返回 GenerateContentResponse 分片/数组形态，可携带 usage/modelVersion/responseId 元数据。
+                </Descriptions.Item>
+                <Descriptions.Item label="Embedding / Error">
+                  <Typography.Text code>embedding.values[]</Typography.Text>；错误响应参考 <Typography.Text code>error.code/message/status</Typography.Text>。
+                </Descriptions.Item>
+              </Descriptions>
+            </Card>
             <Space wrap>
               {(result.labels.length ? result.labels : ['no_blocking_labels']).map((label) => (
                 <Tag key={label} color={label === 'no_blocking_labels' ? 'green' : label === 'middleware_wrapper_trace' ? 'blue' : 'orange'}>{label}</Tag>
               ))}
             </Space>
-            <Table size="small" rowKey={(row) => `${row.group || 'group'}:${row.key}`} pagination={false} dataSource={groupedEvidence} columns={evidenceColumns} />
+            <Collapse
+              defaultActiveKey={groupedEvidence.map(([group]) => group)}
+              items={groupedEvidence.map(([group, items]) => ({
+                key: group,
+                label: `${group}（${items.length}）`,
+                children: (
+                  <Table
+                    size="small"
+                    rowKey={(row, index) => `${row.group || 'group'}:${row.key}:${index}`}
+                    pagination={false}
+                    dataSource={items}
+                    columns={evidenceColumns.filter((column) => column.title !== '分组')}
+                  />
+                ),
+              }))}
+            />
             <Typography.Title level={4}>脱敏原始证据</Typography.Title>
             <pre className="json-block">{prettyJson(result.raw_evidence)}</pre>
           </Space>
