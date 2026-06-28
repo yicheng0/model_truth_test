@@ -552,6 +552,7 @@ REQUEST_PROTOCOL_AUTO = "auto"
 REQUEST_PROTOCOL_ANTHROPIC = "anthropic_messages"
 REQUEST_PROTOCOL_OPENAI = "openai_chat_completions"
 REQUEST_PROTOCOL_AWS_BEDROCK = "aws_bedrock"
+REQUEST_PROTOCOL_GEMINI = "gemini_generate_content"
 MANUAL_PROBE_SUITE_ID = "manual_model_request_probe"
 MANUAL_PROBE_MODE = "manual_probe"
 PROTOCOL_PROFILE_LEGACY = "claude_legacy"
@@ -7733,6 +7734,8 @@ async def _live_call_for_protocol(
 ) -> dict[str, Any]:
     if protocol == REQUEST_PROTOCOL_AWS_BEDROCK:
         return await asyncio.to_thread(_aws_bedrock_call, channel, case, credentials)
+    if protocol == REQUEST_PROTOCOL_GEMINI:
+        return await _gemini_generate_content_call(channel, raw_request, credentials)
     if protocol == REQUEST_PROTOCOL_OPENAI:
         return await _openai_compatible_call(channel, raw_request, credentials)
     return await _anthropic_compatible_call(channel, raw_request, credentials)
@@ -7740,11 +7743,13 @@ async def _live_call_for_protocol(
 
 def _request_protocol(channel: Channel, credentials: dict[str, Any]) -> str:
     value = str(credentials.get("request_protocol") or credentials.get("protocol") or "").strip()
-    if value in {REQUEST_PROTOCOL_AUTO, REQUEST_PROTOCOL_ANTHROPIC, REQUEST_PROTOCOL_OPENAI, REQUEST_PROTOCOL_AWS_BEDROCK}:
+    if value in {REQUEST_PROTOCOL_AUTO, REQUEST_PROTOCOL_ANTHROPIC, REQUEST_PROTOCOL_OPENAI, REQUEST_PROTOCOL_AWS_BEDROCK, REQUEST_PROTOCOL_GEMINI}:
         return value
     provider_kind = _provider_kind(channel.provider_type)
     if provider_kind == "aws_bedrock":
         return REQUEST_PROTOCOL_AWS_BEDROCK
+    if provider_kind == "gemini":
+        return REQUEST_PROTOCOL_GEMINI
     if provider_kind == "openai_compatible":
         return REQUEST_PROTOCOL_OPENAI
     if provider_kind == "anthropic_compatible" and _looks_like_known_anthropic_provider(channel.provider_type):
@@ -7756,6 +7761,8 @@ def _auto_protocol_candidates(channel: Channel) -> list[str]:
     provider_kind = _provider_kind(channel.provider_type)
     if provider_kind == "aws_bedrock":
         return [REQUEST_PROTOCOL_AWS_BEDROCK]
+    if provider_kind == "gemini":
+        return [REQUEST_PROTOCOL_GEMINI]
     if provider_kind == "openai_compatible":
         return [REQUEST_PROTOCOL_OPENAI, REQUEST_PROTOCOL_ANTHROPIC]
     return [REQUEST_PROTOCOL_ANTHROPIC, REQUEST_PROTOCOL_OPENAI]
@@ -7784,6 +7791,8 @@ def _provider_kind(provider_type: str | None) -> str:
     normalized = (provider_type or "").lower()
     if normalized == "aws_bedrock" or "bedrock" in normalized:
         return "aws_bedrock"
+    if "gemini" in normalized or "google_generative" in normalized or "generativelanguage" in normalized:
+        return "gemini"
     if "openai" in normalized:
         return "openai_compatible"
     return "anthropic_compatible"
@@ -7793,6 +7802,10 @@ def _provider_endpoint(channel: Channel, credentials: dict[str, Any], protocol: 
     protocol = protocol or _request_protocol(channel, credentials)
     if protocol == REQUEST_PROTOCOL_AWS_BEDROCK:
         return f"aws_bedrock:{credentials.get('region') or 'us-east-1'}"
+    if protocol == REQUEST_PROTOCOL_GEMINI:
+        base_url = (credentials.get("base_url") or channel.base_url or GEMINI_OFFICIAL_BASE_URL).rstrip("/")
+        model = credentials.get("model") or channel.model_name or "gemini-2.0-flash"
+        return _gemini_safe_url(_normalize_gemini_resource_base_url(base_url), f"{_gemini_model_name_for_path(str(model))}:generateContent")
     if protocol == REQUEST_PROTOCOL_OPENAI:
         base_url = (credentials.get("base_url") or channel.base_url or "").rstrip("/")
         if not base_url:
@@ -7913,6 +7926,8 @@ def _missing_live_credentials(channel: Channel, credentials: dict[str, Any]) -> 
         return "缺少 API Key，未发起正式请求"
     if protocol in {REQUEST_PROTOCOL_OPENAI, REQUEST_PROTOCOL_AUTO} and not (credentials.get("base_url") or channel.base_url):
         return "缺少 OpenAI-compatible Base URL，未发起正式请求"
+    if protocol == REQUEST_PROTOCOL_GEMINI and not (credentials.get("base_url") or channel.base_url):
+        return "缺少 Gemini Base URL，未发起正式请求"
     return None
 
 
@@ -8210,6 +8225,135 @@ def attach_response_metadata(payload: Any, response: httpx.Response) -> Any:
     payload["_response_metadata"] = metadata
     return payload
 
+
+def _gemini_body_from_raw_request(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
+    params = raw_request.get("params") or {}
+    contents: list[dict[str, Any]] = []
+    for message in raw_request.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        parts: list[dict[str, Any]] = []
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text" and part.get("text") is not None:
+                        parts.append({"text": str(part.get("text"))})
+                    elif part.get("text") is not None:
+                        parts.append({"text": str(part.get("text"))})
+        else:
+            parts.append({"text": str(content or "")})
+        contents.append({"role": "user" if message.get("role") != "assistant" else "model", "parts": parts})
+    generation_config: dict[str, Any] = {}
+    if "temperature" in params:
+        generation_config["temperature"] = params["temperature"]
+    if "top_p" in params:
+        generation_config["topP"] = params["top_p"]
+    if "top_k" in params:
+        generation_config["topK"] = params["top_k"]
+    if "max_tokens" in params:
+        generation_config["maxOutputTokens"] = params["max_tokens"]
+    if params.get("stop_sequences"):
+        generation_config["stopSequences"] = params["stop_sequences"]
+    body: dict[str, Any] = {"contents": contents or [{"role": "user", "parts": [{"text": str(raw_request.get("prompt") or "")}]}]}
+    if generation_config:
+        body["generationConfig"] = generation_config
+    system_text = raw_request.get("system")
+    if isinstance(system_text, str) and system_text.strip():
+        body["systemInstruction"] = {"parts": [{"text": system_text.strip()}]}
+    if params.get("tools"):
+        body["tools"] = params["tools"]
+    _apply_probe_body_overrides(body, params)
+    _remove_probe_only_params(body)
+    raw_request.update({"gemini_body": body, "model": credentials.get("model") or channel.model_name})
+    return body
+
+
+def _gemini_message_from_payload(payload: Any) -> dict[str, Any]:
+    text = _gemini_content_text(payload)
+    usage = payload.get("usageMetadata") if isinstance(payload, dict) and isinstance(payload.get("usageMetadata"), dict) else None
+    candidates = payload.get("candidates") if isinstance(payload, dict) and isinstance(payload.get("candidates"), list) else []
+    first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+    parts = []
+    content = first.get("content") if isinstance(first.get("content"), dict) else {}
+    for part in content.get("parts") or []:
+        if isinstance(part, dict) and part.get("text") is not None:
+            parts.append({"type": "text", "text": str(part.get("text"))})
+        elif isinstance(part, dict) and part.get("functionCall"):
+            fn = part.get("functionCall") if isinstance(part.get("functionCall"), dict) else {}
+            parts.append({"type": "tool_use", "id": str(fn.get("id") or fn.get("name") or "gemini_tool"), "name": fn.get("name"), "input": fn.get("args") or {}})
+    mapped_usage = None
+    if usage:
+        mapped_usage = {
+            "input_tokens": usage.get("promptTokenCount") or usage.get("inputTokenCount"),
+            "output_tokens": usage.get("candidatesTokenCount") or usage.get("outputTokenCount"),
+            "total_tokens": usage.get("totalTokenCount"),
+            "usageMetadata": usage,
+        }
+    return {
+        "type": "message",
+        "id": payload.get("responseId") if isinstance(payload, dict) else None,
+        "model": payload.get("modelVersion") if isinstance(payload, dict) else None,
+        "content": parts or ([{"type": "text", "text": text}] if text else []),
+        "stop_reason": first.get("finishReason") if isinstance(first, dict) else None,
+        "usage": mapped_usage,
+        "raw_gemini_response": payload,
+    }
+
+
+def _gemini_message_from_stream(raw: str, *, first_token_ms: int | None = None, request_id: str | None = None) -> dict[str, Any]:
+    events = _iter_sse_json_events(raw)
+    chunks = [event for event in events if event]
+    if not chunks:
+        try:
+            parsed = json.loads(raw)
+            chunks = parsed if isinstance(parsed, list) else [parsed]
+        except Exception:
+            chunks = []
+    text = "".join(_gemini_content_text(chunk) for chunk in chunks if isinstance(chunk, dict))
+    last = next((chunk for chunk in reversed(chunks) if isinstance(chunk, dict)), {})
+    message = _gemini_message_from_payload(last if isinstance(last, dict) else {})
+    if text:
+        message["content"] = [{"type": "text", "text": text}]
+    meta = message.get("_response_metadata") if isinstance(message.get("_response_metadata"), dict) else {}
+    meta.update({"stream_events": [str(event.get("type") or "generateContentResponse") for event in chunks if isinstance(event, dict)], "first_token_ms": first_token_ms, "raw_stream_excerpt": raw[:2000]})
+    if request_id:
+        meta["request_id"] = request_id
+    message["_response_metadata"] = meta
+    message["raw_gemini_stream_chunks"] = chunks[:20]
+    return message
+
+
+async def _gemini_generate_content_call(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
+    api_key = credentials.get("api_key")
+    if not api_key:
+        raise ValueError("缺少 API Key，未发起正式请求")
+    base_url = _normalize_gemini_resource_base_url(credentials.get("base_url") or channel.base_url or GEMINI_OFFICIAL_BASE_URL)
+    model = str(credentials.get("model") or channel.model_name or "gemini-2.0-flash")
+    params = raw_request.get("params") or {}
+    stream = params.get("stream") is True
+    path = f"{_gemini_model_name_for_path(model)}:{'streamGenerateContent' if stream else 'generateContent'}"
+    url = _gemini_url(base_url, path, api_key)
+    headers = {"content-type": "application/json"}
+    body = _gemini_body_from_raw_request(channel, raw_request, credentials)
+    timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        if stream and hasattr(client, "stream"):
+            started = time.perf_counter()
+            first_token_ms: int | None = None
+            chunks: list[str] = []
+            async with client.stream("POST", url, headers=headers, json=body) as response:
+                async for chunk in response.aiter_text():
+                    if chunk and first_token_ms is None:
+                        first_token_ms = int((time.perf_counter() - started) * 1000)
+                    chunks.append(chunk)
+                _raise_for_status_with_body(response)
+                return _gemini_message_from_stream("".join(chunks), first_token_ms=first_token_ms, request_id=request_id_from_headers(response.headers))
+        response = await client.post(url, headers=headers, json=body)
+        _raise_for_status_with_body(response)
+        payload = _parse_gemini_response_payload(response)
+        message = _gemini_message_from_payload(payload)
+        return attach_response_metadata(message, response)
 
 async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, Any], credentials: dict[str, Any]) -> dict[str, Any]:
     url = _anthropic_messages_url(credentials.get("base_url") or channel.base_url)
@@ -10896,6 +11040,8 @@ def _full_model_protocol_family(channel: Channel) -> str:
     protocol = _request_protocol(channel, _merged_channel_credentials(channel, {}))
     if protocol == REQUEST_PROTOCOL_OPENAI:
         return "openai_chat_completions"
+    if protocol == REQUEST_PROTOCOL_GEMINI:
+        return "gemini_generate_content"
     if protocol == REQUEST_PROTOCOL_AWS_BEDROCK:
         return "aws_bedrock"
     if protocol == REQUEST_PROTOCOL_ANTHROPIC:
@@ -10903,6 +11049,8 @@ def _full_model_protocol_family(channel: Channel) -> str:
     kind = _provider_kind(channel.provider_type)
     if kind == "openai_compatible":
         return "openai_chat_completions"
+    if kind == "gemini":
+        return "gemini_generate_content"
     if kind == "aws_bedrock":
         return "aws_bedrock"
     return "anthropic_messages"
@@ -10910,6 +11058,7 @@ def _full_model_protocol_family(channel: Channel) -> str:
 
 def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) -> list[dict[str, Any]]:
     is_openai = protocol_family == "openai_chat_completions"
+    is_gemini = protocol_family == "gemini_generate_content"
     is_anthropic = protocol_family in {"anthropic_messages", "aws_bedrock"}
     specs: list[dict[str, Any]] = [
         {
@@ -10983,6 +11132,21 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                         "tools": [{"type": "function", "function": {"name": "record_weather", "description": "Record weather lookup arguments.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "unit": {"type": "string"}}, "required": ["city", "unit"]}}}],
                     },
                     "rules": {"min_length": 0},
+                }
+            )
+        elif is_gemini:
+            specs.append(
+                {
+                    "key": "gemini_function_call_shape",
+                    "title": "Gemini 函数调用形态",
+                    "category": "tools",
+                    "prompt": "请调用函数记录城市 Paris 和单位 celsius，不要直接回答天气。",
+                    "params": {
+                        "max_tokens": 160,
+                        "temperature": 0,
+                        "tools": [{"functionDeclarations": [{"name": "record_weather", "description": "Record weather lookup arguments.", "parameters": {"type": "OBJECT", "properties": {"city": {"type": "STRING"}, "unit": {"type": "STRING"}}, "required": ["city", "unit"]}}]}],
+                    },
+                    "rules": {"tool_required": True, "tool_name": "record_weather"},
                 }
             )
         elif is_anthropic:

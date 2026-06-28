@@ -8650,3 +8650,82 @@ def test_full_model_check_rejects_missing_channel() -> None:
 
     assert response.status_code == 400
     assert "Channel not found" in response.json()["detail"]
+
+
+def test_full_model_check_supports_gemini_protocol(monkeypatch) -> None:
+    reset_database()
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+        headers = {"x-goog-request-id": "goog_req_full"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "responseId": "gem_resp_1",
+                "modelVersion": "gemini-2.0-flash",
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": "OK"}]},
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 1, "totalTokenCount": 4},
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *args) -> None:  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers=None, json=None):  # noqa: ANN001
+            captured.setdefault("urls", []).append(url)
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with SessionLocal() as db:
+        channel = Channel(
+            id="gemini_full_ch",
+            name="Gemini Full Channel",
+            provider_type="gemini_proxy",
+            role="candidate",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model_name="gemini-2.0-flash",
+            auth_config={"api_key": "gem-key", "request_protocol": "gemini_generate_content"},
+            enabled=True,
+        )
+        db.add(channel)
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/full-model-check",
+            json={
+                "channel_ids": ["gemini_full_ch"],
+                "repeat_count": 1,
+                "include_stream": False,
+                "include_tools": False,
+                "include_params": False,
+                "include_error_probe": False,
+                "include_thinking": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    channel_payload = payload["channels"][0]
+    assert channel_payload["protocol_family"] == "gemini_generate_content"
+    assert channel_payload["total_output_tokens"] >= 1
+    assert channel_payload["probes"][0]["request_id"] == "goog_req_full"
+    assert any(":generateContent" in url for url in captured["urls"])
+    assert captured["json"]["contents"][0]["parts"][0]["text"]

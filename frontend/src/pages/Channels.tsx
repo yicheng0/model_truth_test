@@ -155,6 +155,7 @@ const requestProtocolOptions = [
   { value: 'auto', label: '自动探测' },
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
   { value: 'openai_chat_completions', label: 'OpenAI Chat Completions' },
+  { value: 'gemini_generate_content', label: 'Gemini GenerateContent' },
   { value: 'aws_bedrock', label: 'AWS Bedrock' },
 ];
 
