@@ -1179,7 +1179,13 @@ export type ScheduledTestsHealth = {
   last_tick_at?: string | null;
   stale_schedule_count: number;
   overdue_schedule_count?: number;
+  overdue_job_count?: number;
+  stale_attempt_count?: number;
   heartbeat_stale?: boolean;
+  active_task_count?: number;
+  max_concurrent_tasks?: number;
+  last_recovery_count?: number;
+  last_recovery_error?: string | null;
   queued_schedule_count: number;
   running_schedule_count: number;
   next_due_at?: string | null;

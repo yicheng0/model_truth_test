@@ -766,6 +766,10 @@ class ScheduledTestHealthRead(BaseModel):
     overdue_job_count: int = 0
     stale_attempt_count: int = 0
     heartbeat_stale: bool = False
+    active_task_count: int = 0
+    max_concurrent_tasks: int = 0
+    last_recovery_count: int = 0
+    last_recovery_error: str | None = None
     queued_schedule_count: int
     running_schedule_count: int
     next_due_at: datetime | None = None

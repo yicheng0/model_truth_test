@@ -617,18 +617,34 @@ export default function ScheduledTests() {
                       description={getErrorMessage(schedulerHealthError)}
                     />
                   ) : null}
-                  {schedulerHealth.data && (!schedulerHealth.data.enabled || schedulerHealth.data.heartbeat_stale || (schedulerHealth.data.overdue_schedule_count ?? 0) > 0) ? (
+                  {schedulerHealth.data && (
+                    !schedulerHealth.data.enabled
+                    || schedulerHealth.data.heartbeat_stale
+                    || (schedulerHealth.data.overdue_schedule_count ?? 0) > 0
+                    || (schedulerHealth.data.stale_schedule_count ?? 0) > 0
+                    || (schedulerHealth.data.overdue_job_count ?? 0) > 0
+                    || (schedulerHealth.data.stale_attempt_count ?? 0) > 0
+                    || Boolean(schedulerHealth.data.last_recovery_error)
+                  ) ? (
                     <Alert
-                      type={(schedulerHealth.data.overdue_schedule_count ?? 0) > 0 ? 'error' : 'warning'}
+                      type={(schedulerHealth.data.overdue_schedule_count ?? 0) > 0 || (schedulerHealth.data.stale_attempt_count ?? 0) > 0 || schedulerHealth.data.last_recovery_error ? 'error' : 'warning'}
                       showIcon
                       style={{ marginBottom: 12 }}
                       message="自动巡检调度异常"
                       description={
                         !schedulerHealth.data.enabled
                           ? '后端自动调度器已停用，请检查 AUTO_SCHEDULER_ENABLED。'
-                          : schedulerHealth.data.heartbeat_stale
-                            ? '后端调度器心跳过旧，可能已经停止。'
-                            : `有 ${schedulerHealth.data.overdue_schedule_count ?? 0} 个计划已过执行时间但尚未被认领，请确认后端服务仍在运行。`
+                          : schedulerHealth.data.last_recovery_error
+                            ? `自动恢复失败：${schedulerHealth.data.last_recovery_error}`
+                            : schedulerHealth.data.heartbeat_stale
+                              ? '后端调度器心跳过旧，可能已经停止。'
+                              : (schedulerHealth.data.stale_attempt_count ?? 0) > 0
+                                ? `有 ${schedulerHealth.data.stale_attempt_count ?? 0} 个巡检尝试疑似卡住，系统会自动恢复并推进下一次执行。`
+                                : (schedulerHealth.data.overdue_job_count ?? 0) > 0
+                                  ? `有 ${schedulerHealth.data.overdue_job_count ?? 0} 个巡检任务排队/运行超时，请关注后端负载。`
+                                  : (schedulerHealth.data.stale_schedule_count ?? 0) > 0
+                                    ? `系统刚恢复了 ${schedulerHealth.data.last_recovery_count ?? schedulerHealth.data.stale_schedule_count} 个卡住的巡检锁。`
+                                    : `有 ${schedulerHealth.data.overdue_schedule_count ?? 0} 个计划已过执行时间但尚未被认领，请确认后端服务仍在运行。`
                       }
                     />
                   ) : null}
@@ -647,6 +663,7 @@ export default function ScheduledTests() {
                         <Statistic
                           title="运行中 / 排队"
                           value={schedulerHealth.data ? `${schedulerHealth.data.running_schedule_count} / ${schedulerHealth.data.queued_schedule_count}` : '-'}
+                          suffix={schedulerHealth.data?.max_concurrent_tasks ? `任务 ${schedulerHealth.data.active_task_count ?? 0}/${schedulerHealth.data.max_concurrent_tasks}` : undefined}
                         />
                       </Card>
                     </Col>
@@ -654,8 +671,8 @@ export default function ScheduledTests() {
                       <Card bordered={false}>
                         <Statistic
                           title="疑似卡住"
-                          value={schedulerHealth.data ? schedulerHealth.data.stale_schedule_count : '-'}
-                          valueStyle={{ color: schedulerHealth.data?.stale_schedule_count ? '#b42318' : '#067647' }}
+                          value={schedulerHealth.data ? `${schedulerHealth.data.stale_schedule_count} / ${schedulerHealth.data.stale_attempt_count ?? 0}` : '-'}
+                          valueStyle={{ color: schedulerHealth.data?.stale_schedule_count || schedulerHealth.data?.stale_attempt_count ? '#b42318' : '#067647' }}
                         />
                       </Card>
                     </Col>

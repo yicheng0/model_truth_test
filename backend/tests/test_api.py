@@ -2432,6 +2432,65 @@ def test_refresh_active_scheduled_test_locks_extends_only_current_instance_locks
     assert foreign.locked_until == now.replace(tzinfo=None)
 
 
+def test_recover_stale_scheduled_tests_marks_running_job_attempt_failed() -> None:
+    reset_database()
+    stale_started = datetime.now(timezone.utc) - timedelta(seconds=7200)
+    with SessionLocal() as db:
+        schedule = ScheduledChannelTest(
+            id="stale_attempt_schedule",
+            channel_id="third_party_demo",
+            suite_id="manual_model_request_probe",
+            baseline_snapshot_id="scheduled_probe_baseline",
+            name="stale attempt",
+            enabled=True,
+            last_status="running",
+            locked_by="old-worker",
+            locked_until=datetime.now(timezone.utc) + timedelta(minutes=30),
+        )
+        job = PatrolJob(
+            id="stale_patrol_job",
+            scheduled_test_id=schedule.id,
+            channel_id="third_party_demo",
+            status="running",
+            started_at=stale_started,
+        )
+        attempt = PatrolJobAttempt(
+            id="stale_patrol_attempt",
+            job_id=job.id,
+            attempt_index=0,
+            worker_id="old-worker",
+            status="running",
+            started_at=stale_started,
+            timeout_seconds=1,
+        )
+        db.add_all([schedule, job, attempt])
+        db.commit()
+
+    from app import services as services_module
+
+    original_timeout = services_module.SCHEDULED_TEST_TASK_TIMEOUT_SECONDS
+    services_module.SCHEDULED_TEST_TASK_TIMEOUT_SECONDS = 60
+    try:
+        with SessionLocal() as db:
+            recovered = services_module.recover_stale_scheduled_tests(db, now=datetime.now(timezone.utc))
+    finally:
+        services_module.SCHEDULED_TEST_TASK_TIMEOUT_SECONDS = original_timeout
+
+    with SessionLocal() as db:
+        schedule = db.get(ScheduledChannelTest, "stale_attempt_schedule")
+        job = db.get(PatrolJob, "stale_patrol_job")
+        attempt = db.get(PatrolJobAttempt, "stale_patrol_attempt")
+
+    assert recovered >= 3
+    assert schedule is not None and schedule.last_status == "failed"
+    assert schedule.locked_by is None
+    assert schedule.next_run_at is not None
+    assert job is not None and job.status == "failed"
+    assert "恢复调度" in (job.last_error or "")
+    assert attempt is not None and attempt.status == "failed"
+    assert attempt.error_type == "scheduler_timeout"
+
+
 def test_scheduled_test_loop_starts_due_tasks_without_waiting_for_completion(monkeypatch) -> None:
     reset_database()
     started: list[str] = []
@@ -2488,6 +2547,40 @@ def test_scheduled_test_loop_starts_due_tasks_without_waiting_for_completion(mon
     asyncio.run(run_loop_probe())
 
 
+def test_scheduled_test_tick_respects_available_slots(monkeypatch) -> None:
+    reset_database()
+
+    async def no_daily_report(session_factory, *, force=False):  # noqa: ANN001, ARG001
+        return {"ok": False, "status": "skipped", "message": "skip"}
+
+    monkeypatch.setattr("app.services.send_daily_patrol_report", no_daily_report)
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        for index in range(3):
+            db.add(
+                ScheduledChannelTest(
+                    id=f"slot_schedule_{index}",
+                    channel_id="third_party_demo",
+                    suite_id="manual_model_request_probe",
+                    baseline_snapshot_id="scheduled_probe_baseline",
+                    name=f"slot {index}",
+                    enabled=True,
+                    next_run_at=now,
+                    last_status="idle",
+                )
+            )
+        db.commit()
+
+    due_ids = asyncio.run(scheduled_test_tick(SessionLocal, available_slots=1))
+
+    assert len(due_ids) == 1
+    with SessionLocal() as db:
+        queued_or_running = db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_status == "queued")).all()
+        idle = db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.id.like("slot_schedule_%"), ScheduledChannelTest.last_status == "idle")).all()
+    assert len(queued_or_running) == 1
+    assert len(idle) == 2
+
+
 def test_scheduled_task_timeout_marks_run_failed_and_releases_lock(monkeypatch) -> None:
     reset_database()
     with SessionLocal() as db:
@@ -2516,8 +2609,12 @@ def test_scheduled_task_timeout_marks_run_failed_and_releases_lock(monkeypatch) 
             locked_until=datetime.now(timezone.utc) + timedelta(minutes=30),
         )
         run.scheduled_test_id = schedule.id
+        job = PatrolJob(id="timeout_job", scheduled_test_id=schedule.id, channel_id="third_party_demo", status="running", run_id=run.id)
+        attempt = PatrolJobAttempt(id="timeout_attempt", job_id=job.id, attempt_index=0, status="running", run_id=run.id, started_at=datetime.now(timezone.utc) - timedelta(minutes=10))
         db.add(run)
         db.add(schedule)
+        db.add(job)
+        db.add(attempt)
         db.commit()
 
     async def never_finishes(session_factory, scheduled_id, *, advance_next_run=True):  # noqa: ANN001, ARG001
@@ -2531,6 +2628,8 @@ def test_scheduled_task_timeout_marks_run_failed_and_releases_lock(monkeypatch) 
     with SessionLocal() as db:
         schedule = db.get(ScheduledChannelTest, "timeout_schedule")
         run = db.get(Run, "timeout_run")
+        job = db.get(PatrolJob, "timeout_job")
+        attempt = db.get(PatrolJobAttempt, "timeout_attempt")
 
     assert schedule is not None
     assert run is not None
@@ -2541,6 +2640,8 @@ def test_scheduled_task_timeout_marks_run_failed_and_releases_lock(monkeypatch) 
     assert schedule.next_run_at is not None
     assert run.status == "failed"
     assert run.finished_at is not None
+    assert job is not None and job.status == "failed"
+    assert attempt is not None and attempt.status == "failed"
 
 
 def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypatch) -> None:

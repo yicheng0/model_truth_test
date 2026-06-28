@@ -104,6 +104,7 @@ from .services import (
     list_channel_alerts,
     refresh_baseline_status,
     next_run_for_scheduled_test,
+    recover_stale_scheduled_tests,
     scheduled_tests_health,
     scheduled_test_loop,
     scheduled_channel_test_read,
@@ -138,6 +139,9 @@ async def lifespan(_app: FastAPI):
     with SessionLocal() as db:
         try:
             seed_demo_data(db)
+            recovered = recover_stale_scheduled_tests(db)
+            if recovered:
+                logger.warning("Recovered stale scheduled tests on startup count=%d", recovered)
             logger.info("Seed data initialized successfully")
         except Exception:
             logger.exception("Seed data initialization failed — app will continue but data may be incomplete")

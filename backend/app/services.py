@@ -64,6 +64,10 @@ SCHEDULE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 SCHEDULER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 SCHEDULER_LOCK_MINUTES = int(os.getenv("SCHEDULER_LOCK_MINUTES", "30") or "30")
 SCHEDULED_TEST_TASK_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_TEST_TASK_TIMEOUT_SECONDS", "21600") or "21600")
+SCHEDULER_MAX_CONCURRENT_TASKS = int(os.getenv("SCHEDULER_MAX_CONCURRENT_TASKS", "3") or "3")
+SCHEDULER_ACTIVE_TASK_COUNT = 0
+SCHEDULER_LAST_RECOVERY_COUNT = 0
+SCHEDULER_LAST_RECOVERY_ERROR: str | None = None
 SCHEDULER_LAST_TICK_AT: datetime | None = None
 if not logging.getLogger().handlers and not logging.getLogger("claude_eval").handlers:
     logging.basicConfig(
@@ -218,6 +222,25 @@ def claim_scheduled_test(
     return scheduled
 
 
+def _recover_patrol_job(db: Session, job: PatrolJob | None, *, now: datetime, status: str, error: str) -> int:
+    recovered = 0
+    safe_error = redact_text(error)
+    if job and job.status in {"queued", "running"}:
+        job.status = status
+        job.finished_at = now
+        job.last_error = safe_error
+        recovered += 1
+    if job:
+        attempts = db.scalars(select(PatrolJobAttempt).where(PatrolJobAttempt.job_id == job.id, PatrolJobAttempt.status == "running")).all()
+        for attempt in attempts:
+            attempt.status = status
+            attempt.finished_at = now
+            attempt.error_type = "scheduler_recovery"
+            attempt.error_message = safe_error
+            recovered += 1
+    return recovered
+
+
 def recover_stale_scheduled_tests(db: Session, *, now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     stale = db.scalars(
@@ -230,18 +253,55 @@ def recover_stale_scheduled_tests(db: Session, *, now: datetime | None = None) -
         .order_by(ScheduledChannelTest.locked_until)
     ).all()
     recovered = 0
+    stale_error = "自动巡检任务锁已过期，系统已恢复调度"
     for scheduled in stale:
         run = db.get(Run, scheduled.last_run_id) if scheduled.last_run_id else None
         if run and run.status in {"pending", "running"}:
             run.status = "failed"
             run.finished_at = now
+        job = db.scalar(select(PatrolJob).where(PatrolJob.scheduled_test_id == scheduled.id, PatrolJob.status.in_(["queued", "running"])).order_by(PatrolJob.created_at.desc(), PatrolJob.id.desc()).limit(1))
+        recovered += _recover_patrol_job(db, job, now=now, status="failed", error=stale_error)
         scheduled.last_status = run.status if run and run.status in {"completed", "failed", "canceled", "interrupted"} else "failed"
-        scheduled.last_error = "自动巡检任务锁已过期，系统已恢复调度"
+        scheduled.last_error = stale_error
         scheduled.last_finished_at = now
         scheduled.locked_by = None
         scheduled.locked_until = None
         scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
         recovered += 1
+
+    timeout_cutoff = _naive_utc(now - timedelta(seconds=SCHEDULED_TEST_TASK_TIMEOUT_SECONDS))
+    stale_attempts = db.scalars(
+        select(PatrolJobAttempt)
+        .where(PatrolJobAttempt.status == "running", PatrolJobAttempt.started_at <= timeout_cutoff)
+        .order_by(PatrolJobAttempt.started_at)
+    ).all()
+    timeout_error = f"自动巡检任务超过 {SCHEDULED_TEST_TASK_TIMEOUT_SECONDS} 秒未完成，系统已恢复调度"
+    for attempt in stale_attempts:
+        job = db.get(PatrolJob, attempt.job_id)
+        attempt.status = "failed"
+        attempt.finished_at = now
+        attempt.error_type = "scheduler_timeout"
+        attempt.error_message = redact_text(timeout_error)
+        recovered += 1
+        if job and job.status in {"queued", "running"}:
+            job.status = "failed"
+            job.finished_at = now
+            job.last_error = redact_text(timeout_error)
+            recovered += 1
+            scheduled = db.get(ScheduledChannelTest, job.scheduled_test_id)
+            if scheduled and scheduled.last_status in {"queued", "running"}:
+                run = db.get(Run, scheduled.last_run_id) if scheduled.last_run_id else None
+                if run and run.status in {"pending", "running"}:
+                    run.status = "failed"
+                    run.finished_at = now
+                scheduled.last_status = "failed"
+                scheduled.last_error = timeout_error
+                scheduled.last_finished_at = now
+                scheduled.locked_by = None
+                scheduled.locked_until = None
+                scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
+                recovered += 1
+
     if recovered:
         db.commit()
     return recovered
@@ -266,11 +326,14 @@ def refresh_active_scheduled_test_locks(db: Session, scheduled_ids: set[str], *,
 
 
 def scheduled_tests_health(db: Session) -> dict[str, Any]:
+    global SCHEDULER_LAST_RECOVERY_COUNT, SCHEDULER_LAST_RECOVERY_ERROR
     now = datetime.now(timezone.utc)
     try:
-        recover_stale_scheduled_tests(db, now=now)
-    except Exception:
+        SCHEDULER_LAST_RECOVERY_COUNT = recover_stale_scheduled_tests(db, now=now)
+        SCHEDULER_LAST_RECOVERY_ERROR = None
+    except Exception as exc:
         db.rollback()
+        SCHEDULER_LAST_RECOVERY_ERROR = redact_text(str(exc))
         logger.warning("scheduled_tests_health: stale schedule recovery failed", exc_info=True)
     schedules = list(db.scalars(select(ScheduledChannelTest)).all())
     enabled = [schedule for schedule in schedules if schedule.enabled]
@@ -333,6 +396,10 @@ def scheduled_tests_health(db: Session) -> dict[str, Any]:
         "overdue_job_count": overdue_job_count,
         "stale_attempt_count": stale_attempt_count,
         "heartbeat_stale": heartbeat_stale,
+        "active_task_count": SCHEDULER_ACTIVE_TASK_COUNT,
+        "max_concurrent_tasks": max(1, SCHEDULER_MAX_CONCURRENT_TASKS),
+        "last_recovery_count": SCHEDULER_LAST_RECOVERY_COUNT,
+        "last_recovery_error": SCHEDULER_LAST_RECOVERY_ERROR,
         "queued_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "queued"),
         "running_schedule_count": sum(1 for schedule in schedules if schedule.last_status == "running"),
         "next_due_at": min(next_due_candidates, default=None),
@@ -5585,13 +5652,28 @@ async def execute_scheduled_probe_run(
             run = db.get(Run, run.id) if run else None
             if not scheduled or not run:
                 return run
-            signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
+            try:
+                signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
+            except Exception as exc:
+                logger.exception("scheduled_probe_signature_failed scheduled_id=%s run_id=%s", scheduled_id, run.id)
+                signature_result = {
+                    "ok": False,
+                    "status": "fail",
+                    "reason": f"Signature 后处理失败：{redact_text(str(exc))}",
+                    "source_channel_id": None,
+                    "relay_channel_id": scheduled.channel_id,
+                    "steps": [{"name": "Signature 后处理", "status": "fail", "detail": redact_text(str(exc)), "error": redact_text(str(exc))}],
+                    "labels": ["signature_interop_failed"],
+                }
             report = await build_scheduled_probe_report(session_factory, db, scheduled, run.id, model_payload, signature_result)
             finish_patrol_job_attempt(db, job_id, attempt_id, status="completed", run_id=run.id)
             release_scheduled_test_lock(db, scheduled, status="completed", error=None)
             db.refresh(run)
 
-        await create_alerts_for_run(session_factory, run.id if run else "", scheduled_id)
+        try:
+            await create_alerts_for_run(session_factory, run.id if run else "", scheduled_id)
+        except Exception:
+            logger.exception("scheduled_probe_alerts_failed scheduled_id=%s run_id=%s", scheduled_id, run.id if run else None)
         return run
     except Exception as exc:
         with session_factory() as db:
@@ -6889,6 +6971,8 @@ async def _run_scheduled_test_with_timeout(
                 if run and run.status in {"pending", "running"}:
                     run.status = "failed"
                     run.finished_at = now
+                job = db.scalar(select(PatrolJob).where(PatrolJob.scheduled_test_id == scheduled.id, PatrolJob.status.in_(["queued", "running"])).order_by(PatrolJob.created_at.desc(), PatrolJob.id.desc()).limit(1))
+                _recover_patrol_job(db, job, now=now, status="failed", error=error)
                 scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
                 release_scheduled_test_lock(db, scheduled, status="failed", error=error, finished_at=now)
     except Exception as exc:
@@ -6901,25 +6985,38 @@ async def _run_scheduled_test_with_timeout(
                 if run and run.status in {"pending", "running"}:
                     run.status = "failed"
                     run.finished_at = now
+                job = db.scalar(select(PatrolJob).where(PatrolJob.scheduled_test_id == scheduled.id, PatrolJob.status.in_(["queued", "running"])).order_by(PatrolJob.created_at.desc(), PatrolJob.id.desc()).limit(1))
+                _recover_patrol_job(db, job, now=now, status="failed", error=str(exc))
                 scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
                 release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc), finished_at=now)
 
 
-async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids: set[str] | None = None) -> list[str]:
-    await send_daily_patrol_report(session_factory)
+async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids: set[str] | None = None, available_slots: int | None = None) -> list[str]:
+    try:
+        await send_daily_patrol_report(session_factory)
+    except Exception:
+        logger.exception("scheduled_daily_report_failed")
     now = datetime.now(timezone.utc)
     due_ids: list[str] = []
     active_ids = active_ids or set()
     with session_factory() as db:
         if active_ids:
             refresh_active_scheduled_test_locks(db, active_ids, now=now)
-        recover_stale_scheduled_tests(db, now=now)
+        try:
+            recover_stale_scheduled_tests(db, now=now)
+        except Exception:
+            db.rollback()
+            logger.exception("scheduler_recover_stale_failed")
         schedules = db.scalars(
             select(ScheduledChannelTest)
             .where(ScheduledChannelTest.enabled.is_(True), ScheduledChannelTest.next_run_at <= _naive_utc(now))
             .order_by(ScheduledChannelTest.next_run_at)
         ).all()
+        claimed_count = 0
+        max_claims = available_slots if available_slots is not None else len(schedules)
         for scheduled in schedules:
+            if claimed_count >= max(0, max_claims):
+                break
             if scheduled.id in active_ids:
                 continue
             try:
@@ -6932,20 +7029,25 @@ async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids
                 create_patrol_job_for_schedule(db, claimed)
                 db.commit()
                 due_ids.append(claimed.id)
+                claimed_count += 1
     if due_ids:
         logger.info("scheduler_tick due=%d claimed=%d", len(schedules), len(due_ids))
     return due_ids
 
 
 async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_seconds: int = 60) -> None:
-    global SCHEDULER_LAST_TICK_AT
+    global SCHEDULER_LAST_TICK_AT, SCHEDULER_ACTIVE_TASK_COUNT
     _tracked_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def _track_task(scheduled_id: str, task: asyncio.Task[Any]) -> None:
+        global SCHEDULER_ACTIVE_TASK_COUNT
+
         def _cleanup(done_task: asyncio.Task[Any]) -> None:
             current = _tracked_tasks.get(scheduled_id)
             if current is done_task:
                 _tracked_tasks.pop(scheduled_id, None)
+            global SCHEDULER_ACTIVE_TASK_COUNT
+            SCHEDULER_ACTIVE_TASK_COUNT = len(_tracked_tasks)
             try:
                 done_task.result()
             except asyncio.CancelledError:
@@ -6954,6 +7056,7 @@ async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_secon
                 logger.exception("Scheduled test task failed scheduled_id=%s", scheduled_id)
 
         _tracked_tasks[scheduled_id] = task
+        SCHEDULER_ACTIVE_TASK_COUNT = len(_tracked_tasks)
         task.add_done_callback(_cleanup)
 
     try:
@@ -6961,7 +7064,9 @@ async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_secon
             SCHEDULER_LAST_TICK_AT = datetime.now(timezone.utc)
             try:
                 active_ids = {scheduled_id for scheduled_id, task in _tracked_tasks.items() if not task.done()}
-                due_ids = await scheduled_test_tick(session_factory, active_ids)
+                SCHEDULER_ACTIVE_TASK_COUNT = len(active_ids)
+                available_slots = max(0, max(1, SCHEDULER_MAX_CONCURRENT_TASKS) - len(active_ids))
+                due_ids = await scheduled_test_tick(session_factory, active_ids, available_slots=available_slots)
                 for sid in due_ids:
                     task = asyncio.create_task(
                         _run_scheduled_test_with_timeout(
@@ -6981,6 +7086,7 @@ async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_secon
         if _tracked_tasks:
             await asyncio.gather(*_tracked_tasks.values(), return_exceptions=True)
             _tracked_tasks.clear()
+            SCHEDULER_ACTIVE_TASK_COUNT = 0
         raise
 
 
