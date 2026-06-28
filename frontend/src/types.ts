@@ -332,12 +332,20 @@ export type FullModelMetricSummary = {
 
 export type FullModelProbeResult = {
   key: string;
+  base_key?: string | null;
+  attempt_index?: number;
   title: string;
   category: string;
   protocol_family: string;
   status: 'pass' | 'warning' | 'fail' | string;
   score: number;
   labels: string[];
+  conclusion?: string | null;
+  reason?: string | null;
+  detection_type?: string | null;
+  probe_target?: string | null;
+  expected?: string | null;
+  observed?: string | null;
   endpoint?: string | null;
   http_status?: number | null;
   request_id?: string | null;
@@ -351,9 +359,13 @@ export type FullModelProbeResult = {
   stream_event_count: number;
   stream_events: string[];
   usage_present: boolean;
+  response_hash?: string | null;
+  content_types?: string[];
   error_type?: string | null;
   error_excerpt?: string | null;
   excerpt?: string | null;
+  request_template?: string | null;
+  structured_summary?: Record<string, unknown>;
   raw_evidence: Record<string, unknown>;
 };
 

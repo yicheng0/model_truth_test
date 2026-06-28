@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Collapse, Descriptions, Form, InputNumber, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Descriptions, Form, InputNumber, Select, Space, Statistic, Table, Tabs, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { Activity, Gauge, Play, ShieldCheck } from 'lucide-react';
+import { Gauge, Play, ShieldCheck } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
-import type { Channel, FullModelCheckRequest, FullModelCheckResult, FullModelProbeResult } from '../types';
+import type { Channel, FullModelChannelResult, FullModelCheckRequest, FullModelCheckResult, FullModelProbeResult } from '../types';
 
 type FormValues = {
   channel_ids: string[];
@@ -23,13 +23,30 @@ function ms(value?: number | null) {
   return value == null ? '-' : `${value.toFixed(0)} ms`;
 }
 
+function seconds(value?: number | null) {
+  return value == null ? '-' : `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)} s`;
+}
+
 function num(value?: number | null, suffix = '') {
   return value == null ? '-' : `${Number(value).toFixed(2)}${suffix}`;
 }
 
+function shortHash(value?: string | null) {
+  if (!value) return '-';
+  return value.length > 28 ? `${value.slice(0, 18)}…${value.slice(-8)}` : value;
+}
+
 function statusTag(status: string) {
   const color = status === 'pass' ? 'green' : status === 'warning' ? 'orange' : status === 'degraded' ? 'orange' : status === 'fail' || status === 'failed' ? 'red' : 'blue';
-  return <Tag color={color}>{status}</Tag>;
+  const text: Record<string, string> = { pass: '通过', warning: '警告', degraded: '降级', fail: '失败', failed: '失败' };
+  return <Tag color={color}>{text[status] ?? status}</Tag>;
+}
+
+function statusClass(status: string) {
+  if (status === 'pass') return 'pass';
+  if (status === 'warning' || status === 'degraded') return 'warning';
+  if (status === 'fail' || status === 'failed') return 'fail';
+  return 'info';
 }
 
 function protocolLabel(channel: Channel) {
@@ -41,28 +58,182 @@ function prettyJson(value: unknown) {
   return JSON.stringify(value ?? null, null, 2);
 }
 
-const probeColumns: ColumnsType<FullModelProbeResult> = [
-  { title: '探针', dataIndex: 'title', width: 190, fixed: 'left' },
-  { title: '分类', dataIndex: 'category', width: 105, render: (v: string) => <Tag>{v}</Tag> },
-  { title: '状态', dataIndex: 'status', width: 95, render: statusTag },
-  { title: '分数', dataIndex: 'score', width: 80 },
+function metricLine(probe: FullModelProbeResult) {
+  return `${probe.category} · HTTP ${probe.http_status ?? '-'} · ${seconds(probe.latency_ms)}`;
+}
+
+function primaryEvidence(probe?: FullModelProbeResult | null) {
+  if (!probe) return '-';
+  return probe.conclusion || probe.observed || probe.error_excerpt || probe.excerpt || '-';
+}
+
+function groupAttempts(probes: FullModelProbeResult[]) {
+  const grouped = new Map<string, FullModelProbeResult[]>();
+  for (const probe of probes) {
+    const key = probe.base_key || probe.key.split('#', 1)[0];
+    grouped.set(key, [...(grouped.get(key) ?? []), probe]);
+  }
+  return [...grouped.values()].map((items) => items.sort((a, b) => (a.attempt_index ?? 1) - (b.attempt_index ?? 1)));
+}
+
+function FieldTile({ label, children, success = false }: { label: string; children: React.ReactNode; success?: boolean }) {
+  return (
+    <div className={`full-model-field-tile ${success ? 'success' : ''}`}>
+      <span>{label}</span>
+      <strong>{children}</strong>
+    </div>
+  );
+}
+
+function ProbeList({ probes, selectedKey, onSelect }: { probes: FullModelProbeResult[]; selectedKey?: string; onSelect: (key: string) => void }) {
+  return (
+    <div className="full-model-probe-list" role="list" aria-label="完整检测探针列表">
+      {groupAttempts(probes).map((items) => {
+        const first = items[0];
+        const representative = items.find((item) => item.status !== 'pass') ?? first;
+        const active = items.some((item) => item.key === selectedKey);
+        return (
+          <button
+            type="button"
+            key={first.base_key || first.key}
+            className={`full-model-probe-item ${statusClass(representative.status)} ${active ? 'active' : ''}`}
+            onClick={() => onSelect(representative.key)}
+          >
+            <div>
+              <strong>{first.title.replace(/（第 \d+ 次）$/, '')}</strong>
+              <small>{first.category} · HTTP {representative.http_status ?? '-'} · {seconds(representative.latency_ms)}</small>
+            </div>
+            {statusTag(representative.status)}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const attemptColumns: ColumnsType<FullModelProbeResult> = [
+  { title: '运行', width: 80, render: (_, row) => `#${row.attempt_index ?? 1}` },
+  { title: '状态', dataIndex: 'status', width: 90, render: statusTag },
   { title: 'HTTP', dataIndex: 'http_status', width: 80, render: (v: number | null) => v ?? '-' },
-  { title: 'TTFT', dataIndex: 'ttft_ms', width: 100, render: ms },
-  { title: '总延迟', dataIndex: 'latency_ms', width: 110, render: ms },
-  { title: 'TPOT', dataIndex: 'tpot_ms', width: 100, render: ms },
-  { title: '吞吐', dataIndex: 'tokens_per_second', width: 110, render: (v: number | null) => num(v, ' tok/s') },
-  { title: '输入/输出', width: 110, render: (_, row) => `${row.input_tokens ?? '-'} / ${row.output_tokens ?? '-'}` },
-  { title: 'Req ID', dataIndex: 'request_id', width: 150, render: (v: string | null) => v ? <Typography.Text copyable ellipsis={{ tooltip: v }}>{v}</Typography.Text> : '-' },
-  { title: 'Msg ID', dataIndex: 'message_id', width: 150, render: (v: string | null) => v ? <Typography.Text copyable ellipsis={{ tooltip: v }}>{v}</Typography.Text> : '-' },
-  { title: '事件', width: 170, render: (_, row) => row.stream_events?.length ? <Typography.Text ellipsis={{ tooltip: row.stream_events.join(', ') }}>{row.stream_events.join(', ')}</Typography.Text> : '-' },
-  { title: '标签/错误', width: 260, render: (_, row) => (
-    <Space direction="vertical" size={2}>
-      <Space wrap size={4}>{row.labels.map((label) => <Tag key={label} color="orange">{label}</Tag>)}</Space>
-      {row.error_excerpt ? <Typography.Text type="danger" ellipsis={{ tooltip: row.error_excerpt }}>{row.error_excerpt}</Typography.Text> : null}
-    </Space>
-  ) },
-  { title: '摘要', dataIndex: 'excerpt', width: 260, render: (v: string | null) => v ? <Typography.Text ellipsis={{ tooltip: v }}>{v}</Typography.Text> : '-' },
+  { title: '耗时', dataIndex: 'latency_ms', width: 95, render: seconds },
+  { title: 'TTFT', dataIndex: 'ttft_ms', width: 95, render: ms },
+  { title: 'TPOT', dataIndex: 'tpot_ms', width: 95, render: ms },
+  { title: '吞吐', dataIndex: 'tokens_per_second', width: 120, render: (v: number | null) => num(v, ' tok/s') },
+  { title: '响应 ID', dataIndex: 'message_id', width: 180, render: (v: string | null) => v ? <Typography.Text copyable ellipsis={{ tooltip: v }}>{v}</Typography.Text> : '-' },
+  { title: 'Request ID', dataIndex: 'request_id', width: 180, render: (v: string | null) => v ? <Typography.Text copyable ellipsis={{ tooltip: v }}>{v}</Typography.Text> : '-' },
+  { title: '本次结论', dataIndex: 'conclusion', render: (v: string | null, row) => <Typography.Text ellipsis={{ tooltip: v || row.reason || row.error_excerpt || '' }}>{v || row.reason || row.error_excerpt || '-'}</Typography.Text> },
 ];
+
+function ProbeDetail({ channel, probe }: { channel: FullModelChannelResult; probe: FullModelProbeResult }) {
+  const attempts = channel.probes.filter((item) => (item.base_key || item.key.split('#', 1)[0]) === (probe.base_key || probe.key.split('#', 1)[0]));
+  const usage = probe.structured_summary?.usage as Record<string, unknown> | undefined;
+  return (
+    <div className="full-model-detail-panel">
+      <div className="full-model-detail-head">
+        <div>
+          <Typography.Title level={4}>{probe.title.replace(/（第 \d+ 次）$/, '')}</Typography.Title>
+          <Typography.Text type="secondary">{metricLine(probe)}</Typography.Text>
+        </div>
+        {statusTag(probe.status)}
+      </div>
+
+      <div className="full-model-detail-grid">
+        <FieldTile label="关键结论" success={probe.status === 'pass'}>{primaryEvidence(probe)}</FieldTile>
+        <FieldTile label="原因">{probe.reason || probe.observed || '-'}</FieldTile>
+        <FieldTile label="检测类型">{probe.detection_type || probe.category}</FieldTile>
+        <FieldTile label="观测证据">{probe.status === 'pass' ? `${probe.protocol_family} 兼容` : (probe.observed || '-')}</FieldTile>
+      </div>
+
+      <div className="full-model-detail-grid wide-left">
+        <FieldTile label="这根探针在验证">{probe.probe_target || '-'}</FieldTile>
+        <FieldTile label="本次读数" success={probe.status === 'pass'}>{probe.conclusion || probe.observed || '-'}</FieldTile>
+      </div>
+
+      <div className="full-model-mini-grid">
+        <FieldTile label="内容块">{probe.content_types?.join(', ') || '-'}</FieldTile>
+        <FieldTile label="流式事件">{probe.stream_events?.join(', ') || '-'}</FieldTile>
+        <FieldTile label="Usage">{usage ? Object.entries(usage).filter(([, value]) => value !== null && value !== undefined).map(([key, value]) => `${key}=${String(value)}`).join(' · ') : (probe.usage_present ? '已返回' : '缺失')}</FieldTile>
+        <FieldTile label="耗时">{seconds(probe.latency_ms)} / TTFT {ms(probe.ttft_ms)}</FieldTile>
+        <FieldTile label="响应 Hash">{probe.response_hash ? <Typography.Text copyable={{ text: probe.response_hash }}>{shortHash(probe.response_hash)}</Typography.Text> : '-'}</FieldTile>
+        <FieldTile label="Endpoint">{probe.endpoint ? <Typography.Text copyable ellipsis={{ tooltip: probe.endpoint }}>{probe.endpoint}</Typography.Text> : '-'}</FieldTile>
+      </div>
+
+      <Space wrap>
+        {(probe.labels.length ? probe.labels : ['no_blocking_labels']).map((label) => (
+          <Tag key={label} color={label === 'no_blocking_labels' ? 'green' : 'orange'}>{label}</Tag>
+        ))}
+      </Space>
+
+      <Card size="small" title="探针相关输出" extra={<Typography.Text type="secondary">结构化摘要</Typography.Text>}>
+        <div className="full-model-output-grid">
+          <FieldTile label="响应模型">{String(probe.structured_summary?.response_model || '-')}</FieldTile>
+          <FieldTile label="响应 ID">{probe.message_id ? <Typography.Text copyable={{ text: probe.message_id }}>{probe.message_id}</Typography.Text> : '-'}</FieldTile>
+          <FieldTile label="停止原因">{String(probe.structured_summary?.stop_reason || '-')}</FieldTile>
+          <FieldTile label="Request ID">{probe.request_id ? <Typography.Text copyable={{ text: probe.request_id }}>{probe.request_id}</Typography.Text> : '-'}</FieldTile>
+          <FieldTile label="输出摘要">{probe.excerpt || probe.error_excerpt || '-'}</FieldTile>
+          <FieldTile label="响应 Hash">{probe.response_hash ? <Typography.Text copyable={{ text: probe.response_hash }}>{probe.response_hash}</Typography.Text> : '-'}</FieldTile>
+        </div>
+      </Card>
+
+      <Card size="small" title="查看每次运行详情" extra={`${attempts.length} 次记录`}>
+        <Table
+          size="small"
+          rowKey="key"
+          columns={attemptColumns}
+          dataSource={attempts}
+          pagination={false}
+          scroll={{ x: 1200 }}
+          expandable={{
+            expandedRowRender: (row) => (
+              <Space direction="vertical" className="full-width">
+                <Descriptions size="small" bordered column={3}>
+                  <Descriptions.Item label="请求模板">{row.request_template || row.base_key || row.key}</Descriptions.Item>
+                  <Descriptions.Item label="输入/输出 token">{row.input_tokens ?? '-'} / {row.output_tokens ?? '-'}</Descriptions.Item>
+                  <Descriptions.Item label="错误类型">{row.error_type || '-'}</Descriptions.Item>
+                </Descriptions>
+                <pre className="json-block">{prettyJson({ structured_summary: row.structured_summary, raw_evidence: row.raw_evidence })}</pre>
+              </Space>
+            ),
+          }}
+        />
+      </Card>
+    </div>
+  );
+}
+
+function ChannelResultPanel({ item }: { item: FullModelChannelResult }) {
+  const [selectedKey, setSelectedKey] = useState<string | undefined>(() => item.probes[0]?.key);
+  useEffect(() => {
+    setSelectedKey(item.probes[0]?.key);
+  }, [item.channel.id, item.probes]);
+  const selected = item.probes.find((probe) => probe.key === selectedKey) ?? item.probes[0];
+  return (
+    <Card key={item.channel.id} bordered={false} title={`${formatChannelDisplayName(item.channel)} · ${item.channel.model_name || '未配置模型'}`} extra={statusTag(item.status)}>
+      <Space direction="vertical" size={14} className="full-width">
+        <Alert type={item.status === 'pass' ? 'success' : item.status === 'failed' ? 'error' : 'warning'} showIcon message={item.summary} />
+        <Space wrap>
+          <Tag color="blue">{item.protocol_family}</Tag>
+          {item.labels.map((label) => <Tag key={label} color="orange">{label}</Tag>)}
+        </Space>
+        <div className="monitor-stat-grid">
+          <Card size="small"><Statistic title="总分" value={item.score} suffix="/100" /></Card>
+          <Card size="small"><Statistic title="通过/警告/失败" value={`${item.passed_probes}/${item.warning_probes}/${item.failed_probes}`} /></Card>
+          <Card size="small"><Statistic title="P95 延迟" value={ms(item.latency_ms.p95)} /></Card>
+          <Card size="small"><Statistic title="P95 TTFT" value={ms(item.ttft_ms.p95)} /></Card>
+          <Card size="small"><Statistic title="平均 TPOT" value={ms(item.tpot_ms.avg)} /></Card>
+          <Card size="small"><Statistic title="平均吞吐" value={num(item.tokens_per_second.avg, ' tok/s')} /></Card>
+        </div>
+        <div className="full-model-inspector">
+          <aside>
+            <Typography.Text strong>查看单条探针关键详情</Typography.Text>
+            <ProbeList probes={item.probes} selectedKey={selected?.key} onSelect={setSelectedKey} />
+          </aside>
+          <main>{selected ? <ProbeDetail channel={item} probe={selected} /> : <Alert type="info" showIcon message="暂无探针结果" />}</main>
+        </div>
+      </Space>
+    </Card>
+  );
+}
 
 export default function FullModelCheck() {
   const [form] = Form.useForm<FormValues>();
@@ -111,7 +282,7 @@ export default function FullModelCheck() {
         </div>
       </div>
 
-      <Alert showIcon type="info" message="运行说明" description="本检测只使用渠道管理里已配置的运行时凭据，不在结果里输出 API Key/Authorization。流式 TTFT 依赖上游真实流式响应；若中转把流式转成非流式，会被标记为协议/事件异常。" />
+      <Alert showIcon type="info" message="运行说明" description="本检测只使用渠道管理里已配置的运行时凭据，不在结果里输出 API Key/Authorization。检测完成后可在每个探针详情里看到关键结论、原因、命中证据、Usage、响应 ID、Hash 和每次运行详情。" />
 
       <Card title={<span className="card-title-with-icon"><ShieldCheck size={18} />检测配置</span>} bordered={false}>
         <Form
@@ -157,61 +328,13 @@ export default function FullModelCheck() {
             </Descriptions>
           </Card>
 
-          {result.channels.map((item) => (
-            <Card key={item.channel.id} bordered={false} title={`${formatChannelDisplayName(item.channel)} · ${item.channel.model_name || '未配置模型'}`} extra={statusTag(item.status)}>
-              <Space direction="vertical" size={14} className="full-width">
-                <Alert type={item.status === 'pass' ? 'success' : item.status === 'failed' ? 'error' : 'warning'} showIcon message={item.summary} />
-                <Space wrap>
-                  <Tag color="blue">{item.protocol_family}</Tag>
-                  {item.labels.map((label) => <Tag key={label} color="orange">{label}</Tag>)}
-                </Space>
-                <div className="monitor-stat-grid">
-                  <Card size="small"><Statistic title="总分" value={item.score} suffix="/100" /></Card>
-                  <Card size="small"><Statistic title="通过/警告/失败" value={`${item.passed_probes}/${item.warning_probes}/${item.failed_probes}`} /></Card>
-                  <Card size="small"><Statistic title="P95 延迟" value={ms(item.latency_ms.p95)} /></Card>
-                  <Card size="small"><Statistic title="P95 TTFT" value={ms(item.ttft_ms.p95)} /></Card>
-                  <Card size="small"><Statistic title="平均 TPOT" value={ms(item.tpot_ms.avg)} /></Card>
-                  <Card size="small"><Statistic title="平均吞吐" value={num(item.tokens_per_second.avg, ' tok/s')} /></Card>
-                </div>
-                <Descriptions size="small" bordered column={4}>
-                  <Descriptions.Item label="Latency avg/p50/p95">{ms(item.latency_ms.avg)} / {ms(item.latency_ms.p50)} / {ms(item.latency_ms.p95)}</Descriptions.Item>
-                  <Descriptions.Item label="TTFT avg/p50/p95">{ms(item.ttft_ms.avg)} / {ms(item.ttft_ms.p50)} / {ms(item.ttft_ms.p95)}</Descriptions.Item>
-                  <Descriptions.Item label="TPOT avg/p95">{ms(item.tpot_ms.avg)} / {ms(item.tpot_ms.p95)}</Descriptions.Item>
-                  <Descriptions.Item label="Token 输入/输出">{item.total_input_tokens} / {item.total_output_tokens}</Descriptions.Item>
-                </Descriptions>
-                <Table
-                  size="small"
-                  rowKey="key"
-                  columns={probeColumns}
-                  dataSource={item.probes}
-                  scroll={{ x: 1900 }}
-                  pagination={false}
-                  expandable={{
-                    expandedRowRender: (row) => (
-                      <Space direction="vertical" className="full-width">
-                        <Typography.Text type="secondary">Endpoint：{row.endpoint || '-'}</Typography.Text>
-                        <pre className="json-block">{prettyJson(row.raw_evidence)}</pre>
-                      </Space>
-                    ),
-                  }}
-                />
-                <Collapse
-                  ghost
-                  items={[
-                    {
-                      key: 'raw',
-                      label: '按分类查看探针',
-                      children: ['protocol', 'stream', 'parameters', 'tools', 'thinking', 'vision', 'error'].map((category) => {
-                        const rows = item.probes.filter((probe) => probe.category === category);
-                        if (!rows.length) return null;
-                        return <Card key={category} size="small" title={`${category}（${rows.length}）`}><Table size="small" rowKey="key" pagination={false} dataSource={rows} columns={probeColumns.slice(0, 10)} /></Card>;
-                      }),
-                    },
-                  ]}
-                />
-              </Space>
-            </Card>
-          ))}
+          <Tabs
+            items={result.channels.map((item) => ({
+              key: item.channel.id,
+              label: <span>{formatChannelDisplayName(item.channel)} {statusTag(item.status)}</span>,
+              children: <ChannelResultPanel item={item} />,
+            }))}
+          />
         </Space>
       ) : null}
     </Space>

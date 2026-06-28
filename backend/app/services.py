@@ -11068,6 +11068,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
             "prompt": "请只回复 OK。",
             "params": {"max_tokens": 32, "temperature": 0},
             "rules": {"min_length": 1},
+            "probe_target": "验证最基础的模型响应是否返回可解析内容。",
+            "expected": "HTTP 200，响应中存在文本内容、模型/ID/usage 等协议字段尽量完整。",
         },
         {
             "key": "usage_metadata",
@@ -11076,6 +11078,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
             "prompt": "用一句话解释 token usage 的含义。",
             "params": {"max_tokens": 96, "temperature": 0},
             "rules": {"min_length": 3},
+            "probe_target": "验证 token usage 元数据是否透传。",
+            "expected": "响应包含 input/output token 统计；缺失会影响成本、缓存和吞吐判断。",
         },
     ]
     if data.include_stream:
@@ -11087,6 +11091,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                 "prompt": "请用三点简短说明为什么首 token 延迟会影响用户体验。",
                 "params": {"max_tokens": 180, "temperature": 0, "stream": True, "stream_options": {"include_usage": True}},
                 "rules": {"stream_required": True, "min_length": 10},
+                "probe_target": "验证流式响应是否可用，并采集 TTFT、事件序列和吞吐。",
+                "expected": "流式事件中出现首个有效 chunk，能计算 TTFT；Anthropic 应保留 message_start/content_block_delta/message_stop 等事件。",
             }
         )
     if data.include_params:
@@ -11099,6 +11105,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "prompt": "从 1 数到 100，每个数字用逗号分隔。",
                     "params": {"max_tokens": 8, "temperature": 0},
                     "rules": {"expected_stop_reason": "max_tokens", "max_output_chars": 120},
+                    "probe_target": "验证 max_tokens 是否被上游真实执行，而不是被中转改写或忽略。",
+                    "expected": "输出被限制在较短范围内，stop_reason/finish_reason 指向长度截断或内容明显被截断。",
                 },
                 {
                     "key": "stop_sequences",
@@ -11107,6 +11115,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "prompt": "请输出：alpha STOP_TOKEN beta。",
                     "params": {"max_tokens": 80, "temperature": 0, "stop_sequences": ["STOP_TOKEN"]},
                     "rules": {"stop_sequence": "STOP_TOKEN"},
+                    "probe_target": "验证 stop_sequences/stop 参数是否被透传和执行。",
+                    "expected": "响应不应泄漏 STOP_TOKEN 后面的内容，停止原因应体现 stop sequence。",
                 },
                 {
                     "key": "temperature_determinism",
@@ -11115,6 +11125,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "prompt": "只输出 JSON：{\"status\":\"ok\",\"value\":7}",
                     "params": {"max_tokens": 80, "temperature": 0},
                     "rules": {"json_required": True, "json_required_keys": ["status", "value"]},
+                    "probe_target": "验证低温确定性和结构化输出能力。",
+                    "expected": "低温下稳定输出包含 status/value 的 JSON 对象。",
                 },
             ]
         )
@@ -11132,6 +11144,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                         "tools": [{"type": "function", "function": {"name": "record_weather", "description": "Record weather lookup arguments.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "unit": {"type": "string"}}, "required": ["city", "unit"]}}}],
                     },
                     "rules": {"min_length": 0},
+                    "probe_target": "验证 OpenAI-compatible 工具调用字段是否保留。",
+                    "expected": "响应应出现 function/tool_calls 结构、函数名和参数，而不是普通文本绕过。",
                 }
             )
         elif is_gemini:
@@ -11147,6 +11161,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                         "tools": [{"functionDeclarations": [{"name": "record_weather", "description": "Record weather lookup arguments.", "parameters": {"type": "OBJECT", "properties": {"city": {"type": "STRING"}, "unit": {"type": "STRING"}}, "required": ["city", "unit"]}}]}],
                     },
                     "rules": {"tool_required": True, "tool_name": "record_weather"},
+                    "probe_target": "验证 Gemini functionCall 工具协议形态。",
+                    "expected": "响应应出现 functionCall/工具调用结构，函数名为 record_weather。",
                 }
             )
         elif is_anthropic:
@@ -11162,6 +11178,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                         "tools": [{"name": "record_weather", "description": "Record weather lookup arguments.", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}, "unit": {"type": "string"}}, "required": ["city", "unit"]}}],
                     },
                     "rules": {"tool_required": True, "tool_name": "record_weather"},
+                    "probe_target": "验证 Claude tool_use 工具协议形态。",
+                    "expected": "响应应出现 tool_use 内容块，工具名为 record_weather，参数可解析。",
                 }
             )
     if data.include_thinking and is_anthropic:
@@ -11173,6 +11191,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                 "prompt": "请一步内判断 17+25 是否等于 42，最后只给结论。",
                 "params": {"max_tokens": 1200, "thinking": {"type": "enabled", "budget_tokens": 800}},
                 "rules": {"min_length": 1},
+                "probe_target": "验证 Claude extended thinking / 推理内容块是否出现。",
+                "expected": "响应内容块中应出现 thinking，或至少保留 thinking/usage/签名等推理相关字段。",
             }
         )
     if data.include_vision:
@@ -11184,6 +11204,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                 "prompt": "这是一项多模态输入冒烟检测。如果收到图片，请简述图片；否则说明未收到图片。",
                 "params": {"max_tokens": 120, "temperature": 0},
                 "rules": {"min_length": 1},
+                "probe_target": "验证图片输入链路是否可用。",
+                "expected": "模型应承认收到图片或明确描述输入状态；失败时应给出可诊断错误。",
             }
         )
     if data.include_error_probe:
@@ -11195,6 +11217,8 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                 "prompt": "invalid request probe",
                 "params": {"max_tokens": 16},
                 "rules": {"invalid_request_probe": True},
+                "probe_target": "验证错误包裹和参数校验是否来自上游协议，而不是黑盒吞错。",
+                "expected": "无害非法请求应返回可识别的官方/兼容错误 schema，并保留 HTTP 状态和 request id。",
             }
         )
     return specs
@@ -11231,11 +11255,112 @@ def _full_model_probe_status(normalized: dict[str, Any], score: float, labels: l
     return "fail"
 
 
+def _full_model_content_types(normalized: dict[str, Any]) -> list[str]:
+    blocks = normalized.get("content_blocks") if isinstance(normalized.get("content_blocks"), list) else []
+    types = sorted({str(block.get("type")) for block in blocks if isinstance(block, dict) and block.get("type")})
+    if normalized.get("tool_calls") and "tool_use" not in types:
+        types.append("tool_use")
+    return types
+
+
+def _full_model_response_hash(normalized: dict[str, Any]) -> str | None:
+    source = normalized.get("content_text") or normalized.get("raw_response")
+    if not source:
+        return None
+    try:
+        data = json.dumps(source, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        data = str(source)
+    return hashlib.sha256(data.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _full_model_detection_type(category: str) -> str:
+    return {
+        "protocol": "协议 / 响应形态",
+        "stream": "流式协议 / 性能",
+        "parameters": "参数兼容",
+        "tools": "工具调用",
+        "thinking": "Thinking 能力",
+        "vision": "多模态能力",
+        "error": "错误包裹 / 上游校验",
+    }.get(category, category)
+
+
+def _full_model_observed_summary(normalized: dict[str, Any], labels: list[str]) -> str:
+    if normalized.get("error"):
+        return f"请求失败：{_full_model_error_excerpt(normalized) or normalized.get('error')}"
+    parts: list[str] = []
+    content_types = _full_model_content_types(normalized)
+    if content_types:
+        parts.append("内容块：" + ", ".join(content_types))
+    if normalized.get("provider_message_id"):
+        parts.append(f"响应 ID：{normalized.get('provider_message_id')}")
+    if normalized.get("stop_reason"):
+        parts.append(f"停止原因：{normalized.get('stop_reason')}")
+    if normalized.get("usage"):
+        parts.append("Usage 已返回")
+    else:
+        parts.append("Usage 缺失")
+    if normalized.get("stream_events"):
+        parts.append(f"流式事件 {len(normalized.get('stream_events') or [])} 个")
+    if labels:
+        parts.append("标签：" + ", ".join(labels[:4]))
+    return "；".join(parts) or "已收到响应，但未提取到关键字段"
+
+
+def _full_model_conclusion(status: str, spec: dict[str, Any], normalized: dict[str, Any], labels: list[str]) -> str:
+    key = str(spec.get("key") or "")
+    if status == "pass":
+        if key == "thinking_shape" and "thinking" in _full_model_content_types(normalized):
+            return "观测到：thinking 内容块"
+        if key in {"tool_use_shape", "tool_call_shape", "gemini_function_call_shape"}:
+            return "观测到：工具调用结构"
+        if key == "stream_ttft":
+            return "观测到：流式事件与 TTFT"
+        if key == "usage_metadata":
+            return "观测到：Usage 元数据"
+        return "观测到：响应形态符合预期"
+    if normalized.get("error"):
+        return "未通过：上游请求失败"
+    if labels:
+        return "未通过：" + ", ".join(labels[:3])
+    return "需要复核：证据不足或部分字段缺失"
+
+
+def _full_model_reason(status: str, spec: dict[str, Any], normalized: dict[str, Any], labels: list[str]) -> str:
+    if status == "pass":
+        return _full_model_observed_summary(normalized, labels)
+    if normalized.get("error"):
+        return _full_model_error_excerpt(normalized) or "请求失败但未返回详细错误"
+    return _full_model_observed_summary(normalized, labels)
+
+
+def _full_model_structured_summary(normalized: dict[str, Any]) -> dict[str, Any]:
+    usage = normalized.get("usage") if isinstance(normalized.get("usage"), dict) else {}
+    return redact_secrets({
+        "response_model": normalized.get("provider_model"),
+        "response_id": normalized.get("provider_message_id"),
+        "stop_reason": normalized.get("stop_reason"),
+        "stop_sequence": normalized.get("stop_sequence"),
+        "content_types": _full_model_content_types(normalized),
+        "tool_call_count": len(normalized.get("tool_calls") or []),
+        "stream_events": normalized.get("stream_events") or [],
+        "usage": usage,
+        "request_mode": normalized.get("request_mode"),
+        "request_attempted": normalized.get("request_attempted"),
+        "protocol_profile": normalized.get("protocol_profile"),
+        "normalization_notes": normalized.get("request_normalization_notes") or [],
+    })
+
+
 def _full_model_probe_read(spec: dict[str, Any], channel: Channel, protocol_family: str, normalized: dict[str, Any], score: float, labels: list[str]) -> dict[str, Any]:
     raw_response = normalized.get("raw_response") if isinstance(normalized.get("raw_response"), dict) else {}
     text = str(normalized.get("content_text") or "")
     stream_events = [str(item) for item in normalized.get("stream_events") or []]
     usage = normalized.get("usage") if isinstance(normalized.get("usage"), dict) else None
+    content_types = _full_model_content_types(normalized)
+    status = _full_model_probe_status(normalized, score, labels)
+    response_hash = _full_model_response_hash(normalized)
     raw_evidence = {
         "provider_model": normalized.get("provider_model"),
         "stop_reason": normalized.get("stop_reason"),
@@ -11247,15 +11372,25 @@ def _full_model_probe_read(spec: dict[str, Any], channel: Channel, protocol_fami
         "raw_response_shape": _json_shape_summary(raw_response),
         "tool_call_count": len(normalized.get("tool_calls") or []),
         "thinking_block_count": sum(1 for block in normalized.get("content_blocks") or [] if isinstance(block, dict) and block.get("type") == "thinking"),
+        "content_types": content_types,
+        "response_hash": response_hash,
     }
     return {
         "key": spec["key"],
+        "base_key": spec.get("base_key") or spec["key"].split("#", 1)[0],
+        "attempt_index": int(spec.get("attempt_index") or 1),
         "title": spec["title"],
         "category": spec["category"],
         "protocol_family": protocol_family,
-        "status": _full_model_probe_status(normalized, score, labels),
+        "status": status,
         "score": round(float(score), 2),
         "labels": labels,
+        "conclusion": _full_model_conclusion(status, spec, normalized, labels),
+        "reason": _full_model_reason(status, spec, normalized, labels),
+        "detection_type": _full_model_detection_type(str(spec.get("category") or "")),
+        "probe_target": spec.get("probe_target"),
+        "expected": spec.get("expected"),
+        "observed": _full_model_observed_summary(normalized, labels),
         "endpoint": normalized.get("provider_endpoint"),
         "http_status": normalized.get("status_code"),
         "request_id": request_id_from_normalized(normalized),
@@ -11269,9 +11404,13 @@ def _full_model_probe_read(spec: dict[str, Any], channel: Channel, protocol_fami
         "stream_event_count": len(stream_events),
         "stream_events": stream_events[:20],
         "usage_present": bool(usage),
+        "response_hash": response_hash,
+        "content_types": content_types,
         "error_type": normalized.get("error_type"),
         "error_excerpt": _full_model_error_excerpt(normalized),
         "excerpt": redact_text(text)[:1000] if text else None,
+        "request_template": str(spec.get("key") or ""),
+        "structured_summary": _full_model_structured_summary(normalized),
         "raw_evidence": redact_secrets(raw_evidence),
     }
 
@@ -11370,6 +11509,8 @@ async def create_full_model_check(db: Session, data: FullModelCheckCreate) -> di
                     )
                     score, labels = 0.0, ["request_failed"]
                 row_spec = dict(spec)
+                row_spec["base_key"] = spec["key"]
+                row_spec["attempt_index"] = attempt
                 if data.repeat_count > 1:
                     row_spec["key"] = f"{spec['key']}#{attempt}"
                     row_spec["title"] = f"{spec['title']}（第 {attempt} 次）"

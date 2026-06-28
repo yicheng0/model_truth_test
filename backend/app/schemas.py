@@ -222,12 +222,20 @@ class FullModelCheckMetricSummary(BaseModel):
 
 class FullModelCheckProbeRead(BaseModel):
     key: str
+    base_key: str | None = None
+    attempt_index: int = 1
     title: str
     category: str
     protocol_family: str
     status: str
     score: float
     labels: list[str] = Field(default_factory=list)
+    conclusion: str | None = None
+    reason: str | None = None
+    detection_type: str | None = None
+    probe_target: str | None = None
+    expected: str | None = None
+    observed: str | None = None
     endpoint: str | None = None
     http_status: int | None = None
     request_id: str | None = None
@@ -241,9 +249,13 @@ class FullModelCheckProbeRead(BaseModel):
     stream_event_count: int = 0
     stream_events: list[str] = Field(default_factory=list)
     usage_present: bool = False
+    response_hash: str | None = None
+    content_types: list[str] = Field(default_factory=list)
     error_type: str | None = None
     error_excerpt: str | None = None
     excerpt: str | None = None
+    request_template: str | None = None
+    structured_summary: dict[str, Any] = Field(default_factory=dict)
     raw_evidence: dict[str, Any] = Field(default_factory=dict)
 
 
