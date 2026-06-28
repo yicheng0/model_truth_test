@@ -23,6 +23,8 @@ import type {
   Comparison,
   FeishuBroadcastSetting,
   FeishuBroadcastUpdate,
+  GeminiResourceCheckRequest,
+  GeminiResourceCheckResult,
   ModelRequestTestResult,
   NewApiSyncRequest,
   NewApiSyncResult,
@@ -183,6 +185,8 @@ export const api = {
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
   openAIResourceCheck: (payload: OpenAIResourceCheckRequest) =>
     request<OpenAIResourceCheckResult>('/api/openai-resource-check', { method: 'POST', body: JSON.stringify(payload) }),
+  geminiResourceCheck: (payload: GeminiResourceCheckRequest) =>
+    request<GeminiResourceCheckResult>('/api/gemini-resource-check', { method: 'POST', body: JSON.stringify(payload) }),
   cacheHitRateTest: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; cache_ttl?: '5m' | '1h'; run_name?: string | null }) =>
     request<CacheHitRateTestResult>(`/api/channels/${channelId}/cache-hit-rate-test`, { method: 'POST', body: JSON.stringify(payload) }),
   startCacheHitRateTestJob: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; cache_ttl?: '5m' | '1h'; run_name?: string | null }) =>

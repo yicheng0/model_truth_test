@@ -489,6 +489,59 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('sends Gemini resource checks through the transient endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          classification: 'official_gemini_direct_likely',
+          confidence_score: 95,
+          directness: 'official_google_direct',
+          upstream_assessment: 'official_upstream_likely',
+          upstream_score: 90,
+          summary: 'ok',
+          labels: [],
+          base_url: 'https://generativelanguage.googleapis.com/v1beta',
+          normalized_base_url: 'https://generativelanguage.googleapis.com/v1beta',
+          host: 'generativelanguage.googleapis.com',
+          models_endpoint: 'https://generativelanguage.googleapis.com/v1beta/models',
+          generate_endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+          stream_endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent',
+          embedding_endpoint: null,
+          selected_model: 'gemini-2.0-flash',
+          selected_embedding_model: null,
+          request_id: 'goog_req_123',
+          latency_ms: 123,
+          evidence: [],
+          raw_evidence: {},
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.geminiResourceCheck({
+      base_url: 'https://generativelanguage.googleapis.com/v1beta',
+      api_key: 'gemini-key',
+      model: 'gemini-2.0-flash',
+      include_stream_probe: true,
+      include_embedding_probe: false,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/gemini-resource-check',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          base_url: 'https://generativelanguage.googleapis.com/v1beta',
+          api_key: 'gemini-key',
+          model: 'gemini-2.0-flash',
+          include_stream_probe: true,
+          include_embedding_probe: false,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('sends ClaudeCode tests through the isolated channel endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

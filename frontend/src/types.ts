@@ -274,6 +274,39 @@ export type OpenAIResourceCheckResult = {
   raw_evidence: Record<string, unknown>;
 };
 
+export type GeminiResourceCheckRequest = {
+  base_url?: string | null;
+  api_key: string;
+  model?: string | null;
+  include_stream_probe?: boolean;
+  include_embedding_probe?: boolean;
+};
+
+export type GeminiResourceEvidenceItem = OpenAIResourceEvidenceItem;
+
+export type GeminiResourceCheckResult = {
+  classification: 'official_gemini_direct_likely' | 'gemini_compatible_proxy' | 'suspicious_proxy_or_rewrite' | 'invalid_or_unverified' | string;
+  confidence_score: number;
+  directness?: 'official_google_direct' | 'relay_or_proxy' | string;
+  upstream_assessment?: 'official_upstream_likely' | 'gemini_compatible_unverified' | 'suspicious_rewrite' | 'invalid_or_unverified' | string;
+  upstream_score?: number;
+  summary: string;
+  labels: string[];
+  base_url: string;
+  normalized_base_url: string;
+  host?: string | null;
+  models_endpoint: string;
+  generate_endpoint?: string | null;
+  stream_endpoint?: string | null;
+  embedding_endpoint?: string | null;
+  selected_model?: string | null;
+  selected_embedding_model?: string | null;
+  request_id?: string | null;
+  latency_ms?: number | null;
+  evidence: GeminiResourceEvidenceItem[];
+  raw_evidence: Record<string, unknown>;
+};
+
 export type CacheHitRateAttempt = {
   attempt_index: number;
   result: Result;

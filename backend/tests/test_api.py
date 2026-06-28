@@ -4019,6 +4019,145 @@ def test_openai_resource_check_non_json_response_is_unverified(monkeypatch) -> N
     assert payload["upstream_assessment"] == "invalid_or_unverified"
     assert "sk-non-json-secret" not in blob
 
+
+def test_gemini_resource_check_classifies_official_endpoint(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            assert url == "https://generativelanguage.googleapis.com/v1beta/models?key=gemini-official-secret"
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"name": "models/gemini-2.0-flash", "baseModelId": "gemini-2.0-flash", "supportedGenerationMethods": ["generateContent"]},
+                        {"name": "models/text-embedding-004", "baseModelId": "text-embedding-004", "supportedGenerationMethods": ["embedContent"]},
+                    ]
+                },
+                headers={"x-goog-request-id": "goog_req_123", "content-type": "application/json"},
+                request=request,
+            )
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith(":embedContent?key=gemini-official-secret"):
+                return httpx.Response(200, json={"embedding": {"values": [0.1, 0.2]}, "usageMetadata": {"promptTokenCount": 1}}, request=request)
+            if url.endswith(":streamGenerateContent?key=gemini-official-secret"):
+                return httpx.Response(200, json=[{"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 1}, "modelVersion": "gemini-2.0-flash"}], request=request)
+            if json.get("contents") == []:
+                return httpx.Response(400, json={"error": {"code": 400, "message": "contents is required", "status": "INVALID_ARGUMENT"}}, request=request)
+            return httpx.Response(
+                200,
+                json={"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP", "safetyRatings": []}], "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1}, "modelVersion": "gemini-2.0-flash", "responseId": "resp_123"},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/gemini-resource-check", json={"api_key": "gemini-official-secret"})
+
+    payload = response.json()
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 200
+    assert payload["classification"] == "official_gemini_direct_likely"
+    assert payload["directness"] == "official_google_direct"
+    assert payload["upstream_assessment"] == "official_upstream_likely"
+    assert payload["selected_model"] == "gemini-2.0-flash"
+    assert payload["selected_embedding_model"] == "text-embedding-004"
+    assert payload["request_id"] == "goog_req_123"
+    assert "gemini-official-secret" not in blob
+
+
+def test_gemini_resource_check_classifies_relay_with_official_like_upstream(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"models": [{"name": "models/gemini-2.0-flash", "supportedGenerationMethods": ["generateContent"]}]}, request=request)
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            calls.append((url, json))
+            request = httpx.Request("POST", url)
+            if json.get("contents") == []:
+                return httpx.Response(400, json={"error": {"code": 400, "message": "bad request", "status": "INVALID_ARGUMENT"}}, request=request)
+            return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 4}, "modelVersion": "relay-gemini", "responseId": "resp_1"}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/gemini-resource-check", json={"base_url": "https://relay.example/v1beta", "api_key": "gemini-relay-secret", "include_embedding_probe": False})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["classification"] == "gemini_compatible_proxy"
+    assert payload["directness"] == "relay_or_proxy"
+    assert payload["upstream_assessment"] == "official_upstream_likely"
+    assert "non_official_host" in payload["labels"]
+    assert any(url.endswith(":generateContent?key=gemini-relay-secret") for url, _body in calls)
+    assert "gemini-relay-secret" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_gemini_resource_check_invalid_auth_is_unverified_and_redacted(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                403,
+                json={"error": {"code": 403, "message": "API key not valid: gemini-invalid-secret", "status": "PERMISSION_DENIED"}},
+                request=request,
+            )
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                403,
+                json={"error": {"code": 403, "message": "API key not valid: gemini-invalid-secret", "status": "PERMISSION_DENIED"}},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/api/gemini-resource-check", json={"api_key": "gemini-invalid-secret"})
+
+    payload = response.json()
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 200
+    assert payload["classification"] == "invalid_or_unverified"
+    assert payload["upstream_assessment"] == "invalid_or_unverified"
+    assert "models_http_error" in payload["labels"]
+    assert "gemini-invalid-secret" not in blob
+    assert "[REDACTED]" in blob
+
+
 def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypatch) -> None:
     reset_database()
     calls: list[dict] = []

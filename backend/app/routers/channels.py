@@ -17,6 +17,8 @@ from ..schemas import (
     ChannelCreate,
     ChannelRead,
     ChannelUpdate,
+    GeminiResourceCheckCreate,
+    GeminiResourceCheckRead,
     ModelRequestTestCreate,
     ModelRequestTestRead,
     OpenAIResourceCheckCreate,
@@ -29,6 +31,7 @@ from ..services import (
     _clean_auth_config,
     create_cache_hit_rate_test,
     create_channel,
+    create_gemini_resource_check,
     create_model_request_test,
     create_openai_resource_check,
     create_signature_interop_test,
@@ -358,6 +361,17 @@ async def openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[str, ob
     except Exception as exc:
         logger.exception("OpenAI resource check failed")
         raise HTTPException(status_code=502, detail="OpenAI resource check failed") from exc
+
+
+@router.post("/api/gemini-resource-check", response_model=GeminiResourceCheckRead)
+async def gemini_resource_check(data: GeminiResourceCheckCreate) -> dict[str, object]:
+    try:
+        return await create_gemini_resource_check(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Gemini resource check failed")
+        raise HTTPException(status_code=502, detail="Gemini resource check failed") from exc
 
 
 @router.post("/api/channels/{channel_id}/cache-hit-rate-test", response_model=CacheHitRateTestRead)

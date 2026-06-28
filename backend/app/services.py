@@ -42,6 +42,7 @@ from .schemas import (
     EvalScopeJsonlImportCreate,
     FeishuBroadcastSettingUpdate,
     CacheHitRateTestCreate,
+    GeminiResourceCheckCreate,
     ModelRequestTestCreate,
     OpenAIResourceCheckCreate,
     ReportRead,
@@ -2431,6 +2432,579 @@ def _openai_collect_response(raw_evidence: dict[str, Any], key: str, response: h
     )
     raw_evidence[key] = safe
     return safe
+
+
+GEMINI_OFFICIAL_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_MODEL_PREFERENCE = ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")
+GEMINI_EMBEDDING_MODEL_PREFERENCE = ("text-embedding-004", "embedding-001")
+GEMINI_SAFE_RESPONSE_HEADERS = (
+    "x-request-id",
+    "request-id",
+    "x-goog-request-id",
+    "x-google-request-id",
+    "x-cloud-trace-context",
+    "content-type",
+    "server",
+    "cf-ray",
+)
+GEMINI_MIDDLEWARE_TRACE_KEYS = (*OPENAI_MIDDLEWARE_TRACE_KEYS, "google_error", "gemini_error")
+GEMINI_ERROR_STATUSES = {
+    "INVALID_ARGUMENT",
+    "UNAUTHENTICATED",
+    "PERMISSION_DENIED",
+    "NOT_FOUND",
+    "RESOURCE_EXHAUSTED",
+    "FAILED_PRECONDITION",
+    "INTERNAL",
+    "UNAVAILABLE",
+}
+
+
+def _normalize_gemini_resource_base_url(value: str | None) -> str:
+    base_url = (value or GEMINI_OFFICIAL_BASE_URL).strip()
+    if not base_url:
+        base_url = GEMINI_OFFICIAL_BASE_URL
+    if "://" not in base_url:
+        base_url = f"https://{base_url}"
+    base_url = base_url.rstrip("/")
+    upload_prefix = "/upload"
+    if "/upload/" in base_url:
+        base_url = base_url.replace("/upload/", "/", 1)
+    for suffix in (":generateContent", ":streamGenerateContent", ":embedContent", "/models"):
+        if base_url.endswith(suffix):
+            base_url = base_url[: -len(suffix)]
+            break
+    return base_url.rstrip("/")
+
+
+def _safe_gemini_response_headers(headers: Any) -> dict[str, str]:
+    output: dict[str, str] = {}
+    for name in GEMINI_SAFE_RESPONSE_HEADERS:
+        value = headers.get(name) if hasattr(headers, "get") else None
+        if value:
+            output[name] = str(value)
+    return output
+
+
+def _gemini_evidence(group: str, key: str, status: str, detail: str, value: Any | None = None) -> dict[str, Any]:
+    return {"group": group, "key": key, "status": status, "detail": detail, "value": value}
+
+
+def _redact_literal_secret(value: Any, secret: str | None) -> Any:
+    if not secret:
+        return value
+    if isinstance(value, dict):
+        return {key: _redact_literal_secret(item, secret) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_literal_secret(item, secret) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_literal_secret(item, secret) for item in value]
+    if isinstance(value, str):
+        return value.replace(secret, "[REDACTED]")
+    return value
+
+
+def _gemini_url(base_url: str, path: str, api_key: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}?key={api_key}"
+
+
+def _gemini_safe_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _gemini_model_name_for_path(model: str) -> str:
+    model = str(model or "").strip()
+    return model if model.startswith("models/") else f"models/{model}"
+
+
+def _gemini_model_id_from_name(name: str) -> str:
+    text = str(name or "").strip()
+    return text.split("/", 1)[1] if text.startswith("models/") else text
+
+
+def _gemini_json_shape_summary(payload: Any) -> dict[str, Any]:
+    summary = _json_shape_summary(payload)
+    if not isinstance(payload, dict):
+        return summary
+    models = payload.get("models")
+    if isinstance(models, list):
+        summary["models_count"] = len(models)
+        if models and isinstance(models[0], dict):
+            summary["first_model_keys"] = sorted(str(key) for key in models[0].keys())[:20]
+            summary["first_model_name"] = models[0].get("name")
+            methods = models[0].get("supportedGenerationMethods")
+            if isinstance(methods, list):
+                summary["first_model_methods"] = methods[:10]
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        summary["candidates_count"] = len(candidates)
+        if candidates and isinstance(candidates[0], dict):
+            first = candidates[0]
+            summary["first_candidate_keys"] = sorted(str(key) for key in first.keys())[:20]
+            summary["first_finish_reason"] = first.get("finishReason")
+            parts = ((first.get("content") or {}).get("parts") if isinstance(first.get("content"), dict) else None)
+            if isinstance(parts, list):
+                summary["first_parts_count"] = len(parts)
+                if parts and isinstance(parts[0], dict):
+                    summary["first_part_keys"] = sorted(str(key) for key in parts[0].keys())[:20]
+    usage = payload.get("usageMetadata")
+    if isinstance(usage, dict):
+        summary["usage_keys"] = sorted(str(key) for key in usage.keys())[:20]
+    embedding = payload.get("embedding")
+    if isinstance(embedding, dict):
+        values = embedding.get("values")
+        if isinstance(values, list):
+            summary["embedding_value_count"] = len(values)
+    for wrapper_key in GEMINI_MIDDLEWARE_TRACE_KEYS:
+        if wrapper_key in payload:
+            summary[wrapper_key] = True
+    return summary
+
+
+def _gemini_collect_response(raw_evidence: dict[str, Any], key: str, response: httpx.Response, latency_ms: int, payload: Any) -> dict[str, Any]:
+    error_detail = None
+    if response.status_code >= 400:
+        error_detail = redact_text(_response_error_detail(response))
+        payload_error = _gemini_payload_error(payload)
+        if isinstance(payload_error.get("message"), str):
+            payload_error["message"] = redact_text(str(payload_error["message"]))
+    safe = redact_secrets(
+        {
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "headers": _safe_gemini_response_headers(response.headers),
+            "shape": _gemini_json_shape_summary(payload),
+            "error_detail": error_detail,
+        }
+    )
+    raw_evidence[key] = safe
+    return safe
+
+
+def _gemini_payload_error(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    error = payload.get("error")
+    if isinstance(error, dict):
+        return error
+    for wrapper_key in GEMINI_MIDDLEWARE_TRACE_KEYS:
+        wrapper = payload.get(wrapper_key)
+        if isinstance(wrapper, dict):
+            nested = wrapper.get("error")
+            if isinstance(nested, dict):
+                return nested
+            return wrapper
+    return {}
+
+
+def _gemini_error_looks_official(payload: Any) -> bool:
+    error = _gemini_payload_error(payload)
+    if not error:
+        return False
+    code = error.get("code")
+    status = str(error.get("status") or "")
+    has_message = isinstance(error.get("message"), str) and bool(str(error.get("message")).strip())
+    return has_message and (isinstance(code, int) or status in GEMINI_ERROR_STATUSES)
+
+
+def _gemini_has_middleware_trace(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return any(key in payload for key in GEMINI_MIDDLEWARE_TRACE_KEYS)
+
+
+def _gemini_models_from_payload(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+    return [item for item in models if isinstance(item, dict)]
+
+
+def _gemini_supported_methods(model: dict[str, Any]) -> set[str]:
+    methods = model.get("supportedGenerationMethods")
+    if not isinstance(methods, list):
+        return set()
+    return {str(item) for item in methods}
+
+
+def _choose_gemini_probe_model(requested: str | None, models: list[dict[str, Any]], method: str = "generateContent") -> tuple[str | None, str]:
+    requested = _gemini_model_id_from_name((requested or "").strip())
+    available: list[str] = []
+    for model in models:
+        name = _gemini_model_id_from_name(str(model.get("name") or model.get("baseModelId") or ""))
+        if not name:
+            continue
+        methods = _gemini_supported_methods(model)
+        if not methods or method in methods:
+            available.append(name)
+    available = sorted(dict.fromkeys(available))
+    if requested and (not available or requested in available):
+        return requested, "requested"
+    preferences = GEMINI_EMBEDDING_MODEL_PREFERENCE if method == "embedContent" else GEMINI_MODEL_PREFERENCE
+    for preferred in preferences:
+        if preferred in available:
+            return preferred, "preferred"
+    if method == "embedContent":
+        embedding_models = [model for model in available if "embedding" in model.lower()]
+        if embedding_models:
+            return embedding_models[0], "first_embedding"
+    gemini_models = [model for model in available if model.startswith("gemini-")]
+    if gemini_models:
+        return gemini_models[0], "first_gemini"
+    if available:
+        return available[0], "first_available"
+    return None, "none"
+
+
+def _gemini_content_text(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    texts: list[str] = []
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return ""
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        parts = content.get("parts") if isinstance(content, dict) else None
+        if not isinstance(parts, list):
+            continue
+        for part in parts:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                texts.append(part["text"])
+    return "".join(texts)
+
+
+def _gemini_generate_ok(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return False
+    first = candidates[0]
+    if not isinstance(first, dict):
+        return False
+    content = first.get("content")
+    parts = content.get("parts") if isinstance(content, dict) else None
+    return isinstance(parts, list) and any(isinstance(part, dict) and ("text" in part or "functionCall" in part) for part in parts)
+
+
+def _gemini_embedding_ok(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    embedding = payload.get("embedding")
+    values = embedding.get("values") if isinstance(embedding, dict) else None
+    return isinstance(values, list) and len(values) > 0 and all(isinstance(item, int | float) and not isinstance(item, bool) for item in values[:10])
+
+
+def _gemini_stream_ok(payload: Any) -> bool:
+    if isinstance(payload, list):
+        return any(_gemini_generate_ok(item) for item in payload)
+    if isinstance(payload, dict):
+        return _gemini_generate_ok(payload)
+    return False
+
+
+async def create_gemini_resource_check(data: GeminiResourceCheckCreate) -> dict[str, Any]:
+    base_url = _normalize_gemini_resource_base_url(data.base_url)
+    parsed = httpx.URL(base_url)
+    host = parsed.host
+    labels: set[str] = set()
+    evidence: list[dict[str, Any]] = []
+    raw_evidence: dict[str, Any] = {
+        "base_url": base_url,
+        "official_reference_base_url": GEMINI_OFFICIAL_BASE_URL,
+        "docs": {
+            "generate_content": "https://ai.google.dev/api/generate-content",
+            "models": "https://ai.google.dev/api/models",
+            "embeddings": "https://ai.google.dev/api/embeddings",
+        },
+    }
+
+    directness = "official_google_direct" if parsed.scheme == "https" and host == "generativelanguage.googleapis.com" else "relay_or_proxy"
+    if parsed.scheme == "https":
+        evidence.append(_gemini_evidence("Endpoint", "scheme", "ok", "使用 HTTPS 连接。", parsed.scheme))
+    else:
+        labels.add("non_https_endpoint")
+        evidence.append(_gemini_evidence("Endpoint", "scheme", "fail", "官方和可靠中转都应使用 HTTPS。", parsed.scheme))
+    if directness == "official_google_direct":
+        evidence.append(_gemini_evidence("Endpoint", "host", "ok", "目标 host 为 generativelanguage.googleapis.com，连接形态为 Google Gemini API 直连。", host))
+    else:
+        labels.add("non_official_host")
+        evidence.append(_gemini_evidence("Endpoint", "host", "info", "目标 host 不是 generativelanguage.googleapis.com，本次按中转/代理资源评估上游一致性。", host))
+
+    headers = {"content-type": "application/json"}
+    api_key = data.api_key.strip()
+    models_url = _gemini_url(base_url, "models", api_key)
+    models_safe_url = _gemini_safe_url(base_url, "models")
+    raw_evidence.update({"models_endpoint": models_safe_url})
+
+    request_id: str | None = None
+    total_latency_ms = 0
+    models_ok = False
+    generate_ok = False
+    stream_ok: bool | None = None
+    embedding_ok: bool | None = None
+    validation_error_ok = False
+    selected_model: str | None = None
+    selected_embedding_model: str | None = None
+    models: list[dict[str, Any]] = []
+
+    timeout = httpx.Timeout(connect=10, read=30, write=10, pool=10)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            started = time.perf_counter()
+            models_response = await client.get(models_url, headers=headers)
+            models_latency_ms = int((time.perf_counter() - started) * 1000)
+            total_latency_ms += models_latency_ms
+            request_id = request_id_from_headers(models_response.headers)
+            try:
+                models_payload: Any = models_response.json()
+            except ValueError:
+                models_payload = {"_non_json_excerpt": models_response.text[:500]}
+            models_safe = _gemini_collect_response(raw_evidence, "models", models_response, models_latency_ms, models_payload)
+
+            if models_response.status_code == 200:
+                evidence.append(_gemini_evidence("Models", "models_http_status", "ok", "GET /models 返回 200。", 200))
+            else:
+                labels.add("models_http_error")
+                evidence.append(_gemini_evidence("Models", "models_http_status", "fail", "GET /models 未返回 200。", models_response.status_code))
+
+            if request_id:
+                evidence.append(_gemini_evidence("Endpoint", "request_id", "ok", "响应头包含可追踪 request id。", request_id))
+            else:
+                labels.add("request_id_missing")
+                evidence.append(_gemini_evidence("Endpoint", "request_id", "warning", "响应头缺少 request id；不少中转会剥离该 header，因此只降权不直接失败。", None))
+
+            models = _gemini_models_from_payload(models_payload)
+            first_model = models[0] if models else None
+            first_model_has_name = first_model is None or bool(first_model.get("name"))
+            models_ok = isinstance(models_payload, dict) and isinstance(models_payload.get("models"), list) and first_model_has_name
+            if models_ok:
+                evidence.append(_gemini_evidence("Models", "models_shape", "ok", "模型列表符合 Gemini models[] 形态，且模型项包含 name。", models_safe["shape"]))
+            else:
+                labels.add("models_shape_mismatch")
+                evidence.append(_gemini_evidence("Models", "models_shape", "fail", "模型列表响应不符合 models=[]/model.name 的 Gemini 形态。", models_safe["shape"]))
+
+            selected_model, model_selection_reason = _choose_gemini_probe_model(data.model, models, "generateContent")
+            raw_evidence["model_selection"] = {"requested_model": data.model, "selected_model": selected_model, "reason": model_selection_reason, "model_count": len(models)}
+            if selected_model:
+                evidence.append(_gemini_evidence("Models", "selected_model", "ok", "已选择模型执行 GenerateContent 有效探针。", {"model": selected_model, "reason": model_selection_reason}))
+            else:
+                labels.add("model_probe_skipped")
+                evidence.append(_gemini_evidence("Models", "selected_model", "warning", "未能从 /models 选择可用生成模型，跳过有效模型请求探针。", None))
+
+            if selected_model:
+                generate_path = f"{_gemini_model_name_for_path(selected_model)}:generateContent"
+                generate_url = _gemini_url(base_url, generate_path, api_key)
+                generate_safe_url = _gemini_safe_url(base_url, generate_path)
+                raw_evidence["generate_endpoint"] = generate_safe_url
+                generate_body = {
+                    "contents": [{"parts": [{"text": "Reply with exactly: ok"}]}],
+                    "generationConfig": {"maxOutputTokens": 8, "temperature": 0},
+                }
+                started = time.perf_counter()
+                generate_response = await client.post(generate_url, headers=headers, json=generate_body)
+                generate_latency_ms = int((time.perf_counter() - started) * 1000)
+                total_latency_ms += generate_latency_ms
+                request_id = request_id or request_id_from_headers(generate_response.headers)
+                try:
+                    generate_payload: Any = generate_response.json()
+                except ValueError:
+                    generate_payload = {"_non_json_excerpt": generate_response.text[:500]}
+                generate_safe = _gemini_collect_response(raw_evidence, "generate_probe", generate_response, generate_latency_ms, generate_payload)
+                generate_ok = generate_response.status_code == 200 and _gemini_generate_ok(generate_payload)
+                if generate_ok:
+                    evidence.append(_gemini_evidence("GenerateContent", "generate_probe", "ok", "POST :generateContent 返回 Gemini GenerateContentResponse 形态。", generate_safe["shape"]))
+                    if not isinstance(generate_payload.get("usageMetadata"), dict):
+                        labels.add("usage_missing")
+                        evidence.append(_gemini_evidence("GenerateContent", "usage_metadata", "warning", "GenerateContent 响应缺少 usageMetadata。", generate_safe["shape"]))
+                    if not generate_payload.get("modelVersion") and not generate_payload.get("responseId"):
+                        labels.add("gemini_metadata_missing")
+                        evidence.append(_gemini_evidence("GenerateContent", "response_metadata", "warning", "响应缺少 modelVersion/responseId 元数据。", generate_safe["shape"]))
+                elif _gemini_error_looks_official(generate_payload):
+                    labels.add("generate_official_error_shape")
+                    evidence.append(_gemini_evidence("GenerateContent", "generate_probe", "warning", "GenerateContent 探针未成功，但错误 schema 接近 Google API 风格。", generate_safe["shape"]))
+                else:
+                    labels.add("generate_shape_mismatch")
+                    evidence.append(_gemini_evidence("GenerateContent", "generate_probe", "fail", "GenerateContent 探针未返回预期 Gemini 形态。", generate_safe["shape"]))
+
+                if data.include_stream_probe:
+                    stream_path = f"{_gemini_model_name_for_path(selected_model)}:streamGenerateContent"
+                    stream_url = _gemini_url(base_url, stream_path, api_key)
+                    stream_safe_url = _gemini_safe_url(base_url, stream_path)
+                    raw_evidence["stream_endpoint"] = stream_safe_url
+                    started = time.perf_counter()
+                    stream_response = await client.post(stream_url, headers=headers, json=generate_body)
+                    stream_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += stream_latency_ms
+                    request_id = request_id or request_id_from_headers(stream_response.headers)
+                    try:
+                        stream_payload: Any = stream_response.json()
+                    except ValueError:
+                        stream_payload = {"_non_json_excerpt": stream_response.text[:500]}
+                    stream_safe = _gemini_collect_response(raw_evidence, "stream_probe", stream_response, stream_latency_ms, stream_payload)
+                    stream_ok = stream_response.status_code == 200 and _gemini_stream_ok(stream_payload)
+                    if stream_ok:
+                        evidence.append(_gemini_evidence("Streaming", "stream_probe", "ok", "streamGenerateContent 返回 GenerateContentResponse 分片/数组形态。", stream_safe["shape"]))
+                    elif _gemini_error_looks_official(stream_payload):
+                        labels.add("stream_official_error_shape")
+                        evidence.append(_gemini_evidence("Streaming", "stream_probe", "warning", "流式探针未成功，但错误 schema 接近 Google API 风格；不按协议失败处理。", stream_safe["shape"]))
+                    else:
+                        labels.add("stream_shape_mismatch")
+                        evidence.append(_gemini_evidence("Streaming", "stream_probe", "warning", "流式探针未返回预期 Gemini 分片形态。", stream_safe["shape"]))
+
+            if data.include_embedding_probe:
+                selected_embedding_model, embedding_selection_reason = _choose_gemini_probe_model(None, models, "embedContent")
+                raw_evidence["embedding_model_selection"] = {"selected_model": selected_embedding_model, "reason": embedding_selection_reason}
+                if selected_embedding_model:
+                    embed_path = f"{_gemini_model_name_for_path(selected_embedding_model)}:embedContent"
+                    embed_url = _gemini_url(base_url, embed_path, api_key)
+                    embed_safe_url = _gemini_safe_url(base_url, embed_path)
+                    raw_evidence["embedding_endpoint"] = embed_safe_url
+                    embed_body = {"content": {"parts": [{"text": "hello"}]}}
+                    started = time.perf_counter()
+                    embed_response = await client.post(embed_url, headers=headers, json=embed_body)
+                    embed_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += embed_latency_ms
+                    request_id = request_id or request_id_from_headers(embed_response.headers)
+                    try:
+                        embed_payload: Any = embed_response.json()
+                    except ValueError:
+                        embed_payload = {"_non_json_excerpt": embed_response.text[:500]}
+                    embed_safe = _gemini_collect_response(raw_evidence, "embedding_probe", embed_response, embed_latency_ms, embed_payload)
+                    embedding_ok = embed_response.status_code == 200 and _gemini_embedding_ok(embed_payload)
+                    if embedding_ok:
+                        evidence.append(_gemini_evidence("Embeddings", "embedding_probe", "ok", "POST :embedContent 返回 embedding.values[] 与 usageMetadata 形态。", embed_safe["shape"]))
+                    elif _gemini_error_looks_official(embed_payload):
+                        labels.add("embedding_official_error_shape")
+                        evidence.append(_gemini_evidence("Embeddings", "embedding_probe", "warning", "Embedding 探针未成功，但错误 schema 接近 Google API 风格。", embed_safe["shape"]))
+                    else:
+                        labels.add("embedding_shape_mismatch")
+                        evidence.append(_gemini_evidence("Embeddings", "embedding_probe", "warning", "Embedding 探针未返回预期 Gemini embedding 形态。", embed_safe["shape"]))
+                else:
+                    embedding_ok = None
+                    labels.add("embedding_probe_skipped")
+                    evidence.append(_gemini_evidence("Embeddings", "embedding_model", "warning", "未发现支持 embedContent 的模型，跳过 embedding 探针。", None))
+
+            validation_model = selected_model or data.model or "gemini-2.0-flash"
+            validation_path = f"{_gemini_model_name_for_path(validation_model)}:generateContent"
+            validation_url = _gemini_url(base_url, validation_path, api_key)
+            validation_safe_url = _gemini_safe_url(base_url, validation_path)
+            raw_evidence["validation_endpoint"] = validation_safe_url
+            validation_body = {"contents": [], "generationConfig": {"maxOutputTokens": 0}}
+            started = time.perf_counter()
+            validation_response = await client.post(validation_url, headers=headers, json=validation_body)
+            validation_latency_ms = int((time.perf_counter() - started) * 1000)
+            total_latency_ms += validation_latency_ms
+            request_id = request_id or request_id_from_headers(validation_response.headers)
+            try:
+                validation_payload: Any = validation_response.json()
+            except ValueError:
+                validation_payload = {"_non_json_excerpt": validation_response.text[:500]}
+            validation_safe = _gemini_collect_response(raw_evidence, "validation_error_probe", validation_response, validation_latency_ms, validation_payload)
+            validation_error_ok = validation_response.status_code in {400, 422} and _gemini_error_looks_official(validation_payload)
+            if _gemini_has_middleware_trace(validation_payload):
+                labels.add("middleware_wrapper_trace")
+                evidence.append(_gemini_evidence("Middleware Trace", "middleware_wrapper", "info", "错误响应包含中转包装字段，说明存在代理/网关加工痕迹。", validation_safe["shape"]))
+            if validation_error_ok:
+                evidence.append(_gemini_evidence("Validation Error", "validation_error_probe", "ok", "无害非法参数返回 Google API 风格校验错误，可作为上游/兼容层证据。", validation_safe["shape"]))
+            else:
+                labels.add("validation_error_shape_mismatch")
+                evidence.append(_gemini_evidence("Validation Error", "validation_error_probe", "warning", "无害非法参数未返回预期 Google API 风格校验错误。", validation_safe["shape"]))
+    except Exception as exc:
+        message = redact_text(_message_from_exception(exc))[:1000]
+        labels.add("network_or_auth_failure")
+        evidence.append(_gemini_evidence("Endpoint", "network_request", "fail", "联网验证请求失败，无法确认资源形态。", message))
+        raw_evidence["error"] = message
+
+    hard_failure = "network_or_auth_failure" in labels or ("models_http_error" in labels and not models_ok)
+    suspicious_failures = {"models_shape_mismatch", "generate_shape_mismatch"}.intersection(labels)
+    official_like_count = sum(1 for value in (models_ok, generate_ok, stream_ok is True, embedding_ok is True, validation_error_ok) if value)
+    if hard_failure:
+        upstream_assessment = "invalid_or_unverified"
+    elif official_like_count >= 3 or (models_ok and generate_ok and validation_error_ok):
+        upstream_assessment = "official_upstream_likely"
+    elif models_ok or generate_ok or validation_error_ok or "generate_official_error_shape" in labels:
+        upstream_assessment = "gemini_compatible_unverified"
+    elif suspicious_failures:
+        upstream_assessment = "suspicious_rewrite"
+    else:
+        upstream_assessment = "invalid_or_unverified"
+
+    if directness == "official_google_direct" and upstream_assessment == "official_upstream_likely":
+        classification = "official_gemini_direct_likely"
+    elif upstream_assessment == "invalid_or_unverified":
+        classification = "invalid_or_unverified"
+    elif upstream_assessment == "suspicious_rewrite":
+        classification = "suspicious_proxy_or_rewrite"
+    else:
+        classification = "gemini_compatible_proxy"
+
+    upstream_score = 0.0
+    if models_ok:
+        upstream_score += 25
+    if generate_ok:
+        upstream_score += 35
+        if "usage_missing" not in labels and "gemini_metadata_missing" not in labels:
+            upstream_score += 10
+    if stream_ok is True:
+        upstream_score += 10
+    if embedding_ok is True:
+        upstream_score += 10
+    elif embedding_ok is False and "embedding_official_error_shape" in labels:
+        upstream_score += 4
+    if validation_error_ok:
+        upstream_score += 10
+    if request_id:
+        upstream_score += 5
+    if "middleware_wrapper_trace" in labels:
+        upstream_score -= 5
+    if suspicious_failures:
+        upstream_score -= 20
+    if hard_failure:
+        upstream_score = min(upstream_score, 25)
+    upstream_score = max(0.0, min(100.0, upstream_score))
+
+    confidence_score = upstream_score
+    if directness == "official_google_direct":
+        confidence_score = min(100.0, confidence_score + 5)
+    elif upstream_assessment == "official_upstream_likely":
+        confidence_score = min(95.0, confidence_score)
+    confidence_score = max(0.0, min(100.0, confidence_score))
+
+    summaries = {
+        "official_upstream_likely": "资源的模型列表、GenerateContent、可选流式/Embedding 与校验错误多项证据接近 Google Gemini API；非官方 host 只能称为 Gemini-compatible 官转高一致性。",
+        "gemini_compatible_unverified": "资源呈现 Gemini-compatible 特征，但有效上游证据不足，暂不能判断为官转高一致性。",
+        "suspicious_rewrite": "资源部分响应与 Gemini API 形态不一致，存在中转改写或兼容层漂移风险。",
+        "invalid_or_unverified": "认证、网络或关键响应失败导致证据不足，无法验证 Gemini 资源。",
+    }
+    raw_evidence = redact_secrets(_redact_literal_secret(raw_evidence, api_key))
+    return {
+        "classification": classification,
+        "confidence_score": round(confidence_score, 2),
+        "directness": directness,
+        "upstream_assessment": upstream_assessment,
+        "upstream_score": round(upstream_score, 2),
+        "summary": summaries[upstream_assessment],
+        "labels": sorted(labels),
+        "base_url": data.base_url or GEMINI_OFFICIAL_BASE_URL,
+        "normalized_base_url": base_url,
+        "host": host,
+        "models_endpoint": models_safe_url,
+        "generate_endpoint": raw_evidence.get("generate_endpoint"),
+        "stream_endpoint": raw_evidence.get("stream_endpoint"),
+        "embedding_endpoint": raw_evidence.get("embedding_endpoint"),
+        "selected_model": selected_model,
+        "selected_embedding_model": selected_embedding_model,
+        "request_id": request_id,
+        "latency_ms": total_latency_ms or None,
+        "evidence": evidence,
+        "raw_evidence": raw_evidence,
+    }
 
 
 async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[str, Any]:
@@ -7053,6 +7627,9 @@ def _response_error_detail(response: httpx.Response) -> str:
 REQUEST_ID_HEADER_NAMES = (
     "request-id",
     "x-request-id",
+    "x-goog-request-id",
+    "x-google-request-id",
+    "x-cloud-trace-context",
     "x-amzn-requestid",
     "x-amzn-request-id",
     "x-amz-request-id",
