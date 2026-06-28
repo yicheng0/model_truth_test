@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Popover, Typography } from 'antd';
-import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
+import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
@@ -16,6 +16,7 @@ const ScheduledTests = lazy(() => import('./pages/ScheduledTests'));
 const SignatureInterop = lazy(() => import('./pages/SignatureInterop'));
 const CacheHitRateTest = lazy(() => import('./pages/CacheHitRateTest'));
 const ModelRequestTest = lazy(() => import('./pages/ModelRequestTest'));
+const FullModelCheck = lazy(() => import('./pages/FullModelCheck'));
 const OpenAIResourceCheck = lazy(() => import('./pages/OpenAIResourceCheck'));
 const GeminiResourceCheck = lazy(() => import('./pages/GeminiResourceCheck'));
 const ClaudeCodeCheck = lazy(() => import('./pages/ClaudeCodeCheck'));
@@ -49,6 +50,7 @@ const navItems = [
   { key: '/cache-hit-rate-test', icon: DatabaseZap, label: '缓存命中率', to: '/cache-hit-rate-test' },
   { key: '/claude-code-check', icon: TerminalSquare, label: 'Claude 指纹', to: '/claude-code-check' },
   { key: '/model-request-test', icon: Send, label: '模型请求', to: '/model-request-test' },
+  { key: '/full-model-check', icon: Gauge, label: '完整检测', to: '/full-model-check' },
   { key: '/openai-resource-check', icon: ShieldCheck, label: 'OpenAI 直连', to: '/openai-resource-check' },
   { key: '/gemini-resource-check', icon: ShieldCheck, label: 'Gemini 直连', to: '/gemini-resource-check' },
   { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
@@ -145,6 +147,7 @@ function Shell() {
               <Route path="/channels" element={<Channels />} />
               <Route path="/cache-hit-rate-test" element={<CacheHitRateTest />} />
               <Route path="/model-request-test" element={<ModelRequestTest />} />
+              <Route path="/full-model-check" element={<FullModelCheck />} />
               <Route path="/openai-resource-check" element={<OpenAIResourceCheck />} />
               <Route path="/gemini-resource-check" element={<GeminiResourceCheck />} />
               <Route path="/claude-code-check" element={<ClaudeCodeCheck />} />

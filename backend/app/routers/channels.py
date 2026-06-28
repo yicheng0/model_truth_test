@@ -23,6 +23,8 @@ from ..schemas import (
     ChannelUpdate,
     GeminiResourceCheckCreate,
     GeminiResourceCheckRead,
+    FullModelCheckCreate,
+    FullModelCheckRead,
     ModelRequestTestCreate,
     ModelRequestTestRead,
     OpenAIResourceCheckCreate,
@@ -36,6 +38,7 @@ from ..services import (
     _avg,
     create_cache_hit_rate_test,
     create_channel,
+    create_full_model_check,
     create_gemini_resource_check,
     create_model_request_test,
     create_openai_resource_check,
@@ -598,6 +601,20 @@ async def channel_model_request_test(channel_id: str, data: ModelRequestTestCrea
     except Exception as exc:
         logger.exception("Model request test failed for channel %s", channel_id)
         raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+
+
+@router.post("/api/full-model-check", response_model=FullModelCheckRead)
+async def full_model_check(data: FullModelCheckCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return await create_full_model_check(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        logger.exception("Full model check timed out")
+        raise HTTPException(status_code=504, detail="Full model check timed out") from exc
+    except Exception as exc:
+        logger.exception("Full model check failed")
+        raise HTTPException(status_code=502, detail="Full model check failed") from exc
 
 
 @router.post("/api/openai-resource-check", response_model=OpenAIResourceCheckRead)

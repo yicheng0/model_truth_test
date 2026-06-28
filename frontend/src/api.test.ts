@@ -471,6 +471,54 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('sends full model checks through the aggregate endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: 'fullchk_1',
+          created_at: '2026-06-28T00:00:00Z',
+          completed_at: '2026-06-28T00:00:01Z',
+          duration_ms: 1000,
+          repeat_count: 1,
+          categories: ['protocol', 'stream'],
+          channels: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await api.fullModelCheck({
+      channel_ids: ['ch_1', 'ch_2'],
+      repeat_count: 2,
+      include_stream: true,
+      include_tools: true,
+      include_params: true,
+      include_error_probe: true,
+      include_thinking: true,
+      include_vision: false,
+      timeout_seconds: 120,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/full-model-check',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          channel_ids: ['ch_1', 'ch_2'],
+          repeat_count: 2,
+          include_stream: true,
+          include_tools: true,
+          include_params: true,
+          include_error_probe: true,
+          include_thinking: true,
+          include_vision: false,
+          timeout_seconds: 120,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('sends OpenAI resource checks through the transient endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

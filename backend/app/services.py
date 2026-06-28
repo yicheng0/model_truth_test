@@ -43,6 +43,7 @@ from .schemas import (
     FeishuBroadcastSettingUpdate,
     CacheHitRateTestCreate,
     GeminiResourceCheckCreate,
+    FullModelCheckCreate,
     ModelRequestTestCreate,
     OpenAIResourceCheckCreate,
     ReportRead,
@@ -7613,13 +7614,15 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
         logger.debug("channel_call_start channel=%s case=%s attempt=%d protocol=%s", channel.id, case.id, attempt, protocol)
         raw_response, resolved_protocol, endpoint = await _live_call_with_metadata(channel, case, raw_request, credentials)
         latency_ms = int((time.perf_counter() - started) * 1000)
+        response_meta = raw_response.get("_response_metadata") if isinstance(raw_response.get("_response_metadata"), dict) else {}
+        first_token_ms = response_meta.get("first_token_ms") if isinstance(response_meta.get("first_token_ms"), int) else latency_ms
         return normalize_response(
             channel,
             case,
             raw_request,
             raw_response,
             latency_ms,
-            latency_ms,
+            first_token_ms,
             None,
             request_mode="live",
             request_attempted=True,
@@ -8007,6 +8010,149 @@ REQUEST_ID_HEADER_NAMES = (
 )
 
 
+def _iter_sse_json_events(raw: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for block in re.split(r"\r?\n\r?\n", raw.strip()):
+        if not block.strip():
+            continue
+        event_name: str | None = None
+        data_lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data = line.split(":", 1)[1].strip()
+                if data == "[DONE]":
+                    continue
+                data_lines.append(data)
+        if not data_lines:
+            continue
+        data_text = "\n".join(data_lines)
+        try:
+            payload = json.loads(data_text)
+        except json.JSONDecodeError:
+            payload = {"raw": data_text[:1000]}
+        if event_name and isinstance(payload, dict):
+            payload.setdefault("type", event_name)
+        events.append(payload if isinstance(payload, dict) else {"value": payload})
+    return events
+
+
+def _anthropic_message_from_stream(raw: str, *, first_token_ms: int | None = None, request_id: str | None = None) -> dict[str, Any]:
+    events = _iter_sse_json_events(raw)
+    message: dict[str, Any] = {"type": "message", "content": []}
+    text_parts: list[str] = []
+    content_blocks: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] = {}
+    event_names: list[str] = []
+    error_payload: Any = None
+    for event in events:
+        event_type = str(event.get("type") or event.get("event") or "chunk")
+        event_names.append(event_type)
+        if event_type == "message_start" and isinstance(event.get("message"), dict):
+            msg = event["message"]
+            message.update({k: v for k, v in msg.items() if k != "content"})
+            if isinstance(msg.get("usage"), dict):
+                usage.update(msg["usage"])
+        elif event_type == "content_block_start" and isinstance(event.get("content_block"), dict):
+            index = int(event.get("index") or 0)
+            content_blocks[index] = dict(event["content_block"])
+        elif event_type == "content_block_delta" and isinstance(event.get("delta"), dict):
+            index = int(event.get("index") or 0)
+            block = content_blocks.setdefault(index, {"type": "text", "text": ""})
+            delta = event["delta"]
+            if delta.get("type") == "text_delta" or "text" in delta:
+                text_delta = str(delta.get("text") or "")
+                block["text"] = str(block.get("text") or "") + text_delta
+                if text_delta:
+                    text_parts.append(text_delta)
+            if "thinking" in delta:
+                block["type"] = "thinking"
+                block["thinking"] = str(block.get("thinking") or "") + str(delta.get("thinking") or "")
+            if "signature" in delta:
+                block["signature"] = delta.get("signature")
+        elif event_type == "message_delta":
+            if isinstance(event.get("delta"), dict):
+                if event["delta"].get("stop_reason"):
+                    message["stop_reason"] = event["delta"].get("stop_reason")
+                if event["delta"].get("stop_sequence"):
+                    message["stop_sequence"] = event["delta"].get("stop_sequence")
+            if isinstance(event.get("usage"), dict):
+                usage.update(event["usage"])
+        elif event_type in {"error", "message_error"}:
+            error_payload = event.get("error") or event
+    if content_blocks:
+        message["content"] = [content_blocks[index] for index in sorted(content_blocks)]
+    elif text_parts:
+        message["content"] = [{"type": "text", "text": "".join(text_parts)}]
+    if usage:
+        message["usage"] = usage
+    metadata = message.get("_response_metadata") if isinstance(message.get("_response_metadata"), dict) else {}
+    metadata.update({"stream_events": event_names, "first_token_ms": first_token_ms, "raw_stream_excerpt": raw[:2000]})
+    if request_id:
+        metadata["request_id"] = request_id
+    message["_response_metadata"] = metadata
+    if error_payload is not None:
+        message["type"] = "error"
+        message["error"] = error_payload
+    return message
+
+
+def _openai_chat_completion_from_stream(raw: str, *, first_token_ms: int | None = None, request_id: str | None = None) -> dict[str, Any]:
+    events = _iter_sse_json_events(raw)
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] | None = None
+    completion_id: str | None = None
+    model: str | None = None
+    finish_reason: str | None = None
+    event_names: list[str] = []
+    error_payload: Any = None
+    for event in events:
+        event_names.append(str(event.get("object") or event.get("type") or "chunk"))
+        if event.get("error"):
+            error_payload = event.get("error")
+        completion_id = completion_id or (str(event.get("id")) if event.get("id") else None)
+        model = model or (str(event.get("model")) if event.get("model") else None)
+        if isinstance(event.get("usage"), dict):
+            usage = event["usage"]
+        choices = event.get("choices") if isinstance(event.get("choices"), list) else []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            finish_reason = choice.get("finish_reason") or finish_reason
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            if delta.get("content"):
+                content_parts.append(str(delta.get("content")))
+            for call in delta.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                index = int(call.get("index") or 0)
+                target = tool_calls.setdefault(index, {"id": call.get("id"), "type": call.get("type") or "function", "function": {"name": "", "arguments": ""}})
+                if call.get("id"):
+                    target["id"] = call.get("id")
+                fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                target_fn = target.setdefault("function", {"name": "", "arguments": ""})
+                if fn.get("name"):
+                    target_fn["name"] = str(target_fn.get("name") or "") + str(fn.get("name"))
+                if fn.get("arguments"):
+                    target_fn["arguments"] = str(target_fn.get("arguments") or "") + str(fn.get("arguments"))
+    message: dict[str, Any] = {
+        "id": completion_id,
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(content_parts), "tool_calls": [tool_calls[i] for i in sorted(tool_calls)] or None}, "finish_reason": finish_reason}],
+    }
+    if usage:
+        message["usage"] = usage
+    metadata = {"stream_events": event_names, "first_token_ms": first_token_ms, "raw_stream_excerpt": raw[:2000]}
+    if request_id:
+        metadata["request_id"] = request_id
+    message["_response_metadata"] = metadata
+    if error_payload is not None:
+        message["error"] = error_payload
+    return message
+
 def request_id_from_headers(headers: Any) -> str | None:
     if not headers:
         return None
@@ -8106,6 +8252,17 @@ async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, An
     _attach_request_normalization_metadata(raw_request, protocol_profile, normalization_notes)
     timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        if body.get("stream") is True and hasattr(client, "stream"):
+            started = time.perf_counter()
+            first_token_ms: int | None = None
+            chunks: list[str] = []
+            async with client.stream("POST", url, headers=headers, json=body) as response:
+                async for chunk in response.aiter_text():
+                    if chunk and first_token_ms is None and "data:" in chunk:
+                        first_token_ms = int((time.perf_counter() - started) * 1000)
+                    chunks.append(chunk)
+                _raise_for_status_with_body(response)
+                return _anthropic_message_from_stream("".join(chunks), first_token_ms=first_token_ms, request_id=request_id_from_headers(response.headers))
         response = await client.post(url, headers=headers, json=body)
         _raise_for_status_with_body(response)
         return attach_response_metadata(response.json(), response)
@@ -8788,6 +8945,17 @@ async def _openai_compatible_call(channel: Channel, raw_request: dict[str, Any],
     _attach_request_normalization_metadata(raw_request, protocol_profile, normalization_notes)
     timeout = httpx.Timeout(connect=10, read=90, write=10, pool=10)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        if body.get("stream") is True and hasattr(client, "stream"):
+            started = time.perf_counter()
+            first_token_ms: int | None = None
+            chunks: list[str] = []
+            async with client.stream("POST", url, headers=headers, json=body) as response:
+                async for chunk in response.aiter_text():
+                    if chunk and first_token_ms is None and "data:" in chunk:
+                        first_token_ms = int((time.perf_counter() - started) * 1000)
+                    chunks.append(chunk)
+                _raise_for_status_with_body(response)
+                return _openai_chat_completion_from_stream("".join(chunks), first_token_ms=first_token_ms, request_id=request_id_from_headers(response.headers))
         response = await client.post(url, headers=headers, json=body)
         _raise_for_status_with_body(response)
         return attach_response_metadata(response.json(), response)
@@ -9204,6 +9372,11 @@ def _error_type(error: str | None, raw_response: dict[str, Any]) -> str | None:
 
 
 def _stream_events_for(channel: Channel, raw_response: dict[str, Any]) -> list[str]:
+    meta = raw_response.get("_response_metadata") if isinstance(raw_response.get("_response_metadata"), dict) else {}
+    if isinstance(meta.get("stream_events"), list):
+        return [str(item) for item in meta["stream_events"]]
+    if raw_response.get("object") == "chat.completion":
+        return ["chat.completion"]
     if raw_response.get("type") != "message":
         return ["chunk", "done"]
     events = ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
@@ -10715,3 +10888,336 @@ def signature_interop_markdown(signature: Any) -> str:
 
 def _fmt_optional_score(value: Any) -> str:
     return "-" if value is None else f"{float(value):.1f} / 100"
+
+FULL_MODEL_CHECK_CATEGORIES = ["protocol", "stream", "parameters", "tools", "thinking", "performance", "error"]
+
+
+def _full_model_protocol_family(channel: Channel) -> str:
+    protocol = _request_protocol(channel, _merged_channel_credentials(channel, {}))
+    if protocol == REQUEST_PROTOCOL_OPENAI:
+        return "openai_chat_completions"
+    if protocol == REQUEST_PROTOCOL_AWS_BEDROCK:
+        return "aws_bedrock"
+    if protocol == REQUEST_PROTOCOL_ANTHROPIC:
+        return "anthropic_messages"
+    kind = _provider_kind(channel.provider_type)
+    if kind == "openai_compatible":
+        return "openai_chat_completions"
+    if kind == "aws_bedrock":
+        return "aws_bedrock"
+    return "anthropic_messages"
+
+
+def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) -> list[dict[str, Any]]:
+    is_openai = protocol_family == "openai_chat_completions"
+    is_anthropic = protocol_family in {"anthropic_messages", "aws_bedrock"}
+    specs: list[dict[str, Any]] = [
+        {
+            "key": "basic_shape",
+            "title": "基础响应形态",
+            "category": "protocol",
+            "prompt": "请只回复 OK。",
+            "params": {"max_tokens": 32, "temperature": 0},
+            "rules": {"min_length": 1},
+        },
+        {
+            "key": "usage_metadata",
+            "title": "Usage 元数据",
+            "category": "protocol",
+            "prompt": "用一句话解释 token usage 的含义。",
+            "params": {"max_tokens": 96, "temperature": 0},
+            "rules": {"min_length": 3},
+        },
+    ]
+    if data.include_stream:
+        specs.append(
+            {
+                "key": "stream_ttft",
+                "title": "流式 TTFT / 事件形态",
+                "category": "stream",
+                "prompt": "请用三点简短说明为什么首 token 延迟会影响用户体验。",
+                "params": {"max_tokens": 180, "temperature": 0, "stream": True, "stream_options": {"include_usage": True}},
+                "rules": {"stream_required": True, "min_length": 10},
+            }
+        )
+    if data.include_params:
+        specs.extend(
+            [
+                {
+                    "key": "max_tokens_limit",
+                    "title": "max_tokens 截断",
+                    "category": "parameters",
+                    "prompt": "从 1 数到 100，每个数字用逗号分隔。",
+                    "params": {"max_tokens": 8, "temperature": 0},
+                    "rules": {"expected_stop_reason": "max_tokens", "max_output_chars": 120},
+                },
+                {
+                    "key": "stop_sequences",
+                    "title": "stop_sequences 参数",
+                    "category": "parameters",
+                    "prompt": "请输出：alpha STOP_TOKEN beta。",
+                    "params": {"max_tokens": 80, "temperature": 0, "stop_sequences": ["STOP_TOKEN"]},
+                    "rules": {"stop_sequence": "STOP_TOKEN"},
+                },
+                {
+                    "key": "temperature_determinism",
+                    "title": "低温确定性采样",
+                    "category": "parameters",
+                    "prompt": "只输出 JSON：{\"status\":\"ok\",\"value\":7}",
+                    "params": {"max_tokens": 80, "temperature": 0},
+                    "rules": {"json_required": True, "json_required_keys": ["status", "value"]},
+                },
+            ]
+        )
+    if data.include_tools:
+        if is_openai:
+            specs.append(
+                {
+                    "key": "tool_call_shape",
+                    "title": "OpenAI 工具调用形态",
+                    "category": "tools",
+                    "prompt": "请调用工具记录城市 Paris 和单位 celsius，不要直接回答天气。",
+                    "params": {
+                        "max_tokens": 160,
+                        "temperature": 0,
+                        "tools": [{"type": "function", "function": {"name": "record_weather", "description": "Record weather lookup arguments.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "unit": {"type": "string"}}, "required": ["city", "unit"]}}}],
+                    },
+                    "rules": {"min_length": 0},
+                }
+            )
+        elif is_anthropic:
+            specs.append(
+                {
+                    "key": "tool_use_shape",
+                    "title": "Claude 工具调用形态",
+                    "category": "tools",
+                    "prompt": "请调用工具记录城市 Paris 和单位 celsius，不要直接回答天气。",
+                    "params": {
+                        "max_tokens": 180,
+                        "temperature": 0,
+                        "tools": [{"name": "record_weather", "description": "Record weather lookup arguments.", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}, "unit": {"type": "string"}}, "required": ["city", "unit"]}}],
+                    },
+                    "rules": {"tool_required": True, "tool_name": "record_weather"},
+                }
+            )
+    if data.include_thinking and is_anthropic:
+        specs.append(
+            {
+                "key": "thinking_shape",
+                "title": "Claude Thinking 形态",
+                "category": "thinking",
+                "prompt": "请一步内判断 17+25 是否等于 42，最后只给结论。",
+                "params": {"max_tokens": 1200, "thinking": {"type": "enabled", "budget_tokens": 800}},
+                "rules": {"min_length": 1},
+            }
+        )
+    if data.include_vision:
+        specs.append(
+            {
+                "key": "vision_input_smoke",
+                "title": "图片输入烟测",
+                "category": "vision",
+                "prompt": "这是一项多模态输入冒烟检测。如果收到图片，请简述图片；否则说明未收到图片。",
+                "params": {"max_tokens": 120, "temperature": 0},
+                "rules": {"min_length": 1},
+            }
+        )
+    if data.include_error_probe:
+        specs.append(
+            {
+                "key": "invalid_request_error",
+                "title": "错误包裹 / 参数校验",
+                "category": "error",
+                "prompt": "invalid request probe",
+                "params": {"max_tokens": 16},
+                "rules": {"invalid_request_probe": True},
+            }
+        )
+    return specs
+
+
+def _full_model_metric_summary(values: list[float | int | None]) -> dict[str, Any]:
+    nums = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not nums:
+        return {"count": 0, "avg": None, "p50": None, "p95": None, "min": None, "max": None}
+    return {
+        "count": len(nums),
+        "avg": _avg(nums),
+        "p50": _percentile(nums, 50),
+        "p95": _percentile(nums, 95),
+        "min": round(min(nums), 2),
+        "max": round(max(nums), 2),
+    }
+
+
+def _full_model_error_excerpt(normalized: dict[str, Any]) -> str | None:
+    text = _normalized_error_text(normalized) or normalized.get("error")
+    return redact_text(str(text))[:1000] if text else None
+
+
+def _full_model_probe_status(normalized: dict[str, Any], score: float, labels: list[str]) -> str:
+    if normalized.get("error") or normalized.get("status_code", 200) >= 400:
+        if "invalid_request_not_rejected" not in labels and score >= 80:
+            return "warning"
+        return "fail"
+    if score >= 85 and not labels:
+        return "pass"
+    if score >= 65:
+        return "warning"
+    return "fail"
+
+
+def _full_model_probe_read(spec: dict[str, Any], channel: Channel, protocol_family: str, normalized: dict[str, Any], score: float, labels: list[str]) -> dict[str, Any]:
+    raw_response = normalized.get("raw_response") if isinstance(normalized.get("raw_response"), dict) else {}
+    text = str(normalized.get("content_text") or "")
+    stream_events = [str(item) for item in normalized.get("stream_events") or []]
+    usage = normalized.get("usage") if isinstance(normalized.get("usage"), dict) else None
+    raw_evidence = {
+        "provider_model": normalized.get("provider_model"),
+        "stop_reason": normalized.get("stop_reason"),
+        "stop_sequence": normalized.get("stop_sequence"),
+        "request_attempted": normalized.get("request_attempted"),
+        "request_mode": normalized.get("request_mode"),
+        "protocol_profile": normalized.get("protocol_profile"),
+        "request_normalization_notes": normalized.get("request_normalization_notes") or [],
+        "raw_response_shape": _json_shape_summary(raw_response),
+        "tool_call_count": len(normalized.get("tool_calls") or []),
+        "thinking_block_count": sum(1 for block in normalized.get("content_blocks") or [] if isinstance(block, dict) and block.get("type") == "thinking"),
+    }
+    return {
+        "key": spec["key"],
+        "title": spec["title"],
+        "category": spec["category"],
+        "protocol_family": protocol_family,
+        "status": _full_model_probe_status(normalized, score, labels),
+        "score": round(float(score), 2),
+        "labels": labels,
+        "endpoint": normalized.get("provider_endpoint"),
+        "http_status": normalized.get("status_code"),
+        "request_id": request_id_from_normalized(normalized),
+        "message_id": normalized.get("provider_message_id"),
+        "latency_ms": normalized.get("latency_ms"),
+        "ttft_ms": normalized.get("ttft_ms") or normalized.get("first_token_ms"),
+        "tpot_ms": normalized.get("tpot_ms"),
+        "tokens_per_second": normalized.get("tokens_per_second"),
+        "input_tokens": normalized.get("input_tokens"),
+        "output_tokens": normalized.get("output_tokens"),
+        "stream_event_count": len(stream_events),
+        "stream_events": stream_events[:20],
+        "usage_present": bool(usage),
+        "error_type": normalized.get("error_type"),
+        "error_excerpt": _full_model_error_excerpt(normalized),
+        "excerpt": redact_text(text)[:1000] if text else None,
+        "raw_evidence": redact_secrets(raw_evidence),
+    }
+
+
+def _full_model_channel_summary(channel: Channel, protocol_family: str, probes: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(probes)
+    passed = sum(1 for item in probes if item["status"] == "pass")
+    failed = sum(1 for item in probes if item["status"] == "fail")
+    warning = sum(1 for item in probes if item["status"] == "warning")
+    labels = sorted({label for item in probes for label in item.get("labels", [])})
+    score = round(_avg([item.get("score") for item in probes]) or 0.0, 2)
+    if failed:
+        status = "degraded" if passed else "failed"
+    elif warning:
+        status = "warning"
+    else:
+        status = "pass"
+    latency_values = [item.get("latency_ms") for item in probes]
+    ttft_values = [item.get("ttft_ms") for item in probes]
+    tpot_values = [item.get("tpot_ms") for item in probes]
+    tps_values = [item.get("tokens_per_second") for item in probes]
+    summary = f"{channel.name} 完成 {total} 个细分探针：通过 {passed}，警告 {warning}，失败 {failed}；平均分 {score}。"
+    return {
+        "channel": channel,
+        "protocol_family": protocol_family,
+        "status": status,
+        "score": score,
+        "summary": summary,
+        "labels": labels,
+        "total_probes": total,
+        "passed_probes": passed,
+        "failed_probes": failed,
+        "warning_probes": warning,
+        "latency_ms": _full_model_metric_summary(latency_values),
+        "ttft_ms": _full_model_metric_summary(ttft_values),
+        "tpot_ms": _full_model_metric_summary(tpot_values),
+        "tokens_per_second": _full_model_metric_summary(tps_values),
+        "total_input_tokens": int(sum(item.get("input_tokens") or 0 for item in probes)),
+        "total_output_tokens": int(sum(item.get("output_tokens") or 0 for item in probes)),
+        "probes": probes,
+    }
+
+
+async def create_full_model_check(db: Session, data: FullModelCheckCreate) -> dict[str, Any]:
+    started = datetime.now(timezone.utc)
+    output_channels: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for channel_id in data.channel_ids:
+        if channel_id in seen:
+            continue
+        seen.add(channel_id)
+        channel = db.get(Channel, channel_id)
+        if not channel:
+            raise ValueError(f"Channel not found: {channel_id}")
+        if not channel.enabled:
+            raise ValueError(f"Channel is disabled: {channel.name}")
+        protocol_family = _full_model_protocol_family(channel)
+        specs = _full_model_probe_specs(protocol_family, data)
+        credentials = _merged_channel_credentials(channel, {})
+        probe_rows: list[dict[str, Any]] = []
+        for spec in specs:
+            for attempt in range(1, data.repeat_count + 1):
+                params = dict(spec.get("params") or {})
+                rules = dict(spec.get("rules") or {})
+                scoring_rules = {**rules}
+                case = TestCase(
+                    id=new_id("case"),
+                    suite_id=MANUAL_PROBE_SUITE_ID,
+                    module=spec["category"],
+                    sort_order=attempt,
+                    title=f"{spec['title']} #{attempt}",
+                    prompt=spec["prompt"],
+                    system_prompt=None,
+                    request_params=params,
+                    scoring_rules=scoring_rules,
+                    is_hidden=False,
+                    enabled=True,
+                )
+                try:
+                    normalized = await asyncio.wait_for(invoke_channel(channel, case, attempt, dict(credentials), use_mock=False), timeout=data.timeout_seconds)
+                    score, labels = score_result(channel, case, normalized)
+                except Exception as exc:
+                    safe_error = redact_text(_message_from_exception(exc))
+                    normalized = normalize_response(
+                        channel,
+                        case,
+                        build_raw_request(channel, case),
+                        {"error": safe_error},
+                        0,
+                        0,
+                        safe_error,
+                        request_mode="live",
+                        request_attempted=False,
+                        provider_endpoint=_provider_endpoint(channel, credentials),
+                        request_protocol=_request_protocol(channel, credentials),
+                    )
+                    score, labels = 0.0, ["request_failed"]
+                row_spec = dict(spec)
+                if data.repeat_count > 1:
+                    row_spec["key"] = f"{spec['key']}#{attempt}"
+                    row_spec["title"] = f"{spec['title']}（第 {attempt} 次）"
+                probe_rows.append(_full_model_probe_read(row_spec, channel, protocol_family, normalized, score, labels))
+        output_channels.append(_full_model_channel_summary(channel, protocol_family, probe_rows))
+    completed = datetime.now(timezone.utc)
+    return {
+        "id": new_id("fullchk"),
+        "created_at": started,
+        "completed_at": completed,
+        "duration_ms": int((completed - started).total_seconds() * 1000),
+        "repeat_count": data.repeat_count,
+        "categories": FULL_MODEL_CHECK_CATEGORIES,
+        "channels": output_channels,
+    }

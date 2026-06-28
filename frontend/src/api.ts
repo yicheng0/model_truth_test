@@ -26,6 +26,8 @@ import type {
   FeishuBroadcastUpdate,
   GeminiResourceCheckRequest,
   GeminiResourceCheckResult,
+  FullModelCheckRequest,
+  FullModelCheckResult,
   ModelRequestTestResult,
   NewApiSyncRequest,
   NewApiSyncResult,
@@ -185,6 +187,8 @@ export const api = {
     request<SignatureInteropResult>(`/api/channels/signature-interop-test/latest${queryString({ source_channel_id: payload.source_channel_id, relay_channel_id: payload.relay_channel_id, stream: String(payload.stream ?? false), client_probe_id: payload.client_probe_id })}`),
   modelRequestTest: (channelId: string, payload: { prompt: string; system_prompt?: string | null; request_params?: Record<string, unknown>; run_name?: string | null }) =>
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
+  fullModelCheck: (payload: FullModelCheckRequest) =>
+    request<FullModelCheckResult>('/api/full-model-check', { method: 'POST', body: JSON.stringify(payload) }),
   openAIResourceCheck: (payload: OpenAIResourceCheckRequest) =>
     request<OpenAIResourceCheckResult>('/api/openai-resource-check', { method: 'POST', body: JSON.stringify(payload) }),
   geminiResourceCheck: (payload: GeminiResourceCheckRequest) =>

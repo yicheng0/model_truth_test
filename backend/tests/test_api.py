@@ -8598,3 +8598,55 @@ def test_new_api_sync_apply_creates_channel_and_schedule(monkeypatch) -> None:
     payload = response.json()
     assert payload["update_count"] == 1
     assert payload["schedule_exists_count"] == 1
+
+
+def test_full_model_check_returns_structured_metrics_for_missing_key() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = Channel(
+            id="full_model_ch",
+            name="Full Model Channel",
+            provider_type="third_party_anthropic",
+            role="candidate",
+            base_url="https://relay.example",
+            model_name="claude-sonnet-4-5",
+            auth_config={"request_protocol": "anthropic_messages"},
+            enabled=True,
+        )
+        db.add(channel)
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/full-model-check",
+            json={
+                "channel_ids": ["full_model_ch"],
+                "repeat_count": 1,
+                "include_stream": True,
+                "include_tools": True,
+                "include_params": True,
+                "include_error_probe": True,
+                "include_thinking": True,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["channels"][0]["protocol_family"] == "anthropic_messages"
+    assert payload["channels"][0]["total_probes"] >= 7
+    first_probe = payload["channels"][0]["probes"][0]
+    assert first_probe["status"] == "fail"
+    assert first_probe["error_excerpt"]
+    assert "api" in first_probe["error_excerpt"].lower() or "key" in first_probe["error_excerpt"].lower()
+    assert "latency_ms" in payload["channels"][0]
+    assert "ttft_ms" in payload["channels"][0]
+    assert "tokens_per_second" in payload["channels"][0]
+
+
+def test_full_model_check_rejects_missing_channel() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        response = client.post("/api/full-model-check", json={"channel_ids": ["missing"]})
+
+    assert response.status_code == 400
+    assert "Channel not found" in response.json()["detail"]

@@ -199,6 +199,88 @@ class ModelRequestTestCreate(BaseModel):
     run_name: str | None = Field(default=None, max_length=200)
 
 
+class FullModelCheckCreate(BaseModel):
+    channel_ids: list[str] = Field(min_length=1, max_length=12)
+    repeat_count: int = Field(default=1, ge=1, le=5)
+    include_stream: bool = True
+    include_tools: bool = True
+    include_params: bool = True
+    include_error_probe: bool = True
+    include_thinking: bool = True
+    include_vision: bool = False
+    timeout_seconds: int = Field(default=120, ge=30, le=240)
+
+
+class FullModelCheckMetricSummary(BaseModel):
+    count: int = 0
+    avg: float | None = None
+    p50: float | None = None
+    p95: float | None = None
+    min: float | None = None
+    max: float | None = None
+
+
+class FullModelCheckProbeRead(BaseModel):
+    key: str
+    title: str
+    category: str
+    protocol_family: str
+    status: str
+    score: float
+    labels: list[str] = Field(default_factory=list)
+    endpoint: str | None = None
+    http_status: int | None = None
+    request_id: str | None = None
+    message_id: str | None = None
+    latency_ms: float | None = None
+    ttft_ms: float | None = None
+    tpot_ms: float | None = None
+    tokens_per_second: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    stream_event_count: int = 0
+    stream_events: list[str] = Field(default_factory=list)
+    usage_present: bool = False
+    error_type: str | None = None
+    error_excerpt: str | None = None
+    excerpt: str | None = None
+    raw_evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class FullModelCheckChannelRead(BaseModel):
+    channel: ChannelRead
+    protocol_family: str
+    status: str
+    score: float
+    summary: str
+    labels: list[str] = Field(default_factory=list)
+    total_probes: int = 0
+    passed_probes: int = 0
+    failed_probes: int = 0
+    warning_probes: int = 0
+    latency_ms: FullModelCheckMetricSummary = Field(default_factory=FullModelCheckMetricSummary)
+    ttft_ms: FullModelCheckMetricSummary = Field(default_factory=FullModelCheckMetricSummary)
+    tpot_ms: FullModelCheckMetricSummary = Field(default_factory=FullModelCheckMetricSummary)
+    tokens_per_second: FullModelCheckMetricSummary = Field(default_factory=FullModelCheckMetricSummary)
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    probes: list[FullModelCheckProbeRead] = Field(default_factory=list)
+
+
+class FullModelCheckRead(BaseModel):
+    id: str
+    created_at: datetime
+    completed_at: datetime
+    duration_ms: int
+    repeat_count: int
+    categories: list[str]
+    channels: list[FullModelCheckChannelRead] = Field(default_factory=list)
+
+    @field_serializer("channels")
+    def serialize_full_model_channels(self, value: Any) -> Any:
+        return redact_secrets(value)
+
+
 class OpenAIResourceCheckCreate(BaseModel):
     base_url: str | None = Field(default="https://api.openai.com/v1", max_length=500)
     api_key: str = Field(min_length=1, max_length=4096)

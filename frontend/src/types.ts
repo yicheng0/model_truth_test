@@ -309,6 +309,84 @@ export type ModelRequestTestResult = {
   provider_endpoint?: string | null;
 };
 
+export type FullModelCheckRequest = {
+  channel_ids: string[];
+  repeat_count?: number;
+  include_stream?: boolean;
+  include_tools?: boolean;
+  include_params?: boolean;
+  include_error_probe?: boolean;
+  include_thinking?: boolean;
+  include_vision?: boolean;
+  timeout_seconds?: number;
+};
+
+export type FullModelMetricSummary = {
+  count: number;
+  avg?: number | null;
+  p50?: number | null;
+  p95?: number | null;
+  min?: number | null;
+  max?: number | null;
+};
+
+export type FullModelProbeResult = {
+  key: string;
+  title: string;
+  category: string;
+  protocol_family: string;
+  status: 'pass' | 'warning' | 'fail' | string;
+  score: number;
+  labels: string[];
+  endpoint?: string | null;
+  http_status?: number | null;
+  request_id?: string | null;
+  message_id?: string | null;
+  latency_ms?: number | null;
+  ttft_ms?: number | null;
+  tpot_ms?: number | null;
+  tokens_per_second?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  stream_event_count: number;
+  stream_events: string[];
+  usage_present: boolean;
+  error_type?: string | null;
+  error_excerpt?: string | null;
+  excerpt?: string | null;
+  raw_evidence: Record<string, unknown>;
+};
+
+export type FullModelChannelResult = {
+  channel: Channel;
+  protocol_family: string;
+  status: 'pass' | 'warning' | 'degraded' | 'failed' | string;
+  score: number;
+  summary: string;
+  labels: string[];
+  total_probes: number;
+  passed_probes: number;
+  failed_probes: number;
+  warning_probes: number;
+  latency_ms: FullModelMetricSummary;
+  ttft_ms: FullModelMetricSummary;
+  tpot_ms: FullModelMetricSummary;
+  tokens_per_second: FullModelMetricSummary;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  probes: FullModelProbeResult[];
+};
+
+export type FullModelCheckResult = {
+  id: string;
+  created_at: string;
+  completed_at: string;
+  duration_ms: number;
+  repeat_count: number;
+  categories: string[];
+  channels: FullModelChannelResult[];
+};
+
 export type OpenAIResourceCheckRequest = {
   base_url?: string | null;
   api_key: string;
