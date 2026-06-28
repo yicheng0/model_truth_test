@@ -25,6 +25,79 @@ export type ChannelDeleteResult = {
   deleted_patrol_jobs?: number;
 };
 
+export type ChannelHealthTrendPoint = {
+  date: string;
+  run_count: number;
+  result_count: number;
+  success_count: number;
+  failure_count: number;
+  avg_latency_ms?: number | null;
+};
+
+export type ChannelHealthRecentFailure = {
+  result_id: string;
+  run_id: string;
+  run_name?: string | null;
+  created_at?: string | null;
+  http_status?: number | null;
+  request_id?: string | null;
+  message_id?: string | null;
+  error_type?: string | null;
+  error_excerpt?: string | null;
+  labels: string[];
+  latency_ms?: number | null;
+};
+
+export type ChannelHealthProbeSummary = {
+  key: string;
+  total: number;
+  success_count: number;
+  failure_count: number;
+  success_rate?: number | null;
+  avg_latency_ms?: number | null;
+  p95_latency_ms?: number | null;
+};
+
+export type ChannelHealthProfile = {
+  channel: Channel;
+  days: number;
+  status: 'ok' | 'degraded' | 'insufficient_data' | string;
+  total_runs: number;
+  total_results: number;
+  success_count: number;
+  failure_count: number;
+  success_rate?: number | null;
+  failure_rate?: number | null;
+  avg_latency_ms?: number | null;
+  p95_latency_ms?: number | null;
+  latest_result_at?: string | null;
+  label_distribution: Record<string, number>;
+  error_type_distribution: Record<string, number>;
+  probe_summaries: ChannelHealthProbeSummary[];
+  signature_summary: {
+    total: number;
+    pass_count: number;
+    fail_count: number;
+    pass_rate?: number | null;
+    latest_status?: string | null;
+    latest_reason?: string | null;
+    latest_created_at?: string | null;
+  };
+  patrol_summary: {
+    schedule_count: number;
+    enabled_schedule_count: number;
+    latest_status?: string | null;
+    latest_error?: string | null;
+    latest_finished_at?: string | null;
+    alert_count: number;
+    pending_alert_count: number;
+    job_status_counts: Record<string, number>;
+    attempt_status_counts: Record<string, number>;
+  };
+  trend: ChannelHealthTrendPoint[];
+  recent_failures: ChannelHealthRecentFailure[];
+};
+
 /** Legacy — prefer narrower interfaces below. */
 export type JsonObject = Record<string, any>;
 

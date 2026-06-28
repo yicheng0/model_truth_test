@@ -122,6 +122,40 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('fetches channel health profiles with a time window', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          channel: { id: 'ch_1', name: 'channel', provider_type: 'third_party_anthropic', role: 'candidate', is_reference: false, enabled: true },
+          days: 7,
+          status: 'ok',
+          total_runs: 1,
+          total_results: 2,
+          success_count: 2,
+          failure_count: 0,
+          success_rate: 100,
+          failure_rate: 0,
+          avg_latency_ms: 120,
+          p95_latency_ms: 180,
+          label_distribution: {},
+          error_type_distribution: {},
+          probe_summaries: [],
+          signature_summary: { total: 0, pass_count: 0, fail_count: 0, pass_rate: null },
+          patrol_summary: { schedule_count: 0, enabled_schedule_count: 0, alert_count: 0, pending_alert_count: 0, job_status_counts: {}, attempt_status_counts: {} },
+          trend: [],
+          recent_failures: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const payload = await api.channelHealthProfile('ch_1', 7);
+
+    expect(payload.status).toBe('ok');
+    expect(fetchMock).toHaveBeenCalledWith('/api/channels/ch_1/health-profile?days=7', expect.any(Object));
+    fetchMock.mockRestore();
+  });
+
   it('adds the admin key to destructive requests when configured', async () => {
     const storage = new Map<string, string>();
     vi.stubGlobal('localStorage', {

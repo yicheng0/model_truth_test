@@ -61,6 +61,87 @@ class ChannelRead(ChannelBase):
         return redact_channel_auth_config(value)
 
 
+class ChannelHealthTrendPointRead(BaseModel):
+    date: str
+    run_count: int = 0
+    result_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    avg_latency_ms: float | None = None
+
+
+class ChannelHealthRecentFailureRead(BaseModel):
+    result_id: str
+    run_id: str
+    run_name: str | None = None
+    created_at: datetime | None = None
+    http_status: int | None = None
+    request_id: str | None = None
+    message_id: str | None = None
+    error_type: str | None = None
+    error_excerpt: str | None = None
+    labels: list[str] = Field(default_factory=list)
+    latency_ms: float | None = None
+
+
+class ChannelHealthProbeSummaryRead(BaseModel):
+    key: str
+    total: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    success_rate: float | None = None
+    avg_latency_ms: float | None = None
+    p95_latency_ms: float | None = None
+
+
+class ChannelHealthSignatureSummaryRead(BaseModel):
+    total: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    pass_rate: float | None = None
+    latest_status: str | None = None
+    latest_reason: str | None = None
+    latest_created_at: datetime | None = None
+
+
+class ChannelHealthPatrolSummaryRead(BaseModel):
+    schedule_count: int = 0
+    enabled_schedule_count: int = 0
+    latest_status: str | None = None
+    latest_error: str | None = None
+    latest_finished_at: datetime | None = None
+    alert_count: int = 0
+    pending_alert_count: int = 0
+    job_status_counts: dict[str, int] = Field(default_factory=dict)
+    attempt_status_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class ChannelHealthProfileRead(BaseModel):
+    channel: ChannelRead
+    days: int
+    status: Literal["ok", "degraded", "insufficient_data"]
+    total_runs: int = 0
+    total_results: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    success_rate: float | None = None
+    failure_rate: float | None = None
+    avg_latency_ms: float | None = None
+    p95_latency_ms: float | None = None
+    latest_result_at: datetime | None = None
+    label_distribution: dict[str, int] = Field(default_factory=dict)
+    error_type_distribution: dict[str, int] = Field(default_factory=dict)
+    probe_summaries: list[ChannelHealthProbeSummaryRead] = Field(default_factory=list)
+    signature_summary: ChannelHealthSignatureSummaryRead = Field(default_factory=ChannelHealthSignatureSummaryRead)
+    patrol_summary: ChannelHealthPatrolSummaryRead = Field(default_factory=ChannelHealthPatrolSummaryRead)
+    trend: list[ChannelHealthTrendPointRead] = Field(default_factory=list)
+    recent_failures: list[ChannelHealthRecentFailureRead] = Field(default_factory=list)
+
+    @field_serializer("channel", "label_distribution", "error_type_distribution", "probe_summaries", "signature_summary", "patrol_summary", "trend", "recent_failures")
+    def serialize_health_payload(self, value: Any) -> Any:
+        return redact_secrets(value)
+
+
 class SignatureInteropTestCreate(BaseModel):
     source_channel_id: str
     relay_channel_id: str

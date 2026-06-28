@@ -4409,6 +4409,187 @@ def test_gemini_resource_check_parses_sse_like_stream_chunks(monkeypatch) -> Non
     assert "stream_shape_mismatch" not in payload["labels"]
 
 
+def test_channel_health_profile_returns_insufficient_data() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        create_channel(db, ChannelCreate(id="ch_health_empty", name="empty", provider_type="third_party_anthropic", role="candidate"))
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/ch_health_empty/health-profile")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "insufficient_data"
+    assert payload["total_results"] == 0
+    assert payload["trend"]
+
+
+def test_channel_health_profile_aggregates_results_and_redacts() -> None:
+    reset_database()
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="suite_health", name="health suite"))
+        create_case(db, TestCaseCreate(id="case_ok", suite_id="suite_health", module="protocol", title="ok", prompt="ok"))
+        create_case(db, TestCaseCreate(id="case_fail", suite_id="suite_health", module="protocol", title="fail", prompt="fail"))
+        create_channel(db, ChannelCreate(id="ch_health", name="health", provider_type="third_party_anthropic", role="candidate"))
+        run = Run(
+            id="run_health",
+            suite_id="suite_health",
+            name="health run",
+            mode="manual_probe",
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=2,
+            completed_jobs=2,
+            created_at=now,
+        )
+        db.add(run)
+        db.add(RunChannel(id="rch_health", run_id=run.id, channel_id="ch_health", role_in_run="candidate"))
+        db.add(
+            Result(
+                id="res_health_ok",
+                run_id=run.id,
+                test_case_id="case_ok",
+                channel_id="ch_health",
+                attempt_index=1,
+                normalized_response={"provider_message_id": "msg_ok", "raw_response": {"request_id": "req_ok"}},
+                raw_response={"type": "message", "id": "msg_ok"},
+                metrics={"status_code": 200, "latency_ms": 100},
+                score=90,
+                labels=[],
+                created_at=now,
+            )
+        )
+        db.add(
+            Result(
+                id="res_health_fail",
+                run_id=run.id,
+                test_case_id="case_fail",
+                channel_id="ch_health",
+                attempt_index=1,
+                normalized_response={"error": "API key sk-health-secret failed", "raw_response": {"request_id": "req_fail"}},
+                raw_response={"error": {"type": "rate_limit_error", "message": "bad sk-health-secret"}},
+                metrics={"status_code": 429, "latency_ms": 900, "error_type": "rate_limit_error"},
+                score=0,
+                labels=["request_failed", "latency_outlier"],
+                created_at=now,
+            )
+        )
+        db.add(
+            Report(
+                id="report_health",
+                run_id=run.id,
+                channel_id="ch_health",
+                final_score=60,
+                grade="D",
+                summary="health report",
+                evidence={"labels": ["request_failed"]},
+                created_at=now,
+            )
+        )
+        db.add(
+            ChannelAlert(
+                id="alert_health",
+                run_id=run.id,
+                report_id="report_health",
+                channel_id="ch_health",
+                status="pending_review",
+                severity="high",
+                grade="D",
+                final_score=60,
+                trigger_labels=["request_failed"],
+                created_at=now,
+            )
+        )
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/ch_health/health-profile?days=7")
+
+    payload = response.json()
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 200
+    assert payload["status"] == "degraded"
+    assert payload["total_results"] == 2
+    assert payload["success_count"] == 1
+    assert payload["failure_count"] == 1
+    assert payload["success_rate"] == 50.0
+    assert payload["p95_latency_ms"] == 860.0
+    assert payload["label_distribution"]["request_failed"] == 1
+    assert payload["error_type_distribution"]["rate_limit_error"] == 1
+    assert payload["recent_failures"][0]["http_status"] == 429
+    assert payload["recent_failures"][0]["request_id"] == "req_fail"
+    assert "sk-health-secret" not in blob
+
+
+def test_channel_health_profile_summarizes_signature_and_patrol() -> None:
+    reset_database()
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="suite_health_sig", name="health sig suite"))
+        create_case(db, TestCaseCreate(id="signature_interop", suite_id="suite_health_sig", module="signature", title="sig", prompt="sig"))
+        create_channel(db, ChannelCreate(id="ch_source_health", name="source", provider_type="anthropic", role="gold"))
+        create_channel(db, ChannelCreate(id="ch_relay_health", name="relay", provider_type="third_party_anthropic", role="candidate"))
+        run = Run(id="run_health_sig", suite_id="suite_health_sig", name="sig run", mode="manual_probe", status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1, created_at=now)
+        db.add(run)
+        db.add(RunChannel(id="rch_health_sig", run_id=run.id, channel_id="ch_relay_health", role_in_run="candidate"))
+        db.add(
+            Result(
+                id="res_health_sig",
+                run_id=run.id,
+                test_case_id="signature_interop",
+                channel_id="ch_relay_health",
+                attempt_index=1,
+                raw_request={"source_channel_id": "ch_source_health", "relay_channel_id": "ch_relay_health", "stream": True},
+                raw_response={"signature_interop": {"ok": True, "status": "pass", "reason": "ok", "steps": []}},
+                normalized_response={},
+                metrics={"status_code": 200, "latency_ms": 300},
+                score=100,
+                labels=[],
+                created_at=now,
+            )
+        )
+        schedule = ScheduledChannelTest(
+            id="sched_health",
+            channel_id="ch_relay_health",
+            suite_id="suite_health_sig",
+            baseline_snapshot_id="base_missing_for_health",
+            name="health patrol",
+            enabled=True,
+            last_status="completed",
+            last_finished_at=now,
+            next_run_at=now + timedelta(hours=1),
+        )
+        db.add(schedule)
+        db.add(PatrolJob(id="pjob_health", scheduled_test_id=schedule.id, channel_id="ch_relay_health", status="completed", run_id=run.id, created_at=now, finished_at=now))
+        db.add(PatrolJobAttempt(id="pattempt_health", job_id="pjob_health", attempt_index=1, status="completed", run_id=run.id, started_at=now, finished_at=now))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/ch_relay_health/health-profile?days=1")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["signature_summary"]["total"] == 1
+    assert payload["signature_summary"]["pass_count"] == 1
+    assert payload["signature_summary"]["pass_rate"] == 100.0
+    assert payload["patrol_summary"]["schedule_count"] == 1
+    assert payload["patrol_summary"]["enabled_schedule_count"] == 1
+    assert payload["patrol_summary"]["job_status_counts"]["completed"] == 1
+
+
+def test_channel_health_profile_rejects_invalid_days() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        create_channel(db, ChannelCreate(id="ch_health_days", name="days", provider_type="third_party_anthropic", role="candidate"))
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/ch_health_days/health-profile?days=2")
+
+    assert response.status_code == 400
+
+
 def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypatch) -> None:
     reset_database()
     calls: list[dict] = []

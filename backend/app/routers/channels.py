@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,12 +12,13 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest
-from ..redaction import merge_redacted_config
+from ..redaction import merge_redacted_config, redact_secrets, redact_text
 from ..seed_utils import ensure_seed_data_when_empty
 from ..schemas import (
     CacheHitRateTestCreate,
     CacheHitRateTestRead,
     ChannelCreate,
+    ChannelHealthProfileRead,
     ChannelRead,
     ChannelUpdate,
     GeminiResourceCheckCreate,
@@ -29,6 +33,7 @@ from ..schemas import (
 )
 from ..services import (
     _clean_auth_config,
+    _avg,
     create_cache_hit_rate_test,
     create_channel,
     create_gemini_resource_check,
@@ -36,6 +41,10 @@ from ..services import (
     create_openai_resource_check,
     create_signature_interop_test,
     fetch_channel_models,
+    request_id_from_normalized,
+    _metric_number,
+    _pct,
+    _percentile,
 )
 
 
@@ -241,6 +250,245 @@ def channel_health(channel_id: str, db: Session = Depends(get_db)) -> dict[str, 
         "provider_type": channel.provider_type,
         "message": "MVP health check uses configured metadata; live probes are handled by eval runs.",
     }
+
+
+def _dt_key(value: datetime | None) -> str:
+    if not value:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).date().isoformat()
+
+
+def _sorted_counts(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for value in values:
+        if value:
+            counts[value] += 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _result_error_type(result: Result) -> str | None:
+    metrics = result.metrics if isinstance(result.metrics, dict) else {}
+    normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+    raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+    error_type = metrics.get("error_type") or normalized.get("error_type")
+    if error_type:
+        return str(error_type)
+    raw_error = raw.get("error")
+    if isinstance(raw_error, dict):
+        return str(raw_error.get("type") or raw_error.get("code") or raw_error.get("status") or "provider_error")
+    if normalized.get("error"):
+        return "request_failed"
+    return None
+
+
+def _result_error_excerpt(result: Result) -> str | None:
+    normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+    raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+    for value in (normalized.get("error"), raw.get("error")):
+        if not value:
+            continue
+        if isinstance(value, str):
+            return redact_text(value)[:500]
+        return redact_text(str(redact_secrets(value)))[:500]
+    return None
+
+
+def _result_http_status(result: Result) -> int | None:
+    metrics = result.metrics if isinstance(result.metrics, dict) else {}
+    normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+    for source in (metrics, normalized):
+        value = source.get("status_code") or source.get("http_status")
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _result_message_id(result: Result) -> str | None:
+    normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+    raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+    value = normalized.get("provider_message_id") or raw.get("id") or raw.get("message_id")
+    return str(value) if value else None
+
+
+def _result_failed(result: Result) -> bool:
+    normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+    status_code = _result_http_status(result)
+    return bool(normalized.get("error") or (status_code is not None and status_code >= 400) or "request_failed" in (result.labels or []) or (result.score <= 0 and result.labels))
+
+
+def _signature_payload(result: Result) -> dict[str, Any] | None:
+    payload = _signature_interop_signature_from_result(result)
+    return payload if isinstance(payload, dict) else None
+
+
+def _channel_health_status(total_results: int, failure_rate: float | None, pending_alerts: int) -> str:
+    if total_results <= 0:
+        return "insufficient_data"
+    if (failure_rate or 0) >= 30 or pending_alerts > 0:
+        return "degraded"
+    return "ok"
+
+
+@router.get("/api/channels/{channel_id}/health-profile", response_model=ChannelHealthProfileRead)
+def channel_health_profile(channel_id: str, days: int = 7, db: Session = Depends(get_db)) -> dict[str, object]:
+    if days not in {1, 7, 30}:
+        raise HTTPException(status_code=400, detail="days must be one of 1, 7, 30")
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    results = list(
+        db.scalars(
+            select(Result)
+            .where(Result.channel_id == channel_id, Result.created_at >= since)
+            .order_by(Result.created_at.desc(), Result.id.desc())
+        ).all()
+    )
+    run_ids = {result.run_id for result in results}
+    linked_runs = list(
+        db.scalars(
+            select(Run)
+            .join(RunChannel, RunChannel.run_id == Run.id)
+            .where(RunChannel.channel_id == channel_id, Run.created_at >= since)
+            .order_by(Run.created_at.desc())
+        ).all()
+    )
+    for run in linked_runs:
+        run_ids.add(run.id)
+    runs_by_id = {run.id: run for run in linked_runs}
+    if run_ids:
+        for run in db.scalars(select(Run).where(Run.id.in_(run_ids))).all():
+            runs_by_id[run.id] = run
+
+    failures = [result for result in results if _result_failed(result)]
+    successes = [result for result in results if not _result_failed(result)]
+    latencies = [_metric_number(result, "latency_ms") for result in results]
+    labels = [label for result in results for label in (result.labels or []) if label]
+    error_types = [_result_error_type(result) or "unknown_error" for result in failures]
+
+    by_date: dict[str, list[Result]] = defaultdict(list)
+    for result in results:
+        by_date[_dt_key(result.created_at)].append(result)
+    trend = []
+    for offset in range(days - 1, -1, -1):
+        day = (datetime.now(timezone.utc) - timedelta(days=offset)).date().isoformat()
+        day_results = by_date.get(day, [])
+        day_failures = [result for result in day_results if _result_failed(result)]
+        day_run_ids = {result.run_id for result in day_results}
+        trend.append(
+            {
+                "date": day,
+                "run_count": len(day_run_ids),
+                "result_count": len(day_results),
+                "success_count": len(day_results) - len(day_failures),
+                "failure_count": len(day_failures),
+                "avg_latency_ms": _avg([_metric_number(result, "latency_ms") for result in day_results]),
+            }
+        )
+
+    probe_summaries = []
+    by_probe: dict[str, list[Result]] = defaultdict(list)
+    for result in results:
+        key = result.test_case_id or "unknown_probe"
+        if _signature_payload(result):
+            key = "signature_interop"
+        by_probe[key].append(result)
+    for key, items in sorted(by_probe.items()):
+        failed = [result for result in items if _result_failed(result)]
+        probe_summaries.append(
+            {
+                "key": key,
+                "total": len(items),
+                "success_count": len(items) - len(failed),
+                "failure_count": len(failed),
+                "success_rate": _pct(len(items) - len(failed), len(items)),
+                "avg_latency_ms": _avg([_metric_number(result, "latency_ms") for result in items]),
+                "p95_latency_ms": _percentile([_metric_number(result, "latency_ms") for result in items], 95),
+            }
+        )
+
+    signature_results = [result for result in results if _signature_payload(result)]
+    signature_payloads = [_signature_payload(result) or {} for result in signature_results]
+    signature_pass = [payload for payload in signature_payloads if str(payload.get("status") or "").lower() == "pass" or payload.get("ok") is True]
+    latest_signature = signature_payloads[0] if signature_payloads else {}
+    signature_summary = {
+        "total": len(signature_payloads),
+        "pass_count": len(signature_pass),
+        "fail_count": max(0, len(signature_payloads) - len(signature_pass)),
+        "pass_rate": _pct(len(signature_pass), len(signature_payloads)),
+        "latest_status": latest_signature.get("status"),
+        "latest_reason": redact_text(str(latest_signature.get("reason") or ""))[:500] or None,
+        "latest_created_at": signature_results[0].created_at if signature_results else None,
+    }
+
+    schedules = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.channel_id == channel_id)).all())
+    alerts = list(db.scalars(select(ChannelAlert).where(ChannelAlert.channel_id == channel_id, ChannelAlert.created_at >= since)).all())
+    jobs = list(db.scalars(select(PatrolJob).where(PatrolJob.channel_id == channel_id, PatrolJob.created_at >= since)).all())
+    job_ids = [job.id for job in jobs]
+    attempts = list(db.scalars(select(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_ids))).all()) if job_ids else []
+    latest_schedule = max(schedules, key=lambda item: item.last_finished_at or item.last_started_at or item.created_at) if schedules else None
+    patrol_summary = {
+        "schedule_count": len(schedules),
+        "enabled_schedule_count": len([item for item in schedules if item.enabled]),
+        "latest_status": latest_schedule.last_status if latest_schedule else None,
+        "latest_error": redact_text(latest_schedule.last_error)[:500] if latest_schedule and latest_schedule.last_error else None,
+        "latest_finished_at": latest_schedule.last_finished_at if latest_schedule else None,
+        "alert_count": len(alerts),
+        "pending_alert_count": len([alert for alert in alerts if alert.status == "pending_review"]),
+        "job_status_counts": _sorted_counts([job.status for job in jobs]),
+        "attempt_status_counts": _sorted_counts([attempt.status for attempt in attempts]),
+    }
+
+    recent_failures = []
+    for result in failures[:10]:
+        run = runs_by_id.get(result.run_id)
+        normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+        recent_failures.append(
+            {
+                "result_id": result.id,
+                "run_id": result.run_id,
+                "run_name": run.name if run else None,
+                "created_at": result.created_at,
+                "http_status": _result_http_status(result),
+                "request_id": request_id_from_normalized(normalized),
+                "message_id": _result_message_id(result),
+                "error_type": _result_error_type(result),
+                "error_excerpt": _result_error_excerpt(result),
+                "labels": result.labels or [],
+                "latency_ms": _metric_number(result, "latency_ms"),
+            }
+        )
+
+    failure_rate = _pct(len(failures), len(results))
+    payload = {
+        "channel": channel,
+        "days": days,
+        "status": _channel_health_status(len(results), failure_rate, int(patrol_summary["pending_alert_count"])),
+        "total_runs": len(run_ids),
+        "total_results": len(results),
+        "success_count": len(successes),
+        "failure_count": len(failures),
+        "success_rate": _pct(len(successes), len(results)),
+        "failure_rate": failure_rate,
+        "avg_latency_ms": _avg(latencies),
+        "p95_latency_ms": _percentile(latencies, 95),
+        "latest_result_at": results[0].created_at if results else None,
+        "label_distribution": _sorted_counts(labels),
+        "error_type_distribution": _sorted_counts(error_types),
+        "probe_summaries": probe_summaries,
+        "signature_summary": signature_summary,
+        "patrol_summary": patrol_summary,
+        "trend": trend,
+        "recent_failures": recent_failures,
+    }
+    return redact_secrets(payload)
 
 
 def _signature_interop_signature_from_result(result: Result) -> dict[str, object] | None:

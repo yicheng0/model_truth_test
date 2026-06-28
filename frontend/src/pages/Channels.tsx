@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Card, Collapse, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd';
-import { Edit3, Plus, Trash2 } from 'lucide-react';
+import { Alert, Button, Card, Col, Collapse, Empty, Form, Input, Modal, Popconfirm, Radio, Row, Select, Space, Statistic, Switch, Table, Tag, Typography, message } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
+import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
+import { Activity, Edit3, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import {
   accountTypeLabel,
@@ -14,7 +16,8 @@ import {
   providerTypeForAccountType,
 } from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
-import type { Channel, ChannelCreate, ChannelDeleteResult } from '../types';
+import { formatDateTime } from '../time';
+import type { Channel, ChannelCreate, ChannelDeleteResult, ChannelHealthProfile, ChannelHealthRecentFailure } from '../types';
 
 type ChannelFormValues = {
   name: string;
@@ -56,6 +59,98 @@ function preferredFetchedModel(models: string[]) {
   return models.find((model) => model.includes('sonnet-4-6')) ?? models.find((model) => model.includes('sonnet')) ?? models[0];
 }
 
+function percentText(value?: number | null) {
+  return value == null ? '-' : `${value.toFixed(1)}%`;
+}
+
+function msText(value?: number | null) {
+  return value == null ? '-' : `${Math.round(value)} ms`;
+}
+
+function healthStatusTag(status?: string | null) {
+  if (status === 'ok') return <Tag color="green">健康</Tag>;
+  if (status === 'degraded') return <Tag color="red">需关注</Tag>;
+  if (status === 'insufficient_data') return <Tag color="default">样本不足</Tag>;
+  return <Tag>{status || '-'}</Tag>;
+}
+
+function topEntries(value: Record<string, number>, limit = 8) {
+  return Object.entries(value ?? {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, limit);
+}
+
+const failureColumns: ColumnsType<ChannelHealthRecentFailure> = [
+  { title: '时间', dataIndex: 'created_at', width: 170, render: (value: string | null) => formatDateTime(value) },
+  { title: 'Run', dataIndex: 'run_id', width: 210, render: (value: string, row) => <Typography.Link href={`/runs/${value}`}>{row.run_name || value}</Typography.Link> },
+  { title: 'HTTP', dataIndex: 'http_status', width: 80, render: (value: number | null) => value ?? '-' },
+  { title: 'Request ID', dataIndex: 'request_id', width: 170, render: (value: string | null) => value ? <Typography.Text copyable ellipsis={{ tooltip: value }}>{value}</Typography.Text> : '-' },
+  { title: 'Message ID', dataIndex: 'message_id', width: 170, render: (value: string | null) => value ? <Typography.Text copyable ellipsis={{ tooltip: value }}>{value}</Typography.Text> : '-' },
+  { title: '错误类型', dataIndex: 'error_type', width: 150, render: (value: string | null) => value || '-' },
+  { title: '错误摘要', dataIndex: 'error_excerpt', ellipsis: true, render: (value: string | null) => value || '-' },
+  { title: '标签', dataIndex: 'labels', width: 220, render: (labels: string[]) => <Space size={4} wrap>{(labels ?? []).slice(0, 4).map((label) => <Tag key={label} color="orange">{label}</Tag>)}</Space> },
+];
+
+function ChannelHealthProfilePanel({ profile }: { profile: ChannelHealthProfile }) {
+  const labelData = topEntries(profile.label_distribution).map(([label, count]) => ({ label, count }));
+  return (
+    <Space direction="vertical" size={16} className="full-width">
+      {profile.status === 'insufficient_data' ? (
+        <Alert showIcon type="info" message="样本不足" description="当前时间窗内没有足够历史结果；健康画像不会输出风险结论。可以扩大到 30 天或先运行巡检/手动检测。" />
+      ) : null}
+      <Row gutter={[12, 12]}>
+        <Col xs={12} md={6}><Card size="small"><Statistic title="健康状态" valueRender={() => healthStatusTag(profile.status)} /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title="成功率" value={percentText(profile.success_rate)} /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title="P95 延迟" value={msText(profile.p95_latency_ms)} /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title="最近失败" value={profile.recent_failures[0]?.error_type || '-'} /></Card></Col>
+      </Row>
+      <Row gutter={[12, 12]}>
+        <Col xs={24} lg={14}>
+          <Card size="small" title="最近趋势">
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={profile.trend}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="date" />
+                  <YAxis yAxisId="left" allowDecimals={false} />
+                  <YAxis yAxisId="right" orientation="right" />
+                  <ChartTooltip />
+                  <Line yAxisId="left" type="monotone" dataKey="result_count" name="结果数" stroke="#2563eb" />
+                  <Line yAxisId="left" type="monotone" dataKey="failure_count" name="失败数" stroke="#dc2626" />
+                  <Line yAxisId="right" type="monotone" dataKey="avg_latency_ms" name="平均延迟 ms" stroke="#16a34a" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </Card>
+        </Col>
+        <Col xs={24} lg={10}>
+          <Card size="small" title="异常标签 Top">
+            {labelData.length ? (
+              <div style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={labelData} layout="vertical" margin={{ left: 80 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis type="number" allowDecimals={false} />
+                    <YAxis type="category" dataKey="label" width={120} />
+                    <ChartTooltip />
+                    <Bar dataKey="count" name="次数" fill="#f97316" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无异常标签" />}
+          </Card>
+        </Col>
+      </Row>
+      <Row gutter={[12, 12]}>
+        <Col xs={24} md={8}><Card size="small" title="Signature 互认"><Space direction="vertical"><span>通过率：{percentText(profile.signature_summary.pass_rate)}</span><span>最新状态：{profile.signature_summary.latest_status || '-'}</span><Typography.Text type="secondary">{profile.signature_summary.latest_reason || '-'}</Typography.Text></Space></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="自动巡检"><Space direction="vertical"><span>启用计划：{profile.patrol_summary.enabled_schedule_count}/{profile.patrol_summary.schedule_count}</span><span>最新状态：{profile.patrol_summary.latest_status || '-'}</span><span>待复审告警：{profile.patrol_summary.pending_alert_count}</span></Space></Card></Col>
+        <Col xs={24} md={8}><Card size="small" title="错误类型"><Space wrap>{topEntries(profile.error_type_distribution, 6).map(([key, count]) => <Tag key={key} color="red">{key} {count}</Tag>)}{!topEntries(profile.error_type_distribution).length ? '-' : null}</Space></Card></Col>
+      </Row>
+      <Card size="small" title="最近失败样本">
+        <Table size="small" rowKey="result_id" pagination={{ pageSize: 5 }} dataSource={profile.recent_failures} columns={failureColumns} />
+      </Card>
+    </Space>
+  );
+}
+
 const requestProtocolOptions = [
   { value: 'auto', label: '自动探测' },
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
@@ -71,7 +166,14 @@ export default function Channels() {
   const [createForm] = Form.useForm<ChannelFormValues>();
   const [editForm] = Form.useForm<ChannelFormValues>();
   const [editing, setEditing] = useState<Channel | null>(null);
+  const [healthChannel, setHealthChannel] = useState<Channel | null>(null);
+  const [healthDays, setHealthDays] = useState<1 | 7 | 30>(7);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const healthProfile = useQuery({
+    queryKey: ['channelHealthProfile', healthChannel?.id, healthDays],
+    queryFn: () => api.channelHealthProfile(healthChannel!.id, healthDays),
+    enabled: Boolean(healthChannel),
+  });
   const invalidate = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['channels'] }),
@@ -359,10 +461,13 @@ export default function Channels() {
             },
             {
               title: '操作',
-              width: 180,
+              width: 260,
               fixed: 'right',
               render: (_, channel) => (
                 <Space>
+                  <Button icon={<Activity size={15} />} onClick={() => setHealthChannel(channel)}>
+                    健康
+                  </Button>
                   <Button icon={<Edit3 size={15} />} onClick={() => openEdit(channel)}>
                     编辑
                   </Button>
@@ -391,7 +496,7 @@ export default function Channels() {
               ),
             },
           ]}
-          scroll={{ x: 1120 }}
+          scroll={{ x: 1200 }}
         />
       </Card>
 
@@ -453,6 +558,38 @@ export default function Channels() {
             ]}
           />
         </Form>
+      </Modal>
+
+      <Modal
+        title={healthChannel ? `健康画像：${formatChannelDisplayName(healthChannel)}` : '健康画像'}
+        open={Boolean(healthChannel)}
+        onCancel={() => setHealthChannel(null)}
+        footer={null}
+        width={1120}
+        destroyOnClose
+      >
+        <Space direction="vertical" size={16} className="full-width">
+          <Radio.Group
+            value={healthDays}
+            onChange={(event) => setHealthDays(event.target.value)}
+            options={[
+              { label: '1 天', value: 1 },
+              { label: '7 天', value: 7 },
+              { label: '30 天', value: 30 },
+            ]}
+            optionType="button"
+            buttonStyle="solid"
+          />
+          {healthProfile.isLoading ? (
+            <Card loading />
+          ) : healthProfile.isError ? (
+            <Alert type="error" showIcon message="健康画像加载失败" description={healthProfile.error instanceof Error ? healthProfile.error.message : '请检查后端日志'} />
+          ) : healthProfile.data ? (
+            <ChannelHealthProfilePanel profile={healthProfile.data} />
+          ) : (
+            <Empty description="暂无健康画像" />
+          )}
+        </Space>
       </Modal>
     </Space>
   );
