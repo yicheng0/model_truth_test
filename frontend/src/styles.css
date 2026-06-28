@@ -99,7 +99,7 @@ textarea:focus-visible,
   position: sticky;
   top: 0;
   height: 100vh;
-  overflow: hidden;
+  overflow: visible;
   border-right: 1px solid #e2e8f0;
   background: #faf8f3 !important;
   box-shadow: 10px 0 28px rgba(15, 23, 42, 0.04);
@@ -107,8 +107,10 @@ textarea:focus-visible,
 
 .enterprise-sidebar .ant-layout-sider-children {
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   padding: 24px 18px;
 }
 
@@ -241,7 +243,30 @@ textarea:focus-visible,
 
 .side-nav {
   display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.side-nav::-webkit-scrollbar {
+  width: 6px;
+}
+
+.side-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.side-nav::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.22);
+  border-radius: 999px;
+}
+
+.side-nav::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.34);
 }
 
 .side-nav-item {
@@ -279,6 +304,7 @@ textarea:focus-visible,
 
 .sidebar-tools {
   display: grid;
+  flex: 0 0 auto;
   gap: 10px;
   margin-top: auto;
   padding-top: 18px;
@@ -331,6 +357,44 @@ textarea:focus-visible,
 
 .enterprise-sidebar.ant-layout-sider-collapsed .sidebar-tools {
   padding-top: 14px;
+}
+
+@media (max-height: 780px) and (min-width: 1041px) {
+  .enterprise-sidebar .ant-layout-sider-children {
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+
+  .enterprise-sidebar.ant-layout-sider-collapsed .ant-layout-sider-children {
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+
+  .brand-lockup {
+    margin-bottom: 14px;
+  }
+
+  .sidebar-collapse-button {
+    min-height: 36px;
+    margin-bottom: 8px;
+  }
+
+  .side-nav {
+    gap: 6px;
+  }
+
+  .side-nav-item {
+    min-height: 42px;
+  }
+
+  .sidebar-tools {
+    gap: 8px;
+    padding-top: 12px;
+  }
+
+  .side-tool-button {
+    min-height: 38px;
+  }
 }
 
 .nav-pills,
@@ -2812,12 +2876,15 @@ textarea:focus-visible,
     max-width: none !important;
     min-width: 0 !important;
     height: auto;
+    overflow: visible;
     border-right: 0;
     border-bottom: 1px solid var(--border-subtle);
     background: rgba(255, 255, 255, 0.94) !important;
   }
 
   .enterprise-sidebar .ant-layout-sider-children {
+    height: auto;
+    overflow: visible;
     padding: 16px;
   }
 
@@ -2831,6 +2898,8 @@ textarea:focus-visible,
 
   .side-nav {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    overflow: visible;
+    padding-right: 0;
   }
 
   .side-nav-item {
