@@ -8638,6 +8638,90 @@ def test_new_api_sync_preview_filters_claude_channels(monkeypatch) -> None:
     assert payload["items"][0]["model_name"] == "claude-sonnet-4-5"
 
 
+
+
+def test_new_api_sync_matches_claude_group_and_name_without_model_hit(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_fetch(data):  # noqa: ANN001
+        return "https://new-api.example", [
+            {"id": 301, "name": "azure resource", "group": "azure-claude", "type": 1, "status": 1, "models": "gpt-4o"},
+            {"id": 302, "name": "claude-code relay", "group": "tooling", "type": 1, "status": 1, "models": "sonnet-latest"},
+            {"id": 303, "name": "kimi only", "group": "kimi", "type": 1, "status": 1, "models": "kimi-k2"},
+        ]
+
+    monkeypatch.setattr("app.routers.new_api._fetch_new_api_channels", fake_fetch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/preview",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+                "model_keyword": "claude,anthropic",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    ids = {item["new_api_channel_id"] for item in payload["items"]}
+    assert ids == {"301", "302"}
+    by_id = {item["new_api_channel_id"]: item for item in payload["items"]}
+    assert by_id["301"]["group"] == "azure-claude"
+    assert "group" in by_id["301"]["reason"]
+    assert "name" in by_id["302"]["reason"]
+
+
+def test_new_api_fetch_does_not_send_model_filter_and_supports_multiple_groups(monkeypatch) -> None:
+    reset_database()
+    calls: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __init__(self, payload):  # noqa: ANN001
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # noqa: ANN001
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN001
+            return None
+
+        async def get(self, url, params, headers):  # noqa: ANN001
+            calls.append(dict(params))
+            group = params.get("group")
+            remote_id = 401 if group == "azure-claude" else 402
+            return FakeResponse({"data": {"total": 1, "items": [{"id": remote_id, "name": str(group), "group": group, "models": "sonnet"}]}})
+
+    monkeypatch.setattr("app.routers.new_api.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/preview",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+                "group": "azure-claude, vertex-claude",
+                "model_keyword": "claude",
+            },
+        )
+
+    assert response.status_code == 200
+    assert [call.get("group") for call in calls] == ["azure-claude", "vertex-claude"]
+    assert all("model" not in call for call in calls)
+    assert response.json()["matched"] == 2
+
 def test_new_api_sync_apply_creates_channel_and_schedule(monkeypatch) -> None:
     reset_database()
 

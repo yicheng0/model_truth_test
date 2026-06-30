@@ -885,6 +885,8 @@ class NewApiSyncItemRead(BaseModel):
     name: str
     model_name: str | None = None
     provider_type: str
+    group: str | None = None
+    tag: str | None = None
     action: str
     schedule_action: str
     reason: str | None = None

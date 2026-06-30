@@ -241,6 +241,8 @@ export type NewApiSyncItem = {
   name: string;
   model_name?: string | null;
   provider_type: string;
+  group?: string | null;
+  tag?: string | null;
   action: string;
   schedule_action: string;
   reason?: string | null;

@@ -1330,8 +1330,8 @@ export default function ScheduledTests() {
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
-              <Form.Item label="模型关键词" name="model_keyword">
-                <Input placeholder="claude" />
+              <Form.Item label="Claude 关键词" name="model_keyword" extra="会在 new-api 渠道名称、分组、模型、标签和备注里匹配；多个关键词用逗号分隔。">
+                <Input placeholder="claude, anthropic" />
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
@@ -1360,8 +1360,8 @@ export default function ScheduledTests() {
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
-              <Form.Item label="分组过滤（可选）" name="group">
-                <Input placeholder="留空则不过滤" />
+              <Form.Item label="分组过滤（可选）" name="group" extra="可填 azure-claude、vertex-claude 等；多个分组用逗号分隔。留空则扫描所有分组。">
+                <Input placeholder="留空扫描所有 Claude 相关分组" />
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
@@ -1393,6 +1393,8 @@ export default function ScheduledTests() {
                 { title: 'new-api ID', dataIndex: 'new_api_channel_id', width: 110 },
                 { title: '渠道名称', dataIndex: 'name' },
                 { title: '模型', dataIndex: 'model_name', width: 180, render: (value) => value || '-' },
+                { title: '分组 / 标签', width: 160, render: (_, row) => [row.group, row.tag].filter(Boolean).join(' / ') || '-' },
+                { title: '命中原因', dataIndex: 'reason', width: 170, render: (value) => value || '-' },
                 {
                   title: '渠道',
                   dataIndex: 'action',
