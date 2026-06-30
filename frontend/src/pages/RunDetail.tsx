@@ -637,6 +637,146 @@ export default function RunDetail() {
     return <Card loading />;
   }
 
+  const aiVerdictNode = (() => {
+    const report = selectedReport;
+    const evidence = report?.evidence;
+    const aiJudge = evidence?.ai_judge as Record<string, unknown> | null | undefined;
+    const dimScores = evidence?.dimension_scores as Record<string, number> | null | undefined;
+    const conf = evidence?.confidence;
+    const allResults = data?.results ?? [];
+    const totalProbes = allResults.length;
+    const passedProbes = allResults.filter((r) => r.score === 100).length;
+    const failedProbes = totalProbes - passedProbes;
+
+    const moduleGroups: Record<string, { pass: number; total: number }> = {};
+    const moduleOrder = ['protocol', 'tool', 'tool_use', 'format_boundary', 'identity', 'reasoning', 'code', 'context', 'knowledge', 'safety', 'streaming', 'websearch'];
+    const moduleLabelMap: Record<string, string> = {
+      protocol: '协议指纹', tool: '工具调用', tool_use: '工具调用', format_boundary: '格式边界',
+      identity: '身份一致性', reasoning: '推理能力', code: '代码生成', context: '上下文稳定',
+      knowledge: '知识边界', safety: '安全边界', streaming: '流式协议', websearch: 'Web 搜索',
+    };
+    for (const r of allResults) {
+      const caseModule = caseById.get(r.test_case_id)?.module ?? 'unknown';
+      if (!moduleGroups[caseModule]) moduleGroups[caseModule] = { pass: 0, total: 0 };
+      moduleGroups[caseModule].total++;
+      if (r.score === 100) moduleGroups[caseModule].pass++;
+    }
+    const sortedMods = [...new Set([...moduleOrder, ...Object.keys(moduleGroups)])].filter((m) => moduleGroups[m]);
+
+    const decisiveSignals = aiJudge
+      ? (aiJudge.decisive_signals as string[] | undefined) ?? Object.entries(dimScores ?? {}).filter(([, v]) => v >= 80).map(([k]) => k)
+      : Object.entries(dimScores ?? {}).filter(([, v]) => v >= 80).map(([k]) => k);
+
+    const classificationLabel = (aiJudge?.classification_label as string | undefined)
+      ?? (report?.evidence?.ai_judge?.classification_label as string | undefined)
+      ?? (report?.grade ? `等级 ${report.grade}` : '-');
+
+    const confValue = typeof aiJudge?.confidence === 'number'
+      ? `${Math.round((aiJudge.confidence as number) * 100)}%`
+      : (typeof conf === 'number' ? `${Math.round((conf as number) * 100)}%` : (conf as string | undefined) ?? '-');
+
+    return (
+      <Space direction="vertical" size={20} style={{ width: '100%' }}>
+        <div>
+          <Tag color="blue" style={{ fontSize: 12, marginBottom: 8 }}>AI 辅助摘要</Tag>
+          <div style={{ fontWeight: 700, fontSize: 17, marginBottom: 4 }}>分类判定分析</div>
+          <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+            基于 Evidence Scorer 的结构化证据生成，用于辅助复核；最终结论仍以规则引擎和人工复核为准。
+          </Typography.Text>
+        </div>
+        {report ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <span style={{ color: '#667085', fontSize: 13 }}>综合判定：</span>
+            <Tag color={report.grade === 'A' ? 'success' : report.grade === 'B' ? 'processing' : report.grade === 'C' ? 'warning' : 'error'} style={{ fontWeight: 600, fontSize: 14 }}>
+              {classificationLabel}
+            </Tag>
+            <span style={{ color: '#667085', fontSize: 13 }}>置信度：{confValue}</span>
+          </div>
+        ) : (
+          <Typography.Text type="secondary">请先选择候选渠道以查看判定结果</Typography.Text>
+        )}
+        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', padding: '12px 0', borderTop: '1px solid #f0f0f0', borderBottom: '1px solid #f0f0f0' }}>
+          {[
+            { label: '探针覆盖', value: `${passedProbes}/${totalProbes}` },
+            { label: '未完成/失败', value: String(failedProbes), color: failedProbes > 0 ? '#b42318' : undefined },
+            { label: '证据明细', value: String(totalProbes) },
+            { label: '证据来源', value: '内部黑盒检测' },
+          ].map((item) => (
+            <div key={item.label}>
+              <div style={{ fontSize: 12, color: '#667085' }}>{item.label}</div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: item.color }}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 13 }}>决策性信号</div>
+            {decisiveSignals.length > 0 ? decisiveSignals.map((sig) => (
+              <div key={sig} style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 6 }}>
+                <span style={{ color: '#16a34a', marginTop: 2 }}>●</span>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{sig}</div>
+              </div>
+            )) : (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>暂无决策性信号</Typography.Text>
+            )}
+          </div>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 13 }}>参考性信号 / 复核点</div>
+            {dimScores && Object.entries(dimScores).filter(([, v]) => v < 80 && v > 0).map(([k, v]) => (
+              <div key={k} style={{ fontSize: 12, color: '#667085', marginBottom: 4 }}>{k}：{v.toFixed(0)}</div>
+            ))}
+            {(!dimScores || Object.keys(dimScores).length === 0) && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>暂无参考信号</Typography.Text>
+            )}
+          </div>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 13 }}>改进建议</div>
+            {aiJudge?.reason ? (
+              <Typography.Text style={{ fontSize: 12 }}>{aiJudge.reason as string}</Typography.Text>
+            ) : (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>暂无建议</Typography.Text>
+            )}
+          </div>
+        </div>
+        {report && (
+          <Descriptions size="small" column={4} bordered={false} style={{ background: '#fafafa', padding: '10px 12px', borderRadius: 6 }}>
+            <Descriptions.Item label="Run ID">{data?.run.id}</Descriptions.Item>
+            <Descriptions.Item label="模型">{selectedReport?.channel_id ?? '-'}</Descriptions.Item>
+            <Descriptions.Item label="置信度">{confValue}</Descriptions.Item>
+            <Descriptions.Item label="探针通过">{passedProbes}/{totalProbes}</Descriptions.Item>
+            <Descriptions.Item label="失败探针">{failedProbes}</Descriptions.Item>
+            <Descriptions.Item label="评级">{report.grade ?? '-'}</Descriptions.Item>
+            <Descriptions.Item label="总分">{report.final_score?.toFixed(1) ?? '-'}</Descriptions.Item>
+          </Descriptions>
+        )}
+        <div>
+          <div style={{ fontWeight: 600, marginBottom: 12, fontSize: 13 }}>探针输出与结果</div>
+          <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
+            每根探针显示关键判断信息、命中/缺失信号和该探针相关的脱敏输出摘要。
+          </Typography.Text>
+          {sortedMods.length > 0 ? (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {sortedMods.map((mod, idx) => {
+                const group = moduleGroups[mod];
+                return (
+                  <div key={mod} style={{ padding: '8px 14px', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6, minWidth: 140 }}>
+                    <div style={{ fontSize: 11, color: '#667085', marginBottom: 2 }}>阶段 {idx + 1}</div>
+                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{moduleLabelMap[mod] ?? mod}</div>
+                    <Tag color={group.pass === group.total ? 'success' : group.pass > 0 ? 'warning' : 'error'} style={{ fontSize: 11 }}>
+                      {group.pass}/{group.total} 通过
+                    </Tag>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <Typography.Text type="secondary">暂无探针结果（运行完成后显示）</Typography.Text>
+          )}
+        </div>
+      </Space>
+    );
+  })();
+
   return (
     <Space direction="vertical" size={20} style={{ width: '100%' }} className="page-stack">
       {isPatrolRun ? (
@@ -909,6 +1049,11 @@ export default function RunDetail() {
                 ) : (
                   <Empty description="当前任务不是 Arena 模式，或暂无排名数据" />
                 ),
+              },
+              {
+                key: 'ai_verdict',
+                label: 'AI 判定',
+                children: aiVerdictNode,
               },
             ]}
           />

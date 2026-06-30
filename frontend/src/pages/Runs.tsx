@@ -457,7 +457,7 @@ export default function Runs() {
   const [selectedPatrolRowKeys, setSelectedPatrolRowKeys] = useState<Key[]>([]);
   const runs = useQuery({
     queryKey: ['runs'],
-    queryFn: api.runs,
+    queryFn: () => api.runs(),
     refetchInterval: (query) => (query.state.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
   });
 

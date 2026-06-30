@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Typography } from 'antd';
-import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
+import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, Layers, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
@@ -24,6 +24,7 @@ const ReportsPage = lazy(() => import('./pages/ReportsPage'));
 const ReportDetailPage = lazy(() => import('./pages/ReportDetailPage'));
 const ComparePage = lazy(() => import('./pages/ComparePage'));
 const ResourceLogManagement = lazy(() => import('./pages/ResourceLogManagement'));
+const Probes = lazy(() => import('./pages/Probes'));
 
 const { Content, Sider } = Layout;
 const SIDEBAR_COLLAPSED_KEY = 'apipro.sidebar.collapsed';
@@ -47,6 +48,7 @@ function writeSidebarCollapsed(collapsed: boolean) {
 const navItems = [
   { key: '/', icon: Activity, label: '总览', to: '/' },
   { key: '/channels', icon: Network, label: '渠道管理', to: '/channels' },
+  { key: '/probes', icon: Layers, label: '探针管理', to: '/probes' },
   { key: '/cache-hit-rate-test', icon: DatabaseZap, label: '缓存命中率', to: '/cache-hit-rate-test' },
   { key: '/claude-code-check', icon: TerminalSquare, label: 'Claude 指纹', to: '/claude-code-check' },
   { key: '/model-request-test', icon: Send, label: '模型请求', to: '/model-request-test' },
@@ -130,6 +132,7 @@ function Shell() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/channels" element={<Channels />} />
+              <Route path="/probes" element={<Probes />} />
               <Route path="/cache-hit-rate-test" element={<CacheHitRateTest />} />
               <Route path="/model-request-test" element={<ModelRequestTest />} />
               <Route path="/full-model-check" element={<FullModelCheck />} />

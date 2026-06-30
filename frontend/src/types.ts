@@ -190,6 +190,9 @@ export interface ReportEvidence {
   model_request?: Record<string, unknown>;
   model_requests?: Array<Record<string, unknown>>;
   signature_interop?: SignatureInteropEvidence;
+  ai_judge?: Record<string, unknown> | null;
+  classification_label?: string | null;
+  classification_reason?: string | null;
 }
 
 export type ChannelTaxonomySetting = {

@@ -8,7 +8,7 @@ import { Section } from "../components/Section";
 
 export function RunsPage() {
   const queryClient = useQueryClient();
-  const runs = useQuery({ queryKey: ["runs"], queryFn: api.runs, refetchInterval: 2000 });
+  const runs = useQuery({ queryKey: ["runs"], queryFn: () => api.runs(), refetchInterval: 2000 });
   const suites = useQuery({ queryKey: ["suites"], queryFn: api.suites });
   const cases = useQuery({ queryKey: ["cases"], queryFn: () => api.cases() });
   const [form, setForm] = useState({ name: "四路渠道真实性测评", suite_id: "", repeat_count: 1, concurrency: 4 });
