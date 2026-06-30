@@ -918,29 +918,6 @@ export default function ScheduledTests() {
           rowClassName={(alert) => (alert.id === selectedAlertId ? 'highlight-table-row' : '')}
           pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
           scroll={{ x: 1360 }}
-          expandable={{
-            expandedRowRender: (alert) => {
-              return (
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  <Space wrap>
-                    {(alert.trigger_labels?.length ? alert.trigger_labels : ['无异常标签']).map((label) => (
-                      <Tag color={label === '无异常标签' ? 'default' : 'red'} key={label}>{label}</Tag>
-                    ))}
-                  </Space>
-                  <Typography.Text type="secondary">
-                    渠道：{alertChannelText(alert, channelById.get(alert.channel_id)).displayId} · 判定：{alertErrorText(alert)} · 时间：{formatDateTime(alertProbeCompletedAt(alert)) || formatDateTime(alert.created_at) || '-'}
-                  </Typography.Text>
-                  <Space wrap>
-                    <Button icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
-                    <Link to={buildPatrolRunDetailLink(alert)}>查看报告</Link>
-                    {alert.notification_error ? (
-                      <Typography.Text type="danger">飞书发送错误：{alert.notification_error}</Typography.Text>
-                    ) : null}
-                  </Space>
-                </Space>
-              );
-            },
-          }}
           columns={[
             {
               title: '渠道',
