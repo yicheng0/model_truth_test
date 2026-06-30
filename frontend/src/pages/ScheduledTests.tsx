@@ -13,16 +13,7 @@ import type { Channel, ChannelAlert, ChannelAlertStatus, NewApiSyncRequest, NewA
 import { buildScheduleBasePayload, intervalText, type ScheduleFormValues } from '../scheduledTestsUtils';
 import { buildFeishuBroadcastUpdate, type FeishuBroadcastFormValues } from './feishuBroadcast';
 import {
-  alertOutcomeColor,
-  alertOutcomeLabel,
-  alertErrorText,
-  alertProbeCompletedAt,
-} from '../scheduledAlertLog';
-import {
-  alertChannelText,
   alertRangeToParams,
-  alertStatusColor,
-  alertStatusLabel,
   alertSummaryCell,
   bulkDeleteMessage,
   matchesAlertResultFilter,
@@ -453,6 +444,9 @@ export default function ScheduledTests() {
       message.warning('这个计划没有关联巡检日志');
       return;
     }
+    if (deletingAlertRunId === runId || deleteAlertRun.isPending) {
+      return;
+    }
     setDeletingAlertRunId(runId);
     deleteAlertRun.mutate(runId);
   }
@@ -745,10 +739,18 @@ export default function ScheduledTests() {
                                 description="会删除这次巡检任务、结果、报告和关联告警，并清空本计划的上次运行引用。确定删除吗？"
                                 okText="删除日志"
                                 cancelText="取消"
-                                okButtonProps={{ danger: true }}
+                                okButtonProps={{ danger: true, loading: deletingAlertRunId === schedule.last_run_id }}
                                 onConfirm={() => deleteScheduleRun(schedule.last_run_id)}
                               >
-                                <Button danger size="small" icon={<Trash2 size={14} />} loading={deletingAlertRunId === schedule.last_run_id}>删除日志</Button>
+                                <Button
+                                  danger
+                                  size="small"
+                                  icon={<Trash2 size={14} />}
+                                  loading={deletingAlertRunId === schedule.last_run_id}
+                                  disabled={Boolean(deletingAlertRunId)}
+                                >
+                                  删除日志
+                                </Button>
                               </Popconfirm>
                             </Space>
                           ) : '-'
@@ -903,52 +905,11 @@ export default function ScheduledTests() {
           }}
           rowClassName={(alert) => (alert.id === selectedAlertId ? 'highlight-table-row' : '')}
           pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1360 }}
+          scroll={{ x: 760 }}
           columns={[
             {
-              title: '渠道',
-              width: 280,
-              render: (_, alert) => {
-                const channel = alertChannelText(alert, channelById.get(alert.channel_id));
-                return (
-                  <Space direction="vertical" size={4}>
-                    <Typography.Text strong>{channel.name}</Typography.Text>
-                    <Typography.Text type="secondary">{channel.displayId}</Typography.Text>
-                    {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
-                  </Space>
-                );
-              },
-            },
-            {
-              title: '巡检结果',
-              width: 120,
-              render: (_, alert) => <Tag color={alertOutcomeColor(alert.status)}>{alertOutcomeLabel(alert.status)}</Tag>,
-            },
-            {
-              title: '异常摘要',
-              width: 320,
+              title: '告警信息',
               render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)),
-            },
-            {
-              title: '复审状态',
-              width: 150,
-              render: (_, alert) => <Tag color={alertStatusColor[alert.status] ?? 'default'}>{alertStatusLabel[alert.status] ?? alert.status}</Tag>,
-            },
-            {
-              title: '告警创建时间',
-              width: 190,
-              render: (_, alert) => formatDateTime(alert.created_at),
-            },
-            {
-              title: '飞书',
-              width: 120,
-              render: (_, alert) => (
-                <Tooltip title={alert.notification_error || undefined}>
-                  <Tag color={alert.notification_status === 'sent' ? 'green' : alert.notification_status === 'failed' ? 'red' : 'default'}>
-                    {alert.notification_status}
-                  </Tag>
-                </Tooltip>
-              ),
             },
             {
               title: '操作',
@@ -1102,29 +1063,13 @@ export default function ScheduledTests() {
                       rowKey="id"
                       dataSource={recentAlerts}
                       pagination={false}
-                      scroll={{ x: 1460 }}
+                      scroll={{ x: 660 }}
                       rowSelection={{
                         selectedRowKeys: selectedRecentAlertRowKeys,
                         onChange: setSelectedRecentAlertRowKeys,
                       }}
                       columns={[
-                        {
-                          title: '渠道',
-                          width: 250,
-                          render: (_, alert) => {
-                            const channel = alertChannelText(alert, channelById.get(alert.channel_id));
-                            return (
-                              <Space direction="vertical" size={2}>
-                                <Typography.Text strong>{channel.name}</Typography.Text>
-                                <Typography.Text type="secondary">{channel.displayId}</Typography.Text>
-                                {channel.model ? <Typography.Text type="secondary">{channel.model}</Typography.Text> : null}
-                              </Space>
-                            );
-                          },
-                        },
-                        { title: '结果', width: 110, render: (_, alert) => <Tag color={alertOutcomeColor(alert.status)}>{alertOutcomeLabel(alert.status)}</Tag> },
-                        { title: '异常摘要', width: 320, render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
-                        { title: '告警创建时间', dataIndex: 'created_at', width: 180, render: (_, alert) => formatDateTime(alert.created_at) },
+                        { title: '告警信息', render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
                         {
                           title: '操作',
                           width: 160,

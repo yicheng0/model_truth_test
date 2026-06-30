@@ -478,7 +478,7 @@ export default function Channels() {
                       description="会同步删除该渠道关联的巡检计划、日志、结果、报告、告警和指纹。确定删除吗？"
                       okText="删除"
                       cancelText="取消"
-                      okButtonProps={{ danger: true }}
+                      okButtonProps={{ danger: true, loading: deletingChannelId === channel.id }}
                       onConfirm={async () => {
                         setDeletingChannelId(channel.id);
                         try {
@@ -488,7 +488,7 @@ export default function Channels() {
                         }
                       }}
                     >
-                      <Button danger icon={<Trash2 size={15} />} loading={deletingChannelId === channel.id}>
+                      <Button danger icon={<Trash2 size={15} />} loading={deletingChannelId === channel.id} disabled={Boolean(deletingChannelId)}>
                         删除
                       </Button>
                     </Popconfirm>

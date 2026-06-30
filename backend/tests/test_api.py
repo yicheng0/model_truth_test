@@ -1170,6 +1170,86 @@ def test_run_bulk_delete_clears_scheduled_last_run_when_all_history_deleted() ->
         assert db.get(Run, second_run_id) is None
 
 
+def test_run_bulk_delete_uses_set_based_delete_helper(monkeypatch) -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    first_run_id = create_report_for_schedule(schedule, grade="D", score=60, labels=["protocol_drift"])
+    second_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    calls: list[tuple[set[str], bool]] = []
+
+    import app.main as main_module
+
+    original = main_module._delete_runs_by_ids
+
+    def spy_delete_runs(db, run_ids, *, repair_refs=True):  # noqa: ANN001
+        calls.append((set(run_ids), repair_refs))
+        return original(db, run_ids, repair_refs=repair_refs)
+
+    monkeypatch.setattr(main_module, "_delete_runs_by_ids", spy_delete_runs)
+
+    with TestClient(app) as client:
+        response = client.post("/api/runs/bulk-delete", json={"ids": [first_run_id, second_run_id]}, headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == 2
+    assert calls == [({first_run_id, second_run_id}, True)]
+
+
+def test_run_bulk_delete_large_batch_completes_and_cleans_related_rows() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_ids: list[str] = []
+    with SessionLocal() as db:
+        for index in range(80):
+            run_id = f"bulk_perf_run_{index}"
+            report_id = f"bulk_perf_report_{index}"
+            run_ids.append(run_id)
+            run = Run(
+                id=run_id,
+                suite_id=schedule["suite_id"],
+                name=f"bulk perf {index}",
+                mode="candidate_eval",
+                test_scope="full",
+                baseline_snapshot_id=schedule["baseline_snapshot_id"],
+                scheduled_test_id=schedule["id"],
+                status="completed",
+                repeat_count=1,
+                concurrency=1,
+                total_jobs=1,
+                completed_jobs=1,
+            )
+            db.add(run)
+            db.add(RunChannel(id=f"bulk_perf_rch_{index}", run_id=run_id, channel_id="negative_sample", role_in_run="candidate"))
+            db.add(Result(id=f"bulk_perf_result_{index}", run_id=run_id, test_case_id="case_builtin_math_json", channel_id="negative_sample", normalized_response={}, raw_request={}, raw_response={}, metrics={}, score=0, labels=[]))
+            db.add(Report(id=report_id, run_id=run_id, channel_id="negative_sample", final_score=60, grade="D", summary="perf"))
+            db.add(ChannelAlert(id=f"bulk_perf_alert_{index}", scheduled_test_id=schedule["id"], run_id=run_id, report_id=report_id, channel_id="negative_sample", grade="D", final_score=60))
+            job = PatrolJob(id=f"bulk_perf_job_{index}", scheduled_test_id=schedule["id"], channel_id="negative_sample", status="completed", run_id=run_id)
+            db.add(job)
+            db.add(PatrolJobAttempt(id=f"bulk_perf_attempt_{index}", job_id=job.id, run_id=run_id, status="completed"))
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        scheduled.last_run_id = run_ids[-1]
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.post("/api/runs/bulk-delete", json={"ids": run_ids}, headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == len(run_ids)
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Run).where(Run.id.in_(run_ids))) == 0
+        assert db.scalar(select(func.count()).select_from(Result).where(Result.run_id.in_(run_ids))) == 0
+        assert db.scalar(select(func.count()).select_from(Report).where(Report.run_id.in_(run_ids))) == 0
+        assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.run_id.in_(run_ids))) == 0
+        assert db.scalar(select(func.count()).select_from(PatrolJob).where(PatrolJob.run_id.in_(run_ids))) == 0
+        assert db.scalar(select(func.count()).select_from(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(run_ids))) == 0
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None and scheduled.last_run_id is None
+
 def test_run_bulk_delete_returns_deleted_missing_and_failed() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -3590,6 +3670,49 @@ def test_channel_delete_keeps_shared_run_for_other_channels() -> None:
         assert db.get(RunChannel, "run_channel_delete_target") is None
         assert db.get(RunChannel, "run_channel_delete_other") is not None
 
+
+def test_channel_delete_large_related_history_keeps_shared_runs_and_removes_private_runs() -> None:
+    reset_database()
+    private_run_ids: list[str] = []
+    shared_run_ids: list[str] = []
+    with SessionLocal() as db:
+        for index in range(60):
+            run_id = f"channel_perf_private_run_{index}"
+            report_id = f"channel_perf_private_report_{index}"
+            private_run_ids.append(run_id)
+            db.add(Run(id=run_id, suite_id="claude_full_35", name=f"private {index}", mode="candidate_eval", status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1))
+            db.add(RunChannel(id=f"channel_perf_private_rch_{index}", run_id=run_id, channel_id="third_party_demo", role_in_run="candidate"))
+            db.add(Result(id=f"channel_perf_private_result_{index}", run_id=run_id, test_case_id="case_builtin_math_json", channel_id="third_party_demo", normalized_response={}, raw_request={}, raw_response={}, metrics={}, score=0, labels=[]))
+            db.add(Report(id=report_id, run_id=run_id, channel_id="third_party_demo", final_score=60, grade="D", summary="private"))
+            db.add(ChannelAlert(id=f"channel_perf_private_alert_{index}", scheduled_test_id="sched_perf_delete", run_id=run_id, report_id=report_id, channel_id="third_party_demo", grade="D", final_score=60))
+            job = PatrolJob(id=f"channel_perf_private_job_{index}", scheduled_test_id="sched_perf_delete", channel_id="third_party_demo", status="completed", run_id=run_id)
+            db.add(job)
+            db.add(PatrolJobAttempt(id=f"channel_perf_private_attempt_{index}", job_id=job.id, run_id=run_id, status="completed"))
+        for index in range(15):
+            run_id = f"channel_perf_shared_run_{index}"
+            shared_run_ids.append(run_id)
+            db.add(Run(id=run_id, suite_id="claude_full_35", name=f"shared {index}", mode="candidate_eval", status="completed", repeat_count=1, concurrency=1, total_jobs=2, completed_jobs=2))
+            db.add(RunChannel(id=f"channel_perf_shared_target_rch_{index}", run_id=run_id, channel_id="third_party_demo", role_in_run="candidate"))
+            db.add(RunChannel(id=f"channel_perf_shared_other_rch_{index}", run_id=run_id, channel_id="anthropic_official", role_in_run="gold"))
+            db.add(Result(id=f"channel_perf_shared_target_result_{index}", run_id=run_id, test_case_id="case_builtin_math_json", channel_id="third_party_demo", normalized_response={}, raw_request={}, raw_response={}, metrics={}, score=0, labels=[]))
+            db.add(Result(id=f"channel_perf_shared_other_result_{index}", run_id=run_id, test_case_id="case_builtin_math_json", channel_id="anthropic_official", normalized_response={}, raw_request={}, raw_response={}, metrics={}, score=100, labels=[]))
+        db.add(ScheduledChannelTest(id="sched_perf_delete", channel_id="third_party_demo", suite_id="claude_full_35", baseline_snapshot_id="snapshot_unused_delete", name="perf delete schedule", last_run_id=private_run_ids[-1]))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.delete("/api/channels/third_party_demo")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["deleted_runs"] == len(private_run_ids)
+    assert payload["deleted_results"] >= len(private_run_ids) + len(shared_run_ids)
+    assert payload["deleted_schedules"] >= 1
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Run).where(Run.id.in_(private_run_ids))) == 0
+        assert db.scalar(select(func.count()).select_from(Run).where(Run.id.in_(shared_run_ids))) == len(shared_run_ids)
+        assert db.scalar(select(func.count()).select_from(Result).where(Result.id.like("channel_perf_shared_target_result_%"))) == 0
+        assert db.scalar(select(func.count()).select_from(Result).where(Result.id.like("channel_perf_shared_other_result_%"))) == len(shared_run_ids)
+        assert db.get(ScheduledChannelTest, "sched_perf_delete") is None
 
 def test_channel_delete_succeeds_for_unreferenced_channel() -> None:
     reset_database()
@@ -9082,3 +9205,5 @@ def test_full_model_check_supports_gemini_protocol(monkeypatch) -> None:
     assert channel_payload["probes"][0]["request_id"] == "goog_req_full"
     assert any(":generateContent" in url for url in captured["urls"])
     assert captured["json"]["contents"][0]["parts"][0]["text"]
+
+

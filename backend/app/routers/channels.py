@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -140,6 +140,20 @@ def _id_set_for(db: Session, model: type, *criteria) -> set[str]:  # noqa: ANN00
     return {str(item) for item in db.scalars(select(model.id).where(*criteria)).all()}
 
 
+def _rowcount(result) -> int:  # noqa: ANN001
+    return int(result.rowcount or 0)
+
+
+def _in_or_false(column, values: set[str]):  # noqa: ANN001
+    return column.in_(values) if values else False
+
+
+def _channel_or_deletable_run_filter(channel_column, channel_id: str, run_column, run_ids: set[str]):  # noqa: ANN001
+    if run_ids:
+        return or_(channel_column == channel_id, run_column.in_(run_ids))
+    return channel_column == channel_id
+
+
 def _channel_delete_run_ids(db: Session, channel_id: str) -> set[str]:
     run_ids = set(db.scalars(select(RunChannel.run_id).where(RunChannel.channel_id == channel_id)).all())
     run_ids.update(db.scalars(select(Result.run_id).where(Result.channel_id == channel_id)).all())
@@ -151,17 +165,16 @@ def _channel_delete_run_ids(db: Session, channel_id: str) -> set[str]:
 
 
 def _run_ids_deletable_after_channel_cleanup(db: Session, run_ids: set[str], channel_id: str) -> set[str]:
-    deletable: set[str] = set()
-    for run_id in run_ids:
-        other_run_channels = _count_for(db, RunChannel, RunChannel.run_id == run_id, RunChannel.channel_id != channel_id)
-        other_results = _count_for(db, Result, Result.run_id == run_id, Result.channel_id != channel_id)
-        other_reports = _count_for(db, Report, Report.run_id == run_id, Report.channel_id != channel_id)
-        other_alerts = _count_for(db, ChannelAlert, ChannelAlert.run_id == run_id, ChannelAlert.channel_id != channel_id)
-        other_comparisons = _count_for(db, Comparison, Comparison.run_id == run_id, Comparison.candidate_channel_id != channel_id)
-        other_jobs = _count_for(db, PatrolJob, PatrolJob.run_id == run_id, PatrolJob.channel_id != channel_id)
-        if not any([other_run_channels, other_results, other_reports, other_alerts, other_comparisons, other_jobs]):
-            deletable.add(run_id)
-    return deletable
+    if not run_ids:
+        return set()
+    shared_run_ids: set[str] = set()
+    shared_run_ids.update(db.scalars(select(RunChannel.run_id).where(RunChannel.run_id.in_(run_ids), RunChannel.channel_id != channel_id)).all())
+    shared_run_ids.update(db.scalars(select(Result.run_id).where(Result.run_id.in_(run_ids), Result.channel_id != channel_id)).all())
+    shared_run_ids.update(db.scalars(select(Report.run_id).where(Report.run_id.in_(run_ids), Report.channel_id != channel_id)).all())
+    shared_run_ids.update(db.scalars(select(ChannelAlert.run_id).where(ChannelAlert.run_id.in_(run_ids), ChannelAlert.channel_id != channel_id)).all())
+    shared_run_ids.update(db.scalars(select(Comparison.run_id).where(Comparison.run_id.in_(run_ids), Comparison.candidate_channel_id != channel_id)).all())
+    shared_run_ids.update(db.scalars(select(PatrolJob.run_id).where(PatrolJob.run_id.in_(run_ids), PatrolJob.channel_id != channel_id)).all())
+    return {str(run_id) for run_id in run_ids if run_id and str(run_id) not in {str(item) for item in shared_run_ids if item}}
 
 
 def _delete_channel_and_related_data(db: Session, channel: Channel) -> dict[str, object]:
@@ -171,58 +184,41 @@ def _delete_channel_and_related_data(db: Session, channel: Channel) -> dict[str,
     baseline_source_run_ids = set(db.scalars(select(BaselineSnapshot.source_run_id).where(BaselineSnapshot.source_run_id.in_(deletable_run_ids))).all()) if deletable_run_ids else set()
     deletable_run_ids -= {str(run_id) for run_id in baseline_source_run_ids if run_id}
 
-    job_ids = set(db.scalars(select(PatrolJob.id).where(PatrolJob.channel_id == channel_id)).all())
-    job_ids.update(db.scalars(select(PatrolJob.id).where(PatrolJob.run_id.in_(deletable_run_ids))).all() if deletable_run_ids else [])
-
-    run_channel_ids = _id_set_for(db, RunChannel, RunChannel.channel_id == channel_id)
-    result_ids = _id_set_for(db, Result, Result.channel_id == channel_id)
-    comparison_ids = _id_set_for(db, Comparison, Comparison.candidate_channel_id == channel_id)
-    report_ids = _id_set_for(db, Report, Report.channel_id == channel_id)
-    alert_ids = _id_set_for(db, ChannelAlert, ChannelAlert.channel_id == channel_id)
-    if deletable_run_ids:
-        run_channel_ids |= _id_set_for(db, RunChannel, RunChannel.run_id.in_(deletable_run_ids))
-        result_ids |= _id_set_for(db, Result, Result.run_id.in_(deletable_run_ids))
-        comparison_ids |= _id_set_for(db, Comparison, Comparison.run_id.in_(deletable_run_ids))
-        report_ids |= _id_set_for(db, Report, Report.run_id.in_(deletable_run_ids))
-        alert_ids |= _id_set_for(db, ChannelAlert, ChannelAlert.run_id.in_(deletable_run_ids))
-
-    stats = {
-        "deleted": True,
-        "deleted_runs": len(deletable_run_ids),
-        "deleted_run_channels": len(run_channel_ids),
-        "deleted_results": len(result_ids),
-        "deleted_comparisons": len(comparison_ids),
-        "deleted_reports": len(report_ids),
-        "deleted_alerts": len(alert_ids),
-        "deleted_schedules": _count_for(db, ScheduledChannelTest, ScheduledChannelTest.channel_id == channel_id),
-        "deleted_baselines": _count_for(db, BaselineResult, BaselineResult.channel_id == channel_id),
-        "deleted_patrol_jobs": len(job_ids),
-    }
-
     schedule_ids = set(db.scalars(select(ScheduledChannelTest.id).where(ScheduledChannelTest.channel_id == channel_id)).all())
-    if job_ids:
-        db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_ids)))
-        db.execute(delete(PatrolJob).where(PatrolJob.id.in_(job_ids)))
-    if schedule_ids:
-        db.execute(delete(ChannelAlert).where(ChannelAlert.scheduled_test_id.in_(schedule_ids)))
-        db.execute(delete(ScheduledChannelTest).where(ScheduledChannelTest.id.in_(schedule_ids)))
+    job_filter = _channel_or_deletable_run_filter(PatrolJob.channel_id, channel_id, PatrolJob.run_id, deletable_run_ids)
+    job_id_query = select(PatrolJob.id).where(job_filter)
 
-    db.execute(delete(ChannelAlert).where(ChannelAlert.channel_id == channel_id))
-    db.execute(delete(BaselineResult).where(BaselineResult.channel_id == channel_id))
-    db.execute(delete(Report).where(Report.channel_id == channel_id))
-    db.execute(delete(Comparison).where(Comparison.candidate_channel_id == channel_id))
-    db.execute(delete(Result).where(Result.channel_id == channel_id))
-    db.execute(delete(RunChannel).where(RunChannel.channel_id == channel_id))
+    stats = {"deleted": True, "deleted_runs": 0}
+    stats["deleted_patrol_job_attempts"] = _rowcount(
+        db.execute(
+            delete(PatrolJobAttempt).where(
+                or_(
+                    PatrolJobAttempt.job_id.in_(job_id_query),
+                    _in_or_false(PatrolJobAttempt.run_id, deletable_run_ids),
+                )
+            )
+        )
+    )
+    stats["deleted_patrol_jobs"] = _rowcount(db.execute(delete(PatrolJob).where(job_filter)))
+    if schedule_ids:
+        stats["deleted_alerts"] = _rowcount(db.execute(delete(ChannelAlert).where(ChannelAlert.scheduled_test_id.in_(schedule_ids))))
+        stats["deleted_schedules"] = _rowcount(db.execute(delete(ScheduledChannelTest).where(ScheduledChannelTest.id.in_(schedule_ids))))
+    else:
+        stats["deleted_alerts"] = 0
+        stats["deleted_schedules"] = 0
 
     if deletable_run_ids:
-        db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(deletable_run_ids)))
         db.execute(update(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(deletable_run_ids)).values(last_run_id=None))
-        db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(deletable_run_ids)))
-        db.execute(delete(Report).where(Report.run_id.in_(deletable_run_ids)))
-        db.execute(delete(Comparison).where(Comparison.run_id.in_(deletable_run_ids)))
-        db.execute(delete(Result).where(Result.run_id.in_(deletable_run_ids)))
-        db.execute(delete(RunChannel).where(RunChannel.run_id.in_(deletable_run_ids)))
-        db.execute(delete(Run).where(Run.id.in_(deletable_run_ids)))
+
+    stats["deleted_alerts"] += _rowcount(db.execute(delete(ChannelAlert).where(_channel_or_deletable_run_filter(ChannelAlert.channel_id, channel_id, ChannelAlert.run_id, deletable_run_ids))))
+    stats["deleted_baselines"] = _rowcount(db.execute(delete(BaselineResult).where(BaselineResult.channel_id == channel_id)))
+    stats["deleted_reports"] = _rowcount(db.execute(delete(Report).where(_channel_or_deletable_run_filter(Report.channel_id, channel_id, Report.run_id, deletable_run_ids))))
+    stats["deleted_comparisons"] = _rowcount(db.execute(delete(Comparison).where(_channel_or_deletable_run_filter(Comparison.candidate_channel_id, channel_id, Comparison.run_id, deletable_run_ids))))
+    stats["deleted_results"] = _rowcount(db.execute(delete(Result).where(_channel_or_deletable_run_filter(Result.channel_id, channel_id, Result.run_id, deletable_run_ids))))
+    stats["deleted_run_channels"] = _rowcount(db.execute(delete(RunChannel).where(_channel_or_deletable_run_filter(RunChannel.channel_id, channel_id, RunChannel.run_id, deletable_run_ids))))
+
+    if deletable_run_ids:
+        stats["deleted_runs"] = _rowcount(db.execute(delete(Run).where(Run.id.in_(deletable_run_ids))))
 
     db.delete(channel)
     return stats

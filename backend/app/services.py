@@ -65,6 +65,7 @@ SCHEDULE_TIMEZONE = ZoneInfo("Asia/Shanghai")
 SCHEDULER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 SCHEDULER_LOCK_MINUTES = int(os.getenv("SCHEDULER_LOCK_MINUTES", "30") or "30")
 SCHEDULED_TEST_TASK_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_TEST_TASK_TIMEOUT_SECONDS", "21600") or "21600")
+SCHEDULER_LOCK_GRACE_SECONDS = int(os.getenv("SCHEDULER_LOCK_GRACE_SECONDS", "300") or "300")
 SCHEDULER_MAX_CONCURRENT_TASKS = int(os.getenv("SCHEDULER_MAX_CONCURRENT_TASKS", "3") or "3")
 SCHEDULER_ACTIVE_TASK_COUNT = 0
 SCHEDULER_LAST_RECOVERY_COUNT = 0
@@ -150,7 +151,17 @@ def _naive_utc(value: datetime | None) -> datetime | None:
 
 
 def _lock_expiry(now: datetime | None = None) -> datetime:
-    return (now or datetime.now(timezone.utc)) + timedelta(minutes=max(1, SCHEDULER_LOCK_MINUTES))
+    # Keep the lease long enough for one patrol attempt.  The previous fixed
+    # 30-minute lock could expire while the default six-hour task timeout was
+    # still valid, so the recovery loop could mark an in-flight patrol as
+    # failed and start another run.  Use the larger of the configured lease and
+    # the task timeout, plus a small grace window for DB/report finalization.
+    lease_seconds = max(
+        60,
+        int(SCHEDULER_LOCK_MINUTES * 60),
+        int(SCHEDULED_TEST_TASK_TIMEOUT_SECONDS) + max(0, int(SCHEDULER_LOCK_GRACE_SECONDS)),
+    )
+    return (now or datetime.now(timezone.utc)) + timedelta(seconds=lease_seconds)
 
 
 def _schedule_lock_active(scheduled: ScheduledChannelTest, now: datetime | None = None) -> bool:

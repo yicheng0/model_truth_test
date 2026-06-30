@@ -1650,15 +1650,21 @@ def cancel_run_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, st
     return {"status": run.status}
 
 
-def _delete_patrol_jobs_for_runs(db: Session, run_ids: set[str]) -> None:
+def _rowcount(result) -> int:  # noqa: ANN001
+    return int(result.rowcount or 0)
+
+
+def _delete_patrol_jobs_for_runs(db: Session, run_ids: set[str]) -> int:
     if not run_ids:
-        return
+        return 0
+    deleted = 0
     job_ids = list(db.scalars(select(PatrolJob.id).where(PatrolJob.run_id.in_(run_ids))).all())
     if job_ids:
-        db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_ids)))
-        db.execute(delete(PatrolJob).where(PatrolJob.id.in_(job_ids)))
-    db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(run_ids)))
-    db.execute(delete(PatrolJob).where(PatrolJob.run_id.in_(run_ids)))
+        deleted += _rowcount(db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_ids))))
+        deleted += _rowcount(db.execute(delete(PatrolJob).where(PatrolJob.id.in_(job_ids))))
+    deleted += _rowcount(db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(run_ids))))
+    deleted += _rowcount(db.execute(delete(PatrolJob).where(PatrolJob.run_id.in_(run_ids))))
+    return deleted
 
 
 def _refresh_scheduled_state_after_run_delete(db: Session, scheduled: ScheduledChannelTest, deleted_run_ids: set[str]) -> None:
@@ -1685,35 +1691,46 @@ def _refresh_scheduled_state_after_run_delete(db: Session, scheduled: ScheduledC
         scheduled.last_finished_at = None
 
 
+def _baseline_snapshots_for_deletable_runs(db: Session, run_ids: set[str]) -> list[BaselineSnapshot]:
+    if not run_ids:
+        return []
+    return list(db.scalars(select(BaselineSnapshot).where(BaselineSnapshot.source_run_id.in_(run_ids))).all())
+
+
+def _delete_runs_by_ids(db: Session, run_ids: set[str], *, repair_refs: bool = True) -> int:
+    if not run_ids:
+        return 0
+    source_snapshots = _baseline_snapshots_for_deletable_runs(db, run_ids)
+    if repair_refs:
+        _repair_scheduled_last_run_refs_before_delete(db, run_ids)
+    _delete_patrol_jobs_for_runs(db, run_ids)
+    db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(run_ids)))
+    db.execute(delete(RunChannel).where(RunChannel.run_id.in_(run_ids)))
+    db.execute(delete(Result).where(Result.run_id.in_(run_ids)))
+    db.execute(delete(Comparison).where(Comparison.run_id.in_(run_ids)))
+    db.execute(delete(Report).where(Report.run_id.in_(run_ids)))
+    for snapshot in source_snapshots:
+        db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
+    if source_snapshots:
+        db.execute(delete(BaselineSnapshot).where(BaselineSnapshot.id.in_([snapshot.id for snapshot in source_snapshots])))
+    return _rowcount(db.execute(delete(Run).where(Run.id.in_(run_ids))))
+
+
 def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True, excluded_run_ids: set[str] | None = None) -> bool:
     run = db.get(Run, run_id)
     if not run:
         return False
     if run.status == "running":
         raise HTTPException(status_code=409, detail="Running runs must be canceled before deletion")
-    source_snapshots = list(db.scalars(select(BaselineSnapshot).where(BaselineSnapshot.source_run_id == run_id)).all())
+    source_snapshots = _baseline_snapshots_for_deletable_runs(db, {run_id})
     for snapshot in source_snapshots:
         conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
         if conflict:
             raise HTTPException(status_code=409, detail=conflict)
     deleted_run_ids = excluded_run_ids or {run_id}
-    scheduled_refs = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(deleted_run_ids))).all())
-    if repair_refs:
+    if repair_refs and deleted_run_ids != {run_id}:
         _repair_scheduled_last_run_refs_before_delete(db, deleted_run_ids)
-    _delete_patrol_jobs_for_runs(db, {run_id})
-    db.execute(delete(ChannelAlert).where(ChannelAlert.run_id == run_id))
-    db.execute(delete(RunChannel).where(RunChannel.run_id == run_id))
-    db.execute(delete(Result).where(Result.run_id == run_id))
-    db.execute(delete(Comparison).where(Comparison.run_id == run_id))
-    db.execute(delete(Report).where(Report.run_id == run_id))
-    for snapshot in source_snapshots:
-        db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
-        db.delete(snapshot)
-    db.delete(run)
-    for scheduled in scheduled_refs:
-        if repair_refs:
-            _refresh_scheduled_state_after_run_delete(db, scheduled, deleted_run_ids)
-    return True
+    return _delete_runs_by_ids(db, {run_id}, repair_refs=repair_refs) > 0
 
 
 def _repair_scheduled_last_run_refs_before_delete(db: Session, run_ids: set[str]) -> int:
@@ -1734,26 +1751,38 @@ def _repair_scheduled_last_run_refs_before_delete(db: Session, run_ids: set[str]
     return len(scheduled_refs)
 
 
+def _run_ids_blocked_by_baseline_refs(db: Session, run_ids: set[str]) -> dict[str, str]:
+    blocked: dict[str, str] = {}
+    for snapshot in _baseline_snapshots_for_deletable_runs(db, run_ids):
+        if not snapshot.source_run_id:
+            continue
+        conflict = _baseline_reference_conflict(db, snapshot.id, snapshot.source_run_id)
+        if conflict:
+            blocked[str(snapshot.source_run_id)] = conflict
+    return blocked
+
+
 def _preflight_deletable_run_ids(db: Session, run_ids: list[str]) -> tuple[set[str], list[str], dict[str, str]]:
+    requested = list(dict.fromkeys(str(item).strip() for item in run_ids if str(item).strip()))
+    if not requested:
+        return set(), [], {}
+    runs = {run.id: run for run in db.scalars(select(Run).where(Run.id.in_(requested))).all()}
+    blocked_by_baseline = _run_ids_blocked_by_baseline_refs(db, set(runs))
     deletable: set[str] = set()
     missing: list[str] = []
     failed: dict[str, str] = {}
-    for run_id in run_ids:
-        try:
-            run = db.get(Run, run_id)
-            if not run:
-                missing.append(run_id)
-                continue
-            if run.status == "running":
-                raise HTTPException(status_code=409, detail="Running runs must be canceled before deletion")
-            source_snapshots = list(db.scalars(select(BaselineSnapshot).where(BaselineSnapshot.source_run_id == run_id)).all())
-            for snapshot in source_snapshots:
-                conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
-                if conflict:
-                    raise HTTPException(status_code=409, detail=conflict)
-            deletable.add(run_id)
-        except HTTPException as exc:
-            failed[run_id] = str(exc.detail)
+    for run_id in requested:
+        run = runs.get(run_id)
+        if not run:
+            missing.append(run_id)
+            continue
+        if run.status == "running":
+            failed[run_id] = "Running runs must be canceled before deletion"
+            continue
+        if run_id in blocked_by_baseline:
+            failed[run_id] = blocked_by_baseline[run_id]
+            continue
+        deletable.add(run_id)
     return deletable, missing, failed
 
 
@@ -1767,16 +1796,7 @@ def bulk_delete_runs(
         return {"deleted": 0, "missing": [], "failed": {}}
     run_ids = list(dict.fromkeys(str(item).strip() for item in data.ids if str(item).strip()))
     deletable_ids, missing, failed = _preflight_deletable_run_ids(db, run_ids)
-    _repair_scheduled_last_run_refs_before_delete(db, deletable_ids)
-    deleted = 0
-    for run_id in run_ids:
-        if run_id not in deletable_ids:
-            continue
-        try:
-            if _delete_run_by_id(db, run_id, repair_refs=False):
-                deleted += 1
-        except HTTPException as exc:
-            failed[run_id] = str(exc.detail)
+    deleted = _delete_runs_by_ids(db, deletable_ids, repair_refs=True)
     db.commit()
     return {"deleted": deleted, "missing": missing, "failed": failed}
 

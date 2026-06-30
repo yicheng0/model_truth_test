@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { Button, Layout, Popover, Typography } from 'antd';
-import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, Headphones, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
+import { Button, Layout, Typography } from 'antd';
+import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
@@ -121,21 +121,6 @@ function Shell() {
               <span className="side-tool-label">资源与日志管理</span>
             </Button>
           </Link>
-          <Popover
-            trigger="click"
-            placement="rightBottom"
-            content={
-              <div className="support-popover">
-                <img src="/support-qr.svg" alt="APIPro customer support QR code" />
-                <strong>APIPro 客服</strong>
-                <span>扫码联系团队客服</span>
-              </div>
-            }
-          >
-            <Button className="side-tool-button" icon={<Headphones size={16} />} title={collapsed ? '联系客服' : undefined}>
-              <span className="side-tool-label">联系客服</span>
-            </Button>
-          </Popover>
         </div>
       </Sider>
 

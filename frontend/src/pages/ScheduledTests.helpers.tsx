@@ -6,6 +6,8 @@ import { formatDateTime } from '../time';
 import type { Channel, ChannelAlert, ScheduledChannelTest } from '../types';
 import {
   alertChannelModel,
+  alertOutcomeColor,
+  alertOutcomeLabel,
   alertProbeCompletedAt,
   alertProbeTitle,
 } from '../scheduledAlertLog';
@@ -183,13 +185,27 @@ export function matchesAlertResultFilter(alert: ChannelAlert, filter: AlertResul
 export function alertSummaryCell(alert: ChannelAlert, channelRecord?: Channel | null) {
   const channel = alertChannelText(alert, channelRecord);
   const completedAt = alertProbeCompletedAt(alert);
-  const channelModel = alertChannelModel(alert);
+  const model = channel.model || alertChannelModel(alert) || channelRecord?.model_name || '';
+  const alertTime = formatDateTime(alert.created_at);
+  const probeTime = formatDateTime(completedAt);
   return (
-    <Space direction="vertical" size={2}>
-      <Typography.Text strong>{channel.name}</Typography.Text>
-      {channel.model || channelModel ? <Typography.Text type="secondary">{channel.model || channelModel}</Typography.Text> : null}
-      <Typography.Text>{alertProbeTitle(alert)}</Typography.Text>
-      <Typography.Text type="secondary">{formatDateTime(completedAt) || formatDateTime(alert.created_at) || '-'}</Typography.Text>
+    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+      <Space size={[6, 4]} wrap align="center">
+        <Typography.Text strong>{channel.name}</Typography.Text>
+        <Tag color={alertOutcomeColor(alert.status)}>{alertOutcomeLabel(alert.status)}</Tag>
+        <Tag color={alertStatusColor[alert.status] ?? 'default'}>{alertStatusLabel[alert.status] ?? alert.status}</Tag>
+        <Tooltip title={alert.notification_error || undefined}>
+          <Tag color={alert.notification_status === 'sent' ? 'green' : alert.notification_status === 'failed' ? 'red' : 'default'}>
+            飞书：{alert.notification_status}
+          </Tag>
+        </Tooltip>
+      </Space>
+      <Typography.Text type="secondary">渠道：{channel.displayId}</Typography.Text>
+      {model ? <Typography.Text type="secondary">模型：{model}</Typography.Text> : null}
+      <Typography.Text>探针：{alertProbeTitle(alert)}</Typography.Text>
+      <Typography.Text type="secondary">
+        时间：{probeTime || alertTime || '-'}{probeTime && alertTime ? ` / 告警 ${alertTime}` : ''}
+      </Typography.Text>
     </Space>
   );
 }
