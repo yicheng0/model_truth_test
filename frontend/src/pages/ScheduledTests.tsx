@@ -999,89 +999,103 @@ export default function ScheduledTests() {
             label: '智能报告',
             children: (
               <Space direction="vertical" size={20} style={{ width: '100%' }}>
-                <Card
-                  className="smart-report-card"
-                  title={<span className="card-title-with-icon"><BarChart3 size={18} />智能巡检汇总报告</span>}
-                  extra={
-                    <Space size={8} wrap={false} className="smart-report-actions">
-                      <Select
-                        value={reportRange}
-                        onChange={setReportRange}
-                        style={{ width: 130 }}
-                        options={[
-                          { value: '24h', label: '近 24 小时' },
-                          { value: '7d', label: '近 7 天' },
-                          { value: '30d', label: '近 30 天' },
-                        ]}
-                      />
-                      <Button size="small" href={api.smartPatrolReportUrl(reportDates.from, reportDates.to)} target="_blank">下载 Markdown</Button>
-                      <Button size="small" icon={<Send size={14} />} loading={sendDaily.isPending} onClick={() => sendDaily.mutate()}>发送日报</Button>
-                    </Space>
-                  }
+                <Collapse
+                  className="smart-report-card smart-report-collapse"
+                  defaultActiveKey={['smart-report']}
                   bordered={false}
-                >
-                  <Row gutter={[14, 14]} className="smart-report-stats">
-                    <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="巡检任务" value={smartReport.data?.run_count ?? 0} /></Card></Col>
-                    <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="成功" value={smartReport.data?.completed_run_count ?? 0} valueStyle={{ color: '#067647' }} /></Card></Col>
-                    <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="错误" value={smartReport.data?.failed_run_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card></Col>
-                    <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="异常告警" value={smartReport.data?.alert_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card></Col>
-                    <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="待复审" value={smartReport.data?.pending_review_count ?? 0} valueStyle={{ color: '#a35f45' }} /></Card></Col>
-                  </Row>
-                  <Typography.Title level={5} className="smart-report-section-title">渠道巡检汇总</Typography.Title>
-                  {smartReport.isLoading ? (
-                    <div className="smart-report-empty">正在加载智能巡检报告</div>
-                  ) : channelSummaries.length ? (
-                    <Table
-                      className="smart-report-table"
-                      size="small"
-                      rowKey="channel_id"
-                      dataSource={channelSummaries}
-                      pagination={{ pageSize: 8 }}
-                      scroll={{ x: 760 }}
-                      columns={[
-                        {
-                          title: '渠道',
-                          width: 210,
-                          render: (_, item) => {
-                            const channel = channelById.get(item.channel_id);
-                            const displayId = channel
-                              ? formatChannelDisplayName(channel)
-                              : formatProviderChannelDisplayName({
-                                id: item.channel_id,
-                                name: item.channel_name,
-                                providerType: item.channel_provider_type,
-                                accountType: item.channel_account_type,
-                              }, item.channel_id);
-                            return (
-                              <Space direction="vertical" size={2}>
-                                <Typography.Text strong>{item.channel_name ?? item.channel_id}</Typography.Text>
-                                <Typography.Text type="secondary">{displayId}</Typography.Text>
-                                {item.channel_model_name ? <Typography.Text type="secondary">{item.channel_model_name}</Typography.Text> : null}
-                              </Space>
-                            );
-                          },
-                        },
-                        { title: '巡检次数', dataIndex: 'run_count', width: 96 },
-                        { title: '错误数', dataIndex: 'alert_count', width: 86, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
-                        { title: '待复审', dataIndex: 'pending_review_count', width: 86 },
-                        { title: '最近巡检', dataIndex: 'last_run_at', width: 150, render: formatDateTime },
-                      ]}
-                    />
-                  ) : (
-                    <div className="smart-report-empty">
-                      <Empty description="暂无巡检报告数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                    </div>
-                  )}
-                </Card>
+                  items={[
+                    {
+                      key: 'smart-report',
+                      label: <span className="card-title-with-icon"><BarChart3 size={18} />智能巡检汇总报告</span>,
+                      extra: (
+                        <Space
+                          size={8}
+                          wrap={false}
+                          className="smart-report-actions"
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => event.stopPropagation()}
+                        >
+                          <Select
+                            value={reportRange}
+                            onChange={setReportRange}
+                            style={{ width: 130 }}
+                            options={[
+                              { value: '24h', label: '近 24 小时' },
+                              { value: '7d', label: '近 7 天' },
+                              { value: '30d', label: '近 30 天' },
+                            ]}
+                          />
+                          <Button size="small" href={api.smartPatrolReportUrl(reportDates.from, reportDates.to)} target="_blank">下载 Markdown</Button>
+                          <Button size="small" icon={<Send size={14} />} loading={sendDaily.isPending} onClick={() => sendDaily.mutate()}>发送日报</Button>
+                        </Space>
+                      ),
+                      children: (
+                        <>
+                          <div className="smart-report-stats-grid">
+                            <Card bordered={false}><Statistic title="巡检任务" value={smartReport.data?.run_count ?? 0} /></Card>
+                            <Card bordered={false}><Statistic title="成功" value={smartReport.data?.completed_run_count ?? 0} valueStyle={{ color: '#067647' }} /></Card>
+                            <Card bordered={false}><Statistic title="错误" value={smartReport.data?.failed_run_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card>
+                            <Card bordered={false}><Statistic title="异常告警" value={smartReport.data?.alert_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card>
+                            <Card bordered={false}><Statistic title="待复审" value={smartReport.data?.pending_review_count ?? 0} valueStyle={{ color: '#a35f45' }} /></Card>
+                          </div>
+                          <Typography.Title level={5} className="smart-report-section-title">渠道巡检汇总</Typography.Title>
+                          {smartReport.isLoading ? (
+                            <div className="smart-report-empty">正在加载智能巡检报告</div>
+                          ) : channelSummaries.length ? (
+                            <Table
+                              className="smart-report-table"
+                              size="small"
+                              rowKey="channel_id"
+                              dataSource={channelSummaries}
+                              pagination={{ pageSize: 8 }}
+                              scroll={{ x: 680 }}
+                              columns={[
+                                {
+                                  title: '渠道',
+                                  render: (_, item) => {
+                                    const channel = channelById.get(item.channel_id);
+                                    const displayId = channel
+                                      ? formatChannelDisplayName(channel)
+                                      : formatProviderChannelDisplayName({
+                                        id: item.channel_id,
+                                        name: item.channel_name,
+                                        providerType: item.channel_provider_type,
+                                        accountType: item.channel_account_type,
+                                      }, item.channel_id);
+                                    return (
+                                      <Space direction="vertical" size={1}>
+                                        <Typography.Text strong>{item.channel_name ?? item.channel_id}</Typography.Text>
+                                        <Typography.Text type="secondary">{displayId}</Typography.Text>
+                                        {item.channel_model_name ? <Typography.Text type="secondary">{item.channel_model_name}</Typography.Text> : null}
+                                      </Space>
+                                    );
+                                  },
+                                },
+                                { title: '巡检次数', dataIndex: 'run_count', width: 90 },
+                                { title: '错误数', dataIndex: 'alert_count', width: 78, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
+                                { title: '待复审', dataIndex: 'pending_review_count', width: 78 },
+                                { title: '最近巡检', dataIndex: 'last_run_at', width: 148, render: formatDateTime },
+                              ]}
+                            />
+                          ) : (
+                            <div className="smart-report-empty">
+                              <Empty description="暂无巡检报告数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                            </div>
+                          )}
+                        </>
+                      ),
+                    },
+                  ]}
+                />
                 <Card className="recent-alert-card" title="最近异常" bordered={false}>
                   {smartReport.isLoading ? (
                     <div className="smart-report-empty">正在加载最近异常</div>
                   ) : recentAlerts.length ? (
-                    <Space size={8} wrap style={{ marginBottom: 10 }}>
+                    <Space size={8} wrap className="recent-alert-toolbar">
                       <Select
                         value={alertResultFilter}
                         onChange={setAlertResultFilter}
-                        style={{ width: 150 }}
+                        style={{ width: 132 }}
                         options={[
                           { value: 'failure', label: '失败优先' },
                           { value: 'success', label: '成功' },
@@ -1115,7 +1129,7 @@ export default function ScheduledTests() {
                       rowKey="id"
                       dataSource={recentAlerts}
                       pagination={false}
-                      scroll={{ x: 660 }}
+                      scroll={{ x: 520 }}
                       rowSelection={{
                         selectedRowKeys: selectedRecentAlertRowKeys,
                         onChange: setSelectedRecentAlertRowKeys,
@@ -1124,8 +1138,7 @@ export default function ScheduledTests() {
                         { title: '告警信息', render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
                         {
                           title: '操作',
-                          width: 140,
-                          fixed: 'right',
+                          width: 120,
                           render: (_, alert) => (
                             <Space size={6} wrap={false} style={{ whiteSpace: 'nowrap' }}>
                               <Link to={buildPatrolRunDetailLink(alert)}>查看详情</Link>
