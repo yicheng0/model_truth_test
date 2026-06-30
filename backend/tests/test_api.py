@@ -901,10 +901,13 @@ def test_destructive_endpoints_require_admin_key() -> None:
             },
         ).json()
 
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
         forbidden = client.delete(f"/api/runs/{run['id']}")
+        schedule_forbidden = client.delete(f"/api/scheduled-tests/{schedule['id']}")
         cleanup_forbidden = client.post("/api/system/cleanup-run-logs?dry_run=true")
 
     assert forbidden.status_code in {401, 403}
+    assert schedule_forbidden.status_code in {401, 403}
     assert cleanup_forbidden.status_code in {401, 403}
 
 
@@ -924,11 +927,14 @@ def test_regular_delete_allows_missing_admin_key_when_unconfigured(monkeypatch) 
                 "use_mock": True,
             },
         ).json()
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
 
         deleted = client.delete(f"/api/runs/{run['id']}")
+        deleted_schedule = client.delete(f"/api/scheduled-tests/{schedule['id']}")
         cleanup_forbidden = client.post("/api/system/cleanup-run-logs?dry_run=true")
 
-    assert deleted.status_code == 403
+    assert deleted.status_code == 200
+    assert deleted_schedule.status_code == 200
     assert cleanup_forbidden.status_code == 403
 
 

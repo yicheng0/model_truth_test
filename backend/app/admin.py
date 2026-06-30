@@ -17,5 +17,11 @@ def require_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def require_admin_if_configured(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
+    expected = configured_admin_key()
+    if expected and x_admin_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 def require_configured_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
     require_admin(x_admin_key)

@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from .admin import require_admin, require_configured_admin
+from .admin import require_admin, require_admin_if_configured, require_configured_admin
 from .audit import audit_actor, audit_log_read, record_audit_log, scheduled_test_audit_summary
 from .database import SessionLocal, get_db, init_db
 from .claude_code_check import claude_code_check_steps, claude_code_status, run_claude_code_check, run_claude_code_check_with_progress
@@ -1406,7 +1406,7 @@ def update_scheduled_test(
 def delete_scheduled_test(
     scheduled_id: str,
     actor: dict[str, str | None] = Depends(audit_actor),
-    _admin: None = Depends(require_admin),
+    _admin: None = Depends(require_admin_if_configured),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     scheduled = db.get(ScheduledChannelTest, scheduled_id)
@@ -1501,7 +1501,7 @@ def get_alert(alert_id: str, db: Session = Depends(get_db)) -> dict[str, object]
 @app.delete("/api/alerts/{alert_id}")
 def delete_alert(
     alert_id: str,
-    _admin: None = Depends(require_admin),
+    _admin: None = Depends(require_admin_if_configured),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     alert = db.get(ChannelAlert, alert_id)
@@ -1515,7 +1515,7 @@ def delete_alert(
 @app.post("/api/alerts/bulk-delete")
 def bulk_delete_alerts(
     data: BulkDeleteRequest,
-    _admin: None = Depends(require_admin),
+    _admin: None = Depends(require_admin_if_configured),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     if not data.ids:
@@ -1794,7 +1794,7 @@ def _preflight_deletable_run_ids(db: Session, run_ids: list[str]) -> tuple[set[s
 @app.post("/api/runs/bulk-delete")
 def bulk_delete_runs(
     data: BulkDeleteRequest,
-    _admin: None = Depends(require_admin),
+    _admin: None = Depends(require_admin_if_configured),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     if not data.ids:
@@ -1809,7 +1809,7 @@ def bulk_delete_runs(
 @app.delete("/api/runs/{run_id}")
 def delete_run(
     run_id: str,
-    _admin: None = Depends(require_admin),
+    _admin: None = Depends(require_admin_if_configured),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     if not _delete_run_by_id(db, run_id):
