@@ -144,15 +144,9 @@ def scheduler_enabled_env_value() -> str:
     return os.getenv("AUTO_SCHEDULER_ENABLED", "true")
 
 
-def scheduler_force_enabled() -> bool:
-    return os.getenv("SCHEDULER_FORCE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
-
-
 def scheduler_enabled() -> bool:
-    if scheduler_force_enabled():
-        return True
-    value = scheduler_enabled_env_value().strip().lower()
-    return value not in {"0", "false", "no", "off", "disabled"}
+    # 线上固定启用自动巡检，不再受 AUTO_SCHEDULER_ENABLED 环境变量控制。
+    return True
 
 
 def _naive_utc(value: datetime | None) -> datetime | None:
