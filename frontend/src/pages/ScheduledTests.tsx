@@ -9,7 +9,7 @@ import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../c
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { buildPatrolRunDetailLink } from '../patrolNavigation';
 import { formatDateTime } from '../time';
-import type { Channel, ChannelAlert, ChannelAlertStatus, NewApiSyncRequest, NewApiSyncResult, ScheduledChannelTest, ScheduledChannelTestCreate, ScheduledPatrolModule } from '../types';
+import type { Channel, ChannelAlert, ChannelAlertStatus, NewApiSyncRequest, NewApiSyncResult, ScheduledChannelTest, ScheduledChannelTestCreate, ScheduledPatrolModule, SmartPatrolReport } from '../types';
 import { buildScheduleBasePayload, intervalText, type ScheduleFormValues } from '../scheduledTestsUtils';
 import { buildFeishuBroadcastUpdate, type FeishuBroadcastFormValues } from './feishuBroadcast';
 import {
@@ -212,6 +212,47 @@ export default function ScheduledTests() {
     onSettled: () => setRunningScheduleId(null),
   });
 
+  function removeDeletedAlertsFromCache(ids: string[]) {
+    const deletedIds = new Set(ids);
+    if (!deletedIds.size) return;
+
+    queryClient.setQueriesData<ChannelAlert[]>({ queryKey: ['alerts'] }, (current) => (
+      current ? current.filter((alert) => !deletedIds.has(alert.id)) : current
+    ));
+
+    queryClient.setQueriesData<SmartPatrolReport>({ queryKey: ['smartPatrolReport'] }, (current) => {
+      if (!current) return current;
+      const removedAlerts = current.recent_alerts.filter((alert) => deletedIds.has(alert.id));
+      const removedByChannel = new Map<string, { total: number; pending: number }>();
+      for (const alert of removedAlerts) {
+        const item = removedByChannel.get(alert.channel_id) ?? { total: 0, pending: 0 };
+        item.total += 1;
+        if (alert.status === 'pending_review') item.pending += 1;
+        removedByChannel.set(alert.channel_id, item);
+      }
+      return {
+        ...current,
+        alert_count: Math.max(0, current.alert_count - removedAlerts.length),
+        pending_review_count: Math.max(0, current.pending_review_count - removedAlerts.filter((alert) => alert.status === 'pending_review').length),
+        recent_alerts: current.recent_alerts.filter((alert) => !deletedIds.has(alert.id)),
+        channel_summaries: current.channel_summaries.map((summary) => {
+          const removed = removedByChannel.get(summary.channel_id);
+          if (!removed) return summary;
+          return {
+            ...summary,
+            alert_count: Math.max(0, summary.alert_count - removed.total),
+            pending_review_count: Math.max(0, summary.pending_review_count - removed.pending),
+          };
+        }),
+      };
+    });
+  }
+
+  function refreshAlertViews() {
+    void queryClient.invalidateQueries({ queryKey: ['alerts'] });
+    void queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
+  }
+
   const reviewAlert = useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: ReviewFormValues }) => api.reviewAlert(id, payload),
     onSuccess: async () => {
@@ -224,12 +265,12 @@ export default function ScheduledTests() {
 
   const deleteAlert = useMutation({
     mutationFn: api.deleteAlert,
-    onSuccess: async (_, id) => {
+    onSuccess: (_result, id) => {
       message.success('告警已删除');
       setSelectedAlertRowKeys((keys) => keys.filter((key) => key !== id));
       setSelectedRecentAlertRowKeys((keys) => keys.filter((key) => key !== id));
-      await queryClient.invalidateQueries({ queryKey: ['alerts'] });
-      await queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
+      removeDeletedAlertsFromCache([id]);
+      refreshAlertViews();
     },
     onError: (error) => message.error(getErrorMessage(error)),
     onSettled: () => setDeletingAlertId(null),
@@ -237,12 +278,14 @@ export default function ScheduledTests() {
 
   const deleteAlerts = useMutation({
     mutationFn: api.deleteAlerts,
-    onSuccess: async (result) => {
+    onSuccess: (result, ids) => {
       bulkDeleteMessage('条告警', result);
+      const missing = new Set(result.missing ?? []);
+      const deletedIds = ids.filter((id) => !missing.has(id));
       setSelectedAlertRowKeys([]);
       setSelectedRecentAlertRowKeys([]);
-      await queryClient.invalidateQueries({ queryKey: ['alerts'] });
-      await queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
+      removeDeletedAlertsFromCache(deletedIds);
+      refreshAlertViews();
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });
@@ -592,11 +635,12 @@ export default function ScheduledTests() {
                   />
                 </section>
                 <Card
+                  className="scheduled-plan-card"
                   title={<span className="card-title-with-icon"><CalendarClock size={18} />按渠道自动巡检</span>}
                   extra={(
-                    <Space wrap>
-                      <Button icon={<DownloadCloud size={16} />} onClick={openNewApiSync}>从 new-api 同步</Button>
-                      <Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>
+                    <Space size={8} wrap={false}>
+                      <Button size="small" icon={<DownloadCloud size={14} />} onClick={openNewApiSync}>从 new-api 同步</Button>
+                      <Button type="primary" size="small" onClick={() => openCreateSchedule()}>新增计划</Button>
                     </Space>
                   )}
                   bordered={false}
@@ -676,16 +720,18 @@ export default function ScheduledTests() {
                     </Col>
                   </Row>
                   <Table
+                    className="scheduled-plan-table"
+                    size="small"
                     rowKey="id"
                     loading={schedules.isLoading || channels.isLoading}
                     dataSource={schedules.data ?? []}
                     pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-                    scroll={{ x: 1380 }}
+                    scroll={{ x: 1180 }}
                     locale={{ emptyText: schedules.isLoading || channels.isLoading ? ' ' : <Empty description="暂无自动巡检计划" image={Empty.PRESENTED_IMAGE_SIMPLE}><Button type="primary" onClick={openCreateSchedule}>立即创建</Button></Empty> }}
                     columns={[
                       {
                         title: '计划',
-                        width: 230,
+                        width: 170,
                         render: (_, schedule) => (
                           <Space direction="vertical" size={2}>
                             <strong>{schedule.name}</strong>
@@ -695,7 +741,7 @@ export default function ScheduledTests() {
                       },
                       {
                         title: '渠道',
-                        width: 220,
+                        width: 150,
                         render: (_, schedule) => {
                           const channel = channelById.get(schedule.channel_id);
                           if (!channel) return <Typography.Text>{schedule.channel_id}</Typography.Text>;
@@ -709,31 +755,33 @@ export default function ScheduledTests() {
                       },
                       {
                         title: '巡检结果',
-                        width: 100,
+                        width: 84,
                         render: (_, schedule) => probeSummary(schedule),
                       },
                       {
                         title: '模块',
-                        width: 190,
-                        render: (_, schedule) => <Typography.Text>{patrolModuleText(schedule.patrol_modules)}</Typography.Text>,
+                        width: 150,
+                        render: (_, schedule) => <Typography.Text ellipsis style={{ maxWidth: 132 }}>{patrolModuleText(schedule.patrol_modules)}</Typography.Text>,
                       },
                       {
                         title: '频率',
-                        width: 110,
+                        width: 78,
                         render: (_, schedule) => intervalText(schedule.interval_minutes),
                       },
                       {
                         title: '执行窗口',
-                        width: 190,
-                        render: (_, schedule) => runWindowText(schedule),
+                        width: 92,
+                        render: (_, schedule) => <Typography.Text ellipsis style={{ maxWidth: 74 }}>{runWindowText(schedule)}</Typography.Text>,
                       },
                       {
                         title: '上次运行',
-                        width: 260,
+                        width: 178,
                         render: (_, schedule) => (
                           schedule.last_run_id ? (
-                            <Space direction="vertical" size={4}>
-                              <Link to={`/runs/${schedule.last_run_id}`}>{schedule.last_run_id}</Link>
+                            <Space size={6} wrap={false} style={{ whiteSpace: 'nowrap' }}>
+                              <Typography.Text ellipsis style={{ maxWidth: 96 }}>
+                                <Link to={`/runs/${schedule.last_run_id}`}>{schedule.last_run_id}</Link>
+                              </Typography.Text>
                               <Popconfirm
                                 title="删除本次巡检日志"
                                 description="会删除这次巡检任务、结果、报告和关联告警，并清空本计划的上次运行引用。确定删除吗？"
@@ -745,7 +793,7 @@ export default function ScheduledTests() {
                                 <Button
                                   danger
                                   size="small"
-                                  icon={<Trash2 size={14} />}
+                                  icon={<Trash2 size={13} />}
                                   loading={deletingAlertRunId === schedule.last_run_id}
                                   disabled={Boolean(deletingAlertRunId)}
                                 >
@@ -774,26 +822,24 @@ export default function ScheduledTests() {
                       },
                       {
                         title: '状态',
-                        width: 210,
+                        width: 130,
                         render: (_, schedule) => (
-                          <Space direction="vertical" size={4}>
+                          <Space size={[4, 2]} wrap>
                             <Tag color={schedule.enabled ? 'green' : 'default'}>{schedule.enabled ? '启用' : '停用'}</Tag>
                             <Tag color={schedule.is_stale ? 'red' : scheduleStatusColor[schedule.last_status ?? 'idle'] ?? 'default'}>{schedule.is_stale ? 'stale' : schedule.last_status ?? 'idle'}</Tag>
-                            {schedule.locked_until ? <Typography.Text type={schedule.is_stale ? 'danger' : 'secondary'}>锁至 {formatDateTime(schedule.locked_until)}</Typography.Text> : null}
-                            {schedule.last_started_at ? <Typography.Text type="secondary">开始 {formatDateTime(schedule.last_started_at)}</Typography.Text> : null}
-                            {schedule.last_finished_at ? <Typography.Text type="secondary">完成 {formatDateTime(schedule.last_finished_at)}</Typography.Text> : null}
                           </Space>
                         ),
                       },
                       {
                         title: '操作',
-                        width: 250,
+                        width: 210,
                         fixed: 'right',
                         render: (_, schedule) => (
-                          <Space wrap>
+                          <Space size={6} wrap={false} style={{ whiteSpace: 'nowrap' }}>
                             <Tooltip title="立即执行一次">
                               <Button
-                                icon={<Play size={15} />}
+                                size="small"
+                                icon={<Play size={14} />}
                                 loading={runningScheduleId === schedule.id}
                                 onClick={() => {
                                   setRunningScheduleId(schedule.id);
@@ -803,7 +849,7 @@ export default function ScheduledTests() {
                                 执行
                               </Button>
                             </Tooltip>
-                            <Button icon={<Edit3 size={15} />} onClick={() => openEditSchedule(schedule)}>编辑</Button>
+                            <Button size="small" icon={<Edit3 size={14} />} onClick={() => openEditSchedule(schedule)}>编辑</Button>
                             {(
                               <Popconfirm
                                 title="删除自动巡检计划"
@@ -816,7 +862,7 @@ export default function ScheduledTests() {
                                   deleteSchedule.mutate(schedule.id);
                                 }}
                               >
-                                <Button danger icon={<Trash2 size={15} />} loading={deletingScheduleId === schedule.id}>删除</Button>
+                                <Button size="small" danger icon={<Trash2 size={14} />} loading={deletingScheduleId === schedule.id}>删除</Button>
                               </Popconfirm>
                             )}
                           </Space>
@@ -913,14 +959,15 @@ export default function ScheduledTests() {
             },
             {
               title: '操作',
-              width: 260,
+              width: 230,
               fixed: 'right',
               render: (_, alert) => (
-                <Space wrap>
+                <Space size={6} wrap={false} style={{ whiteSpace: 'nowrap' }}>
                   <Link to={buildPatrolRunDetailLink(alert)}>查看详情</Link>
-                  {alert.status === 'pending_review' ? <Button type="primary" onClick={() => openReview(alert)}>复审</Button> : <Button onClick={() => openReview(alert)}>更新复审</Button>}
+                  {alert.status === 'pending_review' ? <Button size="small" type="primary" onClick={() => openReview(alert)}>复审</Button> : <Button size="small" onClick={() => openReview(alert)}>更新复审</Button>}
                   <Button
-                    icon={<RefreshCw size={15} />}
+                    size="small"
+                    icon={<RefreshCw size={14} />}
                     loading={resendingAlertIds.has(alert.id)}
                     disabled={resendingAlertIds.has(alert.id)}
                     onClick={() => resend.mutate(alert.id)}
@@ -936,7 +983,7 @@ export default function ScheduledTests() {
                       cancelText="取消"
                       onConfirm={() => deleteOneAlert(alert)}
                     >
-                      <Button danger icon={<Trash2 size={15} />} loading={deletingAlertId === alert.id}>删除</Button>
+                      <Button size="small" danger icon={<Trash2 size={14} />} loading={deletingAlertId === alert.id}>删除</Button>
                     </Popconfirm>
                   )}
                 </Space>
@@ -953,9 +1000,10 @@ export default function ScheduledTests() {
             children: (
               <Space direction="vertical" size={20} style={{ width: '100%' }}>
                 <Card
+                  className="smart-report-card"
                   title={<span className="card-title-with-icon"><BarChart3 size={18} />智能巡检汇总报告</span>}
                   extra={
-                    <Space wrap className="smart-report-actions">
+                    <Space size={8} wrap={false} className="smart-report-actions">
                       <Select
                         value={reportRange}
                         onChange={setReportRange}
@@ -966,8 +1014,8 @@ export default function ScheduledTests() {
                           { value: '30d', label: '近 30 天' },
                         ]}
                       />
-                      <Button href={api.smartPatrolReportUrl(reportDates.from, reportDates.to)} target="_blank">下载 Markdown</Button>
-                      <Button icon={<Send size={15} />} loading={sendDaily.isPending} onClick={() => sendDaily.mutate()}>发送日报</Button>
+                      <Button size="small" href={api.smartPatrolReportUrl(reportDates.from, reportDates.to)} target="_blank">下载 Markdown</Button>
+                      <Button size="small" icon={<Send size={14} />} loading={sendDaily.isPending} onClick={() => sendDaily.mutate()}>发送日报</Button>
                     </Space>
                   }
                   bordered={false}
@@ -984,14 +1032,16 @@ export default function ScheduledTests() {
                     <div className="smart-report-empty">正在加载智能巡检报告</div>
                   ) : channelSummaries.length ? (
                     <Table
+                      className="smart-report-table"
+                      size="small"
                       rowKey="channel_id"
                       dataSource={channelSummaries}
                       pagination={{ pageSize: 8 }}
-                      scroll={{ x: 900 }}
+                      scroll={{ x: 760 }}
                       columns={[
                         {
                           title: '渠道',
-                          width: 260,
+                          width: 210,
                           render: (_, item) => {
                             const channel = channelById.get(item.channel_id);
                             const displayId = channel
@@ -1011,10 +1061,10 @@ export default function ScheduledTests() {
                             );
                           },
                         },
-                        { title: '巡检次数', dataIndex: 'run_count', width: 110 },
-                        { title: '错误数', dataIndex: 'alert_count', width: 100, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
-                        { title: '待复审', dataIndex: 'pending_review_count', width: 100 },
-                        { title: '最近巡检', dataIndex: 'last_run_at', width: 180, render: formatDateTime },
+                        { title: '巡检次数', dataIndex: 'run_count', width: 96 },
+                        { title: '错误数', dataIndex: 'alert_count', width: 86, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
+                        { title: '待复审', dataIndex: 'pending_review_count', width: 86 },
+                        { title: '最近巡检', dataIndex: 'last_run_at', width: 150, render: formatDateTime },
                       ]}
                     />
                   ) : (
@@ -1023,11 +1073,11 @@ export default function ScheduledTests() {
                     </div>
                   )}
                 </Card>
-                <Card title="最近异常" bordered={false}>
+                <Card className="recent-alert-card" title="最近异常" bordered={false}>
                   {smartReport.isLoading ? (
                     <div className="smart-report-empty">正在加载最近异常</div>
                   ) : recentAlerts.length ? (
-                    <Space wrap style={{ marginBottom: 12 }}>
+                    <Space size={8} wrap style={{ marginBottom: 10 }}>
                       <Select
                         value={alertResultFilter}
                         onChange={setAlertResultFilter}
@@ -1048,7 +1098,7 @@ export default function ScheduledTests() {
                           disabled={!selectedRecentAlertRowKeys.length}
                           onConfirm={deleteSelectedRecentAlerts}
                         >
-                          <Button danger icon={<Trash2 size={15} />} disabled={!selectedRecentAlertRowKeys.length} loading={deleteAlerts.isPending}>
+                          <Button size="small" danger icon={<Trash2 size={14} />} disabled={!selectedRecentAlertRowKeys.length} loading={deleteAlerts.isPending}>
                             删除已选
                           </Button>
                         </Popconfirm>
@@ -1060,6 +1110,8 @@ export default function ScheduledTests() {
                     <div className="smart-report-empty">正在加载最近异常</div>
                   ) : recentAlerts.length ? (
                     <Table
+                      className="recent-alert-table"
+                      size="small"
                       rowKey="id"
                       dataSource={recentAlerts}
                       pagination={false}
@@ -1072,10 +1124,10 @@ export default function ScheduledTests() {
                         { title: '告警信息', render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
                         {
                           title: '操作',
-                          width: 160,
+                          width: 140,
                           fixed: 'right',
                           render: (_, alert) => (
-                            <Space wrap>
+                            <Space size={6} wrap={false} style={{ whiteSpace: 'nowrap' }}>
                               <Link to={buildPatrolRunDetailLink(alert)}>查看详情</Link>
                               {(
                                 <Popconfirm
@@ -1086,7 +1138,7 @@ export default function ScheduledTests() {
                                   cancelText="取消"
                                   onConfirm={() => deleteOneAlert(alert)}
                                 >
-                                  <Button danger icon={<Trash2 size={15} />} loading={deletingAlertId === alert.id}>删除</Button>
+                                  <Button size="small" danger icon={<Trash2 size={14} />} loading={deletingAlertId === alert.id}>删除</Button>
                                 </Popconfirm>
                               )}
                             </Space>

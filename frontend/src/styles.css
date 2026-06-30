@@ -3540,3 +3540,123 @@ textarea:focus-visible,
     grid-template-columns: 1fr;
   }
 }
+
+/* Scheduled patrol compact layout */
+.scheduled-plan-card .ant-card-head {
+  min-height: 50px;
+}
+
+.scheduled-plan-card .ant-card-head-title,
+.scheduled-plan-card .ant-card-extra {
+  padding: 10px 0;
+}
+
+.scheduled-plan-card > .ant-card-body {
+  padding-top: 14px;
+}
+
+.scheduler-health-row {
+  margin-bottom: 12px;
+}
+
+.scheduler-health-row .ant-card-body {
+  padding: 14px 16px;
+}
+
+.scheduler-health-row .ant-statistic-title {
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.scheduler-health-row .ant-statistic-content {
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.patrol-guide-panel {
+  padding: 14px 18px;
+}
+
+.patrol-guide-header .ant-typography {
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.patrol-guide-header .ant-typography + .ant-typography {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.patrol-guide-collapse > .ant-collapse-item > .ant-collapse-content > .ant-collapse-content-box {
+  padding: 12px 0 0 !important;
+}
+
+.scheduled-plan-table .ant-table-thead > tr > th,
+.scheduled-plan-table .ant-table-tbody > tr > td {
+  padding: 10px 14px !important;
+}
+
+.scheduled-plan-table .ant-table-cell {
+  vertical-align: middle;
+}
+
+.scheduled-plan-table .ant-tag {
+  margin-inline-end: 0;
+}
+
+/* Smart patrol report compact layout */
+.smart-report-card .ant-card-head,
+.recent-alert-card .ant-card-head {
+  min-height: 50px;
+}
+
+.smart-report-card .ant-card-head-title,
+.smart-report-card .ant-card-extra,
+.recent-alert-card .ant-card-head-title,
+.recent-alert-card .ant-card-extra {
+  padding: 10px 0;
+}
+
+.smart-report-card > .ant-card-body,
+.recent-alert-card > .ant-card-body {
+  padding-top: 14px;
+}
+
+.smart-report-stats {
+  margin-bottom: 10px;
+}
+
+.smart-report-stats .ant-card-body {
+  padding: 14px 16px;
+}
+
+.smart-report-stats .ant-statistic-title {
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.smart-report-stats .ant-statistic-content {
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.smart-report-section-title.ant-typography {
+  margin: 12px 0 8px;
+  font-size: 15px;
+}
+
+.smart-report-table .ant-table-thead > tr > th,
+.smart-report-table .ant-table-tbody > tr > td,
+.recent-alert-table .ant-table-thead > tr > th,
+.recent-alert-table .ant-table-tbody > tr > td {
+  padding: 10px 14px !important;
+}
+
+.smart-report-table .ant-table-cell,
+.recent-alert-table .ant-table-cell {
+  vertical-align: middle;
+}
+
+.smart-report-actions .ant-select {
+  width: 116px !important;
+}
