@@ -70,6 +70,7 @@ from .schemas import (
     ScheduledChannelTestCreate,
     ScheduledChannelTestRead,
     ScheduledTestHealthRead,
+    AutoSchedulerToggleRequest,
     ScheduledChannelTestUpdate,
     SmartPatrolReportRead,
 )
@@ -108,6 +109,7 @@ from .services import (
     scheduler_enabled,
     scheduler_enabled_env_value,
     scheduled_tests_health,
+    set_auto_patrol_enabled,
     scheduled_test_loop,
     scheduled_channel_test_read,
     send_alert_notification,
@@ -1370,6 +1372,15 @@ def download_smart_patrol_report(
 
 @app.get("/api/scheduled-tests/health", response_model=ScheduledTestHealthRead)
 def get_scheduled_tests_health(db: Session = Depends(get_db)) -> dict[str, object]:
+    return scheduled_tests_health(db)
+
+
+@app.post("/api/scheduled-tests/auto-scheduler/toggle", response_model=ScheduledTestHealthRead)
+def toggle_auto_scheduler(
+    data: AutoSchedulerToggleRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    set_auto_patrol_enabled(db, data.enabled)
     return scheduled_tests_health(db)
 
 

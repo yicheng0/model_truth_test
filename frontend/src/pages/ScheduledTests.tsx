@@ -213,6 +213,15 @@ export default function ScheduledTests() {
     onSettled: () => setRunningScheduleId(null),
   });
 
+  const toggleAutoScheduler = useMutation({
+    mutationFn: (enabled: boolean) => api.toggleAutoScheduler(enabled),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['scheduledTestsHealth'], data);
+      message.success(data.enabled ? '已开启自动巡检' : '已暂停自动巡检');
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
+
   function removeDeletedAlertsFromCache(ids: string[]) {
     const deletedIds = new Set(ids);
     if (!deletedIds.size) return;
@@ -656,6 +665,16 @@ export default function ScheduledTests() {
                   title={<span className="card-title-with-icon"><CalendarClock size={18} />按渠道自动巡检</span>}
                   extra={(
                     <Space size={8} wrap={false}>
+                      <Tooltip title={schedulerHealth.data?.enabled === false ? '当前已暂停，打开后恢复自动巡检' : '关闭后将暂停所有计划的自动巡检'}>
+                        <Switch
+                          checkedChildren="自动巡检开"
+                          unCheckedChildren="自动巡检停"
+                          checked={schedulerHealth.data?.enabled ?? true}
+                          loading={toggleAutoScheduler.isPending}
+                          disabled={!schedulerHealth.data}
+                          onChange={(checked) => toggleAutoScheduler.mutate(checked)}
+                        />
+                      </Tooltip>
                       <Button size="small" icon={<DownloadCloud size={14} />} onClick={openNewApiSync}>从 new-api 同步</Button>
                       <Button type="primary" size="small" onClick={() => openCreateSchedule()}>新增计划</Button>
                     </Space>
@@ -671,9 +690,17 @@ export default function ScheduledTests() {
                       description={getErrorMessage(schedulerHealthError)}
                     />
                   ) : null}
+                  {schedulerHealth.data && schedulerHealth.data.enabled === false ? (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message="自动巡检已暂停"
+                      description="当前由顶部开关手动暂停，所有计划不会自动执行。打开开关即可恢复，无需重启服务。"
+                    />
+                  ) : null}
                   {schedulerHealth.data && (
-                    !schedulerHealth.data.enabled
-                    || schedulerHealth.data.heartbeat_stale
+                    schedulerHealth.data.heartbeat_stale
                     || (schedulerHealth.data.overdue_schedule_count ?? 0) > 0
                     || (schedulerHealth.data.stale_schedule_count ?? 0) > 0
                     || (schedulerHealth.data.overdue_job_count ?? 0) > 0
@@ -686,19 +713,17 @@ export default function ScheduledTests() {
                       style={{ marginBottom: 12 }}
                       message="自动巡检调度异常"
                       description={
-                        !schedulerHealth.data.enabled
-                          ? `后端自动调度器已停用，请检查 AUTO_SCHEDULER_ENABLED（当前值：${schedulerHealth.data.auto_scheduler_enabled_value ?? '未返回'}）。`
-                          : schedulerHealth.data.last_recovery_error
-                            ? `自动恢复失败：${schedulerHealth.data.last_recovery_error}`
-                            : schedulerHealth.data.heartbeat_stale
-                              ? '后端调度器心跳过旧，可能已经停止。'
-                              : (schedulerHealth.data.stale_attempt_count ?? 0) > 0
-                                ? `有 ${schedulerHealth.data.stale_attempt_count ?? 0} 个巡检尝试疑似卡住，系统会自动恢复并推进下一次执行。`
-                                : (schedulerHealth.data.overdue_job_count ?? 0) > 0
-                                  ? `有 ${schedulerHealth.data.overdue_job_count ?? 0} 个巡检任务排队/运行超时，请关注后端负载。`
-                                  : (schedulerHealth.data.stale_schedule_count ?? 0) > 0
-                                    ? `系统刚恢复了 ${schedulerHealth.data.last_recovery_count ?? schedulerHealth.data.stale_schedule_count} 个卡住的巡检锁。`
-                                    : `有 ${schedulerHealth.data.overdue_schedule_count ?? 0} 个计划已过执行时间但尚未被认领，请确认后端服务仍在运行。`
+                        schedulerHealth.data.last_recovery_error
+                          ? `自动恢复失败：${schedulerHealth.data.last_recovery_error}`
+                          : schedulerHealth.data.heartbeat_stale
+                            ? '后端调度器心跳过旧，可能已经停止。'
+                            : (schedulerHealth.data.stale_attempt_count ?? 0) > 0
+                              ? `有 ${schedulerHealth.data.stale_attempt_count ?? 0} 个巡检尝试疑似卡住，系统会自动恢复并推进下一次执行。`
+                              : (schedulerHealth.data.overdue_job_count ?? 0) > 0
+                                ? `有 ${schedulerHealth.data.overdue_job_count ?? 0} 个巡检任务排队/运行超时，请关注后端负载。`
+                                : (schedulerHealth.data.stale_schedule_count ?? 0) > 0
+                                  ? `系统刚恢复了 ${schedulerHealth.data.last_recovery_count ?? schedulerHealth.data.stale_schedule_count} 个卡住的巡检锁。`
+                                  : `有 ${schedulerHealth.data.overdue_schedule_count ?? 0} 个计划已过执行时间但尚未被认领，请确认后端服务仍在运行。`
                       }
                     />
                   ) : null}

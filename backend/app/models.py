@@ -199,6 +199,16 @@ class FeishuBroadcastSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class AppSetting(Base):
+    """全局应用设置（单行）。用于存放需要在运行期由 UI 控制、又不进环境变量的开关。"""
+
+    __tablename__ = "app_settings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # 固定主键 "global"
+    auto_patrol_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class ChannelTaxonomySetting(Base):
     __tablename__ = "channel_taxonomy_settings"
 

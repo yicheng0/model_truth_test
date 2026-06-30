@@ -23,7 +23,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .redaction import merge_redacted_config, redact_secrets, redact_text
 from .scheduled_probe import (
     _probe_parameter_unsupported,
@@ -144,15 +144,38 @@ def scheduler_enabled_env_value() -> str:
     return os.getenv("AUTO_SCHEDULER_ENABLED", "true")
 
 
-def scheduler_force_enabled() -> bool:
-    return os.getenv("SCHEDULER_FORCE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
-
-
 def scheduler_enabled() -> bool:
-    if scheduler_force_enabled():
-        return True
-    value = scheduler_enabled_env_value().strip().lower()
-    return value not in {"0", "false", "no", "off", "disabled"}
+    # 进程启动时是否拉起调度循环。固定为 True：循环常驻，实际是否派发巡检
+    # 由数据库里的全局开关 auto_patrol_enabled 控制（见 get_auto_patrol_enabled），
+    # 这样前端按钮可以在运行期实时开关，无需重启、也不依赖环境变量。
+    return True
+
+
+APP_SETTING_ID = "global"
+
+
+def get_or_create_app_setting(db: Session) -> AppSetting:
+    setting = db.get(AppSetting, APP_SETTING_ID)
+    if setting:
+        return setting
+    setting = AppSetting(id=APP_SETTING_ID, auto_patrol_enabled=True)
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    return setting
+
+
+def get_auto_patrol_enabled(db: Session) -> bool:
+    return bool(get_or_create_app_setting(db).auto_patrol_enabled)
+
+
+def set_auto_patrol_enabled(db: Session, enabled: bool) -> AppSetting:
+    setting = get_or_create_app_setting(db)
+    setting.auto_patrol_enabled = bool(enabled)
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+    return setting
 
 
 def _naive_utc(value: datetime | None) -> datetime | None:
@@ -411,7 +434,7 @@ def scheduled_tests_health(db: Session) -> dict[str, Any]:
         or 0
     )
     return {
-        "enabled": scheduler_enabled(),
+        "enabled": get_auto_patrol_enabled(db),
         "auto_scheduler_enabled_value": scheduler_enabled_env_value(),
         "instance_id": SCHEDULER_INSTANCE_ID,
         "last_tick_at": SCHEDULER_LAST_TICK_AT,
@@ -7361,8 +7384,12 @@ async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids
     due_ids: list[str] = []
     active_ids = active_ids or set()
     with session_factory() as db:
+        # 在 flight 中的任务先续租，避免暂停期间被误判为卡死锁。
         if active_ids:
             refresh_active_scheduled_test_locks(db, active_ids, now=now)
+        # 全局开关：关闭时只维持循环心跳与续租，不派发任何新巡检任务（按钮可实时控制）。
+        if not get_auto_patrol_enabled(db):
+            return due_ids
         try:
             recover_stale_scheduled_tests(db, now=now)
         except Exception:

@@ -34,7 +34,7 @@ from app.models import AuditLog, BaselineResult, BaselineSnapshot, Channel, Chan
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate, TestSuiteCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -285,22 +285,41 @@ def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
     } <= set(payload)
 
 
-def test_scheduler_enabled_parser_is_trimmed_and_explicit(monkeypatch) -> None:
-    monkeypatch.delenv("SCHEDULER_FORCE_ENABLED", raising=False)
+def test_scheduler_enabled_always_starts_loop_regardless_of_env(monkeypatch) -> None:
+    # 新语义：scheduler_enabled() 只决定启动时是否拉起循环，固定为 True；
+    # 实际是否派发巡检改由数据库全局开关控制，不再受 AUTO_SCHEDULER_ENABLED 影响。
     monkeypatch.delenv("AUTO_SCHEDULER_ENABLED", raising=False)
     assert scheduler_enabled() is True
-    for value in ["true", " TRUE ", "1", "yes", "enabled", ""]:
+    for value in ["true", "false", "0", "off", "disabled", ""]:
         monkeypatch.setenv("AUTO_SCHEDULER_ENABLED", value)
         assert scheduler_enabled() is True
-    for value in ["false", " FALSE ", "0", "no", "off", "disabled"]:
-        monkeypatch.setenv("AUTO_SCHEDULER_ENABLED", value)
-        assert scheduler_enabled() is False
 
 
-def test_scheduler_force_enabled_overrides_disabled_env(monkeypatch) -> None:
-    monkeypatch.setenv("AUTO_SCHEDULER_ENABLED", "false")
-    monkeypatch.setenv("SCHEDULER_FORCE_ENABLED", "true")
-    assert scheduler_enabled() is True
+def test_auto_patrol_toggle_controls_dispatch_and_health() -> None:
+    reset_database()
+    # 默认开启
+    with SessionLocal() as db:
+        assert get_auto_patrol_enabled(db) is True
+
+    with TestClient(app) as client:
+        # 关闭：health.enabled -> False
+        response = client.post("/api/scheduled-tests/auto-scheduler/toggle", json={"enabled": False})
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+        assert client.get("/api/scheduled-tests/health").json()["enabled"] is False
+
+    # 关闭状态下，tick 不派发任何任务
+    with SessionLocal() as db:
+        assert get_auto_patrol_enabled(db) is False
+    assert asyncio.run(scheduled_test_tick(SessionLocal)) == []
+
+    with TestClient(app) as client:
+        # 重新开启：health.enabled -> True
+        response = client.post("/api/scheduled-tests/auto-scheduler/toggle", json={"enabled": True})
+        assert response.status_code == 200
+        assert response.json()["enabled"] is True
+    with SessionLocal() as db:
+        assert get_auto_patrol_enabled(db) is True
 
 
 def test_docker_compose_enables_scheduler_by_default() -> None:

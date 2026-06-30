@@ -253,6 +253,11 @@ export const api = {
       throw error;
     }
   },
+  toggleAutoScheduler: (enabled: boolean) =>
+    request<ScheduledTestsHealth>('/api/scheduled-tests/auto-scheduler/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
   createScheduledTest: (payload: ScheduledChannelTestCreate) => request<ScheduledChannelTest>('/api/scheduled-tests', { method: 'POST', body: JSON.stringify(payload) }),
   updateScheduledTest: (id: string, payload: Partial<ScheduledChannelTestCreate>) =>
     request<ScheduledChannelTest>(`/api/scheduled-tests/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),

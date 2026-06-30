@@ -980,6 +980,10 @@ class ScheduledTestHealthRead(BaseModel):
     next_due_at: datetime | None = None
 
 
+class AutoSchedulerToggleRequest(BaseModel):
+    enabled: bool
+
+
 class FeishuBroadcastSettingRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
