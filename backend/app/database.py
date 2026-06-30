@@ -49,6 +49,7 @@ def repair_schema() -> None:
     if "scheduled_channel_tests" in table_names:
         scheduled_columns = {column["name"] for column in inspector.get_columns("scheduled_channel_tests")}
         _add_column_if_missing("scheduled_channel_tests", scheduled_columns, Column("patrol_modules", JSON, nullable=True))
+        _add_column_if_missing("scheduled_channel_tests", scheduled_columns, Column("model_request_probe_keys", JSON, nullable=True))
 
     if "channel_alerts" not in table_names:
         return

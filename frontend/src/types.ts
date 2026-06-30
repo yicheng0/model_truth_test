@@ -337,12 +337,38 @@ export type FullModelMetricSummary = {
   max?: number | null;
 };
 
+export type FullModelPlanProbe = {
+  key: string;
+  title: string;
+  category: string;
+  group?: string | null;
+  group_label?: string | null;
+  probe_target?: string | null;
+  expected?: string | null;
+  detection_type?: string | null;
+};
+
+export type FullModelPlanTarget = {
+  channel_id?: string | null;
+  channel_name?: string | null;
+  protocol_family: string;
+  probes: FullModelPlanProbe[];
+};
+
+export type FullModelCheckPlan = {
+  repeat_count: number;
+  categories: string[];
+  group_order: { key: string; label: string }[];
+  targets: FullModelPlanTarget[];
+};
+
 export type FullModelProbeResult = {
   key: string;
   base_key?: string | null;
   attempt_index?: number;
   title: string;
   category: string;
+  group?: string | null;
   protocol_family: string;
   status: 'pass' | 'warning' | 'fail' | string;
   score: number;

@@ -24,6 +24,7 @@ from ..schemas import (
     GeminiResourceCheckCreate,
     GeminiResourceCheckRead,
     FullModelCheckCreate,
+    FullModelCheckPlanCreate,
     FullModelCheckRead,
     ModelRequestTestCreate,
     ModelRequestTestRead,
@@ -39,6 +40,7 @@ from ..services import (
     create_cache_hit_rate_test,
     create_channel,
     create_full_model_check,
+    full_model_check_plan,
     create_gemini_resource_check,
     create_model_request_test,
     create_openai_resource_check,
@@ -597,6 +599,17 @@ async def channel_model_request_test(channel_id: str, data: ModelRequestTestCrea
     except Exception as exc:
         logger.exception("Model request test failed for channel %s", channel_id)
         raise HTTPException(status_code=502, detail="Upstream request failed") from exc
+
+
+@router.post("/api/full-model-check/plan")
+async def full_model_check_plan_route(data: FullModelCheckPlanCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    try:
+        return full_model_check_plan(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Full model check plan failed")
+        raise HTTPException(status_code=502, detail="Full model check plan failed") from exc
 
 
 @router.post("/api/full-model-check", response_model=FullModelCheckRead)

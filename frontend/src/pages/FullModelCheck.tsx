@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Descriptions, Form, InputNumber, Select, Space, Statistic, Table, Tabs, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Descriptions, Form, InputNumber, Select, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { Gauge, Play, ShieldCheck } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
-import type { Channel, FullModelChannelResult, FullModelCheckRequest, FullModelCheckResult, FullModelProbeResult } from '../types';
+import type { Channel, FullModelChannelResult, FullModelCheckRequest, FullModelCheckResult, FullModelPlanProbe, FullModelProbeResult } from '../types';
 
 type FormValues = {
   channel_ids: string[];
@@ -85,28 +85,55 @@ function FieldTile({ label, children, success = false }: { label: string; childr
   );
 }
 
+const PROBE_GROUP_ORDER: { key: string; label: string }[] = [
+  { key: 'fingerprint', label: '指纹' },
+  { key: 'parameters', label: '参数兼容' },
+  { key: 'capability', label: '能力验证' },
+  { key: 'behavior', label: '行为观测' },
+];
+
+function probeGroupKey(probe: FullModelProbeResult) {
+  return probe.group || probe.category || 'fingerprint';
+}
+
 function ProbeList({ probes, selectedKey, onSelect }: { probes: FullModelProbeResult[]; selectedKey?: string; onSelect: (key: string) => void }) {
+  const groups = groupAttempts(probes);
+  const byGroup = new Map<string, FullModelProbeResult[][]>();
+  for (const items of groups) {
+    const key = probeGroupKey(items[0]);
+    byGroup.set(key, [...(byGroup.get(key) ?? []), items]);
+  }
+  const knownKeys = new Set(PROBE_GROUP_ORDER.map((entry) => entry.key));
+  const orderedGroups = [
+    ...PROBE_GROUP_ORDER.filter((entry) => byGroup.has(entry.key)),
+    ...[...byGroup.keys()].filter((key) => !knownKeys.has(key)).map((key) => ({ key, label: key })),
+  ];
   return (
     <div className="full-model-probe-list" role="list" aria-label="完整检测探针列表">
-      {groupAttempts(probes).map((items) => {
-        const first = items[0];
-        const representative = items.find((item) => item.status !== 'pass') ?? first;
-        const active = items.some((item) => item.key === selectedKey);
-        return (
-          <button
-            type="button"
-            key={first.base_key || first.key}
-            className={`full-model-probe-item ${statusClass(representative.status)} ${active ? 'active' : ''}`}
-            onClick={() => onSelect(representative.key)}
-          >
-            <div>
-              <strong>{first.title.replace(/（第 \d+ 次）$/, '')}</strong>
-              <small>{first.category} · HTTP {representative.http_status ?? '-'} · {seconds(representative.latency_ms)}</small>
-            </div>
-            {statusTag(representative.status)}
-          </button>
-        );
-      })}
+      {orderedGroups.map((group) => (
+        <div key={group.key} className="full-model-probe-group">
+          <Typography.Text type="secondary" className="full-model-probe-group-title">{group.label}</Typography.Text>
+          {(byGroup.get(group.key) ?? []).map((items) => {
+            const first = items[0];
+            const representative = items.find((item) => item.status !== 'pass') ?? first;
+            const active = items.some((item) => item.key === selectedKey);
+            return (
+              <button
+                type="button"
+                key={first.base_key || first.key}
+                className={`full-model-probe-item ${statusClass(representative.status)} ${active ? 'active' : ''}`}
+                onClick={() => onSelect(representative.key)}
+              >
+                <div>
+                  <strong>{first.title.replace(/（第 \d+ 次）$/, '')}</strong>
+                  <small>{first.category} · HTTP {representative.http_status ?? '-'} · {seconds(representative.latency_ms)}</small>
+                </div>
+                {statusTag(representative.status)}
+              </button>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -201,6 +228,67 @@ function ProbeDetail({ channel, probe }: { channel: FullModelChannelResult; prob
   );
 }
 
+function ProbePlanPreview({ values, channelCount }: { values: Partial<FullModelCheckRequest>; channelCount: number }) {
+  const plan = useQuery({
+    queryKey: ['fullModelCheckPlan', values],
+    queryFn: () => api.fullModelCheckPlan(values),
+  });
+  const target = plan.data?.targets?.[0];
+  const groupOrder = plan.data?.group_order ?? [];
+  const byGroup = useMemo(() => {
+    const map = new Map<string, FullModelPlanProbe[]>();
+    for (const probe of target?.probes ?? []) {
+      const key = probe.group || probe.category || 'fingerprint';
+      map.set(key, [...(map.get(key) ?? []), probe]);
+    }
+    return map;
+  }, [target]);
+  const orderedKeys = [
+    ...groupOrder.map((g) => g.key).filter((k) => byGroup.has(k)),
+    ...[...byGroup.keys()].filter((k) => !groupOrder.some((g) => g.key === k)),
+  ];
+  const groupLabel = (key: string) => groupOrder.find((g) => g.key === key)?.label
+    || byGroup.get(key)?.[0]?.group_label || key;
+  const total = target?.probes.length ?? 0;
+
+  return (
+    <Card
+      bordered={false}
+      title={<span className="card-title-with-icon"><ShieldCheck size={18} />将检测的探针</span>}
+      extra={<Typography.Text type="secondary">共 {total} 项{plan.data?.repeat_count && plan.data.repeat_count > 1 ? ` × ${plan.data.repeat_count} 次` : ''}</Typography.Text>}
+    >
+      {plan.isLoading ? (
+        <Typography.Text type="secondary">正在生成探针清单…</Typography.Text>
+      ) : plan.isError ? (
+        <Alert type="warning" showIcon message="探针清单加载失败" description={getErrorMessage(plan.error)} />
+      ) : (
+        <Space direction="vertical" size={12} className="full-width">
+          <Typography.Text type="secondary">
+            {channelCount > 0
+              ? `按所选渠道协议（${target?.protocol_family ?? '-'}）与当前勾选项，本次将依次运行以下探针：`
+              : '未选择渠道，以下为 Anthropic 默认协议下的探针预览；选择渠道后会按其协议自动调整。'}
+          </Typography.Text>
+          {orderedKeys.map((key) => (
+            <div key={key} className="full-model-plan-group">
+              <Space size={8} align="center" style={{ marginBottom: 6 }}>
+                <Typography.Text strong>{groupLabel(key)}</Typography.Text>
+                <Tag>{byGroup.get(key)?.length ?? 0}</Tag>
+              </Space>
+              <Space wrap size={[8, 8]}>
+                {(byGroup.get(key) ?? []).map((probe) => (
+                  <Tooltip key={probe.key} title={probe.probe_target || probe.expected || ''}>
+                    <Tag color="default" className="full-model-plan-tag">{probe.title}</Tag>
+                  </Tooltip>
+                ))}
+              </Space>
+            </div>
+          ))}
+        </Space>
+      )}
+    </Card>
+  );
+}
+
 function ChannelResultPanel({ item }: { item: FullModelChannelResult }) {
   const [selectedKey, setSelectedKey] = useState<string | undefined>(() => item.probes[0]?.key);
   useEffect(() => {
@@ -240,6 +328,26 @@ export default function FullModelCheck() {
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<FullModelCheckResult | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+
+  const watchedChannelIds = Form.useWatch('channel_ids', form);
+  const watchedStream = Form.useWatch('include_stream', form);
+  const watchedTools = Form.useWatch('include_tools', form);
+  const watchedParams = Form.useWatch('include_params', form);
+  const watchedError = Form.useWatch('include_error_probe', form);
+  const watchedThinking = Form.useWatch('include_thinking', form);
+  const watchedVision = Form.useWatch('include_vision', form);
+  const watchedRepeat = Form.useWatch('repeat_count', form);
+
+  const planPayload = useMemo<Partial<FullModelCheckRequest>>(() => ({
+    channel_ids: watchedChannelIds ?? [],
+    repeat_count: watchedRepeat ?? 1,
+    include_stream: watchedStream ?? true,
+    include_tools: watchedTools ?? true,
+    include_params: watchedParams ?? true,
+    include_error_probe: watchedError ?? true,
+    include_thinking: watchedThinking ?? true,
+    include_vision: watchedVision ?? false,
+  }), [watchedChannelIds, watchedRepeat, watchedStream, watchedTools, watchedParams, watchedError, watchedThinking, watchedVision]);
 
   const availableChannels = useMemo(() => (channels.data ?? []).filter((channel) => channel.enabled && channel.base_url), [channels.data]);
   const channelOptions = availableChannels.map((channel) => ({ value: channel.id, label: protocolLabel(channel) }));
@@ -313,6 +421,8 @@ export default function FullModelCheck() {
           <Button type="primary" htmlType="submit" loading={runCheck.isPending} icon={<Play size={16} />} disabled={!availableChannels.length}>开始完整检测</Button>
         </Form>
       </Card>
+
+      {!result ? <ProbePlanPreview values={planPayload} channelCount={watchedChannelIds?.length ?? 0} /> : null}
 
       {requestError ? <Alert type="error" showIcon message="检测失败" description={requestError} /> : null}
 

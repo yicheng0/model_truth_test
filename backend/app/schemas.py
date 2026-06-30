@@ -14,6 +14,10 @@ TIME_OF_DAY_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 PATROL_MODULES = {"signature_interop", "model_request_probes"}
 DEFAULT_PATROL_MODULES = ["signature_interop", "model_request_probes"]
 
+# Sub-probe keys inside the model_request_probes module. Kept in sync with
+# services.SCHEDULED_MODEL_REQUEST_PROBE_KEYS (schemas must not import services).
+MODEL_REQUEST_PROBE_KEYS = ["thinking_temperature", "web_search", "thinking_adaptive_enabled"]
+
 
 def normalize_patrol_modules(value: list[str] | None) -> list[str]:
     source = DEFAULT_PATROL_MODULES if value is None else value
@@ -25,6 +29,21 @@ def normalize_patrol_modules(value: list[str] | None) -> list[str]:
     if not deduped:
         raise ValueError("at least one patrol module must be selected")
     return deduped
+
+
+def normalize_model_request_probe_keys(value: list[str] | None) -> list[str] | None:
+    """None means 'all sub-probes' (default). An explicit list is validated and
+    returned in registry order; an empty explicit list is rejected."""
+    if value is None:
+        return None
+    keys = [str(item).strip() for item in value if str(item).strip()]
+    deduped = list(dict.fromkeys(keys))
+    invalid = [key for key in deduped if key not in MODEL_REQUEST_PROBE_KEYS]
+    if invalid:
+        raise ValueError(f"unsupported model request probe keys: {', '.join(invalid)}")
+    if not deduped:
+        raise ValueError("at least one model request probe must be selected")
+    return [key for key in MODEL_REQUEST_PROBE_KEYS if key in deduped]
 
 
 def validate_run_window(start: str | None, end: str | None) -> tuple[str | None, str | None]:
@@ -226,6 +245,19 @@ class FullModelCheckCreate(BaseModel):
     timeout_seconds: int = Field(default=120, ge=30, le=240)
 
 
+class FullModelCheckPlanCreate(BaseModel):
+    """运行前的探针清单预览：channel_ids 可空（空则按 Anthropic 默认预览）。"""
+    channel_ids: list[str] = Field(default_factory=list, max_length=12)
+    repeat_count: int = Field(default=1, ge=1, le=5)
+    include_stream: bool = True
+    include_tools: bool = True
+    include_params: bool = True
+    include_error_probe: bool = True
+    include_thinking: bool = True
+    include_vision: bool = False
+    timeout_seconds: int = Field(default=120, ge=30, le=240)
+
+
 class FullModelCheckMetricSummary(BaseModel):
     count: int = 0
     avg: float | None = None
@@ -241,6 +273,7 @@ class FullModelCheckProbeRead(BaseModel):
     attempt_index: int = 1
     title: str
     category: str
+    group: str | None = None
     protocol_family: str
     status: str
     score: float
@@ -790,6 +823,7 @@ class ScheduledChannelTestBase(BaseModel):
     run_window_end: str | None = None
     test_scope: str = "scheduled_probe"
     patrol_modules: list[str] = Field(default_factory=lambda: list(DEFAULT_PATROL_MODULES))
+    model_request_probe_keys: list[str] | None = None
     repeat_count: int = Field(default=1, ge=1, le=5)
     concurrency: int = Field(default=4, ge=1, le=16)
     use_mock: bool = False
@@ -805,6 +839,7 @@ class ScheduledChannelTestBase(BaseModel):
     def validate_schedule_window(self) -> "ScheduledChannelTestBase":
         self.run_window_start, self.run_window_end = validate_run_window(self.run_window_start, self.run_window_end)
         self.patrol_modules = normalize_patrol_modules(self.patrol_modules)
+        self.model_request_probe_keys = normalize_model_request_probe_keys(self.model_request_probe_keys)
         return self
 
 
@@ -823,6 +858,7 @@ class ScheduledChannelTestUpdate(BaseModel):
     run_window_end: str | None = None
     test_scope: str | None = None
     patrol_modules: list[str] | None = None
+    model_request_probe_keys: list[str] | None = None
     repeat_count: int | None = Field(default=None, ge=1, le=5)
     concurrency: int | None = Field(default=None, ge=1, le=16)
     use_mock: bool | None = None
@@ -838,6 +874,8 @@ class ScheduledChannelTestUpdate(BaseModel):
     def validate_schedule_window(self) -> "ScheduledChannelTestUpdate":
         if "patrol_modules" in self.model_fields_set:
             self.patrol_modules = normalize_patrol_modules(self.patrol_modules)
+        if "model_request_probe_keys" in self.model_fields_set:
+            self.model_request_probe_keys = normalize_model_request_probe_keys(self.model_request_probe_keys)
         if "run_window_start" not in self.model_fields_set and "run_window_end" not in self.model_fields_set:
             return self
         if {"run_window_start", "run_window_end"} - self.model_fields_set:

@@ -127,6 +127,12 @@ def _probe_parameter_unsupported(item: dict[str, Any]) -> bool:
 
 
 def _scheduled_probe_all_parameter_unsupported(model_requests: list[dict[str, Any]]) -> bool:
+    # The "every probe returned a generic parameter-unsupported/400 form → AWS
+    # resource" inference is only valid when the whole sweep ran. A per-schedule
+    # subset can omit probes, so requiring the full registry set here avoids
+    # misreading a single Claude-native rejection as the AWS generic shape;
+    # subset runs are still classified by the Claude-native and AWS-message-id
+    # branches below, which are count-agnostic.
     request_keys = {str(item.get("key") or "") for item in model_requests}
     if request_keys != EXPECTED_SCHEDULED_PROBE_KEYS:
         return False
@@ -142,11 +148,13 @@ def scheduled_probe_classification(
     label_set = set(labels)
     normalized_score = _safe_float(score)
     provider_hint = scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels)
+    probe_count = len({str(item.get("key") or "") for item in model_requests if str(item.get("key") or "")}) or len(model_requests)
+    probe_count_text = f"{probe_count} 项" if probe_count else "所选"
     if _scheduled_probe_all_parameter_unsupported(model_requests):
         return {
             "status": "aws_resource",
             "label": "AWS 资源",
-            "reason": "三项自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理；4.7/4.8 adaptive thinking 新协议已归一化。",
+            "reason": f"{probe_count_text}自动巡检探针均命中参数不支持/原生拒绝形态，资源按 AWS 路径处理；4.7/4.8 adaptive thinking 新协议已归一化。",
             "score": max(normalized_score, 95),
         }
     if _scheduled_probe_has_native_aws_shape(model_requests, label_set):
@@ -160,7 +168,7 @@ def scheduled_probe_classification(
         return {
             "status": "claude",
             "label": "Claude 资源",
-            "reason": "三项自动巡检探针均命中 Claude 原生参数拒绝形态，资源按 Claude 路径处理；4.7/4.8 adaptive thinking 新协议已归一化。",
+            "reason": f"{probe_count_text}自动巡检探针均命中 Claude 原生参数拒绝形态，资源按 Claude 路径处理；4.7/4.8 adaptive thinking 新协议已归一化。",
             "score": max(normalized_score, 95),
         }
     if label_set.intersection(BLOCKING_SCHEDULED_PROBE_LABELS) or label_set.intersection({"unexpected_error_response", "thinking_adaptive_enabled_wrong_error"}):

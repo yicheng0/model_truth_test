@@ -1076,13 +1076,16 @@ def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = 
 
 
 @app.get("/api/eval-runs", response_model=list[RunRead])
-def list_runs(db: Session = Depends(get_db)) -> list[RunRead]:
-    return [run_read(db, run) for run in db.scalars(select(Run).order_by(Run.created_at.desc())).all()]
+def list_runs(scheduled_test_id: str | None = None, db: Session = Depends(get_db)) -> list[RunRead]:
+    stmt = select(Run).order_by(Run.created_at.desc())
+    if scheduled_test_id:
+        stmt = stmt.where(Run.scheduled_test_id == scheduled_test_id)
+    return [run_read(db, run) for run in db.scalars(stmt).all()]
 
 
 @app.get("/api/runs", response_model=list[RunRead])
-def list_runs_alias(db: Session = Depends(get_db)) -> list[RunRead]:
-    return list_runs(db)
+def list_runs_alias(scheduled_test_id: str | None = None, db: Session = Depends(get_db)) -> list[RunRead]:
+    return list_runs(scheduled_test_id, db)
 
 
 @app.post("/api/runs", response_model=RunRead)
@@ -1417,6 +1420,7 @@ def update_scheduled_test(
         "run_window_end": scheduled.run_window_end,
         "test_scope": scheduled.test_scope,
         "patrol_modules": scheduled.patrol_modules,
+        "model_request_probe_keys": scheduled.model_request_probe_keys,
     }
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(scheduled, key, value)

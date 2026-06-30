@@ -3393,6 +3393,37 @@ textarea:focus-visible,
   padding: 2px 8px 2px 2px;
 }
 
+.full-model-probe-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.full-model-probe-group + .full-model-probe-group {
+  margin-top: 6px;
+}
+
+.full-model-probe-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 2px 0;
+}
+
+.full-model-plan-group + .full-model-plan-group {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ant-color-split, rgba(5, 5, 5, 0.06));
+}
+
+.full-model-plan-tag {
+  margin: 0;
+  padding: 3px 10px;
+  font-size: 13px;
+  cursor: default;
+}
+
 .full-model-probe-item {
   width: 100%;
   border: 1px solid #dbe6f3;

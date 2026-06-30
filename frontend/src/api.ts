@@ -28,6 +28,7 @@ import type {
   GeminiResourceCheckResult,
   FullModelCheckRequest,
   FullModelCheckResult,
+  FullModelCheckPlan,
   ModelRequestTestResult,
   NewApiSyncRequest,
   NewApiSyncResult,
@@ -190,6 +191,8 @@ export const api = {
     request<ModelRequestTestResult>(`/api/channels/${channelId}/model-request-test`, { method: 'POST', body: JSON.stringify(payload) }),
   fullModelCheck: (payload: FullModelCheckRequest) =>
     request<FullModelCheckResult>('/api/full-model-check', { method: 'POST', body: JSON.stringify(payload) }),
+  fullModelCheckPlan: (payload: Partial<FullModelCheckRequest>) =>
+    request<FullModelCheckPlan>('/api/full-model-check/plan', { method: 'POST', body: JSON.stringify(payload) }),
   openAIResourceCheck: (payload: OpenAIResourceCheckRequest) =>
     request<OpenAIResourceCheckResult>('/api/openai-resource-check', { method: 'POST', body: JSON.stringify(payload) }),
   geminiResourceCheck: (payload: GeminiResourceCheckRequest) =>
@@ -230,7 +233,10 @@ export const api = {
   createCase: (payload: TestCaseCreate) => request<TestCase>('/api/test-cases', { method: 'POST', body: JSON.stringify(payload) }),
   updateCase: (id: string, payload: Partial<TestCaseCreate>) => request<TestCase>(`/api/test-cases/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCase: (id: string) => request<{ deleted: boolean }>(`/api/test-cases/${id}`, { method: 'DELETE', headers: adminHeaders() }),
-  runs: () => request<Run[]>('/api/runs'),
+  runs: (params?: { scheduled_test_id?: string }) => {
+    const qs = params?.scheduled_test_id ? `?scheduled_test_id=${encodeURIComponent(params.scheduled_test_id)}` : '';
+    return request<Run[]>(`/api/runs${qs}`);
+  },
   run: (runId: string) => request<Run>(`/api/runs/${runId}`),
   runResults: (runId: string) => request<RunResults>(`/api/runs/${runId}/results`),
   runSummary: (runId: string) => request<RunSummary>(`/api/runs/${runId}/summary`),

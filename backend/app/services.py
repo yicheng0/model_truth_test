@@ -44,6 +44,7 @@ from .schemas import (
     CacheHitRateTestCreate,
     GeminiResourceCheckCreate,
     FullModelCheckCreate,
+    FullModelCheckPlanCreate,
     ModelRequestTestCreate,
     OpenAIResourceCheckCreate,
     ReportRead,
@@ -2125,6 +2126,7 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
         run_window_end=data.run_window_end,
         test_scope=test_scope if test_scope in {"quick", "full", "scheduled_probe"} else "scheduled_probe",
         patrol_modules=normalize_scheduled_patrol_modules(data.patrol_modules),
+        model_request_probe_keys=normalize_model_request_probe_keys(data.model_request_probe_keys),
         repeat_count=max(1, data.repeat_count),
         concurrency=max(1, data.concurrency),
         use_mock=data.use_mock,
@@ -2167,6 +2169,7 @@ def validate_scheduled_channel_test(db: Session, scheduled: ScheduledChannelTest
         scheduled.suite_id = suite_id
         scheduled.baseline_snapshot_id = baseline_snapshot_id
         scheduled.patrol_modules = scheduled_patrol_modules(scheduled)
+        scheduled.model_request_probe_keys = normalize_model_request_probe_keys(scheduled.model_request_probe_keys)
         return
     if not scheduled.suite_id or not scheduled.baseline_snapshot_id:
         raise ValueError("Scheduled channel tests require suite_id and baseline_snapshot_id")
@@ -3916,6 +3919,44 @@ SCHEDULED_MODEL_REQUEST_PROBES: list[dict[str, Any]] = [
     },
 ]
 
+# Stable ordered registry of the real-request sub-probes. Used to validate and
+# filter per-schedule sub-probe selections. Order here defines execution order.
+SCHEDULED_MODEL_REQUEST_PROBE_KEYS: list[str] = [str(probe["key"]) for probe in SCHEDULED_MODEL_REQUEST_PROBES]
+
+
+def normalize_model_request_probe_keys(value: Any) -> list[str] | None:
+    """Validate a per-schedule sub-probe selection.
+
+    Returns None when no explicit selection is provided (meaning: run all
+    sub-probes, preserving the historical all-on behavior). Otherwise returns a
+    deduplicated, registry-ordered list of valid keys. Raises ValueError on
+    unknown keys or an empty explicit selection.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("model_request_probe_keys must be a list")
+    keys = [str(item).strip() for item in value if str(item).strip()]
+    deduped = list(dict.fromkeys(keys))
+    invalid = [key for key in deduped if key not in SCHEDULED_MODEL_REQUEST_PROBE_KEYS]
+    if invalid:
+        raise ValueError(f"unsupported model request probe keys: {', '.join(invalid)}")
+    if not deduped:
+        raise ValueError("at least one model request probe must be selected")
+    return [key for key in SCHEDULED_MODEL_REQUEST_PROBE_KEYS if key in deduped]
+
+
+def scheduled_model_request_probes(scheduled: ScheduledChannelTest | None) -> list[dict[str, Any]]:
+    """Resolve the concrete sub-probe list to run for a schedule.
+
+    None / empty selection falls back to the full registry (all sub-probes).
+    """
+    selection = normalize_model_request_probe_keys(getattr(scheduled, "model_request_probe_keys", None) if scheduled else None)
+    if not selection:
+        return list(SCHEDULED_MODEL_REQUEST_PROBES)
+    chosen = set(selection)
+    return [probe for probe in SCHEDULED_MODEL_REQUEST_PROBES if str(probe["key"]) in chosen]
+
 CLAUDE_CODE_DEFAULT_IMAGE_URL = "https://dummyimage.com/64x64/ff0000/ffffff.png&text=R"
 CLAUDE_CODE_RED_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfElEQVR4nNXOQREAMAjAsK7+PTMRPLhGQd7QJnESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ES53Vg6wNShQF/fRSLfgAAAABJRU5ErkJggg=="
 CLAUDE_CODE_DOCUMENT_TEXT = "ClaudeCode document marker: CC-DOC-742. Return this marker exactly."
@@ -5313,6 +5354,7 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
     if not channel.enabled:
         raise ValueError("Channel is disabled")
 
+    probes = scheduled_model_request_probes(scheduled)
     suite = _manual_probe_suite(db)
     started_at = datetime.now(timezone.utc)
     run = Run(
@@ -5324,7 +5366,7 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
         status="running",
         repeat_count=1,
         concurrency=1,
-        total_jobs=len(SCHEDULED_MODEL_REQUEST_PROBES),
+        total_jobs=len(probes),
         completed_jobs=0,
         started_at=started_at,
     )
@@ -5334,7 +5376,7 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
 
     credentials = _merged_channel_credentials(channel, {})
     probe_results: list[dict[str, Any]] = []
-    for index, probe in enumerate(SCHEDULED_MODEL_REQUEST_PROBES, start=1):
+    for index, probe in enumerate(probes, start=1):
         request_params = dict(probe["request_params"])
         case = TestCase(
             id=new_id("case"),
@@ -5890,6 +5932,9 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "ok": bool(result.get("ok")),
         "status": result.get("status"),
         "reason": result.get("reason"),
+        "raw_error": result.get("raw_error"),
+        "error_http_status": result.get("error_http_status"),
+        "error_stage": result.get("error_stage"),
         "created_at": result.get("created_at"),
         "completed_at": result.get("completed_at"),
         "source_channel_id": result.get("source_channel_id"),
@@ -6592,7 +6637,17 @@ def alert_error_message(evidence: dict[str, Any], labels: list[str] | None = Non
             return f"{title}：{error}" if title else str(error)
     signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
     if signature.get("status") == "fail" or signature.get("reason"):
-        return str(signature.get("reason") or "Thinking Signature 互通检测未通过")
+        reason = str(signature.get("reason") or "Thinking Signature 互通检测未通过")
+        raw_error = str(signature.get("raw_error") or "").strip()
+        http_status = signature.get("error_http_status")
+        stage = signature.get("error_stage")
+        parts = [reason]
+        if http_status:
+            stage_label = {"source": "source", "relay": "relay"}.get(str(stage or ""), str(stage or "")).strip()
+            parts.append(f"HTTP {http_status}{('（' + stage_label + '）') if stage_label else ''}")
+        if raw_error and raw_error != reason:
+            parts.append(f"原始错误：{raw_error}")
+        return " | ".join(parts)
     descriptions = [
         item["description"]
         for item in label_explanations(labels or [])
@@ -7051,9 +7106,6 @@ def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadca
     channel = db.get(Channel, alert.channel_id)
     run = db.get(Run, alert.run_id)
     channel_display_name = patrol_channel_display_name(channel, alert.channel_id)
-    app_base_url = (setting.app_base_url or "").strip().rstrip("/")
-    run_link = f"{app_base_url}/runs/{alert.run_id}" if app_base_url else f"/runs/{alert.run_id}"
-    review_link = f"{app_base_url}/scheduled-tests?alert={alert.id}" if app_base_url else f"/scheduled-tests?alert={alert.id}"
     labels = ", ".join(alert.trigger_labels or []) or "无"
     evidence = alert_evidence_summary(db, alert) or {}
     message_id = evidence.get("model_request_message_id") or evidence.get("signature_relay_message_id") or evidence.get("signature_source_message_id")
@@ -7067,9 +7119,7 @@ def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadca
         f"错误：{detail}\n"
         f"异常标签：{labels}\n"
         f"Message ID：{message_id or '-'}\n"
-        f"Request ID：{request_id or '-'}\n"
-        f"报告：{run_link}\n"
-        f"复审：{review_link}"
+        f"Request ID：{request_id or '-'}"
     )
     return feishu_signed_payload(text, setting.webhook_secret)
 
@@ -8604,6 +8654,9 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             source_protocol_profile=source_protocol_profile,
             relay_protocol_profile=claude_protocol_profile_for_model(relay.model_name),
             request_normalization_notes=source_normalization_notes,
+            raw_error=str(source_meta.get("error") or "") or None,
+            error_http_status=source_meta.get("http_status"),
+            error_stage="source",
         )
 
     steps[0] = _signature_step_from_meta(
@@ -8752,6 +8805,9 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             source_protocol_profile=source_protocol_profile,
             relay_protocol_profile=relay_protocol_profile,
             request_normalization_notes=source_normalization_notes + relay_normalization_notes,
+            raw_error=raw or None,
+            error_http_status=relay_meta.get("http_status"),
+            error_stage="relay",
         )
 
     raw_b = json.dumps(response_b, ensure_ascii=False)
@@ -8762,6 +8818,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         if ok
         else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw_b else "relay 请求失败")
     )
+    body_error = None if ok else (_signature_payload_error_detail(response_b) or relay_meta.get("error") or raw_b[:1200])
     relay_meta["ok"] = ok
     relay_meta["message_id"] = response_b.get("id")
     steps[-1] = _signature_step_from_meta(
@@ -8786,6 +8843,9 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         source_protocol_profile=source_protocol_profile,
         relay_protocol_profile=relay_protocol_profile,
         request_normalization_notes=source_normalization_notes + relay_normalization_notes,
+        raw_error=(str(body_error).strip() or None) if body_error else None,
+        error_http_status=relay_meta.get("http_status"),
+        error_stage="relay" if not ok else None,
     )
 
 
@@ -9115,6 +9175,9 @@ def _signature_interop_result(
     source_protocol_profile: str | None = None,
     relay_protocol_profile: str | None = None,
     request_normalization_notes: list[str] | None = None,
+    raw_error: str | None = None,
+    error_http_status: int | None = None,
+    error_stage: str | None = None,
 ) -> dict[str, Any]:
     relay_raw_excerpt = json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:3000]
     source_message_id = response_a.get("id")
@@ -9123,6 +9186,9 @@ def _signature_interop_result(
         "ok": ok,
         "status": "pass" if ok else "fail",
         "reason": reason,
+        "raw_error": (str(raw_error).strip() or None) if raw_error else None,
+        "error_http_status": error_http_status,
+        "error_stage": error_stage,
         "source_channel_id": source.id,
         "source_channel_name": source.name,
         "relay_channel_id": relay.id,
@@ -11189,6 +11255,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
             "key": "basic_shape",
             "title": "基础响应形态",
             "category": "protocol",
+            "group": "fingerprint",
             "prompt": "请只回复 OK。",
             "params": {"max_tokens": 32, "temperature": 0},
             "rules": {"min_length": 1},
@@ -11199,11 +11266,100 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
             "key": "usage_metadata",
             "title": "Usage 元数据",
             "category": "protocol",
+            "group": "fingerprint",
             "prompt": "用一句话解释 token usage 的含义。",
             "params": {"max_tokens": 96, "temperature": 0},
             "rules": {"min_length": 3},
             "probe_target": "验证 token usage 元数据是否透传。",
             "expected": "响应包含 input/output token 统计；缺失会影响成本、缓存和吞吐判断。",
+        },
+        {
+            "key": "response_body_shape",
+            "title": "Claude Body 形态",
+            "category": "protocol",
+            "group": "fingerprint",
+            "prompt": "请只回复 OK。",
+            "params": {"max_tokens": 32, "temperature": 0},
+            "rules": ({"raw_response_type_required": "message", "min_length": 1} if is_anthropic else {"min_length": 1}),
+            "probe_target": "验证响应体是否保持原生 message 形态，而不是被中转改写或转壳。",
+            "expected": "Anthropic 协议下 raw_response.type 应为 message，含 content/usage/stop_reason 等字段。",
+        },
+        {
+            "key": "message_id_source",
+            "title": "响应 ID 来源",
+            "category": "protocol",
+            "group": "fingerprint",
+            "prompt": "请只回复 OK。",
+            "params": {"max_tokens": 32, "temperature": 0},
+            "rules": ({"provider_message_id_prefix_any": ["msg_", "msg_bdrk_", "msg_vrtx_"], "min_length": 1} if is_anthropic else {"min_length": 1}),
+            "probe_target": "采集响应 ID / Request ID 来源，识别上游归属（msg_/msg_bdrk_/msg_vrtx_ 家族）。",
+            "expected": "Anthropic/Bedrock/Vertex 应返回对应前缀的 message id，可作为渠道来源指纹。",
+        },
+        {
+            "key": "token_count_baseline",
+            "title": "Token 计数基线",
+            "category": "protocol",
+            "group": "fingerprint",
+            "prompt": "请用一句话介绍 Claude。",
+            "params": {"max_tokens": 80, "temperature": 0},
+            "rules": {"min_length": 3},
+            "probe_target": "采集 token 计数基线，辅助判断 usage 统计是否真实可信。",
+            "expected": "响应应返回 input/output token 统计，数值与输出长度相称。",
+        },
+        {
+            "key": "model_self_report",
+            "title": "模型自述",
+            "category": "behavior",
+            "group": "behavior",
+            "prompt": "你是哪个模型？请用一句话说明你的模型族与厂商，不要编造部署环境。",
+            "params": {"max_tokens": 120, "temperature": 0},
+            "rules": {"min_length": 2},
+            "probe_target": "观测模型自述，作为辅助证据（不单独作为判定依据）。",
+            "expected": "稳定承认 Claude/Anthropic 身份，不臆造具体部署渠道。",
+        },
+        {
+            "key": "knowledge_cutoff",
+            "title": "知识截止自述",
+            "category": "behavior",
+            "group": "behavior",
+            "prompt": "你的知识大致截止到什么时间？如不确定请直接说明不确定。",
+            "params": {"max_tokens": 120, "temperature": 0},
+            "rules": {"min_length": 2},
+            "probe_target": "观测知识边界与不确定性表达，作为模型族辅助指纹。",
+            "expected": "给出大致截止时间或明确表示不确定，不过度自信。",
+        },
+        {
+            "key": "instruction_following",
+            "title": "指令遵循",
+            "category": "behavior",
+            "group": "behavior",
+            "prompt": "请严格只输出这一行内容，不要任何解释：READY-OK",
+            "params": {"max_tokens": 40, "temperature": 0},
+            "rules": {"required_all": ["READY-OK"], "min_length": 1},
+            "probe_target": "验证是否严格遵循输出约束、不附加多余解释。",
+            "expected": "输出包含 READY-OK，且不夹带额外说明文字。",
+        },
+        {
+            "key": "basic_echo",
+            "title": "基础回显",
+            "category": "capability",
+            "group": "capability",
+            "prompt": "请原样回复下面的内容，不要改动：PING-1234",
+            "params": {"max_tokens": 40, "temperature": 0},
+            "rules": {"required_all": ["PING-1234"], "min_length": 1},
+            "probe_target": "验证基础回显能力，确认链路真实可用而非空壳。",
+            "expected": "响应中应包含 PING-1234。",
+        },
+        {
+            "key": "json_output_mode",
+            "title": "JSON 输出模式",
+            "category": "capability",
+            "group": "capability",
+            "prompt": "只输出 JSON：{\"status\":\"ok\",\"code\":200}",
+            "params": {"max_tokens": 80, "temperature": 0},
+            "rules": {"json_required": True, "json_required_keys": ["status", "code"]},
+            "probe_target": "验证结构化 JSON 输出能力。",
+            "expected": "稳定输出包含 status/code 的合法 JSON 对象。",
         },
     ]
     if data.include_stream:
@@ -11212,6 +11368,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                 "key": "stream_ttft",
                 "title": "流式 TTFT / 事件形态",
                 "category": "stream",
+                "group": "fingerprint",
                 "prompt": "请用三点简短说明为什么首 token 延迟会影响用户体验。",
                 "params": {"max_tokens": 180, "temperature": 0, "stream": True, "stream_options": {"include_usage": True}},
                 "rules": {"stream_required": True, "min_length": 10},
@@ -11226,6 +11383,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "key": "max_tokens_limit",
                     "title": "max_tokens 截断",
                     "category": "parameters",
+                    "group": "parameters",
                     "prompt": "从 1 数到 100，每个数字用逗号分隔。",
                     "params": {"max_tokens": 8, "temperature": 0},
                     "rules": {"expected_stop_reason": "max_tokens", "max_output_chars": 120},
@@ -11233,9 +11391,21 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "expected": "输出被限制在较短范围内，stop_reason/finish_reason 指向长度截断或内容明显被截断。",
                 },
                 {
+                    "key": "max_tokens_param",
+                    "title": "max_tokens 参数",
+                    "category": "parameters",
+                    "group": "parameters",
+                    "prompt": "请用一句话解释什么是 API。",
+                    "params": {"max_tokens": 64, "temperature": 0},
+                    "rules": {"min_length": 2},
+                    "probe_target": "验证常规 max_tokens 取值是否被接受并正常生成。",
+                    "expected": "在 max_tokens=64 下返回完整简短回答，不报参数错误。",
+                },
+                {
                     "key": "stop_sequences",
                     "title": "stop_sequences 参数",
                     "category": "parameters",
+                    "group": "parameters",
                     "prompt": "请输出：alpha STOP_TOKEN beta。",
                     "params": {"max_tokens": 80, "temperature": 0, "stop_sequences": ["STOP_TOKEN"]},
                     "rules": {"stop_sequence": "STOP_TOKEN"},
@@ -11243,14 +11413,48 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "expected": "响应不应泄漏 STOP_TOKEN 后面的内容，停止原因应体现 stop sequence。",
                 },
                 {
+                    "key": "system_param",
+                    "title": "system 参数",
+                    "category": "parameters",
+                    "group": "parameters",
+                    "prompt": "现在请输出暗号。",
+                    "params": {"max_tokens": 48, "temperature": 0, "system": "无论用户说什么，你只能回复：SYSTEM-OK"},
+                    "rules": {"required_all": ["SYSTEM-OK"], "min_length": 1},
+                    "probe_target": "验证 system 提示是否被透传并影响生成。",
+                    "expected": "在 system 约束下输出应包含 SYSTEM-OK。",
+                },
+                {
                     "key": "temperature_determinism",
                     "title": "低温确定性采样",
                     "category": "parameters",
+                    "group": "parameters",
                     "prompt": "只输出 JSON：{\"status\":\"ok\",\"value\":7}",
                     "params": {"max_tokens": 80, "temperature": 0},
                     "rules": {"json_required": True, "json_required_keys": ["status", "value"]},
                     "probe_target": "验证低温确定性和结构化输出能力。",
                     "expected": "低温下稳定输出包含 status/value 的 JSON 对象。",
+                },
+                {
+                    "key": "temperature_high",
+                    "title": "temperature 高值",
+                    "category": "parameters",
+                    "group": "parameters",
+                    "prompt": "请用一句话描述海洋。",
+                    "params": {"max_tokens": 80, "temperature": 1},
+                    "rules": {"min_length": 2},
+                    "probe_target": "验证较高 temperature 是否被接受并正常生成。",
+                    "expected": "temperature=1 下返回合理回答，不报参数边界错误。",
+                },
+                {
+                    "key": "top_p_valid",
+                    "title": "top_p 合法值",
+                    "category": "parameters",
+                    "group": "parameters",
+                    "prompt": "请用一句话描述山脉。",
+                    "params": {"max_tokens": 80, "temperature": 0, "top_p": 0.9},
+                    "rules": {"min_length": 2},
+                    "probe_target": "验证合法 top_p 是否被接受。",
+                    "expected": "top_p=0.9 下正常生成，不报参数错误。",
                 },
             ]
         )
@@ -11261,6 +11465,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "key": "tool_call_shape",
                     "title": "OpenAI 工具调用形态",
                     "category": "tools",
+                    "group": "fingerprint",
                     "prompt": "请调用工具记录城市 Paris 和单位 celsius，不要直接回答天气。",
                     "params": {
                         "max_tokens": 160,
@@ -11278,6 +11483,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "key": "gemini_function_call_shape",
                     "title": "Gemini 函数调用形态",
                     "category": "tools",
+                    "group": "fingerprint",
                     "prompt": "请调用函数记录城市 Paris 和单位 celsius，不要直接回答天气。",
                     "params": {
                         "max_tokens": 160,
@@ -11295,6 +11501,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                     "key": "tool_use_shape",
                     "title": "Claude 工具调用形态",
                     "category": "tools",
+                    "group": "fingerprint",
                     "prompt": "请调用工具记录城市 Paris 和单位 celsius，不要直接回答天气。",
                     "params": {
                         "max_tokens": 180,
@@ -11312,6 +11519,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                 "key": "thinking_shape",
                 "title": "Claude Thinking 形态",
                 "category": "thinking",
+                "group": "fingerprint",
                 "prompt": "请一步内判断 17+25 是否等于 42，最后只给结论。",
                 "params": {"max_tokens": 1200, "thinking": {"type": "enabled", "budget_tokens": 800}},
                 "rules": {"min_length": 1},
@@ -11325,6 +11533,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                 "key": "vision_input_smoke",
                 "title": "图片输入烟测",
                 "category": "vision",
+                "group": "capability",
                 "prompt": "这是一项多模态输入冒烟检测。如果收到图片，请简述图片；否则说明未收到图片。",
                 "params": {"max_tokens": 120, "temperature": 0},
                 "rules": {"min_length": 1},
@@ -11338,6 +11547,7 @@ def _full_model_probe_specs(protocol_family: str, data: FullModelCheckCreate) ->
                 "key": "invalid_request_error",
                 "title": "错误包裹 / 参数校验",
                 "category": "error",
+                "group": "parameters",
                 "prompt": "invalid request probe",
                 "params": {"max_tokens": 16},
                 "rules": {"invalid_request_probe": True},
@@ -11505,6 +11715,7 @@ def _full_model_probe_read(spec: dict[str, Any], channel: Channel, protocol_fami
         "attempt_index": int(spec.get("attempt_index") or 1),
         "title": spec["title"],
         "category": spec["category"],
+        "group": spec.get("group") or spec["category"],
         "protocol_family": protocol_family,
         "status": status,
         "score": round(float(score), 2),
@@ -11575,6 +11786,70 @@ def _full_model_channel_summary(channel: Channel, protocol_family: str, probes: 
         "total_input_tokens": int(sum(item.get("input_tokens") or 0 for item in probes)),
         "total_output_tokens": int(sum(item.get("output_tokens") or 0 for item in probes)),
         "probes": probes,
+    }
+
+
+FULL_MODEL_GROUP_LABELS = {
+    "fingerprint": "指纹",
+    "parameters": "参数兼容",
+    "capability": "能力验证",
+    "behavior": "行为观测",
+}
+
+
+def full_model_check_plan(db: Session, data: "FullModelCheckPlanCreate | FullModelCheckCreate") -> dict[str, Any]:
+    """返回将要执行的探针清单（不发起任何上游请求），用于运行前预览。"""
+
+    def specs_to_probes(protocol_family: str) -> list[dict[str, Any]]:
+        probes: list[dict[str, Any]] = []
+        for spec in _full_model_probe_specs(protocol_family, data):
+            group = spec.get("group") or spec.get("category")
+            probes.append({
+                "key": spec["key"],
+                "title": spec["title"],
+                "category": spec["category"],
+                "group": group,
+                "group_label": FULL_MODEL_GROUP_LABELS.get(str(group), str(group)),
+                "probe_target": spec.get("probe_target"),
+                "expected": spec.get("expected"),
+                "detection_type": _full_model_detection_type(str(spec.get("category") or "")),
+            })
+        return probes
+
+    targets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for channel_id in data.channel_ids:
+        if channel_id in seen:
+            continue
+        seen.add(channel_id)
+        channel = db.get(Channel, channel_id)
+        if not channel:
+            continue
+        protocol_family = _full_model_protocol_family(channel)
+        targets.append({
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "protocol_family": protocol_family,
+            "probes": specs_to_probes(protocol_family),
+        })
+
+    if not targets:
+        # 未选渠道时给出 Anthropic 默认预览，便于运行前了解覆盖范围。
+        default_family = "anthropic_messages"
+        targets.append({
+            "channel_id": None,
+            "channel_name": None,
+            "protocol_family": default_family,
+            "probes": specs_to_probes(default_family),
+        })
+
+    return {
+        "repeat_count": data.repeat_count,
+        "categories": FULL_MODEL_CHECK_CATEGORIES,
+        "group_order": [
+            {"key": key, "label": label} for key, label in FULL_MODEL_GROUP_LABELS.items()
+        ],
+        "targets": targets,
     }
 
 

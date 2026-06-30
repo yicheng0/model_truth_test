@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Empty, Popconfirm, Progress, Space, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Empty, Popconfirm, Progress, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
 import { BarChart3, CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2, Trophy } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
@@ -152,6 +152,55 @@ function patrolResultState(evidence: PatrolEvidence) {
   return blockingLabels.length || hasModelError || hasSignatureError ? 'error' : 'ok';
 }
 
+// Per-probe sub-status chips so a row shows at a glance which module failed.
+type PatrolProbeChip = { key: string; label: string; state: 'ok' | 'error'; detail?: string };
+
+function patrolProbeChips(evidence: PatrolEvidence): PatrolProbeChip[] {
+  const chips: PatrolProbeChip[] = [];
+  if (evidence.signature) {
+    const failed = evidence.signature.status === 'fail' || evidence.signature.status === 'error';
+    chips.push({
+      key: 'signature',
+      label: 'Signature',
+      state: failed ? 'error' : 'ok',
+      detail: evidence.signature.reason ?? undefined,
+    });
+  }
+  for (const item of evidence.modelRequests) {
+    const failed = item.status === 'error' || item.status === 'fail' || Boolean(item.error)
+      || item.labels.some((label) => label !== 'provider_error_variant');
+    chips.push({
+      key: item.key ?? item.resultId ?? item.title ?? `probe-${chips.length}`,
+      label: item.title ?? item.key ?? '真实请求',
+      state: failed ? 'error' : 'ok',
+      detail: item.error ?? (item.labels.length ? item.labels.join('、') : undefined),
+    });
+  }
+  return chips;
+}
+
+// Concise human-readable reason for an abnormal patrol result.
+function patrolFailureReason(evidence: PatrolEvidence): string {
+  const reasons: string[] = [];
+  if (evidence.signature?.status === 'fail' || evidence.signature?.status === 'error') {
+    reasons.push(evidence.signature.reason ?? 'Signature 互通检测未通过');
+  }
+  for (const item of evidence.modelRequests) {
+    const failed = item.status === 'error' || item.status === 'fail' || Boolean(item.error)
+      || item.labels.some((label) => label !== 'provider_error_variant');
+    if (!failed) continue;
+    const title = item.title ?? item.key ?? '真实请求探针';
+    const detail = item.error ?? item.responseText ?? item.rawResponseText
+      ?? (item.labels.length ? item.labels.filter((label) => label !== 'provider_error_variant').join('、') : '');
+    reasons.push(detail ? `${title}：${detail}` : `${title} 异常`);
+  }
+  const blockingLabels = evidence.labels.filter((label) => label !== 'patrol_probe_passed' && label !== 'provider_error_variant');
+  for (const label of blockingLabels) {
+    reasons.push(evidence.labelExplanations[label] ?? label);
+  }
+  return reasons.join('；') || '渠道自动巡检异常';
+}
+
 function patrolClassificationLabel(evidence: PatrolEvidence) {
   if (evidence.classificationStatus === 'claude') return evidence.classificationLabel || 'Claude 资源';
   if (evidence.classificationStatus === 'aws_resource') return evidence.classificationLabel || 'AWS 资源';
@@ -188,10 +237,19 @@ function PatrolEvidenceCell({ run }: { run: Run }) {
     return <Typography.Text type="secondary">等待巡检完成</Typography.Text>;
   }
   if (runResults.isLoading) {
-    return <Typography.Text type="secondary">正在加载巡检日志...</Typography.Text>;
+    return (
+      <Space size={6}>
+        <Spin size="small" />
+        <Typography.Text type="secondary">加载中</Typography.Text>
+      </Space>
+    );
   }
   if (runResults.isError) {
-    return <Tag color="red">巡检日志加载失败</Tag>;
+    return (
+      <Tooltip title={getErrorMessage(runResults.error)}>
+        <Tag color="red">日志加载失败</Tag>
+      </Tooltip>
+    );
   }
   if (!evidence) {
     return <Typography.Text type="secondary">暂无巡检证据</Typography.Text>;
@@ -212,14 +270,21 @@ function PatrolReviewCell({ run }: { run: Run }) {
     return <Tag color="default">-</Tag>;
   }
   if (runResults.isLoading) {
-    return <Typography.Text type="secondary">判断中</Typography.Text>;
+    return <Spin size="small" />;
   }
   if (runResults.isError || !evidence) {
     return run.status === 'failed' ? <Tag color="red">需要复审</Tag> : <Tag color="default">-</Tag>;
   }
   const classification = patrolClassificationLabel(evidence);
   if (classification) return <Tag color="green">{classification}</Tag>;
-  return patrolResultState(evidence) === 'error' ? <Tag color="red">需要复审</Tag> : <Tag color="default">-</Tag>;
+  if (patrolResultState(evidence) === 'error') {
+    return (
+      <Tooltip title={patrolFailureReason(evidence)}>
+        <Tag color="red">需要复审</Tag>
+      </Tooltip>
+    );
+  }
+  return <Tag color="default">-</Tag>;
 }
 
 function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = true }: { evidence: PatrolEvidence; compact?: boolean; showProbeDetails?: boolean }) {
@@ -228,9 +293,23 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
   const primaryRequest = evidence.modelRequests[0];
   if (compact) {
     const classification = patrolClassificationLabel(evidence);
+    const primaryLabel = classification || (resultState === 'ok' ? '正确' : '异常');
+    const chips = patrolProbeChips(evidence);
+    const reason = resultState === 'error' ? patrolFailureReason(evidence) : '';
     return (
-      <Tooltip title="点开展开行或查看巡检详情查看探针日志">
-        <Tag color={resultState === 'ok' ? 'green' : 'red'}>{classification || (resultState === 'ok' ? '正确' : '异常')}</Tag>
+      <Tooltip title={reason || '点开展开行或查看巡检详情查看探针日志'}>
+        <Space size={[4, 2]} wrap>
+          <Tag color={resultState === 'ok' ? 'green' : 'red'} style={{ marginInlineEnd: 0 }}>{primaryLabel}</Tag>
+          {chips.map((chip) => (
+            <Tag
+              key={chip.key}
+              color={chip.state === 'ok' ? 'green' : 'red'}
+              style={{ marginInlineEnd: 0 }}
+            >
+              {chip.label} {chip.state === 'ok' ? '✓' : '✗'}
+            </Tag>
+          ))}
+        </Space>
       </Tooltip>
     );
   }
@@ -752,7 +831,7 @@ export default function Runs() {
           }}
           locale={{ emptyText: <Empty description="暂无自动巡检日志" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1040 }}
+          scroll={{ x: 1160 }}
           expandable={{
             expandedRowRender: (run) => <PatrolEvidenceDetail runId={run.id} />,
             rowExpandable: (run) => run.status === 'completed' || run.status === 'failed',
@@ -774,7 +853,7 @@ export default function Runs() {
             },
             {
               title: '巡检结果',
-              width: 104,
+              width: 220,
               render: (_, run) => <PatrolEvidenceCell run={run} />,
             },
             {

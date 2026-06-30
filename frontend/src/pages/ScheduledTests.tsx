@@ -53,6 +53,17 @@ const patrolModuleOptions: Array<{ value: ScheduledPatrolModule; label: string }
   { value: 'model_request_probes', label: '真实模型请求探针' },
 ];
 
+const patrolModuleDescriptions: Record<ScheduledPatrolModule, string> = {
+  signature_interop: '检测带 signature 的 thinking block 能否跨渠道复用，不消耗候选渠道的模型额度。',
+  model_request_probes: '向候选渠道发起真实模型请求并核对协议字段，会额外消耗模型调用。',
+};
+
+const patrolModuleSelectOptions = patrolModuleOptions.map((item) => ({
+  value: item.value,
+  label: item.label,
+  description: patrolModuleDescriptions[item.value],
+}));
+
 function patrolModuleText(modules?: ScheduledPatrolModule[]) {
   const labels = new Map<ScheduledPatrolModule, string>(patrolModuleOptions.map((item) => [item.value, item.label]));
   const selected: ScheduledPatrolModule[] = modules?.length ? modules : ['signature_interop'];
@@ -1510,9 +1521,25 @@ export default function ScheduledTests() {
             label="巡检模块"
             name="patrol_modules"
             rules={[{ required: true, message: '请至少选择一个巡检模块' }]}
-            extra="Signature 互通用于检测带 signature 的 thinking block 能否跨渠道复用；真实模型请求探针会额外消耗模型调用。"
+            extra="可多选。Signature 互通用于检测带 signature 的 thinking block 能否跨渠道复用；真实模型请求探针会额外消耗模型调用。"
           >
-            <Checkbox.Group options={patrolModuleOptions} />
+            <Select
+              mode="multiple"
+              placeholder="选择要执行的巡检探针模块"
+              optionLabelProp="label"
+              options={patrolModuleSelectOptions.map((item) => ({
+                value: item.value,
+                label: item.label,
+                title: item.description,
+                option: (
+                  <Space direction="vertical" size={0}>
+                    <Typography.Text>{item.label}</Typography.Text>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>{item.description}</Typography.Text>
+                  </Space>
+                ),
+              }))}
+              optionRender={(option) => option.data.option}
+            />
           </Form.Item>
           <Form.Item
             label="执行间隔（分钟）"

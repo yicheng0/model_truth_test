@@ -97,6 +97,7 @@ class ScheduledChannelTest(Base):
     run_window_end: Mapped[str | None] = mapped_column(String(5), nullable=True)
     test_scope: Mapped[str] = mapped_column(String(30), default="full", nullable=False)
     patrol_modules: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    model_request_probe_keys: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     repeat_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     concurrency: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
     use_mock: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
