@@ -113,9 +113,10 @@ export function getErrorMessage(error: unknown) {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const { headers: initHeaders, ...restInit } = init ?? {};
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    ...init,
+    ...restInit,
+    headers: { 'Content-Type': 'application/json', ...(initHeaders ?? {}) },
   });
   if (!response.ok) {
     const contentType = response.headers.get('content-type') ?? '';

@@ -209,7 +209,7 @@ describe('api request handling', () => {
       '/api/runs/bulk-delete',
       expect.objectContaining({
         method: 'POST',
-        headers: expect.objectContaining({ 'X-Admin-Key': 'test-admin-key' }),
+        headers: expect.objectContaining({ 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key' }),
         body: JSON.stringify({ ids: ['run_1', 'run_2'] }),
       }),
     );
@@ -1425,6 +1425,7 @@ describe('api request handling', () => {
       '/api/alerts/bulk-delete',
       expect.objectContaining({
         method: 'POST',
+        headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ ids: ['alert_1', 'alert_2'] }),
       }),
     );
@@ -1456,6 +1457,7 @@ describe('api request handling', () => {
       '/api/reports/bulk-delete',
       expect.objectContaining({
         method: 'POST',
+        headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ ids: ['rep_1', 'rep_2'] }),
       }),
     );
