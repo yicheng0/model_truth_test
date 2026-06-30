@@ -106,6 +106,7 @@ from .services import (
     next_run_for_scheduled_test,
     recover_stale_scheduled_tests,
     scheduler_enabled,
+    scheduler_enabled_env_value,
     scheduled_tests_health,
     scheduled_test_loop,
     scheduled_channel_test_read,
@@ -129,6 +130,29 @@ from .routers.system import router as system_router
 from .routers.new_api import router as new_api_router
 
 
+async def _supervise_scheduler_loop(session_factory) -> None:
+    """Run the 自动巡检 scheduler loop and auto-restart it if it crashes.
+
+    ``scheduled_test_loop`` already swallows per-tick errors, so if control ever
+    returns here with an exception it means the whole loop coroutine died
+    unexpectedly. Without supervision that silently stops all scheduled patrols
+    until the process is restarted, while ``/api/scheduled-tests/health`` keeps
+    reporting ``enabled: true`` and only goes ``heartbeat_stale`` minutes later.
+    Restart with capped exponential backoff so a transient fault self-heals.
+    """
+    backoff = 5
+    while True:
+        try:
+            await scheduled_test_loop(session_factory)
+            return  # normal/clean return — loop is an infinite while, so unexpected
+        except asyncio.CancelledError:
+            raise  # shutdown path: propagate so lifespan can await cleanly
+        except Exception:
+            logger.exception("自动巡检 scheduler loop crashed — restarting in %ds", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 300)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logging.basicConfig(
@@ -148,8 +172,18 @@ async def lifespan(_app: FastAPI):
             logger.exception("Seed data initialization failed — app will continue but data may be incomplete")
     scheduler_task = None
     if scheduler_enabled():
-        scheduler_task = asyncio.create_task(scheduled_test_loop(SessionLocal))
+        logger.info(
+            "Auto scheduler enabled (AUTO_SCHEDULER_ENABLED=%r) — starting 自动巡检 patrol loop",
+            scheduler_enabled_env_value(),
+        )
+        scheduler_task = asyncio.create_task(_supervise_scheduler_loop(SessionLocal))
         _app.state.scheduler_task = scheduler_task
+    else:
+        logger.warning(
+            "Auto scheduler DISABLED by AUTO_SCHEDULER_ENABLED=%r — 自动巡检 will NOT run. "
+            "Set AUTO_SCHEDULER_ENABLED=true and restart the backend to enable scheduled patrols.",
+            scheduler_enabled_env_value(),
+        )
     yield
     if scheduler_task:
         scheduler_task.cancel()
