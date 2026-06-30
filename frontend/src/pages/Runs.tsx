@@ -158,8 +158,8 @@ function patrolClassificationLabel(evidence: PatrolEvidence) {
   return '';
 }
 
-function patrolRunTitle(run: Run) {
-  const channel = formatPatrolChannel(
+function patrolChannelAndTask(run: Run) {
+  const channelLabel = formatPatrolChannel(
     {
       id: run.patrol_channel_id,
       name: run.patrol_channel_name,
@@ -168,8 +168,12 @@ function patrolRunTitle(run: Run) {
     },
     run.patrol_channel_id,
   );
-  if (!channel || channel === '-') return run.name;
-  return run.name.startsWith(`${channel} - `) ? run.name : `${channel} - ${run.name}`;
+  const hasChannel = Boolean(channelLabel) && channelLabel !== '-';
+  const display = hasChannel ? channelLabel : (run.patrol_channel_name || run.patrol_channel_id || '-');
+  const taskName = hasChannel && run.name.startsWith(`${channelLabel} - `)
+    ? run.name.slice(channelLabel.length + 3)
+    : run.name;
+  return { channelLabel: display, taskName };
 }
 
 function PatrolEvidenceCell({ run }: { run: Run }) {
@@ -758,13 +762,15 @@ export default function Runs() {
               title: '渠道',
               dataIndex: 'name',
               width: 220,
-              render: (_, run) => (
-                <Space direction="vertical" size={2}>
-                  <Typography.Text strong>{run.patrol_channel_name || run.patrol_channel_id || '-'}</Typography.Text>
-                  <Typography.Text type="secondary">{formatPatrolChannel({ id: run.patrol_channel_id, name: run.patrol_channel_name, accountType: run.patrol_channel_account_type, providerType: run.patrol_channel_provider_type }, run.patrol_channel_id)}</Typography.Text>
-                  <Typography.Text type="secondary">{patrolRunTitle(run)}</Typography.Text>
-                </Space>
-              ),
+              render: (_, run) => {
+                const { channelLabel, taskName } = patrolChannelAndTask(run);
+                return (
+                  <Space direction="vertical" size={2}>
+                    <Typography.Text strong>{channelLabel}</Typography.Text>
+                    <Typography.Text type="secondary">{taskName}</Typography.Text>
+                  </Space>
+                );
+              },
             },
             {
               title: '巡检结果',

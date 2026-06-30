@@ -96,6 +96,23 @@ function escapeRowKey(value: string) {
   return value.replace(/["\\]/g, '\\$&');
 }
 
+function compactSignatureId(value?: string | null) {
+  if (!value) return '';
+  if (value.length <= 22) return value;
+  return `${value.slice(0, 11)}...${value.slice(-7)}`;
+}
+
+function SignatureIdText({ value, missingHint }: { value?: string | null; missingHint?: string }) {
+  if (!value) {
+    return <Typography.Text type="secondary">{missingHint ?? '未提供'}</Typography.Text>;
+  }
+  const short = compactSignatureId(value);
+  const content = (
+    <Typography.Text copyable={{ text: value }} className="patrol-log-id">{short}</Typography.Text>
+  );
+  return short !== value ? <Tooltip title={value}>{content}</Tooltip> : content;
+}
+
 function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
   const responseText = item.responseText ?? item.rawResponseText ?? item.error ?? '-';
   return (
@@ -242,8 +259,22 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
           ref={signaturePanelRef}
           className={`patrol-signature-panel ${focus?.section === 'signature' ? 'patrol-focused-panel' : ''}`}
         >
-          <div><span>Source</span><strong>{signature.sourceChannelId ?? '-'} / msg {signature.sourceMessageId ?? '-'} / req {signature.sourceRequestId ?? '-'}</strong></div>
-          <div><span>Relay</span><strong>{signature.relayChannelId ?? '-'} / msg {signature.relayMessageId ?? '-'} / req {signature.relayRequestId ?? '-'}</strong></div>
+          <div>
+            <span>Source</span>
+            <strong>
+              {formatPatrolChannel({ id: signature.sourceChannelId, name: signature.sourceChannelName, accountType: signature.sourceChannelAccountType, providerType: signature.sourceChannelProviderType }, signature.sourceChannelId)}
+              {' / msg '}<SignatureIdText value={signature.sourceMessageId} />
+              {' / req '}<SignatureIdText value={signature.sourceRequestId} missingHint={signature.sourceMessageChannelType === 'AWS Bedrock' ? '无（Bedrock 不返回 request id）' : '未提供'} />
+            </strong>
+          </div>
+          <div>
+            <span>Relay</span>
+            <strong>
+              {formatPatrolChannel({ id: signature.relayChannelId, name: signature.relayChannelName, accountType: signature.relayChannelAccountType, providerType: signature.relayChannelProviderType }, signature.relayChannelId)}
+              {' / msg '}<SignatureIdText value={signature.relayMessageId} />
+              {' / req '}<SignatureIdText value={signature.relayRequestId} missingHint={signature.relayMessageChannelType === 'AWS Bedrock' ? '无（Bedrock 不返回 request id）' : '未提供'} />
+            </strong>
+          </div>
           <div><span>Source 类型</span><strong>{signature.sourceMessageChannelType ?? '-'}</strong></div>
           <div><span>Relay 类型</span><strong>{signature.relayMessageChannelType ?? '-'}</strong></div>
         </div>
