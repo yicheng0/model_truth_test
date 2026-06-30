@@ -1413,7 +1413,12 @@ def delete_scheduled_test(
     if not scheduled:
         raise HTTPException(status_code=404, detail="Scheduled test not found")
     before_summary = scheduled_test_audit_summary(scheduled)
-    # Detach references so orphaned runs/alerts don't break the frontend.
+    # Remove scheduler queue records first: patrol jobs keep a non-null FK to the schedule.
+    job_ids = list(db.scalars(select(PatrolJob.id).where(PatrolJob.scheduled_test_id == scheduled_id)).all())
+    if job_ids:
+        db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_ids)))
+        db.execute(delete(PatrolJob).where(PatrolJob.id.in_(job_ids)))
+    # Detach evidence/history references so orphaned runs/alerts don't break the frontend.
     for alert in db.scalars(select(ChannelAlert).where(ChannelAlert.scheduled_test_id == scheduled_id)).all():
         alert.scheduled_test_id = None
     for run in db.scalars(select(Run).where(Run.scheduled_test_id == scheduled_id)).all():

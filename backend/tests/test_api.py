@@ -1074,6 +1074,60 @@ def test_alert_bulk_delete_returns_deleted_count_and_missing_ids() -> None:
         assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.id.in_(alert_ids))) == 0
 
 
+def test_scheduled_test_delete_cleans_patrol_jobs_and_keeps_history() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
+    asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == run_id))
+        assert scheduled is not None
+        assert report is not None
+        assert alert is not None
+        scheduled.last_run_id = run_id
+        job = PatrolJob(
+            id="job_scheduled_delete_keeps_history",
+            scheduled_test_id=schedule["id"],
+            channel_id=schedule["channel_id"],
+            status="completed",
+            run_id=run_id,
+        )
+        db.add(job)
+        db.add(
+            PatrolJobAttempt(
+                id="attempt_scheduled_delete_keeps_history",
+                job_id=job.id,
+                run_id=run_id,
+                status="completed",
+            )
+        )
+        db.commit()
+        report_id = report.id
+        alert_id = alert.id
+
+    with TestClient(app) as client:
+        response = client.delete(f"/api/scheduled-tests/{schedule['id']}", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True}
+    with SessionLocal() as db:
+        assert db.get(ScheduledChannelTest, schedule["id"]) is None
+        assert db.get(PatrolJob, "job_scheduled_delete_keeps_history") is None
+        assert db.get(PatrolJobAttempt, "attempt_scheduled_delete_keeps_history") is None
+        run = db.get(Run, run_id)
+        report = db.get(Report, report_id)
+        alert = db.get(ChannelAlert, alert_id)
+        assert run is not None
+        assert report is not None
+        assert alert is not None
+        assert run.scheduled_test_id is None
+        assert alert.scheduled_test_id is None
+
+
 def test_run_delete_removes_linked_alerts() -> None:
     reset_database()
     with TestClient(app) as client:
