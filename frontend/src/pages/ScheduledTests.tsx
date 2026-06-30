@@ -9,7 +9,7 @@ import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../c
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { buildPatrolRunDetailLink } from '../patrolNavigation';
 import { formatDateTime } from '../time';
-import type { Channel, ChannelAlert, ChannelAlertStatus, NewApiSyncRequest, NewApiSyncResult, ScheduledChannelTest, ScheduledChannelTestCreate } from '../types';
+import type { Channel, ChannelAlert, ChannelAlertStatus, NewApiSyncRequest, NewApiSyncResult, ScheduledChannelTest, ScheduledChannelTestCreate, ScheduledPatrolModule } from '../types';
 import { buildScheduleBasePayload, intervalText, type ScheduleFormValues } from '../scheduledTestsUtils';
 import { buildFeishuBroadcastUpdate, type FeishuBroadcastFormValues } from './feishuBroadcast';
 import {
@@ -57,6 +57,17 @@ type FeishuFormValues = FeishuBroadcastFormValues & {
 };
 
 type NewApiSyncFormValues = NewApiSyncRequest;
+
+const patrolModuleOptions: Array<{ value: ScheduledPatrolModule; label: string }> = [
+  { value: 'signature_interop', label: 'Thinking Signature 互通' },
+  { value: 'model_request_probes', label: '真实模型请求探针' },
+];
+
+function patrolModuleText(modules?: ScheduledPatrolModule[]) {
+  const labels = new Map<ScheduledPatrolModule, string>(patrolModuleOptions.map((item) => [item.value, item.label]));
+  const selected: ScheduledPatrolModule[] = modules?.length ? modules : ['signature_interop'];
+  return selected.map((item) => labels.get(item) ?? item).join(' + ');
+}
 
 export default function ScheduledTests() {
   const queryClient = useQueryClient();
@@ -376,6 +387,7 @@ export default function ScheduledTests() {
     scheduleForm.setFieldsValue({
       enabled: true,
       interval_minutes: 1440,
+      patrol_modules: ['signature_interop'],
       run_window_enabled: false,
       run_window_start: '09:00',
       run_window_end: '18:00',
@@ -389,6 +401,7 @@ export default function ScheduledTests() {
       name: schedule.name,
       channel_id: schedule.channel_id,
       interval_minutes: schedule.interval_minutes,
+      patrol_modules: schedule.patrol_modules?.length ? schedule.patrol_modules : ['signature_interop'],
       run_window_enabled: Boolean(schedule.run_window_start && schedule.run_window_end),
       run_window_start: schedule.run_window_start ?? '09:00',
       run_window_end: schedule.run_window_end ?? '18:00',
@@ -718,6 +731,11 @@ export default function ScheduledTests() {
                         title: '巡检结果',
                         width: 100,
                         render: (_, schedule) => probeSummary(schedule),
+                      },
+                      {
+                        title: '模块',
+                        width: 190,
+                        render: (_, schedule) => <Typography.Text>{patrolModuleText(schedule.patrol_modules)}</Typography.Text>,
                       },
                       {
                         title: '频率',
@@ -1432,8 +1450,8 @@ export default function ScheduledTests() {
             type="info"
             showIcon
             style={{ marginBottom: 16 }}
-            message="固定巡检内容"
-            description="系统会自动执行 Thinking Signature 互通检测和多项真实模型请求探针；Opus 4.7/4.8+ 会自动使用 adaptive thinking + output_config.effort 新协议，不需要再选择测试集、渠道指纹或评分阈值。"
+            message="选择巡检模块"
+            description="默认只跑 Thinking Signature 互通，专门检测 ClaudeCode/原生 thinking signature 能不能互通；需要完整资源画像时可额外勾选真实模型请求探针。"
           />
           <Form.Item label="计划名称" name="name" rules={[{ required: true, message: '请输入计划名称' }]}>
             <Input placeholder="第三方 Sonnet 渠道每日巡检" />
@@ -1443,6 +1461,14 @@ export default function ScheduledTests() {
               placeholder="选择候选或负样本渠道"
               options={candidateChannels.map((channel) => ({ value: channel.id, label: `${formatChannelDisplayName(channel)} (${roleLabel(channel.role, taxonomy.data)} / ${channel.model_name ?? '未配置模型'})` }))}
             />
+          </Form.Item>
+          <Form.Item
+            label="巡检模块"
+            name="patrol_modules"
+            rules={[{ required: true, message: '请至少选择一个巡检模块' }]}
+            extra="Signature 互通用于检测带 signature 的 thinking block 能否跨渠道复用；真实模型请求探针会额外消耗模型调用。"
+          >
+            <Checkbox.Group options={patrolModuleOptions} />
           </Form.Item>
           <Form.Item
             label="执行间隔（分钟）"
@@ -1525,3 +1551,4 @@ export default function ScheduledTests() {
     </Space>
   );
 }
+

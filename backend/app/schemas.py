@@ -11,6 +11,21 @@ from .redaction import redact_channel_auth_config, redact_secrets
 
 TIME_OF_DAY_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
+PATROL_MODULES = {"signature_interop", "model_request_probes"}
+DEFAULT_PATROL_MODULES = ["signature_interop", "model_request_probes"]
+
+
+def normalize_patrol_modules(value: list[str] | None) -> list[str]:
+    source = DEFAULT_PATROL_MODULES if value is None else value
+    modules = [str(item).strip() for item in source if str(item).strip()]
+    deduped = list(dict.fromkeys(modules))
+    invalid = [item for item in deduped if item not in PATROL_MODULES]
+    if invalid:
+        raise ValueError(f"unsupported patrol modules: {', '.join(invalid)}")
+    if not deduped:
+        raise ValueError("at least one patrol module must be selected")
+    return deduped
+
 
 def validate_run_window(start: str | None, end: str | None) -> tuple[str | None, str | None]:
     if not start and not end:
@@ -757,6 +772,8 @@ class RunLogCleanupRead(BaseModel):
     deleted_comparisons: int = 0
     deleted_reports: int = 0
     deleted_alerts: int = 0
+    deleted_patrol_jobs: int = 0
+    deleted_patrol_job_attempts: int = 0
     cleared_scheduled_last_run_refs: int = 0
     skipped_running_runs: int = 0
     skipped_baseline_runs: int = 0
@@ -772,6 +789,7 @@ class ScheduledChannelTestBase(BaseModel):
     run_window_start: str | None = None
     run_window_end: str | None = None
     test_scope: str = "scheduled_probe"
+    patrol_modules: list[str] = Field(default_factory=lambda: list(DEFAULT_PATROL_MODULES))
     repeat_count: int = Field(default=1, ge=1, le=5)
     concurrency: int = Field(default=4, ge=1, le=16)
     use_mock: bool = False
@@ -786,6 +804,7 @@ class ScheduledChannelTestBase(BaseModel):
     @model_validator(mode="after")
     def validate_schedule_window(self) -> "ScheduledChannelTestBase":
         self.run_window_start, self.run_window_end = validate_run_window(self.run_window_start, self.run_window_end)
+        self.patrol_modules = normalize_patrol_modules(self.patrol_modules)
         return self
 
 
@@ -803,6 +822,7 @@ class ScheduledChannelTestUpdate(BaseModel):
     run_window_start: str | None = None
     run_window_end: str | None = None
     test_scope: str | None = None
+    patrol_modules: list[str] | None = None
     repeat_count: int | None = Field(default=None, ge=1, le=5)
     concurrency: int | None = Field(default=None, ge=1, le=16)
     use_mock: bool | None = None
@@ -816,6 +836,8 @@ class ScheduledChannelTestUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule_window(self) -> "ScheduledChannelTestUpdate":
+        if "patrol_modules" in self.model_fields_set:
+            self.patrol_modules = normalize_patrol_modules(self.patrol_modules)
         if "run_window_start" not in self.model_fields_set and "run_window_end" not in self.model_fields_set:
             return self
         if {"run_window_start", "run_window_end"} - self.model_fields_set:

@@ -87,6 +87,7 @@ def scheduled_test_audit_summary(value: Any) -> dict[str, Any]:
         "run_window_start": getattr(value, "run_window_start", None),
         "run_window_end": getattr(value, "run_window_end", None),
         "test_scope": getattr(value, "test_scope", None),
+        "patrol_modules": getattr(value, "patrol_modules", None),
         "quiet_minutes": getattr(value, "quiet_minutes", None),
         "max_retries": getattr(value, "max_retries", None),
         "retry_interval_minutes": getattr(value, "retry_interval_minutes", None),

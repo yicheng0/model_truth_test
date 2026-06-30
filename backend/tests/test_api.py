@@ -2151,6 +2151,99 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
     assert attempt.run_id == updated_schedule["last_run_id"]
 
 
+
+
+def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    called = {"signature": 0, "model_probe": 0}
+
+    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
+        called["signature"] += 1
+        return {
+            "ok": True,
+            "status": "pass",
+            "reason": "Signature 互通通过",
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "source_message_id": "msg_source",
+            "relay_message_id": "msg_relay",
+            "signature_prefixes": ["sig-ok"],
+            "steps": [{"name": "最终判定", "status": "ok", "detail": "兼容", "excerpt": None}],
+        }
+
+    async def fake_model_probe(db, channel, scheduled):  # noqa: ANN001, ARG001
+        called["model_probe"] += 1
+        raise AssertionError("signature-only patrol must not run model request probes")
+
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
+    monkeypatch.setattr("app.services.create_scheduled_model_request_probe", fake_model_probe)
+    reset_database()
+    with TestClient(app) as client:
+        schedule_response = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "signature only patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "enabled": True,
+                "patrol_modules": ["signature_interop"],
+            },
+        )
+        assert schedule_response.status_code == 200
+        schedule = schedule_response.json()
+        assert schedule["patrol_modules"] == ["signature_interop"]
+
+    asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+
+    assert called == {"signature": 1, "model_probe": 0}
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        assert scheduled.last_status == "completed"
+        run = db.get(Run, scheduled.last_run_id)
+        assert run is not None
+        assert run.status == "completed"
+        report = db.scalar(select(Report).where(Report.run_id == run.id, Report.channel_id == "third_party_demo"))
+        assert report is not None
+        assert report.evidence["patrol_modules"] == ["signature_interop"]
+        assert report.evidence["signature_interop"]["ok"] is True
+        assert report.evidence["model_requests"] == []
+
+
+def test_run_delete_removes_patrol_job_history_and_resets_schedule_state() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        scheduled.last_run_id = run_id
+        scheduled.last_status = "completed"
+        job = PatrolJob(
+            id="pjob_delete_test",
+            scheduled_test_id=schedule["id"],
+            channel_id="negative_sample",
+            status="completed",
+            run_id=run_id,
+        )
+        db.add(job)
+        db.add(PatrolJobAttempt(id="pattempt_delete_test", job_id=job.id, status="completed", run_id=run_id))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.delete(f"/api/runs/{run_id}", headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        assert scheduled.last_run_id is None
+        assert scheduled.last_status == "idle"
+        assert db.get(PatrolJob, "pjob_delete_test") is None
+        assert db.get(PatrolJobAttempt, "pattempt_delete_test") is None
+
 def test_scheduled_test_tick_claims_overdue_schedule_and_advances_next_run(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()

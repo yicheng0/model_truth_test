@@ -875,6 +875,7 @@ export type ScheduledChannelTestCreate = {
   run_window_start?: string | null;
   run_window_end?: string | null;
   test_scope?: TestScope;
+  patrol_modules?: ScheduledPatrolModule[];
   repeat_count?: number;
   concurrency?: number;
   use_mock?: boolean;
@@ -915,6 +916,8 @@ export type RunLogCleanupResult = {
   deleted_comparisons: number;
   deleted_reports: number;
   deleted_alerts: number;
+  deleted_patrol_jobs?: number;
+  deleted_patrol_job_attempts?: number;
   cleared_scheduled_last_run_refs: number;
   skipped_running_runs: number;
   skipped_baseline_runs: number;
@@ -922,6 +925,7 @@ export type RunLogCleanupResult = {
 
 export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe' | 'performance_benchmark' | 'arena_comparison';
 export type TestScope = 'quick' | 'full' | 'scheduled_probe';
+export type ScheduledPatrolModule = 'signature_interop' | 'model_request_probes';
 
 export type ScheduledProbeModelRequest = {
   key?: string | null;
@@ -1258,6 +1262,7 @@ export type ScheduledChannelTest = {
   run_window_start?: string | null;
   run_window_end?: string | null;
   test_scope: TestScope;
+  patrol_modules: ScheduledPatrolModule[];
   repeat_count: number;
   concurrency: number;
   use_mock: boolean;

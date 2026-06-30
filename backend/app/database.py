@@ -6,11 +6,20 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy import JSON, Column, DateTime, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
+
+
+def _add_column_if_missing(table_name: str, existing_columns: set[str], column: Column) -> None:
+    if column.name in existing_columns:
+        return
+    ddl = str(CreateColumn(column).compile(dialect=engine.dialect))
+    with engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
+    existing_columns.add(column.name)
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./claude_eval.db")
@@ -35,14 +44,18 @@ def init_db() -> None:
 
 def repair_schema() -> None:
     inspector = inspect(engine)
-    if "channel_alerts" not in inspector.get_table_names():
+    table_names = set(inspector.get_table_names())
+
+    if "scheduled_channel_tests" in table_names:
+        scheduled_columns = {column["name"] for column in inspector.get_columns("scheduled_channel_tests")}
+        _add_column_if_missing("scheduled_channel_tests", scheduled_columns, Column("patrol_modules", JSON, nullable=True))
+
+    if "channel_alerts" not in table_names:
         return
 
     alert_columns = {column["name"] for column in inspector.get_columns("channel_alerts")}
-    with engine.begin() as connection:
-        for column in _missing_channel_alert_columns(alert_columns):
-            ddl = str(CreateColumn(column).compile(dialect=engine.dialect))
-            connection.execute(text(f"ALTER TABLE channel_alerts ADD COLUMN {ddl}"))
+    for column in _missing_channel_alert_columns(alert_columns):
+        _add_column_if_missing("channel_alerts", alert_columns, column)
 
     inspector = inspect(engine)
     alert_indexes = {index["name"] for index in inspector.get_indexes("channel_alerts")}

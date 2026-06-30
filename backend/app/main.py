@@ -24,7 +24,7 @@ from .audit import audit_actor, audit_log_read, record_audit_log, scheduled_test
 from .database import SessionLocal, get_db, init_db
 from .claude_code_check import claude_code_check_steps, claude_code_status, run_claude_code_check, run_claude_code_check_with_progress
 from .job_store import InMemoryJobStore
-from .models import AuditLog, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ClaudeCodeEvidence, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .models import AuditLog, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ClaudeCodeEvidence, Comparison, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .restored_seed import restored_seed_data
 from .suite_seed import DEFAULT_SUITE_ID, default_cases
 from .schemas import (
@@ -1370,6 +1370,7 @@ def update_scheduled_test(
         "run_window_start": scheduled.run_window_start,
         "run_window_end": scheduled.run_window_end,
         "test_scope": scheduled.test_scope,
+        "patrol_modules": scheduled.patrol_modules,
     }
     for key, value in data.model_dump(exclude_unset=True).items():
         setattr(scheduled, key, value)
@@ -1649,6 +1650,41 @@ def cancel_run_alias(run_id: str, db: Session = Depends(get_db)) -> dict[str, st
     return {"status": run.status}
 
 
+def _delete_patrol_jobs_for_runs(db: Session, run_ids: set[str]) -> None:
+    if not run_ids:
+        return
+    job_ids = list(db.scalars(select(PatrolJob.id).where(PatrolJob.run_id.in_(run_ids))).all())
+    if job_ids:
+        db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_ids)))
+        db.execute(delete(PatrolJob).where(PatrolJob.id.in_(job_ids)))
+    db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(run_ids)))
+    db.execute(delete(PatrolJob).where(PatrolJob.run_id.in_(run_ids)))
+
+
+def _refresh_scheduled_state_after_run_delete(db: Session, scheduled: ScheduledChannelTest, deleted_run_ids: set[str]) -> None:
+    fallback_run_id = db.scalar(
+        select(Run.id)
+        .where(
+            Run.scheduled_test_id == scheduled.id,
+            Run.id.not_in(deleted_run_ids),
+        )
+        .order_by(Run.created_at.desc(), Run.id.desc())
+        .limit(1)
+    )
+    scheduled.last_run_id = fallback_run_id
+    if fallback_run_id:
+        fallback = db.get(Run, fallback_run_id)
+        scheduled.last_status = fallback.status if fallback else "idle"
+        scheduled.last_error = None
+        scheduled.last_started_at = fallback.started_at if fallback else None
+        scheduled.last_finished_at = fallback.finished_at if fallback else None
+    else:
+        scheduled.last_status = "idle"
+        scheduled.last_error = None
+        scheduled.last_started_at = None
+        scheduled.last_finished_at = None
+
+
 def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True, excluded_run_ids: set[str] | None = None) -> bool:
     run = db.get(Run, run_id)
     if not run:
@@ -1660,8 +1696,11 @@ def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True, exc
         conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
         if conflict:
             raise HTTPException(status_code=409, detail=conflict)
+    deleted_run_ids = excluded_run_ids or {run_id}
+    scheduled_refs = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(deleted_run_ids))).all())
     if repair_refs:
-        _repair_scheduled_last_run_refs_before_delete(db, excluded_run_ids or {run_id})
+        _repair_scheduled_last_run_refs_before_delete(db, deleted_run_ids)
+    _delete_patrol_jobs_for_runs(db, {run_id})
     db.execute(delete(ChannelAlert).where(ChannelAlert.run_id == run_id))
     db.execute(delete(RunChannel).where(RunChannel.run_id == run_id))
     db.execute(delete(Result).where(Result.run_id == run_id))
@@ -1671,6 +1710,9 @@ def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True, exc
         db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
         db.delete(snapshot)
     db.delete(run)
+    for scheduled in scheduled_refs:
+        if repair_refs:
+            _refresh_scheduled_state_after_run_delete(db, scheduled, deleted_run_ids)
     return True
 
 
@@ -1688,7 +1730,7 @@ def _repair_scheduled_last_run_refs_before_delete(db: Session, run_ids: set[str]
             .order_by(Run.created_at.desc(), Run.id.desc())
             .limit(1)
         )
-        scheduled.last_run_id = fallback_run_id
+        _refresh_scheduled_state_after_run_delete(db, scheduled, run_ids)
     return len(scheduled_refs)
 
 

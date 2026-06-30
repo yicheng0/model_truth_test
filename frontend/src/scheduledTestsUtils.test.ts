@@ -28,6 +28,22 @@ describe('scheduled test utilities', () => {
       run_window_end: null,
       enabled: true,
       test_scope: 'scheduled_probe',
+      patrol_modules: ['signature_interop'],
+    });
+  });
+
+  it('preserves selected patrol modules in the scheduled patrol payload', () => {
+    expect(
+      buildScheduleBasePayload({
+        name: 'signature only patrol',
+        channel_id: 'ch_1',
+        interval_minutes: 60,
+        patrol_modules: ['signature_interop', 'model_request_probes'],
+        enabled: true,
+      }),
+    ).toMatchObject({
+      patrol_modules: ['signature_interop', 'model_request_probes'],
+      test_scope: 'scheduled_probe',
     });
   });
 

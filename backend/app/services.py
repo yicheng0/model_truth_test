@@ -418,6 +418,7 @@ def create_patrol_job_for_schedule(db: Session, scheduled: ScheduledChannelTest)
         claimed_until=scheduled.locked_until,
         job_metadata={
             "test_scope": scheduled.test_scope,
+            "patrol_modules": scheduled_patrol_modules(scheduled),
             "interval_minutes": scheduled.interval_minutes,
             "source": "scheduled_test_execution",
         },
@@ -555,6 +556,26 @@ REQUEST_PROTOCOL_AWS_BEDROCK = "aws_bedrock"
 REQUEST_PROTOCOL_GEMINI = "gemini_generate_content"
 MANUAL_PROBE_SUITE_ID = "manual_model_request_probe"
 MANUAL_PROBE_MODE = "manual_probe"
+DEFAULT_SCHEDULED_PATROL_MODULES = ["signature_interop", "model_request_probes"]
+SCHEDULED_PATROL_MODULES = {"signature_interop", "model_request_probes"}
+
+
+def normalize_scheduled_patrol_modules(value: Any) -> list[str]:
+    raw_modules = value if isinstance(value, list) else None
+    source = DEFAULT_SCHEDULED_PATROL_MODULES if raw_modules is None else raw_modules
+    modules = [str(item).strip() for item in source if str(item).strip()]
+    modules = list(dict.fromkeys(modules))
+    invalid = [item for item in modules if item not in SCHEDULED_PATROL_MODULES]
+    if invalid:
+        raise ValueError(f"Unsupported patrol modules: {', '.join(invalid)}")
+    if not modules:
+        raise ValueError("Scheduled patrol requires at least one module")
+    return modules
+
+
+def scheduled_patrol_modules(scheduled: ScheduledChannelTest | None) -> list[str]:
+    return normalize_scheduled_patrol_modules(getattr(scheduled, "patrol_modules", None) if scheduled else None)
+
 PROTOCOL_PROFILE_LEGACY = "claude_legacy"
 PROTOCOL_PROFILE_ADAPTIVE_THINKING = "claude_adaptive_thinking"
 PROTOCOL_PROFILE_UNKNOWN = "unknown"
@@ -2057,6 +2078,7 @@ def create_scheduled_channel_test(db: Session, data: ScheduledChannelTestCreate)
         run_window_start=data.run_window_start,
         run_window_end=data.run_window_end,
         test_scope=test_scope if test_scope in {"quick", "full", "scheduled_probe"} else "scheduled_probe",
+        patrol_modules=normalize_scheduled_patrol_modules(data.patrol_modules),
         repeat_count=max(1, data.repeat_count),
         concurrency=max(1, data.concurrency),
         use_mock=data.use_mock,
@@ -2098,6 +2120,7 @@ def validate_scheduled_channel_test(db: Session, scheduled: ScheduledChannelTest
         suite_id, baseline_snapshot_id = scheduled_probe_context(db, scheduled.suite_id, scheduled.baseline_snapshot_id)
         scheduled.suite_id = suite_id
         scheduled.baseline_snapshot_id = baseline_snapshot_id
+        scheduled.patrol_modules = scheduled_patrol_modules(scheduled)
         return
     if not scheduled.suite_id or not scheduled.baseline_snapshot_id:
         raise ValueError("Scheduled channel tests require suite_id and baseline_snapshot_id")
@@ -5900,9 +5923,31 @@ async def execute_scheduled_probe_run(
             channel = db.get(Channel, scheduled.channel_id) if scheduled else None
             if not scheduled or not channel:
                 return None
-            model_payload = await create_scheduled_model_request_probe(db, channel, scheduled)
-            run = model_payload["run"]
-            result = model_payload["result"]
+            modules = scheduled_patrol_modules(scheduled)
+            if "model_request_probes" in modules:
+                model_payload = await create_scheduled_model_request_probe(db, channel, scheduled)
+                run = model_payload["run"]
+                result = model_payload.get("result")
+            else:
+                started_at = datetime.now(timezone.utc)
+                suite = _manual_probe_suite(db)
+                run = Run(
+                    id=new_id("run"),
+                    suite_id=suite.id,
+                    name=f"{patrol_channel_display_name(channel)} - 自动巡检 Signature"[:200],
+                    mode=MANUAL_PROBE_MODE,
+                    test_scope="scheduled_probe",
+                    status="running",
+                    repeat_count=1,
+                    concurrency=1,
+                    total_jobs=1,
+                    completed_jobs=0,
+                    started_at=started_at,
+                )
+                db.add(run)
+                db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=channel.id, role_in_run=channel.role or "candidate"))
+                db.flush()
+                model_payload = {"run": run, "result": None, "results": [], "modules": modules}
             run.scheduled_test_id = scheduled.id
             job = db.get(PatrolJob, job_id) if job_id else None
             if job:
@@ -5916,20 +5961,37 @@ async def execute_scheduled_probe_run(
             run = db.get(Run, run.id) if run else None
             if not scheduled or not run:
                 return run
-            try:
-                signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
-            except Exception as exc:
-                logger.exception("scheduled_probe_signature_failed scheduled_id=%s run_id=%s", scheduled_id, run.id)
+            modules = scheduled_patrol_modules(scheduled)
+            if "signature_interop" in modules:
+                try:
+                    signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
+                except Exception as exc:
+                    logger.exception("scheduled_probe_signature_failed scheduled_id=%s run_id=%s", scheduled_id, run.id)
+                    signature_result = {
+                        "ok": False,
+                        "status": "fail",
+                        "reason": f"Signature 后处理失败：{redact_text(str(exc))}",
+                        "source_channel_id": None,
+                        "relay_channel_id": scheduled.channel_id,
+                        "steps": [{"name": "Signature 后处理", "status": "fail", "detail": redact_text(str(exc)), "error": redact_text(str(exc))}],
+                        "labels": ["signature_interop_failed"],
+                    }
+            else:
                 signature_result = {
-                    "ok": False,
-                    "status": "fail",
-                    "reason": f"Signature 后处理失败：{redact_text(str(exc))}",
-                    "source_channel_id": None,
+                    "ok": True,
+                    "status": "skipped",
+                    "reason": "本计划未选择 Thinking Signature 互通模块",
                     "relay_channel_id": scheduled.channel_id,
-                    "steps": [{"name": "Signature 后处理", "status": "fail", "detail": redact_text(str(exc)), "error": redact_text(str(exc))}],
-                    "labels": ["signature_interop_failed"],
+                    "request_normalization_notes": [],
+                    "signature_prefixes": [],
+                    "steps": [{"name": "自动巡检 Signature 互通检测", "status": "skipped", "detail": "计划模块未启用", "excerpt": None}],
                 }
             report = await build_scheduled_probe_report(session_factory, db, scheduled, run.id, model_payload, signature_result)
+            if run.status == "running":
+                run.status = "completed"
+                run.completed_jobs = run.total_jobs
+                run.finished_at = datetime.now(timezone.utc)
+                db.flush()
             finish_patrol_job_attempt(db, job_id, attempt_id, status="completed", run_id=run.id)
             release_scheduled_test_lock(db, scheduled, status="completed", error=None)
             db.refresh(run)
@@ -5974,9 +6036,19 @@ async def build_scheduled_probe_report(
     labels.update(label for label in (signature_result or {}).get("labels", []) if isinstance(label, str))
     if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok"):
         labels.add("signature_interop_failed")
+    modules = scheduled_patrol_modules(scheduled)
     probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
     raw_score = min(probe_scores) if probe_scores else (result.score if isinstance(result, Result) else 0)
-    classification = scheduled_probe_classification(model_requests, signature_evidence, sorted(labels), raw_score)
+    if model_requests:
+        classification = scheduled_probe_classification(model_requests, signature_evidence, sorted(labels), raw_score)
+    else:
+        signature_ok = signature_evidence.get("status") == "skipped" or bool(signature_evidence.get("ok"))
+        classification = {
+            "status": "claude_signature" if signature_ok else "anomaly",
+            "label": "Signature 互通通过" if signature_ok else "ClaudeCode Signature 链路不可验证",
+            "reason": str(signature_evidence.get("reason") or ("Thinking Signature 互通检测通过。" if signature_ok else "Thinking Signature 互通检测未通过。")),
+            "score": 95 if signature_ok else 60,
+        }
     rule_classification = dict(classification)
     ai_judge = await scheduled_probe_ai_judge(session_factory, model_requests, signature_evidence, sorted(labels), classification)
     if ai_judge:
@@ -6010,6 +6082,7 @@ async def build_scheduled_probe_report(
             "score": rule_classification.get("score"),
         },
         "ai_judge": ai_judge,
+        "patrol_modules": modules,
         "test_scope": "scheduled_probe",
     }
     summary = f"自动巡检完成：{classification_label}。{classification_reason}"
@@ -6460,7 +6533,7 @@ def alert_error_message(evidence: dict[str, Any], labels: list[str] | None = Non
     classification_label = evidence.get("classification_label")
     classification_reason = evidence.get("classification_reason")
     classification_status = evidence.get("classification_status")
-    if classification_status in {"claude", "aws_resource"}:
+    if classification_status in {"claude", "aws_resource", "claude_signature"}:
         label = str(classification_label or "自动巡检结果")
         reason = str(classification_reason or "")
         return f"{label}：{reason}" if reason else label
@@ -6641,6 +6714,7 @@ def scheduled_channel_test_read(db: Session, scheduled: ScheduledChannelTest) ->
         "run_window_start": scheduled.run_window_start,
         "run_window_end": scheduled.run_window_end,
         "test_scope": scheduled.test_scope,
+        "patrol_modules": scheduled_patrol_modules(scheduled),
         "repeat_count": scheduled.repeat_count,
         "concurrency": scheduled.concurrency,
         "use_mock": scheduled.use_mock,
@@ -6786,7 +6860,7 @@ def report_needs_alert(report: Report, labels: list[str] | None = None, schedule
     labels = labels if labels is not None else report_labels(report)
     evidence = report.evidence if isinstance(report.evidence, dict) else {}
     classification_status = evidence.get("classification_status")
-    if scheduled and scheduled.test_scope == "scheduled_probe" and classification_status in {"claude", "aws_resource"}:
+    if scheduled and scheduled.test_scope == "scheduled_probe" and classification_status in {"claude", "aws_resource", "claude_signature"}:
         return False
     if scheduled and scheduled.test_scope == "scheduled_probe":
         return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels)) or (report.final_score < 90 and bool(labels))
@@ -11526,3 +11600,4 @@ async def create_full_model_check(db: Session, data: FullModelCheckCreate) -> di
         "categories": FULL_MODEL_CHECK_CATEGORIES,
         "channels": output_channels,
     }
+

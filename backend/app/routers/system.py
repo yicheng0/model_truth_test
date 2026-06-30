@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..admin import configured_admin_key, require_configured_admin
 from ..database import DATABASE_URL, get_db
-from ..models import BaselineSnapshot, ChannelAlert, Comparison, Report, Result, Run, RunChannel, ScheduledChannelTest, TestSuite
+from ..models import BaselineSnapshot, ChannelAlert, Comparison, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestSuite
 from ..schemas import RunLogCleanupRead, SystemUsageRead
 
 
@@ -161,6 +161,8 @@ def cleanup_run_logs(
             deleted_comparisons=count_for(Comparison, Comparison.run_id),
             deleted_reports=count_for(Report, Report.run_id),
             deleted_alerts=count_for(ChannelAlert, ChannelAlert.run_id),
+            deleted_patrol_jobs=count_for(PatrolJob, PatrolJob.run_id),
+            deleted_patrol_job_attempts=count_for(PatrolJobAttempt, PatrolJobAttempt.run_id),
             cleared_scheduled_last_run_refs=len(scheduled_refs),
             skipped_running_runs=active_runs,
             skipped_baseline_runs=skipped_baseline_runs,
@@ -181,7 +183,7 @@ def cleanup_run_logs(
 
     candidate_run_id_set = set(candidate_run_ids)
     for scheduled in scheduled_refs:
-        scheduled.last_run_id = db.scalar(
+        fallback_run_id = db.scalar(
             select(Run.id)
             .where(
                 Run.scheduled_test_id == scheduled.id,
@@ -190,6 +192,20 @@ def cleanup_run_logs(
             .order_by(Run.created_at.desc(), Run.id.desc())
             .limit(1)
         )
+        scheduled.last_run_id = fallback_run_id
+        if fallback_run_id:
+            fallback = db.get(Run, fallback_run_id)
+            scheduled.last_status = fallback.status if fallback else "idle"
+            scheduled.last_error = None
+            scheduled.last_started_at = fallback.started_at if fallback else None
+            scheduled.last_finished_at = fallback.finished_at if fallback else None
+        else:
+            scheduled.last_status = "idle"
+            scheduled.last_error = None
+            scheduled.last_started_at = None
+            scheduled.last_finished_at = None
+    db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(candidate_run_ids)))
+    db.execute(delete(PatrolJob).where(PatrolJob.run_id.in_(candidate_run_ids)))
     db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(candidate_run_ids)))
     db.execute(delete(RunChannel).where(RunChannel.run_id.in_(candidate_run_ids)))
     db.execute(delete(Result).where(Result.run_id.in_(candidate_run_ids)))
