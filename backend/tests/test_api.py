@@ -34,7 +34,7 @@ from app.models import AuditLog, BaselineResult, BaselineSnapshot, Channel, Chan
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate, TestSuiteCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_test_loop, scheduled_test_tick, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -278,10 +278,28 @@ def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
         "overdue_job_count",
         "stale_attempt_count",
         "heartbeat_stale",
+        "auto_scheduler_enabled_value",
         "queued_schedule_count",
         "running_schedule_count",
         "next_due_at",
     } <= set(payload)
+
+
+def test_scheduler_enabled_parser_is_trimmed_and_explicit(monkeypatch) -> None:
+    monkeypatch.delenv("AUTO_SCHEDULER_ENABLED", raising=False)
+    assert scheduler_enabled() is True
+    for value in ["true", " TRUE ", "1", "yes", "enabled", ""]:
+        monkeypatch.setenv("AUTO_SCHEDULER_ENABLED", value)
+        assert scheduler_enabled() is True
+    for value in ["false", " FALSE ", "0", "no", "off", "disabled"]:
+        monkeypatch.setenv("AUTO_SCHEDULER_ENABLED", value)
+        assert scheduler_enabled() is False
+
+
+def test_docker_compose_enables_scheduler_by_default() -> None:
+    compose = Path(__file__).resolve().parents[2] / "docker-compose.yml"
+    content = compose.read_text(encoding="utf-8")
+    assert "AUTO_SCHEDULER_ENABLED: ${AUTO_SCHEDULER_ENABLED:-true}" in content
 
 
 def test_scheduled_tests_schema_backfill_migration_adds_missing_columns(tmp_path: Path) -> None:

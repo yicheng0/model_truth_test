@@ -963,6 +963,7 @@ class AuditLogRead(BaseModel):
 
 class ScheduledTestHealthRead(BaseModel):
     enabled: bool
+    auto_scheduler_enabled_value: str | None = None
     instance_id: str
     last_tick_at: datetime | None = None
     stale_schedule_count: int

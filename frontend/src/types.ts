@@ -1350,6 +1350,7 @@ export type ChannelAlert = {
 
 export type ScheduledTestsHealth = {
   enabled: boolean;
+  auto_scheduler_enabled_value?: string | null;
   instance_id: string;
   last_tick_at?: string | null;
   stale_schedule_count: number;

@@ -105,6 +105,7 @@ from .services import (
     refresh_baseline_status,
     next_run_for_scheduled_test,
     recover_stale_scheduled_tests,
+    scheduler_enabled,
     scheduled_tests_health,
     scheduled_test_loop,
     scheduled_channel_test_read,
@@ -146,7 +147,7 @@ async def lifespan(_app: FastAPI):
         except Exception:
             logger.exception("Seed data initialization failed — app will continue but data may be incomplete")
     scheduler_task = None
-    if os.getenv("AUTO_SCHEDULER_ENABLED", "true").lower() not in {"0", "false", "no"}:
+    if scheduler_enabled():
         scheduler_task = asyncio.create_task(scheduled_test_loop(SessionLocal))
         _app.state.scheduler_task = scheduler_task
     yield

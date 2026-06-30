@@ -140,8 +140,13 @@ def next_run_for_scheduled_test(scheduled: ScheduledChannelTest, base_at: dateti
     )
 
 
+def scheduler_enabled_env_value() -> str:
+    return os.getenv("AUTO_SCHEDULER_ENABLED", "true")
+
+
 def scheduler_enabled() -> bool:
-    return os.getenv("AUTO_SCHEDULER_ENABLED", "true").lower() not in {"0", "false", "no"}
+    value = scheduler_enabled_env_value().strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
 
 
 def _naive_utc(value: datetime | None) -> datetime | None:
@@ -401,6 +406,7 @@ def scheduled_tests_health(db: Session) -> dict[str, Any]:
     )
     return {
         "enabled": scheduler_enabled(),
+        "auto_scheduler_enabled_value": scheduler_enabled_env_value(),
         "instance_id": SCHEDULER_INSTANCE_ID,
         "last_tick_at": SCHEDULER_LAST_TICK_AT,
         "stale_schedule_count": stale_schedule_count,

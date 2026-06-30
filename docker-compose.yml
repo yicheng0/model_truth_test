@@ -19,7 +19,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://claude_eval:claude_eval@postgres:5432/claude_eval}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
-      AUTO_SCHEDULER_ENABLED: ${AUTO_SCHEDULER_ENABLED:-false}
+      AUTO_SCHEDULER_ENABLED: ${AUTO_SCHEDULER_ENABLED:-true}
     depends_on:
       postgres:
         condition: service_healthy

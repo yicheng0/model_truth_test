@@ -687,7 +687,7 @@ export default function ScheduledTests() {
                       message="自动巡检调度异常"
                       description={
                         !schedulerHealth.data.enabled
-                          ? '后端自动调度器已停用，请检查 AUTO_SCHEDULER_ENABLED。'
+                          ? `后端自动调度器已停用，请检查 AUTO_SCHEDULER_ENABLED（当前值：${schedulerHealth.data.auto_scheduler_enabled_value ?? '未返回'}）。`
                           : schedulerHealth.data.last_recovery_error
                             ? `自动恢复失败：${schedulerHealth.data.last_recovery_error}`
                             : schedulerHealth.data.heartbeat_stale
