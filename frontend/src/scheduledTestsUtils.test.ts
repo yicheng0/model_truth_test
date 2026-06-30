@@ -29,6 +29,7 @@ describe('scheduled test utilities', () => {
       enabled: true,
       test_scope: 'scheduled_probe',
       patrol_modules: ['signature_interop'],
+      model_request_probe_keys: null,
     });
   });
 
@@ -45,6 +46,47 @@ describe('scheduled test utilities', () => {
       patrol_modules: ['signature_interop', 'model_request_probes'],
       test_scope: 'scheduled_probe',
     });
+  });
+
+  it('keeps an explicit model-request sub-probe subset when that module is enabled', () => {
+    expect(
+      buildScheduleBasePayload({
+        name: 'subset patrol',
+        channel_id: 'ch_1',
+        interval_minutes: 60,
+        patrol_modules: ['model_request_probes'],
+        model_request_probe_keys: ['web_search', 'thinking_temperature'],
+        enabled: true,
+      }),
+    ).toMatchObject({
+      model_request_probe_keys: ['web_search', 'thinking_temperature'],
+    });
+  });
+
+  it('drops sub-probe keys when the model-request module is not selected', () => {
+    expect(
+      buildScheduleBasePayload({
+        name: 'signature only',
+        channel_id: 'ch_1',
+        interval_minutes: 60,
+        patrol_modules: ['signature_interop'],
+        model_request_probe_keys: ['web_search'],
+        enabled: true,
+      }),
+    ).toMatchObject({ model_request_probe_keys: null });
+  });
+
+  it('rejects an empty sub-probe selection when the model-request module is enabled', () => {
+    expect(() =>
+      buildScheduleBasePayload({
+        name: 'empty subset',
+        channel_id: 'ch_1',
+        interval_minutes: 60,
+        patrol_modules: ['model_request_probes'],
+        model_request_probe_keys: [],
+        enabled: true,
+      }),
+    ).toThrow('请至少选择一个真实请求子探针');
   });
 
   it('rejects missing interval values before submit', () => {

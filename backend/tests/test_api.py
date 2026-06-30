@@ -2394,6 +2394,56 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
         assert report.evidence["model_requests"] == []
 
 
+def test_scheduled_channel_test_model_request_probe_keys_subset(monkeypatch) -> None:
+    from app.services import scheduled_model_request_probes, SCHEDULED_MODEL_REQUEST_PROBE_KEYS
+
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        # Explicit subset is persisted and echoed back in registry order.
+        response = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "subset probe patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "enabled": True,
+                "patrol_modules": ["model_request_probes"],
+                "model_request_probe_keys": ["thinking_adaptive_enabled", "thinking_temperature"],
+            },
+        )
+        assert response.status_code == 200
+        schedule = response.json()
+        assert schedule["model_request_probe_keys"] == ["thinking_temperature", "thinking_adaptive_enabled"]
+
+        # Invalid sub-probe keys are rejected.
+        bad = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "bad subset",
+                "channel_id": "third_party_demo",
+                "model_request_probe_keys": ["not_a_probe"],
+            },
+        )
+        assert bad.status_code == 422
+
+        # PATCH updates the selection.
+        patched = client.patch(
+            f"/api/scheduled-tests/{schedule['id']}",
+            json={"model_request_probe_keys": ["web_search"]},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["model_request_probe_keys"] == ["web_search"]
+
+    # The resolver runs only the selected sub-probes; None => full registry.
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        assert [probe["key"] for probe in scheduled_model_request_probes(scheduled)] == ["web_search"]
+        scheduled.model_request_probe_keys = None
+        assert [probe["key"] for probe in scheduled_model_request_probes(scheduled)] == SCHEDULED_MODEL_REQUEST_PROBE_KEYS
+
+
 def test_run_delete_removes_patrol_job_history_and_resets_schedule_state() -> None:
     reset_database()
     with TestClient(app) as client:

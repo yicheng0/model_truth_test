@@ -1,15 +1,15 @@
 import { useDeferredValue, useEffect, useMemo, useState, type Key, type MouseEvent as ReactMouseEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Col, Collapse, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Col, Collapse, DatePicker, Descriptions, Drawer, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
-import { BarChart3, Bell, CalendarClock, DownloadCloud, Edit3, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
+import { BarChart3, Bell, CalendarClock, DownloadCloud, Edit3, Play, RefreshCw, Send, Settings, Trash2, X } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../channelCredentials';
 import { isCandidateChannel, roleLabel } from '../channelTaxonomy';
 import { buildPatrolRunDetailLink } from '../patrolNavigation';
 import { formatDateTime } from '../time';
-import type { Channel, ChannelAlert, ChannelAlertStatus, NewApiSyncRequest, NewApiSyncResult, ScheduledChannelTest, ScheduledChannelTestCreate, ScheduledPatrolModule, SmartPatrolReport } from '../types';
+import type { Channel, ChannelAlert, ChannelAlertStatus, NewApiSyncRequest, NewApiSyncResult, Run, ScheduledChannelTest, ScheduledChannelTestCreate, ScheduledModelRequestProbeKey, ScheduledPatrolModule, SmartPatrolReport } from '../types';
 import { buildScheduleBasePayload, intervalText, type ScheduleFormValues } from '../scheduledTestsUtils';
 import { buildFeishuBroadcastUpdate, type FeishuBroadcastFormValues } from './feishuBroadcast';
 import {
@@ -64,6 +64,26 @@ const patrolModuleSelectOptions = patrolModuleOptions.map((item) => ({
   description: patrolModuleDescriptions[item.value],
 }));
 
+const modelRequestProbeOptions: Array<{ value: ScheduledModelRequestProbeKey; label: string; description: string }> = [
+  {
+    value: 'thinking_temperature',
+    label: 'Adaptive thinking 协议',
+    description: '发送 adaptive thinking 协议请求，核对原生渠道是否按预期拒绝。',
+  },
+  {
+    value: 'web_search',
+    label: 'Web Search tool',
+    description: '携带 Anthropic 专有 web_search 工具，检测非原生渠道是否拒绝。',
+  },
+  {
+    value: 'thinking_adaptive_enabled',
+    label: 'Adaptive thinking effort',
+    description: '使用 output_config.effort 协议，核对 4.7/4.8 adaptive effort 处理形态。',
+  },
+];
+
+const MODEL_REQUEST_PROBE_KEYS: ScheduledModelRequestProbeKey[] = modelRequestProbeOptions.map((item) => item.value);
+
 function patrolModuleText(modules?: ScheduledPatrolModule[]) {
   const labels = new Map<ScheduledPatrolModule, string>(patrolModuleOptions.map((item) => [item.value, item.label]));
   const selected: ScheduledPatrolModule[] = modules?.length ? modules : ['signature_interop'];
@@ -95,6 +115,8 @@ export default function ScheduledTests() {
   const [reportRange, setReportRange] = useState('7d');
   const [runningScheduleId, setRunningScheduleId] = useState<string | null>(null);
   const [deletingScheduleId, setDeletingScheduleId] = useState<string | null>(null);
+  const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
+  const [buildingBaselineRunId, setBuildingBaselineRunId] = useState<string | null>(null);
   const [newApiModalOpen, setNewApiModalOpen] = useState(false);
   const [newApiPreview, setNewApiPreview] = useState<NewApiSyncResult | null>(null);
   const runWindowEnabled = Form.useWatch('run_window_enabled', scheduleForm);
@@ -162,6 +184,11 @@ export default function ScheduledTests() {
     queryKey: ['feishuBroadcastSetting'],
     queryFn: api.feishuBroadcastSetting,
     enabled: activeTab === 'feishu',
+  });
+  const scheduleRuns = useQuery({
+    queryKey: ['runs', { scheduled_test_id: selectedScheduleId }],
+    queryFn: () => api.runs({ scheduled_test_id: selectedScheduleId! }),
+    enabled: !!selectedScheduleId,
   });
 
   const channelById = useMemo(() => new Map((channels.data ?? []).map((channel) => [channel.id, channel])), [channels.data]);
@@ -392,6 +419,28 @@ export default function ScheduledTests() {
     onError: (error) => message.error(getErrorMessage(error)),
   });
 
+  const buildBaseline = useMutation({
+    mutationFn: (runId: string) => {
+      const schedule = schedules.data?.find((s) => s.id === selectedScheduleId);
+      return api.buildBaseline({
+        name: `${schedule?.name ?? 'patrol'} 基线 ${new Date().toLocaleDateString('zh-CN')}`,
+        suite_id: schedule?.suite_id ?? '',
+        repeat_count: 1,
+        concurrency: 1,
+        test_scope: 'quick',
+        channel_ids: schedule?.channel_id ? { [schedule.channel_id]: [runId] } : undefined,
+      });
+    },
+    onSuccess: () => {
+      message.success('基线已提交构建');
+      setBuildingBaselineRunId(null);
+    },
+    onError: (error) => {
+      message.error(getErrorMessage(error));
+      setBuildingBaselineRunId(null);
+    },
+  });
+
   const applyNewApi = useMutation({
     mutationFn: api.applyNewApiSync,
     onSuccess: async (result) => {
@@ -435,6 +484,7 @@ export default function ScheduledTests() {
       enabled: true,
       interval_minutes: 1440,
       patrol_modules: ['signature_interop'],
+      model_request_probe_keys: [...MODEL_REQUEST_PROBE_KEYS],
       run_window_enabled: false,
       run_window_start: '09:00',
       run_window_end: '18:00',
@@ -449,6 +499,9 @@ export default function ScheduledTests() {
       channel_id: schedule.channel_id,
       interval_minutes: schedule.interval_minutes,
       patrol_modules: schedule.patrol_modules?.length ? schedule.patrol_modules : ['signature_interop'],
+      model_request_probe_keys: schedule.model_request_probe_keys?.length
+        ? schedule.model_request_probe_keys
+        : [...MODEL_REQUEST_PROBE_KEYS],
       run_window_enabled: Boolean(schedule.run_window_start && schedule.run_window_end),
       run_window_start: schedule.run_window_start ?? '09:00',
       run_window_end: schedule.run_window_end ?? '18:00',
@@ -738,6 +791,54 @@ export default function ScheduledTests() {
                       }
                     />
                   ) : null}
+                  {/* 截图风格四格统计条 */}
+                  <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                    {[
+                      {
+                        label: '总任务',
+                        value: schedules.data?.length ?? 0,
+                        icon: <CalendarClock size={16} />,
+                        color: '#1677ff',
+                        bg: '#e6f4ff',
+                      },
+                      {
+                        label: '运行中',
+                        value: schedulerHealth.data?.running_schedule_count ?? 0,
+                        icon: null,
+                        color: '#067647',
+                        bg: '#f0fdf4',
+                      },
+                      {
+                        label: '待执行/延迟',
+                        value: (schedulerHealth.data?.queued_schedule_count ?? 0) + (schedulerHealth.data?.overdue_schedule_count ?? 0),
+                        icon: null,
+                        color: '#b45309',
+                        bg: '#fffbeb',
+                      },
+                      {
+                        label: '异常/跳过',
+                        value: (schedulerHealth.data?.stale_schedule_count ?? 0) + (schedulerHealth.data?.stale_attempt_count ?? 0),
+                        icon: null,
+                        color: '#b42318',
+                        bg: '#fff1f0',
+                      },
+                    ].map((item) => (
+                      <Col xs={12} sm={6} key={item.label}>
+                        <Card
+                          bordered={false}
+                          style={{ background: item.bg }}
+                          styles={{ body: { padding: '14px 18px' } }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                            {item.icon && <span style={{ color: item.color }}>{item.icon}</span>}
+                            <span style={{ fontSize: 12, color: '#667085' }}>{item.label}</span>
+                          </div>
+                          <div style={{ fontSize: 24, fontWeight: 700, color: item.color }}>{item.value}</div>
+                        </Card>
+                      </Col>
+                    ))}
+                  </Row>
+                  {/* 原有的调度器详情统计 */}
                   <Row gutter={[12, 12]} className="scheduler-health-row">
                     <Col xs={24} sm={12} lg={6}>
                       <Card bordered={false}>
@@ -780,6 +881,15 @@ export default function ScheduledTests() {
                     dataSource={schedules.data ?? []}
                     pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
                     scroll={{ x: 1180 }}
+                    rowClassName={(schedule) => schedule.id === selectedScheduleId ? 'ant-table-row-selected' : ''}
+                    onRow={(schedule) => ({
+                      onClick: (e) => {
+                        const target = e.target as HTMLElement;
+                        if (target.closest('button') || target.closest('a') || target.closest('.ant-popover')) return;
+                        setSelectedScheduleId((prev) => prev === schedule.id ? null : schedule.id);
+                      },
+                      style: { cursor: 'pointer' },
+                    })}
                     locale={{ emptyText: schedules.isLoading || channels.isLoading ? ' ' : <Empty description="暂无自动巡检计划" image={Empty.PRESENTED_IMAGE_SIMPLE}><Button type="primary" onClick={openCreateSchedule}>立即创建</Button></Empty> }}
                     columns={[
                       {
@@ -923,6 +1033,197 @@ export default function ScheduledTests() {
                       },
                     ]}
                   />
+                  {/* 右侧任务详情抽屉 */}
+                  {(() => {
+                    const selected = schedules.data?.find((s) => s.id === selectedScheduleId) ?? null;
+                    const channel = selected ? channelById.get(selected.channel_id) : null;
+                    const suiteData = taxonomy.data;
+                    const runs = scheduleRuns.data ?? [];
+                    const drawerTabItems = [
+                      {
+                        key: 'history',
+                        label: '运行记录',
+                        children: (
+                          <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+                            {scheduleRuns.isLoading ? (
+                              <div style={{ padding: 24, textAlign: 'center', color: '#667085' }}>加载中…</div>
+                            ) : runs.length === 0 ? (
+                              <div style={{ padding: 24, textAlign: 'center', color: '#667085' }}>暂无运行记录</div>
+                            ) : runs.map((run) => (
+                              <div
+                                key={run.id}
+                                style={{ padding: '10px 0', borderBottom: '1px solid #f0f0f0', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}
+                              >
+                                <div>
+                                  <Tag color={run.status === 'completed' ? 'success' : run.status === 'running' ? 'processing' : run.status === 'failed' ? 'error' : 'default'}>
+                                    {run.status === 'completed' ? '完成' : run.status === 'running' ? '运行中' : run.status === 'failed' ? '失败' : run.status}
+                                  </Tag>
+                                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>{formatDateTime(run.started_at ?? run.created_at)}</Typography.Text>
+                                  <div style={{ marginTop: 4 }}>
+                                    <Link to={`/runs/${run.id}`} style={{ fontSize: 12, fontFamily: 'monospace' }}>run#{run.id}</Link>
+                                  </div>
+                                  {run.baseline_snapshot_id && (
+                                    <div style={{ marginTop: 2 }}>
+                                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>与基线 {run.baseline_snapshot_id} 关联</Typography.Text>
+                                    </div>
+                                  )}
+                                </div>
+                                {run.status === 'completed' && (
+                                  <Popconfirm
+                                    title="设为基线"
+                                    description={`将 run#${run.id} 设为此渠道的基线参考？`}
+                                    okText="确认"
+                                    cancelText="取消"
+                                    onConfirm={() => {
+                                      setBuildingBaselineRunId(run.id);
+                                      buildBaseline.mutate(run.id);
+                                    }}
+                                  >
+                                    <Button
+                                      size="small"
+                                      loading={buildingBaselineRunId === run.id}
+                                    >
+                                      设为基线
+                                    </Button>
+                                  </Popconfirm>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ),
+                      },
+                      {
+                        key: 'latest',
+                        label: '最近结果',
+                        children: selected?.latest_probe_summary ? (
+                          <div style={{ fontSize: 13 }}>
+                            {selected.latest_probe_summary.classification_label && (
+                              <div style={{ marginBottom: 8 }}>
+                                <Tag color="blue">{selected.latest_probe_summary.classification_label}</Tag>
+                                {selected.latest_probe_summary.classification_reason && (
+                                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                                    {selected.latest_probe_summary.classification_reason}
+                                  </Typography.Text>
+                                )}
+                              </div>
+                            )}
+                            {selected.latest_probe_summary.labels?.map((label) => (
+                              <Tag key={label} color="orange" style={{ marginBottom: 4 }}>{label}</Tag>
+                            ))}
+                            {!selected.latest_probe_summary.classification_label && !selected.latest_probe_summary.labels?.length && (
+                              <Typography.Text type="secondary">暂无分类结果</Typography.Text>
+                            )}
+                          </div>
+                        ) : (
+                          <Typography.Text type="secondary">暂无最近结果</Typography.Text>
+                        ),
+                      },
+                      {
+                        key: 'baseline',
+                        label: '基线',
+                        children: (
+                          <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                            {selected?.baseline_snapshot_id
+                              ? `基线 ID：${selected.baseline_snapshot_id}`
+                              : '未绑定基线'}
+                          </Typography.Text>
+                        ),
+                      },
+                      {
+                        key: 'config',
+                        label: '配置',
+                        children: selected ? (
+                          <Descriptions column={1} size="small" bordered={false}>
+                            <Descriptions.Item label="告警等级阈值">{selected.alert_grade_threshold}</Descriptions.Item>
+                            <Descriptions.Item label="静默窗口">{selected.quiet_minutes} 分钟</Descriptions.Item>
+                            <Descriptions.Item label="最大重试">{selected.max_retries} 次</Descriptions.Item>
+                            <Descriptions.Item label="重试间隔">{selected.retry_interval_minutes} 分钟</Descriptions.Item>
+                            <Descriptions.Item label="并发数">{selected.concurrency}</Descriptions.Item>
+                            <Descriptions.Item label="重复次数">{selected.repeat_count}</Descriptions.Item>
+                          </Descriptions>
+                        ) : null,
+                      },
+                    ];
+                    return (
+                      <Drawer
+                        title={
+                          selected ? (
+                            <div>
+                              <div style={{ fontWeight: 600, fontSize: 15 }}>{selected.name}</div>
+                              {channel && (
+                                <div style={{ fontWeight: 400, fontSize: 12, color: '#667085', marginTop: 2 }}>
+                                  {channel.name} · {channel.model_name ?? '未配置模型'}
+                                </div>
+                              )}
+                            </div>
+                          ) : '任务详情'
+                        }
+                        open={!!selectedScheduleId}
+                        onClose={() => setSelectedScheduleId(null)}
+                        width={480}
+                        styles={{ body: { padding: '16px 20px' } }}
+                        extra={
+                          selected && (
+                            <Space size={6}>
+                              <Button
+                                size="small"
+                                icon={<Play size={13} />}
+                                loading={runningScheduleId === selected.id}
+                                onClick={() => {
+                                  setRunningScheduleId(selected.id);
+                                  runNow.mutate(selected.id);
+                                }}
+                              >立即运行</Button>
+                              <Button size="small" icon={<Edit3 size={13} />} onClick={() => openEditSchedule(selected)}>编辑</Button>
+                              <Popconfirm
+                                title="删除自动巡检计划"
+                                description="确定删除吗？"
+                                okText="删除"
+                                okButtonProps={{ danger: true }}
+                                cancelText="取消"
+                                onConfirm={() => {
+                                  setDeletingScheduleId(selected.id);
+                                  deleteSchedule.mutate(selected.id);
+                                  setSelectedScheduleId(null);
+                                }}
+                              >
+                                <Button size="small" danger icon={<Trash2 size={13} />} loading={deletingScheduleId === selected.id}>删除</Button>
+                              </Popconfirm>
+                            </Space>
+                          )
+                        }
+                      >
+                        {selected && (
+                          <>
+                            <Descriptions column={2} size="small" style={{ marginBottom: 16 }}>
+                              <Descriptions.Item label="调度">{intervalText(selected.interval_minutes)}</Descriptions.Item>
+                              <Descriptions.Item label="下次运行">{formatDateTime(selected.next_run_at) || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="上次运行">{formatDateTime(selected.last_started_at) || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="协议/深度">
+                                {channel?.auth_config?.request_protocol ?? 'anthropic_messages'} / deep
+                              </Descriptions.Item>
+                              <Descriptions.Item label="探针套件" span={2}>
+                                {patrolModuleText(selected.patrol_modules)}
+                              </Descriptions.Item>
+                              <Descriptions.Item label="并发策略">forbid</Descriptions.Item>
+                              <Descriptions.Item label="探针并发">{selected.concurrency} 路</Descriptions.Item>
+                              <Descriptions.Item label="Misfire">skip</Descriptions.Item>
+                              <Descriptions.Item label="重试">{selected.max_retries} × {selected.retry_interval_minutes}m</Descriptions.Item>
+                              <Descriptions.Item label="连续失败">{selected.last_status === 'failed' ? 1 : 0}</Descriptions.Item>
+                              <Descriptions.Item label="基线">
+                                {selected.baseline_snapshot_id ? (
+                                  <Typography.Text ellipsis style={{ maxWidth: 140, fontSize: 12 }}>
+                                    {selected.baseline_snapshot_id}
+                                  </Typography.Text>
+                                ) : '-'}
+                              </Descriptions.Item>
+                            </Descriptions>
+                            <Tabs size="small" items={drawerTabItems} />
+                          </>
+                        )}
+                      </Drawer>
+                    );
+                  })()}
                 </Card>
               </Space>
             ),
@@ -1540,6 +1841,36 @@ export default function ScheduledTests() {
               }))}
               optionRender={(option) => option.data.option}
             />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, next) => prev.patrol_modules !== next.patrol_modules}>
+            {({ getFieldValue }) =>
+              (getFieldValue('patrol_modules') as ScheduledPatrolModule[] | undefined)?.includes('model_request_probes') ? (
+                <Form.Item
+                  label="真实请求子探针"
+                  name="model_request_probe_keys"
+                  rules={[{ required: true, message: '请至少选择一个真实请求子探针' }]}
+                  extra="仅在启用「真实模型请求探针」时生效；每个子探针都会真实消耗一次模型调用。"
+                >
+                  <Select
+                    mode="multiple"
+                    placeholder="选择要执行的真实请求子探针"
+                    optionLabelProp="label"
+                    options={modelRequestProbeOptions.map((item) => ({
+                      value: item.value,
+                      label: item.label,
+                      title: item.description,
+                      option: (
+                        <Space direction="vertical" size={0}>
+                          <Typography.Text>{item.label}</Typography.Text>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{item.description}</Typography.Text>
+                        </Space>
+                      ),
+                    }))}
+                    optionRender={(option) => option.data.option}
+                  />
+                </Form.Item>
+              ) : null
+            }
           </Form.Item>
           <Form.Item
             label="执行间隔（分钟）"

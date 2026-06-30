@@ -909,6 +909,7 @@ export type ScheduledChannelTestCreate = {
   run_window_end?: string | null;
   test_scope?: TestScope;
   patrol_modules?: ScheduledPatrolModule[];
+  model_request_probe_keys?: ScheduledModelRequestProbeKey[] | null;
   repeat_count?: number;
   concurrency?: number;
   use_mock?: boolean;
@@ -959,6 +960,7 @@ export type RunLogCleanupResult = {
 export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe' | 'performance_benchmark' | 'arena_comparison';
 export type TestScope = 'quick' | 'full' | 'scheduled_probe';
 export type ScheduledPatrolModule = 'signature_interop' | 'model_request_probes';
+export type ScheduledModelRequestProbeKey = 'thinking_temperature' | 'web_search' | 'thinking_adaptive_enabled';
 
 export type ScheduledProbeModelRequest = {
   key?: string | null;
@@ -1296,6 +1298,7 @@ export type ScheduledChannelTest = {
   run_window_end?: string | null;
   test_scope: TestScope;
   patrol_modules: ScheduledPatrolModule[];
+  model_request_probe_keys?: ScheduledModelRequestProbeKey[] | null;
   repeat_count: number;
   concurrency: number;
   use_mock: boolean;
