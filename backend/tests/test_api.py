@@ -8722,6 +8722,100 @@ def test_new_api_fetch_does_not_send_model_filter_and_supports_multiple_groups(m
     assert all("model" not in call for call in calls)
     assert response.json()["matched"] == 2
 
+
+def test_new_api_fetch_searches_keywords_groups_types_and_full_list(monkeypatch) -> None:
+    reset_database()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeResponse:
+        def __init__(self, payload):  # noqa: ANN001
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # noqa: ANN001
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN001
+            return None
+
+        async def get(self, url, params, headers):  # noqa: ANN001
+            calls.append((url, dict(params)))
+            if url.endswith("/api/channel/search") and params.get("keyword") == "claude" and not params.get("tag_mode"):
+                return FakeResponse({"data": {"total": 1, "items": [{"id": 501, "name": "claude by name", "group": "default", "models": "sonnet"}]}})
+            if url.endswith("/api/channel/search") and params.get("model") == "claude":
+                return FakeResponse({"data": {"total": 1, "items": [{"id": 502, "name": "model hit", "group": "default", "models": "claude-sonnet-4-5"}]}})
+            if url.endswith("/api/channel/search") and params.get("group") == "azure-claude":
+                return FakeResponse({"data": {"total": 1, "items": [{"id": 503, "name": "azure group", "type": 3, "group": "azure-claude", "models": "sonnet-latest"}]}})
+            if url.endswith("/api/channel/") and params.get("type") == 14:
+                return FakeResponse({"data": {"total": 1, "items": [{"id": 504, "name": "anthropic type", "type": 14, "group": "default", "models": "sonnet-latest"}]}})
+            if url.endswith("/api/channel/") and "type" not in params:
+                return FakeResponse({"data": {"total": 1, "rows": [{"id": 505, "name": "remark alias", "type": 1, "group": "default", "models": "sonnet", "remark": "private claude"}]}})
+            return FakeResponse({"data": {"total": 0, "items": []}})
+
+    monkeypatch.setattr("app.routers.new_api.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/preview",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+                "model_keyword": "claude",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    ids = {item["new_api_channel_id"] for item in payload["items"]}
+    assert {"501", "502", "503", "504", "505"}.issubset(ids)
+    assert any(url.endswith("/api/channel/search") and call.get("keyword") == "claude" for url, call in calls)
+    assert any(url.endswith("/api/channel/search") and call.get("model") == "claude" for url, call in calls)
+    assert any(url.endswith("/api/channel/search") and call.get("group") == "azure-claude" for url, call in calls)
+    assert any(url.endswith("/api/channel/") and call.get("type") == 14 for url, call in calls)
+    assert any(url.endswith("/api/channel/") and "type" not in call and "group" not in call for url, call in calls)
+
+
+def test_new_api_sync_reports_remote_status_and_provider_type(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_fetch(data):  # noqa: ANN001
+        return "https://new-api.example", [
+            {"id": 601, "name": "vertex claude", "type": 41, "status": 2, "group": "vertex-claude", "models": "claude-sonnet"},
+            {"id": 602, "name": "azure claude", "type": 3, "status": 1, "group": "azure-claude", "models": "claude-sonnet"},
+        ]
+
+    monkeypatch.setattr("app.routers.new_api._fetch_new_api_channels", fake_fetch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/preview",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+                "status": "all",
+            },
+        )
+
+    assert response.status_code == 200
+    by_id = {item["new_api_channel_id"]: item for item in response.json()["items"]}
+    assert by_id["601"]["provider_type"] == "new_api_vertex_relay"
+    assert by_id["601"]["remote_type"] == 41
+    assert by_id["601"]["remote_status"] == 2
+    assert by_id["601"]["remote_enabled"] is False
+    assert by_id["602"]["provider_type"] == "new_api_azure_relay"
+
+
 def test_new_api_sync_apply_creates_channel_and_schedule(monkeypatch) -> None:
     reset_database()
 

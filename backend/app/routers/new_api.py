@@ -19,9 +19,28 @@ from ..services import create_channel, create_scheduled_channel_test
 router = APIRouter()
 
 NEW_API_ANTHROPIC_TYPE = 14
+NEW_API_AZURE_TYPE = 3
 NEW_API_AWS_TYPE = 33
+NEW_API_VERTEX_TYPE = 41
 CLAUDE_MATCH_RE = re.compile(r"(claude|anthropic)", re.IGNORECASE)
 TEXT_SPLIT_RE = re.compile(r"[,;\n]")
+NEW_API_CLAUDE_NATIVE_TYPES = {
+    NEW_API_ANTHROPIC_TYPE: "type=14 Anthropic Claude",
+    NEW_API_AWS_TYPE: "type=33 AWS Claude",
+}
+NEW_API_CLAUDE_TYPE_PROBES = [NEW_API_ANTHROPIC_TYPE, NEW_API_AWS_TYPE, NEW_API_VERTEX_TYPE]
+COMMON_CLAUDE_GROUP_PROBES = [
+    "claude",
+    "claude-code",
+    "default-claude",
+    "azure-claude",
+    "vertex-claude",
+    "mix-claude",
+    "kimi-claude",
+    "minimax-claude",
+    "glm-claude",
+    "anthropic",
+]
 
 
 def _normalized_base_url(base_url: str) -> str:
@@ -76,7 +95,7 @@ def _model_candidates(remote: dict[str, Any]) -> list[str]:
 def _claude_keywords(model_keyword: str | None) -> list[str]:
     keywords = _split_filter_values(model_keyword)
     if not keywords:
-        keywords = ["claude", "anthropic"]
+        keywords = ["claude", "anthropic", "sonnet", "opus", "haiku"]
     return [keyword.lower() for keyword in keywords]
 
 
@@ -96,10 +115,8 @@ def _remote_search_fields(remote: dict[str, Any]) -> dict[str, str]:
 
 
 def _claude_match_reason(remote: dict[str, Any], keywords: list[str]) -> tuple[bool, str]:
-    if remote.get("type") == NEW_API_AWS_TYPE:
-        return True, "type=33 AWS Claude"
-    if remote.get("type") == NEW_API_ANTHROPIC_TYPE:
-        return True, "type=14 Anthropic Claude"
+    if remote.get("type") in NEW_API_CLAUDE_NATIVE_TYPES:
+        return True, NEW_API_CLAUDE_NATIVE_TYPES[remote.get("type")]
     matched: list[str] = []
     for key, value in _remote_search_fields(remote).items():
         lowered = value.lower()
@@ -131,7 +148,14 @@ def _matches_requested_group(remote: dict[str, Any], group: str | None) -> bool:
 
 
 def _provider_type(remote: dict[str, Any]) -> str:
-    return "new_api_aws_relay" if remote.get("type") == NEW_API_AWS_TYPE else "new_api_anthropic_relay"
+    remote_type = remote.get("type")
+    if remote_type == NEW_API_AWS_TYPE:
+        return "new_api_aws_relay"
+    if remote_type == NEW_API_VERTEX_TYPE:
+        return "new_api_vertex_relay"
+    if remote_type == NEW_API_AZURE_TYPE:
+        return "new_api_azure_relay"
+    return "new_api_anthropic_relay"
 
 
 def _relay_token_for_channel(relay_token: str, remote_id: Any) -> str:
@@ -146,8 +170,15 @@ def _relay_token_for_channel(relay_token: str, remote_id: Any) -> str:
 
 
 def _remote_enabled(remote: dict[str, Any]) -> bool:
+    status = remote.get("status", 1)
+    if isinstance(status, str):
+        lowered = status.strip().lower()
+        if lowered in {"enabled", "enable", "true", "1"}:
+            return True
+        if lowered in {"disabled", "disable", "false", "0", "2", "3"}:
+            return False
     try:
-        return int(remote.get("status", 1)) == 1
+        return int(status) == 1
     except Exception:
         return True
 
@@ -182,7 +213,7 @@ def _extract_remote_channels(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         data = payload.get("data", payload)
         if isinstance(data, dict):
-            items = data.get("items") or data.get("channels") or data.get("data")
+            items = data.get("items") or data.get("channels") or data.get("rows") or data.get("records") or data.get("list") or data.get("data")
             if isinstance(items, list):
                 return [item for item in items if isinstance(item, dict)]
         if isinstance(data, list):
@@ -192,6 +223,87 @@ def _extract_remote_channels(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _extract_total(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return None
+    total = data.get("total") or data.get("count")
+    try:
+        return int(total)
+    except Exception:
+        return None
+
+
+async def _request_new_api_json(
+    client: httpx.AsyncClient,
+    base_url: str,
+    path: str,
+    params: dict[str, str | int | bool],
+    headers: dict[str, str],
+    *,
+    optional: bool = False,
+) -> Any:
+    response = await client.get(f"{base_url}{path}", params=params, headers=headers)
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        if optional and exc.response.status_code in {404, 405}:
+            return None
+        raise
+    payload = response.json()
+    if isinstance(payload, dict) and payload.get("success") is False:
+        message = str(payload.get("message") or "new-api returned success=false")
+        if optional and ("not found" in message.lower() or "no route" in message.lower()):
+            return None
+        raise ValueError(message)
+    return payload
+
+
+async def _fetch_new_api_pages(
+    client: httpx.AsyncClient,
+    base_url: str,
+    path: str,
+    base_params: dict[str, str | int | bool | None],
+    headers: dict[str, str],
+    page_size: int,
+    *,
+    optional: bool = False,
+) -> list[dict[str, Any]]:
+    params = {key: value for key, value in base_params.items() if value not in (None, "")}
+    params["p"] = 1
+    params["page_size"] = page_size
+    channels: list[dict[str, Any]] = []
+    while True:
+        payload = await _request_new_api_json(client, base_url, path, params, headers, optional=optional)
+        if payload is None:
+            return []
+        batch = _extract_remote_channels(payload)
+        channels.extend(batch)
+        total = _extract_total(payload)
+        if total is None or len(channels) >= total or not batch:
+            break
+        params["p"] = int(params["p"]) + 1
+    return channels
+
+
+def _status_param(status: str | None) -> str:
+    value = str(status or "enabled").strip().lower()
+    if value in {"all", "-1"}:
+        return "all"
+    if value in {"disabled", "0"}:
+        return "disabled"
+    return "enabled"
+
+
+def _base_channel_query_params(data: NewApiSyncRequest, group_filter: str | None = None) -> dict[str, str | int | bool | None]:
+    return {
+        "status": _status_param(data.status),
+        "group": group_filter,
+    }
+
+
 async def _fetch_new_api_channels(data: NewApiSyncRequest) -> tuple[str, list[dict[str, Any]]]:
     base_url = _normalized_base_url(data.base_url)
     group_filters = _split_filter_values(data.group) or [None]
@@ -199,42 +311,96 @@ async def _fetch_new_api_channels(data: NewApiSyncRequest) -> tuple[str, list[di
     channels: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     timeout = httpx.Timeout(connect=10, read=30, write=10, pool=10)
+
+    def add_channels(batch: list[dict[str, Any]]) -> None:
+        for remote in batch:
+            remote_key = str(remote.get("id") if remote.get("id") is not None else id(remote))
+            if remote_key in seen_ids:
+                continue
+            seen_ids.add(remote_key)
+            channels.append(remote)
+
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-        for group_filter in group_filters:
-            params: dict[str, str | int] = {
-                "p": 1,
-                "page_size": data.page_size,
-                "status": data.status or "enabled",
-            }
-            # Do not pass the model keyword to new-api here. Some deployments only
-            # search the model column server-side, while Claude resources are often
-            # represented by group/name/tag values such as azure-claude,
-            # vertex-claude, or claude-code. Fetch pages and apply the richer local
-            # matcher below.
-            if group_filter:
-                params["group"] = group_filter
-            fetched_for_group = 0
-            while True:
-                response = await client.get(f"{base_url}/api/channel/", params=params, headers=headers)
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, dict) and payload.get("success") is False:
-                    raise ValueError(str(payload.get("message") or "new-api returned success=false"))
-                batch = _extract_remote_channels(payload)
-                for remote in batch:
-                    remote_key = str(remote.get("id") if remote.get("id") is not None else id(remote))
-                    if remote_key in seen_ids:
-                        continue
-                    seen_ids.add(remote_key)
-                    channels.append(remote)
-                fetched_for_group += len(batch)
-                total = None
-                data_payload = payload.get("data") if isinstance(payload, dict) else None
-                if isinstance(data_payload, dict):
-                    total = data_payload.get("total")
-                if not isinstance(total, int) or fetched_for_group >= total or not batch:
-                    break
-                params["p"] = int(params["p"]) + 1
+        if any(group_filter for group_filter in group_filters):
+            # new-api exposes /api/channel/search with an exact group parameter.
+            # Query each requested group directly, then fall back to the paged list
+            # endpoint for older deployments where /search is absent.
+            for group_filter in [item for item in group_filters if item]:
+                params = _base_channel_query_params(data, group_filter)
+                batch = await _fetch_new_api_pages(client, base_url, "/api/channel/search", params, headers, data.page_size, optional=True)
+                if not batch:
+                    batch = await _fetch_new_api_pages(client, base_url, "/api/channel/", params, headers, data.page_size)
+                add_channels(batch)
+        else:
+            keywords = _claude_keywords(data.model_keyword)
+            # Search endpoint is fast for large new-api instances and covers
+            # common cases where Claude is encoded in name, model, or tag.
+            for keyword in keywords:
+                add_channels(
+                    await _fetch_new_api_pages(
+                        client,
+                        base_url,
+                        "/api/channel/search",
+                        {**_base_channel_query_params(data), "keyword": keyword},
+                        headers,
+                        data.page_size,
+                        optional=True,
+                    )
+                )
+                add_channels(
+                    await _fetch_new_api_pages(
+                        client,
+                        base_url,
+                        "/api/channel/search",
+                        {**_base_channel_query_params(data), "model": keyword},
+                        headers,
+                        data.page_size,
+                        optional=True,
+                    )
+                )
+                add_channels(
+                    await _fetch_new_api_pages(
+                        client,
+                        base_url,
+                        "/api/channel/search",
+                        {**_base_channel_query_params(data), "keyword": keyword, "tag_mode": True},
+                        headers,
+                        data.page_size,
+                        optional=True,
+                    )
+                )
+            # Many operators isolate Claude routes by group names such as
+            # claude-code, azure-claude, or vertex-claude. Probe those groups even
+            # when the user leaves the group box empty.
+            for group_filter in COMMON_CLAUDE_GROUP_PROBES:
+                add_channels(
+                    await _fetch_new_api_pages(
+                        client,
+                        base_url,
+                        "/api/channel/search",
+                        _base_channel_query_params(data, group_filter),
+                        headers,
+                        data.page_size,
+                        optional=True,
+                    )
+                )
+            # Official Anthropic/AWS type probes are decisive; Vertex is only a
+            # discovery probe and still needs local Claude keyword evidence below.
+            for type_filter in NEW_API_CLAUDE_TYPE_PROBES:
+                add_channels(
+                    await _fetch_new_api_pages(
+                        client,
+                        base_url,
+                        "/api/channel/",
+                        {**_base_channel_query_params(data), "type": type_filter},
+                        headers,
+                        data.page_size,
+                    )
+                )
+            # Final complete scan keeps the sync accurate even when Claude is
+            # represented by custom aliases, model_mapping, or remarks that
+            # new-api's server-side search does not cover.
+            add_channels(await _fetch_new_api_pages(client, base_url, "/api/channel/", _base_channel_query_params(data), headers, data.page_size))
     return base_url, channels
 
 
@@ -285,6 +451,9 @@ def _build_sync_payload(db: Session, base_url: str, remotes: list[dict[str, Any]
                 "provider_type": channel_data.provider_type,
                 "group": remote.get("group") or remote.get("groups"),
                 "tag": remote.get("tag"),
+                "remote_type": remote.get("type"),
+                "remote_status": remote.get("status"),
+                "remote_enabled": _remote_enabled(remote),
                 "action": action,
                 "schedule_action": schedule_action,
                 "reason": match_reason,

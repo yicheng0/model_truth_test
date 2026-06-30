@@ -243,6 +243,9 @@ export type NewApiSyncItem = {
   provider_type: string;
   group?: string | null;
   tag?: string | null;
+  remote_type?: number | null;
+  remote_status?: number | string | null;
+  remote_enabled?: boolean | null;
   action: string;
   schedule_action: string;
   reason?: string | null;

@@ -887,6 +887,9 @@ class NewApiSyncItemRead(BaseModel):
     provider_type: str
     group: str | None = None
     tag: str | None = None
+    remote_type: int | None = None
+    remote_status: int | str | None = None
+    remote_enabled: bool | None = None
     action: str
     schedule_action: str
     reason: str | None = None

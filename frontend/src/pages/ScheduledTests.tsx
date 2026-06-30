@@ -1394,6 +1394,16 @@ export default function ScheduledTests() {
                 { title: '渠道名称', dataIndex: 'name' },
                 { title: '模型', dataIndex: 'model_name', width: 180, render: (value) => value || '-' },
                 { title: '分组 / 标签', width: 160, render: (_, row) => [row.group, row.tag].filter(Boolean).join(' / ') || '-' },
+                {
+                  title: '远端状态',
+                  width: 110,
+                  render: (_, row) => (
+                    <Space size={4} wrap>
+                      {row.remote_type !== undefined && row.remote_type !== null ? <Tag>type {row.remote_type}</Tag> : null}
+                      <Tag color={row.remote_enabled === false ? 'red' : 'green'}>{row.remote_enabled === false ? '禁用' : '启用'}</Tag>
+                    </Space>
+                  ),
+                },
                 { title: '命中原因', dataIndex: 'reason', width: 170, render: (value) => value || '-' },
                 {
                   title: '渠道',
