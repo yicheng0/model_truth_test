@@ -884,6 +884,7 @@ class NewApiSyncItemRead(BaseModel):
     channel_id: str
     name: str
     model_name: str | None = None
+    remote_models: list[str] = Field(default_factory=list)
     provider_type: str
     group: str | None = None
     tag: str | None = None
@@ -899,6 +900,7 @@ class NewApiSyncRead(BaseModel):
     base_url: str
     total_remote: int
     matched: int
+    matched_models: int = 0
     create_count: int
     update_count: int
     skip_count: int

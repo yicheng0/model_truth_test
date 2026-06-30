@@ -240,6 +240,7 @@ export type NewApiSyncItem = {
   channel_id: string;
   name: string;
   model_name?: string | null;
+  remote_models?: string[];
   provider_type: string;
   group?: string | null;
   tag?: string | null;
@@ -255,6 +256,7 @@ export type NewApiSyncResult = {
   base_url: string;
   total_remote: number;
   matched: number;
+  matched_models?: number;
   create_count: number;
   update_count: number;
   skip_count: number;

@@ -8816,6 +8816,88 @@ def test_new_api_sync_reports_remote_status_and_provider_type(monkeypatch) -> No
     assert by_id["602"]["provider_type"] == "new_api_azure_relay"
 
 
+def test_new_api_sync_expands_one_remote_channel_to_all_claude_models(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_fetch(data):  # noqa: ANN001
+        return "https://new-api.example", [
+            {
+                "id": 701,
+                "name": "风雨-claude-awsp",
+                "type": 33,
+                "status": 1,
+                "group": "aws_cache,aws_mix,aws-platform,claude,mix-claude,zhongbo",
+                "models": "claude-3-7-sonnet,claude-sonnet-4-5,claude-opus-4-1,gpt-4o",
+            },
+        ]
+
+    monkeypatch.setattr("app.routers.new_api._fetch_new_api_channels", fake_fetch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/apply",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    models = {item["model_name"] for item in payload["items"]}
+    assert models == {"claude-3-7-sonnet", "claude-sonnet-4-5", "claude-opus-4-1"}
+    assert payload["matched"] == 1
+    assert payload["matched_models"] == 3
+    assert payload["create_count"] == 3
+    assert payload["schedule_create_count"] == 3
+    assert all(item["new_api_channel_id"] == "701" for item in payload["items"])
+    assert all(len(item["remote_models"]) == 3 for item in payload["items"])
+    channel_ids = {item["channel_id"] for item in payload["items"]}
+    assert len(channel_ids) == 3
+    with SessionLocal() as db:
+        channels = [db.get(Channel, channel_id) for channel_id in channel_ids]
+        assert all(channel is not None for channel in channels)
+        assert {channel.model_name for channel in channels if channel} == models
+        assert {channel.auth_config["api_key"] for channel in channels if channel} == {"sk-relay-token-701"}
+        assert {channel.auth_config["new_api_channel_id"] for channel in channels if channel} == {"701"}
+        schedules = db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.channel_id.in_(channel_ids))).all()
+        assert len(schedules) == 3
+
+
+def test_new_api_sync_reads_model_mapping_keys_as_request_models(monkeypatch) -> None:
+    reset_database()
+
+    async def fake_fetch(data):  # noqa: ANN001
+        return "https://new-api.example", [
+            {
+                "id": 702,
+                "name": "mapped claude",
+                "type": 14,
+                "status": 1,
+                "models": "",
+                "model_mapping": '{"claude-sonnet-4-5":"anthropic.claude-sonnet-4-5-v1:0","claude-opus-4-1":"anthropic.claude-opus-4-1-v1:0"}',
+            },
+        ]
+
+    monkeypatch.setattr("app.routers.new_api._fetch_new_api_channels", fake_fetch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/new-api/preview",
+            headers=ADMIN_HEADERS,
+            json={
+                "base_url": "https://new-api.example",
+                "admin_access_token": "admin-token",
+                "relay_token": "sk-relay-token",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {item["model_name"] for item in payload["items"]} == {"claude-sonnet-4-5", "claude-opus-4-1"}
+    assert payload["matched_models"] == 2
+
+
 def test_new_api_sync_apply_creates_channel_and_schedule(monkeypatch) -> None:
     reset_database()
 

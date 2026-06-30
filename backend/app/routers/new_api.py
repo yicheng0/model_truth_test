@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -56,9 +57,18 @@ def _instance_hash(base_url: str) -> str:
     return hashlib.sha1(base_url.encode("utf-8")).hexdigest()[:10]
 
 
-def _sync_channel_id(base_url: str, remote_id: Any) -> str:
+def _safe_id_part(value: Any, max_length: int = 64) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", str(value).strip())[:max_length] or "unknown"
+
+
+def _sync_channel_id(base_url: str, remote_id: Any, model_name: str | None = None, *, force_model_suffix: bool = False) -> str:
     safe_remote_id = re.sub(r"[^A-Za-z0-9_-]+", "_", str(remote_id).strip())[:64] or "unknown"
-    return f"newapi_{_instance_hash(base_url)}_{safe_remote_id}"
+    base_id = f"newapi_{_instance_hash(base_url)}_{safe_remote_id}"
+    if model_name or force_model_suffix:
+        safe_model = _safe_id_part(model_name or "model", 72)
+        model_hash = hashlib.sha1(str(model_name or "").encode("utf-8")).hexdigest()[:8]
+        return f"{base_id}_{safe_model}_{model_hash}"
+    return base_id
 
 
 def _split_filter_values(value: str | None) -> list[str]:
@@ -79,16 +89,49 @@ def _text_parts(value: Any) -> list[str]:
         return parts
     if isinstance(value, dict):
         parts = []
-        for child in value.values():
+        for child in [*value.keys(), *value.values()]:
             parts.extend(_text_parts(child))
         return parts
     return [str(value)]
 
 
+def _json_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                return None
+            return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _model_mapping_candidates(value: Any) -> list[str]:
+    mapping = _json_object(value)
+    if not mapping:
+        return _text_parts(value)
+    # new-api model_mapping usually maps exposed model -> upstream model.
+    # The exposed model key is what this platform must request from the relay,
+    # so prefer keys and keep values as a fallback for incomplete channel rows.
+    values: list[str] = []
+    for key in mapping.keys():
+        values.extend(_text_parts(key))
+    if values:
+        return values
+    for child in mapping.values():
+        values.extend(_text_parts(child))
+    return values
+
+
 def _model_candidates(remote: dict[str, Any]) -> list[str]:
     values: list[str] = []
-    for key in ("test_model", "model", "models", "model_mapping", "model_map"):
+    for key in ("test_model", "model", "models"):
         values.extend(_text_parts(remote.get(key)))
+    for key in ("model_mapping", "model_map"):
+        values.extend(_model_mapping_candidates(remote.get(key)))
     return list(dict.fromkeys(value for value in values if value))
 
 
@@ -103,6 +146,25 @@ def _pick_model(remote: dict[str, Any], keywords: list[str] | None = None) -> st
     models = _model_candidates(remote)
     lowered = keywords or ["claude", "anthropic"]
     return next((model for model in models if any(keyword in model.lower() for keyword in lowered)), models[0] if models else None)
+
+
+def _matching_models(remote: dict[str, Any], keywords: list[str], match_reason: str) -> list[str | None]:
+    models = _model_candidates(remote)
+    if not models:
+        return [None]
+    claude_family_keywords = list(dict.fromkeys([*keywords, "claude", "anthropic", "sonnet", "opus", "haiku"]))
+    claude_like_models = [model for model in models if any(keyword in model.lower() for keyword in claude_family_keywords)]
+    # If the channel itself is identified as Claude by type/name/group/tag/remark,
+    # all advertised models on that new-api channel should be represented locally.
+    # This covers screenshots where one new-api channel exposes several Claude
+    # aliases but the individual model strings may be shortened like "sonnet".
+    channel_level_hit = remote.get("type") in NEW_API_CLAUDE_NATIVE_TYPES or any(
+        label in match_reason for label in ("name", "group", "groups", "tag", "remark")
+    )
+    if channel_level_hit:
+        return claude_like_models or models[:1]
+    matched_models = [model for model in models if any(keyword in model.lower() for keyword in keywords)]
+    return matched_models or models
 
 
 def _remote_search_fields(remote: dict[str, Any]) -> dict[str, str]:
@@ -183,26 +245,38 @@ def _remote_enabled(remote: dict[str, Any]) -> bool:
         return True
 
 
-def _remote_to_channel_create(remote: dict[str, Any], data: NewApiSyncRequest, base_url: str) -> ChannelCreate:
+def _remote_to_channel_create(
+    remote: dict[str, Any],
+    data: NewApiSyncRequest,
+    base_url: str,
+    *,
+    model_name: str | None = None,
+    force_model_suffix: bool = False,
+) -> ChannelCreate:
     remote_id = remote.get("id")
-    model_name = _pick_model(remote, _claude_keywords(data.model_keyword))
+    selected_model = model_name if model_name is not None else _pick_model(remote, _claude_keywords(data.model_keyword))
     auth_config = {
         "api_key": _relay_token_for_channel(data.relay_token, remote_id),
         "request_protocol": "anthropic_messages",
         "account_type": "new-api",
         "new_api_channel_id": str(remote_id),
+        "new_api_model_name": selected_model,
         "new_api_source_base_url": base_url,
         "new_api_channel_type": remote.get("type"),
         "new_api_channel_tag": remote.get("tag"),
         "new_api_channel_group": remote.get("group") or remote.get("groups"),
     }
+    remote_name = remote.get("name") or remote_id
+    display_name = f"new-api #{remote_id} · {remote_name}"
+    if force_model_suffix and selected_model:
+        display_name = f"{display_name} · {selected_model}"
     return ChannelCreate(
-        id=_sync_channel_id(base_url, remote_id),
-        name=f"new-api #{remote_id} · {remote.get('name') or remote_id}",
+        id=_sync_channel_id(base_url, remote_id, selected_model, force_model_suffix=force_model_suffix),
+        name=display_name,
         provider_type=_provider_type(remote),
         role="candidate",
         base_url=base_url,
-        model_name=model_name,
+        model_name=selected_model,
         auth_config=auth_config,
         is_reference=False,
         enabled=bool(data.enabled and _remote_enabled(remote)),
@@ -415,50 +489,59 @@ def _build_sync_payload(db: Session, base_url: str, remotes: list[dict[str, Any]
         if matched:
             matched_remotes.append((remote, reason))
     for remote, match_reason in matched_remotes:
-        channel_data = _remote_to_channel_create(remote, data, base_url)
-        existing = db.get(Channel, channel_data.id)
-        schedule = db.scalar(select(ScheduledChannelTest).where(ScheduledChannelTest.channel_id == channel_data.id).limit(1))
-        action = "update" if existing else "create"
-        schedule_action = "exists" if schedule else "create"
-        if apply:
-            channel = create_channel(db, channel_data)
-            if not schedule:
-                create_scheduled_channel_test(
-                    db,
-                    ScheduledChannelTestCreate(
-                        name=f"{channel.name} 自动巡检",
-                        channel_id=channel.id,
-                        enabled=data.enabled,
-                        interval_minutes=data.default_interval_minutes,
-                        test_scope="scheduled_probe",
-                        repeat_count=1,
-                        concurrency=1,
-                        use_mock=False,
-                        alert_grade_threshold="D",
-                        alert_score_threshold=None,
-                        alert_red_flags_enabled=True,
-                        quiet_minutes=0,
-                        max_retries=0,
-                        retry_interval_minutes=5,
-                    ),
-                )
-        items.append(
-            {
-                "new_api_channel_id": str(remote.get("id")),
-                "channel_id": str(channel_data.id),
-                "name": channel_data.name,
-                "model_name": channel_data.model_name,
-                "provider_type": channel_data.provider_type,
-                "group": remote.get("group") or remote.get("groups"),
-                "tag": remote.get("tag"),
-                "remote_type": remote.get("type"),
-                "remote_status": remote.get("status"),
-                "remote_enabled": _remote_enabled(remote),
-                "action": action,
-                "schedule_action": schedule_action,
-                "reason": match_reason,
-            }
-        )
+        remote_models = _matching_models(remote, keywords, match_reason)
+        force_model_suffix = len(remote_models) > 1
+        for index, selected_model in enumerate(remote_models):
+            legacy_id = _sync_channel_id(base_url, remote.get("id"))
+            legacy_existing = db.get(Channel, legacy_id) if force_model_suffix and index == 0 else None
+            use_legacy_id = legacy_existing is not None
+            channel_data = _remote_to_channel_create(remote, data, base_url, model_name=selected_model, force_model_suffix=force_model_suffix and not use_legacy_id)
+            existing = db.get(Channel, channel_data.id)
+            schedule = db.scalar(select(ScheduledChannelTest).where(ScheduledChannelTest.channel_id == channel_data.id).limit(1))
+            if not schedule and legacy_existing is not None:
+                schedule = db.scalar(select(ScheduledChannelTest).where(ScheduledChannelTest.channel_id == legacy_id).limit(1))
+            action = "update" if existing or legacy_existing else "create"
+            schedule_action = "exists" if schedule else "create"
+            if apply:
+                channel = create_channel(db, channel_data)
+                if not schedule:
+                    create_scheduled_channel_test(
+                        db,
+                        ScheduledChannelTestCreate(
+                            name=f"{channel.name} 自动巡检",
+                            channel_id=channel.id,
+                            enabled=data.enabled,
+                            interval_minutes=data.default_interval_minutes,
+                            test_scope="scheduled_probe",
+                            repeat_count=1,
+                            concurrency=1,
+                            use_mock=False,
+                            alert_grade_threshold="D",
+                            alert_score_threshold=None,
+                            alert_red_flags_enabled=True,
+                            quiet_minutes=0,
+                            max_retries=0,
+                            retry_interval_minutes=5,
+                        ),
+                    )
+            items.append(
+                {
+                    "new_api_channel_id": str(remote.get("id")),
+                    "channel_id": str(channel_data.id),
+                    "name": channel_data.name,
+                    "model_name": channel_data.model_name,
+                    "remote_models": [model for model in remote_models if model],
+                    "provider_type": channel_data.provider_type,
+                    "group": remote.get("group") or remote.get("groups"),
+                    "tag": remote.get("tag"),
+                    "remote_type": remote.get("type"),
+                    "remote_status": remote.get("status"),
+                    "remote_enabled": _remote_enabled(remote),
+                    "action": action,
+                    "schedule_action": schedule_action,
+                    "reason": match_reason,
+                }
+            )
     create_count = sum(1 for item in items if item["action"] == "create")
     update_count = sum(1 for item in items if item["action"] == "update")
     schedule_create_count = sum(1 for item in items if item["schedule_action"] == "create")
@@ -466,6 +549,7 @@ def _build_sync_payload(db: Session, base_url: str, remotes: list[dict[str, Any]
         "base_url": base_url,
         "total_remote": len(remotes),
         "matched": len(matched_remotes),
+        "matched_models": len(items),
         "create_count": create_count,
         "update_count": update_count,
         "skip_count": len(remotes) - len(matched_remotes),

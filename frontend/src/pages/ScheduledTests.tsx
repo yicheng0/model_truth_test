@@ -340,7 +340,7 @@ export default function ScheduledTests() {
     mutationFn: api.previewNewApiSync,
     onSuccess: (result) => {
       setNewApiPreview(result);
-      message.success(`发现 ${result.matched} 个 Claude 相关 new-api 渠道`);
+      message.success(`发现 ${result.matched} 个 Claude 相关 new-api 渠道，${result.matched_models ?? result.items.length} 个模型对应项`);
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });
@@ -1380,7 +1380,7 @@ export default function ScheduledTests() {
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Row gutter={[12, 12]}>
               <Col xs={12} md={6}><Statistic title="远端渠道" value={newApiPreview.total_remote} /></Col>
-              <Col xs={12} md={6}><Statistic title="Claude 匹配" value={newApiPreview.matched} /></Col>
+              <Col xs={12} md={6}><Statistic title="Claude 渠道 / 模型" value={`${newApiPreview.matched} / ${newApiPreview.matched_models ?? newApiPreview.items.length}`} /></Col>
               <Col xs={12} md={6}><Statistic title="创建 / 更新" value={`${newApiPreview.create_count} / ${newApiPreview.update_count}`} /></Col>
               <Col xs={12} md={6}><Statistic title="新增巡检计划" value={newApiPreview.schedule_create_count} /></Col>
             </Row>
@@ -1392,7 +1392,19 @@ export default function ScheduledTests() {
               columns={[
                 { title: 'new-api ID', dataIndex: 'new_api_channel_id', width: 110 },
                 { title: '渠道名称', dataIndex: 'name' },
-                { title: '模型', dataIndex: 'model_name', width: 180, render: (value) => value || '-' },
+                {
+                  title: '对应模型',
+                  dataIndex: 'model_name',
+                  width: 220,
+                  render: (value, row) => (
+                    <Space direction="vertical" size={0}>
+                      <Typography.Text>{value || '-'}</Typography.Text>
+                      {row.remote_models && row.remote_models.length > 1 ? (
+                        <Typography.Text type="secondary">远端共 {row.remote_models.length} 个模型</Typography.Text>
+                      ) : null}
+                    </Space>
+                  ),
+                },
                 { title: '分组 / 标签', width: 160, render: (_, row) => [row.group, row.tag].filter(Boolean).join(' / ') || '-' },
                 {
                   title: '远端状态',
