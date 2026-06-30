@@ -716,13 +716,20 @@ textarea:focus-visible,
 }
 
 .patrol-guide-panel {
-  display: grid;
-  gap: 18px;
   padding: 22px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #fff;
   box-shadow: 0 12px 30px rgba(23, 32, 51, 0.06);
+}
+
+.patrol-guide-collapse > .ant-collapse-item > .ant-collapse-header {
+  padding: 0 !important;
+  align-items: flex-start !important;
+}
+
+.patrol-guide-collapse > .ant-collapse-item > .ant-collapse-content > .ant-collapse-content-box {
+  padding: 18px 0 0 !important;
 }
 
 .patrol-guide-header {

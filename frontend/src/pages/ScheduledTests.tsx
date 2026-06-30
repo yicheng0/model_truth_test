@@ -570,45 +570,56 @@ export default function ScheduledTests() {
             children: (
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
                 <section className="patrol-guide-panel">
-                  <div className="patrol-guide-header">
-                    <div>
-                      <Typography.Title level={4}>自动巡检配置教程</Typography.Title>
-                      <Typography.Paragraph type="secondary">
-                        自动巡检会执行 Thinking Signature 互通检测和多项真实模型请求探针，并按 Opus 4.7/4.8+ adaptive thinking 新协议归一化请求，用响应 ID 和协议证据判断渠道来源特征。
-                      </Typography.Paragraph>
-                    </div>
-                    <Space wrap>
-                      <Button icon={<DownloadCloud size={16} />} size="large" onClick={openNewApiSync}>从 new-api 同步</Button>
-                      <Button type="primary" size="large" onClick={() => openCreateSchedule()}>新增计划</Button>
-                    </Space>
-                  </div>
-                  <div className="patrol-guide-steps">
-                    {patrolGuideSteps.map((step, index) => (
-                      <div className="patrol-guide-step" key={step.title}>
-                        <span>{index + 1}</span>
-                        <strong>{step.title}</strong>
-                        <p>{step.description}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="patrol-guide-presets">
-                    <div className="patrol-preset-preview">
-                      <strong>SIGNATURE INTEROP</strong>
-                      <small>Thinking Signature 互通检测：source 生成 signature，待测渠道复用。</small>
-                    </div>
-                    <div className="patrol-preset-preview">
-                      <strong>MODEL REQUEST</strong>
-                      <small>真实模型请求：记录 message id、request id、协议和 endpoint。</small>
-                    </div>
-                    <div className="patrol-preset-preview">
-                      <strong>告警证据</strong>
-                      <small>返回 run/report/message/request/source/relay 等定位 ID。</small>
-                    </div>
-                  </div>
                   <Collapse
-                    size="small"
+                    className="patrol-guide-collapse"
                     ghost
-                    items={patrolParameterFaq}
+                    items={[
+                      {
+                        key: 'guide',
+                        label: (
+                          <div className="patrol-guide-header">
+                            <div>
+                              <Typography.Title level={4}>自动巡检配置教程</Typography.Title>
+                              <Typography.Paragraph type="secondary">
+                                自动巡检会执行 Thinking Signature 互通检测和多项真实模型请求探针；点击展开查看详情。
+                              </Typography.Paragraph>
+                            </div>
+                          </div>
+                        ),
+                        children: (
+                          <Space direction="vertical" size={18} style={{ width: '100%' }}>
+                            <div className="patrol-guide-steps">
+                              {patrolGuideSteps.map((step, index) => (
+                                <div className="patrol-guide-step" key={step.title}>
+                                  <span>{index + 1}</span>
+                                  <strong>{step.title}</strong>
+                                  <p>{step.description}</p>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="patrol-guide-presets">
+                              <div className="patrol-preset-preview">
+                                <strong>SIGNATURE INTEROP</strong>
+                                <small>Thinking Signature 互通检测：source 生成 signature，待测渠道复用。</small>
+                              </div>
+                              <div className="patrol-preset-preview">
+                                <strong>MODEL REQUEST</strong>
+                                <small>真实模型请求：记录 message id、request id、协议和 endpoint。</small>
+                              </div>
+                              <div className="patrol-preset-preview">
+                                <strong>告警证据</strong>
+                                <small>返回 run/report/message/request/source/relay 等定位 ID。</small>
+                              </div>
+                            </div>
+                            <Collapse
+                              size="small"
+                              ghost
+                              items={patrolParameterFaq}
+                            />
+                          </Space>
+                        ),
+                      },
+                    ]}
                   />
                 </section>
                 <Card
