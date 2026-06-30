@@ -1,6 +1,7 @@
 import dayjs from 'dayjs';
 import { Space, Tag, Tooltip, Typography, message } from 'antd';
 import type { Dayjs } from 'dayjs';
+import type { Key } from 'react';
 import { formatProviderChannelDisplayName } from '../channelCredentials';
 import type { Channel, ChannelAlert, ScheduledChannelTest } from '../types';
 import {
@@ -9,6 +10,7 @@ import {
   alertProbeTitle,
 } from '../scheduledAlertLog';
 
+export type TableRowKey = Key;
 export type AlertTimeRange = [Dayjs | null, Dayjs | null] | null;
 export type AlertResultFilter = 'all' | 'success' | 'failure';
 export type ScheduledTab = 'plans' | 'alerts' | 'report' | 'feishu';
@@ -158,6 +160,12 @@ export function setSearchParamValue(params: URLSearchParams, key: string, value?
   const trimmed = value?.trim();
   if (trimmed) params.set(key, trimmed);
   else params.delete(key);
+}
+
+export function toggleTableRowKey(keys: TableRowKey[], id: string) {
+  return keys.some((key) => String(key) === id)
+    ? keys.filter((key) => String(key) !== id)
+    : [...keys, id];
 }
 
 export function bulkDeleteMessage(entity: string, result: { deleted: number; missing: string[] }) {

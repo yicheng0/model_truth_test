@@ -3706,6 +3706,11 @@ textarea:focus-visible,
   min-width: 40px;
 }
 
+.scheduled-alert-table .ant-table-selection-column,
+.recent-alert-table .ant-table-selection-column {
+  cursor: pointer;
+}
+
 .recent-alert-table .ant-table-container {
   border-radius: 10px;
 }

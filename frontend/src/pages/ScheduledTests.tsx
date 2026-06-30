@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState, type Key } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState, type Key, type MouseEvent as ReactMouseEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Col, Collapse, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -26,6 +26,7 @@ import {
   runWindowText,
   scheduleStatusColor,
   setSearchParamValue,
+  toggleTableRowKey,
   type AlertResultFilter,
   type AlertTimeRange,
   type ScheduledTab,
@@ -512,6 +513,22 @@ export default function ScheduledTests() {
     deleteAlerts.mutate(ids);
   }
 
+  function selectionColumnClicked(event: ReactMouseEvent<HTMLElement>) {
+    return Boolean((event.target as HTMLElement | null)?.closest('td.ant-table-selection-column'));
+  }
+
+  function toggleAlertSelectionFromCell(alert: ChannelAlert, event: ReactMouseEvent<HTMLElement>) {
+    if (!selectionColumnClicked(event)) return;
+    event.stopPropagation();
+    setSelectedAlertRowKeys((keys) => toggleTableRowKey(keys, alert.id));
+  }
+
+  function toggleRecentAlertSelectionFromCell(alert: ChannelAlert, event: ReactMouseEvent<HTMLElement>) {
+    if (!selectionColumnClicked(event)) return;
+    event.stopPropagation();
+    setSelectedRecentAlertRowKeys((keys) => toggleTableRowKey(keys, alert.id));
+  }
+
   function submitFeishu(values: FeishuBroadcastFormValues) {
     const { payload, missingWebhook } = buildFeishuBroadcastUpdate(values, Boolean(feishuSetting.data?.webhook_configured));
     if (missingWebhook) {
@@ -940,6 +957,7 @@ export default function ScheduledTests() {
           )}
         </Space>
         <Table
+          className="scheduled-alert-table"
           rowKey="id"
           loading={alerts.isLoading || channels.isLoading}
           dataSource={filteredAlerts}
@@ -949,6 +967,9 @@ export default function ScheduledTests() {
             onChange: setSelectedAlertRowKeys,
             preserveSelectedRowKeys: true,
           }}
+          onRow={(alert) => ({
+            onClickCapture: (event) => toggleAlertSelectionFromCell(alert, event),
+          })}
           rowClassName={(alert) => (alert.id === selectedAlertId ? 'highlight-table-row' : '')}
           pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
           scroll={{ x: 760 }}
@@ -1001,7 +1022,7 @@ export default function ScheduledTests() {
               <Space direction="vertical" size={20} style={{ width: '100%' }}>
                 <Collapse
                   className="smart-report-card smart-report-collapse"
-                  defaultActiveKey={['smart-report']}
+                  defaultActiveKey={[]}
                   bordered={false}
                   items={[
                     {
@@ -1134,6 +1155,9 @@ export default function ScheduledTests() {
                         selectedRowKeys: selectedRecentAlertRowKeys,
                         onChange: setSelectedRecentAlertRowKeys,
                       }}
+                      onRow={(alert) => ({
+                        onClickCapture: (event) => toggleRecentAlertSelectionFromCell(alert, event),
+                      })}
                       columns={[
                         { title: '告警信息', render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
                         {
