@@ -2,7 +2,7 @@ import { useDeferredValue, useEffect, useMemo, useState, type Key } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Col, Collapse, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
-import { BarChart3, Bell, CalendarClock, DownloadCloud, Edit3, Eye, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
+import { BarChart3, Bell, CalendarClock, DownloadCloud, Edit3, Play, RefreshCw, Send, Settings, Trash2 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName, formatProviderChannelDisplayName } from '../channelCredentials';
@@ -17,9 +17,7 @@ import {
   alertOutcomeLabel,
   alertErrorText,
   alertProbeCompletedAt,
-  alertRequestId,
 } from '../scheduledAlertLog';
-import AlertLogDrawer from '../components/AlertLogDrawer';
 import {
   alertChannelText,
   alertRangeToParams,
@@ -90,7 +88,6 @@ export default function ScheduledTests() {
   const [deletingAlertId, setDeletingAlertId] = useState<string | null>(null);
   const [deletingAlertRunId, setDeletingAlertRunId] = useState<string | null>(null);
   const [resendingAlertIds, setResendingAlertIds] = useState<Set<string>>(() => new Set());
-  const [openAlertLog, setOpenAlertLog] = useState<ChannelAlert | null>(null);
   const [activeTab, setActiveTab] = useState<ScheduledTab>(queryTab);
   const [reportRange, setReportRange] = useState('7d');
   const [runningScheduleId, setRunningScheduleId] = useState<string | null>(null);
@@ -166,7 +163,6 @@ export default function ScheduledTests() {
 
   const channelById = useMemo(() => new Map((channels.data ?? []).map((channel) => [channel.id, channel])), [channels.data]);
   const candidateChannels = useMemo(() => (channels.data ?? []).filter(isCandidateChannel), [channels.data]);
-  const openAlertLogChannel = openAlertLog ? alertChannelText(openAlertLog, channelById.get(openAlertLog.channel_id)) : null;
 
   useEffect(() => {
     if (!feishuSetting.data) return;
@@ -241,7 +237,6 @@ export default function ScheduledTests() {
       message.success('告警已删除');
       setSelectedAlertRowKeys((keys) => keys.filter((key) => key !== id));
       setSelectedRecentAlertRowKeys((keys) => keys.filter((key) => key !== id));
-      setOpenAlertLog((alert) => (alert?.id === id ? null : alert));
       await queryClient.invalidateQueries({ queryKey: ['alerts'] });
       await queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
     },
@@ -251,12 +246,10 @@ export default function ScheduledTests() {
 
   const deleteAlerts = useMutation({
     mutationFn: api.deleteAlerts,
-    onSuccess: async (result, ids) => {
-      const deletedIds = new Set(ids.filter((id) => !result.missing.includes(id)));
+    onSuccess: async (result) => {
       bulkDeleteMessage('条告警', result);
       setSelectedAlertRowKeys([]);
       setSelectedRecentAlertRowKeys([]);
-      setOpenAlertLog((alert) => (alert && deletedIds.has(alert.id) ? null : alert));
       await queryClient.invalidateQueries({ queryKey: ['alerts'] });
       await queryClient.invalidateQueries({ queryKey: ['smartPatrolReport'] });
     },
@@ -267,7 +260,6 @@ export default function ScheduledTests() {
     mutationFn: api.deleteRun,
     onSuccess: async (_, runId) => {
       message.success('关联巡检日志已删除');
-      setOpenAlertLog((alert) => (alert?.run_id === runId ? null : alert));
       setSelectedAlertRowKeys([]);
       setSelectedRecentAlertRowKeys([]);
       await Promise.all([
@@ -456,15 +448,6 @@ export default function ScheduledTests() {
     deleteAlert.mutate(alert.id);
   }
 
-  function deleteLinkedAlertRun(alert: ChannelAlert) {
-    if (!alert.run_id) {
-      message.warning('这条告警没有关联巡检日志');
-      return;
-    }
-    setDeletingAlertRunId(alert.run_id);
-    deleteAlertRun.mutate(alert.run_id);
-  }
-
   function deleteScheduleRun(runId?: string | null) {
     if (!runId) {
       message.warning('这个计划没有关联巡检日志');
@@ -506,14 +489,6 @@ export default function ScheduledTests() {
     setAlertIdQuery('');
     setAlertTimeRange(null);
     setAlertResultFilter('failure');
-  }
-
-  function openAlertLogDrawer(alert: ChannelAlert) {
-    setOpenAlertLog(alert);
-  }
-
-  function closeAlertLogDrawer() {
-    setOpenAlertLog(null);
   }
 
   function refetchActiveTabData() {
@@ -950,8 +925,8 @@ export default function ScheduledTests() {
               render: (_, alert) => <Tag color={alertOutcomeColor(alert.status)}>{alertOutcomeLabel(alert.status)}</Tag>,
             },
             {
-              title: '异常探针 / 时间点 / ID',
-              width: 360,
+              title: '异常摘要',
+              width: 320,
               render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)),
             },
             {
@@ -1148,16 +1123,14 @@ export default function ScheduledTests() {
                           },
                         },
                         { title: '结果', width: 110, render: (_, alert) => <Tag color={alertOutcomeColor(alert.status)}>{alertOutcomeLabel(alert.status)}</Tag> },
-                        { title: '异常探针 / 时间点 / ID', width: 360, render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
+                        { title: '异常摘要', width: 320, render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
                         { title: '告警创建时间', dataIndex: 'created_at', width: 180, render: (_, alert) => formatDateTime(alert.created_at) },
-                        { title: 'Request ID', width: 210, render: (_, alert) => <Typography.Text copyable={{ text: alertRequestId(alert) }}>{alertRequestId(alert) || '-'}</Typography.Text> },
                         {
                           title: '操作',
-                          width: 230,
+                          width: 160,
                           fixed: 'right',
                           render: (_, alert) => (
                             <Space wrap>
-                              <Button type="link" icon={<Eye size={15} />} onClick={() => openAlertLogDrawer(alert)}>查看日志</Button>
                               <Link to={buildPatrolRunDetailLink(alert)}>查看详情</Link>
                               {(
                                 <Popconfirm
@@ -1551,15 +1524,6 @@ export default function ScheduledTests() {
           </Form.Item>
         </Form>
       </Modal>
-
-      <AlertLogDrawer
-        alert={openAlertLog}
-        channelName={openAlertLogChannel?.name ?? ''}
-        channelDisplayId={openAlertLogChannel?.displayId ?? ''}
-        onClose={closeAlertLogDrawer}
-        onDeleteRun={deleteLinkedAlertRun}
-        deletingRun={Boolean(openAlertLog?.run_id && deletingAlertRunId === openAlertLog.run_id)}
-      />
     </Space>
   );
 }

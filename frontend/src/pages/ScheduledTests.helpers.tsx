@@ -7,10 +7,7 @@ import type { Channel, ChannelAlert, ScheduledChannelTest } from '../types';
 import {
   alertChannelModel,
   alertProbeCompletedAt,
-  alertProbeSource,
   alertProbeTitle,
-  alertRequestId,
-  alertResponseId,
 } from '../scheduledAlertLog';
 
 export type AlertTimeRange = [Dayjs | null, Dayjs | null] | null;
@@ -186,9 +183,6 @@ export function matchesAlertResultFilter(alert: ChannelAlert, filter: AlertResul
 export function alertSummaryCell(alert: ChannelAlert, channelRecord?: Channel | null) {
   const channel = alertChannelText(alert, channelRecord);
   const completedAt = alertProbeCompletedAt(alert);
-  const messageId = alertResponseId(alert);
-  const requestId = alertRequestId(alert);
-  const source = alertProbeSource(alert);
   const channelModel = alertChannelModel(alert);
   return (
     <Space direction="vertical" size={2}>
@@ -196,12 +190,6 @@ export function alertSummaryCell(alert: ChannelAlert, channelRecord?: Channel | 
       {channel.model || channelModel ? <Typography.Text type="secondary">{channel.model || channelModel}</Typography.Text> : null}
       <Typography.Text>{alertProbeTitle(alert)}</Typography.Text>
       <Typography.Text type="secondary">{formatDateTime(completedAt) || formatDateTime(alert.created_at) || '-'}</Typography.Text>
-      <Typography.Text type="secondary">
-        {channel.displayId || '-'} · {source || '-'}
-      </Typography.Text>
-      <Typography.Text type="secondary">
-        Message ID：{messageId || '-'} · Request ID：{requestId || '-'}
-      </Typography.Text>
     </Space>
   );
 }
