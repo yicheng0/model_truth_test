@@ -286,6 +286,7 @@ def test_scheduled_tests_health_endpoint_is_not_shadowed() -> None:
 
 
 def test_scheduler_enabled_parser_is_trimmed_and_explicit(monkeypatch) -> None:
+    monkeypatch.delenv("SCHEDULER_FORCE_ENABLED", raising=False)
     monkeypatch.delenv("AUTO_SCHEDULER_ENABLED", raising=False)
     assert scheduler_enabled() is True
     for value in ["true", " TRUE ", "1", "yes", "enabled", ""]:
@@ -294,6 +295,12 @@ def test_scheduler_enabled_parser_is_trimmed_and_explicit(monkeypatch) -> None:
     for value in ["false", " FALSE ", "0", "no", "off", "disabled"]:
         monkeypatch.setenv("AUTO_SCHEDULER_ENABLED", value)
         assert scheduler_enabled() is False
+
+
+def test_scheduler_force_enabled_overrides_disabled_env(monkeypatch) -> None:
+    monkeypatch.setenv("AUTO_SCHEDULER_ENABLED", "false")
+    monkeypatch.setenv("SCHEDULER_FORCE_ENABLED", "true")
+    assert scheduler_enabled() is True
 
 
 def test_docker_compose_enables_scheduler_by_default() -> None:
