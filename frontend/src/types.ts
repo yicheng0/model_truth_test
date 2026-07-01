@@ -330,6 +330,7 @@ export type FullModelCheckRequest = {
   include_thinking?: boolean;
   include_vision?: boolean;
   include_capability_suite?: boolean;
+  probe_keys?: string[];
   timeout_seconds?: number;
 };
 

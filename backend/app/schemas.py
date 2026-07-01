@@ -243,6 +243,7 @@ class FullModelCheckCreate(BaseModel):
     include_thinking: bool = True
     include_vision: bool = False
     include_capability_suite: bool = True
+    probe_keys: list[str] | None = None
     timeout_seconds: int = Field(default=120, ge=30, le=240)
 
 

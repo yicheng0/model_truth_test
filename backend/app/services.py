@@ -12238,6 +12238,9 @@ async def create_full_model_check(db: Session, data: FullModelCheckCreate) -> di
             raise ValueError(f"Channel is disabled: {channel.name}")
         protocol_family = _full_model_protocol_family(channel)
         specs = _full_model_probe_specs(protocol_family, data)
+        if data.probe_keys:
+            key_set = set(data.probe_keys)
+            specs = [s for s in specs if s["key"] in key_set]
         credentials = _merged_channel_credentials(channel, {})
         probe_rows: list[dict[str, Any]] = []
         for spec in specs:

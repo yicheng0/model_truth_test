@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Descriptions, Form, InputNumber, Select, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -229,7 +229,14 @@ function ProbeDetail({ channel, probe }: { channel: FullModelChannelResult; prob
   );
 }
 
-function ProbePlanPreview({ values, channelCount }: { values: Partial<FullModelCheckRequest>; channelCount: number }) {
+function ProbePlanPreview({ values, channelCount, selectedKeys, onToggle, onSetKeys, onKeysLoaded }: {
+  values: Partial<FullModelCheckRequest>;
+  channelCount: number;
+  selectedKeys: Set<string>;
+  onToggle: (key: string) => void;
+  onSetKeys: (keys: string[], select: boolean) => void;
+  onKeysLoaded: (keys: string[]) => void;
+}) {
   const plan = useQuery({
     queryKey: ['fullModelCheckPlan', values],
     queryFn: () => api.fullModelCheckPlan(values),
@@ -250,13 +257,25 @@ function ProbePlanPreview({ values, channelCount }: { values: Partial<FullModelC
   ];
   const groupLabel = (key: string) => groupOrder.find((g) => g.key === key)?.label
     || byGroup.get(key)?.[0]?.group_label || key;
-  const total = target?.probes.length ?? 0;
+  const allKeys = useMemo(() => (target?.probes ?? []).map((p) => p.key), [target]);
+  const total = allKeys.length;
+
+  // 通知父组件当前清单包含的全部探针 key（用于全局全选/清理失效选择）。
+  useEffect(() => {
+    if (allKeys.length) onKeysLoaded(allKeys);
+  }, [allKeys, onKeysLoaded]);
 
   return (
     <Card
       bordered={false}
       title={<span className="card-title-with-icon"><ShieldCheck size={18} />将检测的探针</span>}
-      extra={<Typography.Text type="secondary">共 {total} 项{plan.data?.repeat_count && plan.data.repeat_count > 1 ? ` × ${plan.data.repeat_count} 次` : ''}</Typography.Text>}
+      extra={
+        <Space size={12}>
+          <Typography.Text type="secondary">已选 {selectedKeys.size} / 共 {total} 项{plan.data?.repeat_count && plan.data.repeat_count > 1 ? ` × ${plan.data.repeat_count} 次` : ''}</Typography.Text>
+          <Typography.Link disabled={!total} onClick={() => onSetKeys(allKeys, true)}>全选</Typography.Link>
+          <Typography.Link disabled={!selectedKeys.size} onClick={() => onSetKeys(allKeys, false)}>清空</Typography.Link>
+        </Space>
+      }
     >
       {plan.isLoading ? (
         <Typography.Text type="secondary">正在生成探针清单…</Typography.Text>
@@ -266,24 +285,37 @@ function ProbePlanPreview({ values, channelCount }: { values: Partial<FullModelC
         <Space direction="vertical" size={12} className="full-width">
           <Typography.Text type="secondary">
             {channelCount > 0
-              ? `按所选渠道协议（${target?.protocol_family ?? '-'}）与当前勾选项，本次将依次运行以下探针：`
-              : '未选择渠道，以下为 Anthropic 默认协议下的探针预览；选择渠道后会按其协议自动调整。'}
+              ? `按所选渠道协议（${target?.protocol_family ?? '-'}）与当前勾选项，点选下方探针，仅运行选中的项：`
+              : '未选择渠道，以下为 Anthropic 默认协议下的探针预览；点选后仅运行选中的项，选择渠道后按其协议自动调整。'}
           </Typography.Text>
-          {orderedKeys.map((key) => (
-            <div key={key} className="full-model-plan-group">
-              <Space size={8} align="center" style={{ marginBottom: 6 }}>
-                <Typography.Text strong>{groupLabel(key)}</Typography.Text>
-                <Tag>{byGroup.get(key)?.length ?? 0}</Tag>
-              </Space>
-              <Space wrap size={[8, 8]}>
-                {(byGroup.get(key) ?? []).map((probe) => (
-                  <Tooltip key={probe.key} title={probe.probe_target || probe.expected || ''}>
-                    <Tag color="default" className="full-model-plan-tag">{probe.title}</Tag>
-                  </Tooltip>
-                ))}
-              </Space>
-            </div>
-          ))}
+          {orderedKeys.map((key) => {
+            const probes = byGroup.get(key) ?? [];
+            const groupKeys = probes.map((p) => p.key);
+            const selectedInGroup = groupKeys.filter((k) => selectedKeys.has(k)).length;
+            return (
+              <div key={key} className="full-model-plan-group">
+                <Space size={8} align="center" style={{ marginBottom: 6 }}>
+                  <Typography.Text strong>{groupLabel(key)}</Typography.Text>
+                  <Tag>{selectedInGroup}/{probes.length}</Tag>
+                  <Typography.Link onClick={() => onSetKeys(groupKeys, true)}>全选</Typography.Link>
+                  <Typography.Link disabled={!selectedInGroup} onClick={() => onSetKeys(groupKeys, false)}>清空</Typography.Link>
+                </Space>
+                <Space wrap size={[8, 8]}>
+                  {probes.map((probe) => (
+                    <Tooltip key={probe.key} title={probe.probe_target || probe.expected || ''}>
+                      <Tag.CheckableTag
+                        className="full-model-plan-tag"
+                        checked={selectedKeys.has(probe.key)}
+                        onChange={() => onToggle(probe.key)}
+                      >
+                        {probe.title}
+                      </Tag.CheckableTag>
+                    </Tooltip>
+                  ))}
+                </Space>
+              </div>
+            );
+          })}
         </Space>
       )}
     </Card>
@@ -329,6 +361,32 @@ export default function FullModelCheck() {
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
   const [result, setResult] = useState<FullModelCheckResult | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [selectedProbeKeys, setSelectedProbeKeys] = useState<Set<string>>(new Set());
+
+  const toggleProbe = useCallback((key: string) => {
+    setSelectedProbeKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+  const setProbeKeys = useCallback((keys: string[], select: boolean) => {
+    setSelectedProbeKeys((prev) => {
+      const next = new Set(prev);
+      for (const key of keys) {
+        if (select) next.add(key); else next.delete(key);
+      }
+      return next;
+    });
+  }, []);
+  // 清单变化（切换渠道协议/勾选项）时，剔除当前清单里不存在的已选 key，保持计数准确。
+  const pruneProbeKeys = useCallback((availableKeys: string[]) => {
+    const available = new Set(availableKeys);
+    setSelectedProbeKeys((prev) => {
+      const filtered = [...prev].filter((k) => available.has(k));
+      return filtered.length === prev.size ? prev : new Set(filtered);
+    });
+  }, []);
 
   const watchedChannelIds = Form.useWatch('channel_ids', form);
   const watchedStream = Form.useWatch('include_stream', form);
@@ -367,6 +425,7 @@ export default function FullModelCheck() {
         include_thinking: values.include_thinking,
         include_vision: values.include_vision,
         include_capability_suite: values.include_capability_suite,
+        probe_keys: Array.from(selectedProbeKeys),
         timeout_seconds: values.timeout_seconds ?? 120,
       };
       return api.fullModelCheck(payload);
@@ -401,7 +460,13 @@ export default function FullModelCheck() {
           form={form}
           layout="vertical"
           initialValues={{ repeat_count: 1, include_stream: true, include_tools: true, include_params: true, include_error_probe: true, include_thinking: true, include_vision: false, include_capability_suite: true, timeout_seconds: 120 }}
-          onFinish={(values) => runCheck.mutate(values)}
+          onFinish={(values) => {
+            if (selectedProbeKeys.size === 0) {
+              message.warning('请至少选择一个探针');
+              return;
+            }
+            runCheck.mutate(values);
+          }}
         >
           <Form.Item name="channel_ids" label="待测渠道 / 模型" rules={[{ required: true, message: '请选择至少一个渠道' }]}> 
             <Select mode="multiple" options={channelOptions} loading={channels.isLoading} placeholder="选择一个或多个渠道" maxTagCount="responsive" />
@@ -423,11 +488,20 @@ export default function FullModelCheck() {
             <Form.Item name="include_vision" valuePropName="checked"><Checkbox>图片输入烟测</Checkbox></Form.Item>
             <Form.Item name="include_capability_suite" valuePropName="checked"><Checkbox>题库能力探针</Checkbox></Form.Item>
           </Space>
-          <Button type="primary" htmlType="submit" loading={runCheck.isPending} icon={<Play size={16} />} disabled={!availableChannels.length}>开始完整检测</Button>
+          <Button type="primary" htmlType="submit" loading={runCheck.isPending} icon={<Play size={16} />} disabled={!availableChannels.length || selectedProbeKeys.size === 0}>开始完整检测（已选 {selectedProbeKeys.size}）</Button>
         </Form>
       </Card>
 
-      {!result ? <ProbePlanPreview values={planPayload} channelCount={watchedChannelIds?.length ?? 0} /> : null}
+      {!result ? (
+        <ProbePlanPreview
+          values={planPayload}
+          channelCount={watchedChannelIds?.length ?? 0}
+          selectedKeys={selectedProbeKeys}
+          onToggle={toggleProbe}
+          onSetKeys={setProbeKeys}
+          onKeysLoaded={pruneProbeKeys}
+        />
+      ) : null}
 
       {requestError ? <Alert type="error" showIcon message="检测失败" description={requestError} /> : null}
 
