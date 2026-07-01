@@ -193,6 +193,7 @@ export interface ReportEvidence {
   ai_judge?: Record<string, unknown> | null;
   classification_label?: string | null;
   classification_reason?: string | null;
+  improvement_suggestions?: string[] | null;
 }
 
 export type ChannelTaxonomySetting = {
@@ -994,6 +995,7 @@ export type PatrolAiJudgeEvidence = {
   classification_label?: string | null;
   confidence?: number | null;
   reason?: string | null;
+  decisive_signals?: string[] | null;
   evidence_refs?: string[];
   recommended_labels?: string[];
   error?: string | null;

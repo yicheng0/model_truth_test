@@ -2078,6 +2078,9 @@ def test_baseline_build_then_candidate_eval_reuses_snapshot() -> None:
     assert set(evidence["scoring_dimensions"]).issuperset({"protocol", "streaming", "tool_use", "parameter_adherence", "capability", "stability", "latency", "cost_usage"})
     assert evidence["confidence"] in {"medium", "high"}
     assert isinstance(evidence["label_explanations"], list)
+    assert evidence["classification_label"] in {"高度一致", "基本可信", "可疑（疑似中间层影响）", "疑似非原生 Claude", "高风险", "待复核"}
+    assert isinstance(evidence["classification_reason"], str) and evidence["classification_reason"]
+    assert isinstance(evidence["improvement_suggestions"], list) and evidence["improvement_suggestions"]
 
 
 def test_baseline_snapshot_name_can_be_updated() -> None:
@@ -8204,6 +8207,8 @@ def test_scheduled_probe_ai_judge_saved_for_low_confidence_native_shape(monkeypa
     assert report.evidence["ai_judge"]
     assert report.evidence["ai_judge"]["fallback"] is True
     assert "patrol_ai_reviewed" in report.evidence["labels"]
+    decisive_signals = report.evidence["ai_judge"].get("decisive_signals")
+    assert isinstance(decisive_signals, list) and decisive_signals
     with TestClient(app) as client:
         payload = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
     assert payload["latest_probe_summary"]["ai_judge"]["classification_status"] in {"aws_resource", "claude", "anomaly"}

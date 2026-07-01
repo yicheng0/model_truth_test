@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Form, Input, Select, message } from 'antd';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
 import { buildRuntimeCredentials } from '../channelCredentials';
@@ -42,6 +42,8 @@ export default function CreateRun() {
   const [form] = Form.useForm<CreateRunValues>();
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
+  const preselectedSuiteId = (location.state as { suiteId?: string } | null)?.suiteId;
   const [searchParams, setSearchParams] = useSearchParams();
   const queryMode = searchParams.get('mode');
   const initialMode: CreateMode = queryMode === 'baseline' ? 'baseline_build' : 'candidate_eval';
@@ -77,11 +79,18 @@ export default function CreateRun() {
   }
 
   useEffect(() => {
+    // A suite passed via navigation state (e.g. "运行套件" from /probes) takes
+    // precedence; otherwise default to the built-in suite once it loads.
+    if (preselectedSuiteId && form.getFieldValue('suite_id') !== preselectedSuiteId) {
+      form.setFieldValue('suite_id', preselectedSuiteId);
+      return;
+    }
+    if (preselectedSuiteId) return;
     if (!builtInSuite?.id) return;
     if (form.getFieldValue('suite_id') !== builtInSuite.id) {
       form.setFieldValue('suite_id', builtInSuite.id);
     }
-  }, [builtInSuite?.id, form]);
+  }, [builtInSuite?.id, form, preselectedSuiteId]);
 
   useEffect(() => {
     if (!channels.data) return;

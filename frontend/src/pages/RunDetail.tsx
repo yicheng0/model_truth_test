@@ -11,6 +11,7 @@ import { extractPatrolEvidence, formatPatrolChannel, type PatrolEvidence, type P
 import { formatDateTime } from '../time';
 import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
 import { isComboManualProbeRun, manualProbeSummaryRows } from './runDetailManualProbe';
+import { buildModuleGroups, buildProbeDetailRows, type ProbeDetailRow } from './runDetailProbeRows';
 import {
   type ArenaEvidenceRow,
   type ArenaRankingRow,
@@ -648,20 +649,14 @@ export default function RunDetail() {
     const passedProbes = allResults.filter((r) => r.score === 100).length;
     const failedProbes = totalProbes - passedProbes;
 
-    const moduleGroups: Record<string, { pass: number; total: number }> = {};
     const moduleOrder = ['protocol', 'tool', 'tool_use', 'format_boundary', 'identity', 'reasoning', 'code', 'context', 'knowledge', 'safety', 'streaming', 'websearch'];
     const moduleLabelMap: Record<string, string> = {
       protocol: '协议指纹', tool: '工具调用', tool_use: '工具调用', format_boundary: '格式边界',
       identity: '身份一致性', reasoning: '推理能力', code: '代码生成', context: '上下文稳定',
       knowledge: '知识边界', safety: '安全边界', streaming: '流式协议', websearch: 'Web 搜索',
     };
-    for (const r of allResults) {
-      const caseModule = caseById.get(r.test_case_id)?.module ?? 'unknown';
-      if (!moduleGroups[caseModule]) moduleGroups[caseModule] = { pass: 0, total: 0 };
-      moduleGroups[caseModule].total++;
-      if (r.score === 100) moduleGroups[caseModule].pass++;
-    }
-    const sortedMods = [...new Set([...moduleOrder, ...Object.keys(moduleGroups)])].filter((m) => moduleGroups[m]);
+    const moduleGroups = buildModuleGroups(allResults, caseById, moduleOrder);
+    const probeRows = buildProbeDetailRows(allResults, caseById);
 
     const decisiveSignals = aiJudge
       ? (aiJudge.decisive_signals as string[] | undefined) ?? Object.entries(dimScores ?? {}).filter(([, v]) => v >= 80).map(([k]) => k)
@@ -731,11 +726,26 @@ export default function RunDetail() {
           </div>
           <div>
             <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 13 }}>改进建议</div>
-            {aiJudge?.reason ? (
-              <Typography.Text style={{ fontSize: 12 }}>{aiJudge.reason as string}</Typography.Text>
-            ) : (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>暂无建议</Typography.Text>
-            )}
+            {(() => {
+              const reasonText = (aiJudge?.reason as string | undefined) ?? evidence?.classification_reason ?? undefined;
+              const suggestions = evidence?.improvement_suggestions ?? [];
+              if (reasonText) {
+                return <Typography.Text style={{ fontSize: 12 }}>{reasonText}</Typography.Text>;
+              }
+              if (suggestions.length > 0) {
+                return (
+                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                    {suggestions.map((tip, idx) => (
+                      <div key={idx} style={{ fontSize: 12, display: 'flex', gap: 6 }}>
+                        <span style={{ color: '#667085' }}>·</span>
+                        <span>{tip}</span>
+                      </div>
+                    ))}
+                  </Space>
+                );
+              }
+              return <Typography.Text type="secondary" style={{ fontSize: 12 }}>暂无建议</Typography.Text>;
+            })()}
           </div>
         </div>
         {report && (
@@ -754,21 +764,70 @@ export default function RunDetail() {
           <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
             每根探针显示关键判断信息、命中/缺失信号和该探针相关的脱敏输出摘要。
           </Typography.Text>
-          {sortedMods.length > 0 ? (
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {sortedMods.map((mod, idx) => {
-                const group = moduleGroups[mod];
-                return (
-                  <div key={mod} style={{ padding: '8px 14px', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6, minWidth: 140 }}>
-                    <div style={{ fontSize: 11, color: '#667085', marginBottom: 2 }}>阶段 {idx + 1}</div>
-                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{moduleLabelMap[mod] ?? mod}</div>
-                    <Tag color={group.pass === group.total ? 'success' : group.pass > 0 ? 'warning' : 'error'} style={{ fontSize: 11 }}>
-                      {group.pass}/{group.total} 通过
-                    </Tag>
-                  </div>
-                );
-              })}
+          {moduleGroups.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+              {moduleGroups.map((group) => (
+                <Tag
+                  key={group.module}
+                  color={group.pass === group.total ? 'success' : group.pass > 0 ? 'warning' : 'error'}
+                  style={{ fontSize: 11 }}
+                >
+                  {moduleLabelMap[group.module] ?? group.module} {group.pass}/{group.total}
+                </Tag>
+              ))}
             </div>
+          )}
+          {probeRows.length > 0 ? (
+            <Table<ProbeDetailRow>
+              dataSource={probeRows}
+              rowKey="key"
+              size="small"
+              pagination={probeRows.length > 20 ? { pageSize: 20, showTotal: (t) => `共 ${t} 根` } : false}
+              columns={[
+                {
+                  title: '探针',
+                  key: 'title',
+                  render: (_: unknown, row: ProbeDetailRow) => (
+                    <Space size={6}>
+                      <Tag style={{ fontSize: 11 }}>{moduleLabelMap[row.module] ?? row.module}</Tag>
+                      <span style={{ fontSize: 13 }}>{row.title}</span>
+                    </Space>
+                  ),
+                },
+                {
+                  title: '状态',
+                  key: 'status',
+                  width: 100,
+                  render: (_: unknown, row: ProbeDetailRow) => (
+                    <Tag color={row.passed ? 'success' : 'error'} style={{ fontSize: 11 }}>
+                      {row.passed ? '通过' : '失败·可疑'}
+                    </Tag>
+                  ),
+                },
+                {
+                  title: '命中信号',
+                  key: 'labels',
+                  width: 220,
+                  render: (_: unknown, row: ProbeDetailRow) =>
+                    row.labels.length ? (
+                      <Space size={4} wrap>
+                        {row.labels.map((label) => (
+                          <Tag key={label} color="warning" style={{ fontSize: 11 }}>{label}</Tag>
+                        ))}
+                      </Space>
+                    ) : (
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>无</Typography.Text>
+                    ),
+                },
+                {
+                  title: '输出摘要',
+                  key: 'output',
+                  render: (_: unknown, row: ProbeDetailRow) => (
+                    <Typography.Text style={{ fontSize: 12, color: '#667085' }}>{row.outputSummary}</Typography.Text>
+                  ),
+                },
+              ]}
+            />
           ) : (
             <Typography.Text type="secondary">暂无探针结果（运行完成后显示）</Typography.Text>
           )}

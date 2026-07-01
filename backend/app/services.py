@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .redaction import merge_redacted_config, redact_secrets, redact_text
 from .scheduled_probe import (
+    EXPECTED_CLAUDE_PROBE_LABELS,
     _probe_parameter_unsupported,
     scheduled_probe_classification,
     scheduled_probe_markdown,
@@ -6318,7 +6319,8 @@ def _patrol_ai_judge_prompt(model_requests: list[dict[str, Any]], signature_evid
         "你是 Claude 渠道自动巡检的复核裁判。只根据给定脱敏证据判断渠道形态，"
         "不要凭模型自称判断。输出严格 JSON，不要 Markdown。JSON 字段必须为："
         "classification_status(claude/aws_resource/anomaly), classification_label, confidence(0-1), "
-        "reason, evidence_refs(array), recommended_labels(array)。\n\n"
+        "reason, decisive_signals(array，列出决定本次分类的 2-4 条关键信号，如原生参数拒绝、message id 家族、签名互通结果), "
+        "evidence_refs(array), recommended_labels(array)。\n\n"
         f"证据：{json.dumps(redact_secrets(evidence), ensure_ascii=False, default=str)}"
     )
 
@@ -6339,6 +6341,7 @@ def _fallback_patrol_ai_judge(model_requests: list[dict[str, Any]], labels: list
         label = str(classification.get("label") or "来源特征不明确")
         confidence = 0.45
         judge_reason = "证据不足，保持规则低置信结论。"
+    decisive_signals = _patrol_decisive_signals(model_requests, label_set, status)
     return {
         "enabled": True,
         "attempted": False,
@@ -6349,9 +6352,44 @@ def _fallback_patrol_ai_judge(model_requests: list[dict[str, Any]], labels: list
         "classification_label": label,
         "confidence": confidence,
         "reason": judge_reason,
+        "decisive_signals": decisive_signals,
         "evidence_refs": [str(item.get("key") or item.get("title") or "probe") for item in model_requests[:3]],
         "recommended_labels": sorted(label_set),
     }
+
+
+def _patrol_decisive_signals(model_requests: list[dict[str, Any]], label_set: set[str], status: str) -> list[str]:
+    """Derive human-readable decisive signals from patrol probe evidence.
+
+    Used by the fallback judge and as a backfill when the AI judge omits the
+    field, so the RunDetail "决策性信号" column is never silently empty.
+    """
+    signals: list[str] = []
+    for item in model_requests:
+        if not isinstance(item, dict):
+            continue
+        item_labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
+        title = str(item.get("title") or item.get("key") or "探针")
+        if item_labels.intersection(EXPECTED_CLAUDE_PROBE_LABELS):
+            signals.append(f"{title}：命中 Claude 原生参数拒绝形态")
+        elif _probe_parameter_unsupported(item):
+            signals.append(f"{title}：返回参数不支持/400 形态")
+    message_id = next(
+        (str(item.get("message_id") or "") for item in model_requests if str(item.get("message_id") or "")),
+        "",
+    )
+    if message_id.startswith("msg_bdrk_"):
+        signals.append("响应 message id 属 AWS/Bedrock (msg_bdrk_) 家族")
+    elif message_id.startswith("msg_"):
+        signals.append("响应 message id 属 Anthropic (msg_) 家族")
+    if "signature_interop_failed" in label_set:
+        signals.append("Thinking Signature 互通未通过（链路不可验证）")
+    if not signals:
+        signals.append("巡检探针未命中预期 Claude/AWS 资源形态")
+    # De-duplicate while preserving order, cap at 4 for a compact display.
+    seen: set[str] = set()
+    unique = [sig for sig in signals if not (sig in seen or seen.add(sig))]
+    return unique[:4]
 
 
 def _parse_patrol_ai_judge_response(text: str, judge_channel: Channel) -> dict[str, Any]:
@@ -6363,6 +6401,8 @@ def _parse_patrol_ai_judge_response(text: str, judge_channel: Channel) -> dict[s
         status = "anomaly"
     labels = payload.get("recommended_labels") if isinstance(payload.get("recommended_labels"), list) else []
     refs = payload.get("evidence_refs") if isinstance(payload.get("evidence_refs"), list) else []
+    signals = payload.get("decisive_signals") if isinstance(payload.get("decisive_signals"), list) else []
+    decisive_signals = [str(item)[:200] for item in signals if str(item).strip()][:6]
     return {
         "enabled": True,
         "attempted": True,
@@ -6373,6 +6413,7 @@ def _parse_patrol_ai_judge_response(text: str, judge_channel: Channel) -> dict[s
         "classification_label": str(payload.get("classification_label") or ("AWS 资源" if status == "aws_resource" else "Claude 资源" if status == "claude" else "来源特征不明确")),
         "confidence": max(0.0, min(1.0, _safe_float(payload.get("confidence")))),
         "reason": str(payload.get("reason") or "AI 复核未返回说明")[:1000],
+        "decisive_signals": decisive_signals,
         "evidence_refs": [str(item)[:200] for item in refs],
         "recommended_labels": [str(item)[:100] for item in labels],
     }
@@ -6422,6 +6463,12 @@ async def scheduled_probe_ai_judge(
                 fallback["judge_channel_name"] = judge_channel.name
                 return fallback
             parsed = _parse_patrol_ai_judge_response(str(normalized.get("content_text") or ""), judge_channel)
+            if not parsed.get("decisive_signals"):
+                parsed["decisive_signals"] = _patrol_decisive_signals(
+                    model_requests,
+                    {str(label) for label in labels},
+                    str(parsed.get("classification_status") or ""),
+                )
             parsed["request_id"] = request_id_from_normalized(normalized)
             parsed["message_id"] = normalized.get("provider_message_id")
             return redact_secrets(parsed)
@@ -10069,6 +10116,7 @@ def build_reports(db: Session, run_id: str) -> None:
         dimension_scores = dimension_scores_for(items, cases)
         scoring_dimensions = scoring_dimensions_for(items, cases)
         confidence = confidence_for(run, snapshot, items, labels)
+        red_flags = sorted(set(labels).intersection(ALERT_RED_FLAGS))
         evidence = {
             "avg_gold_similarity": round(sum(item.gold_similarity for item in items) / len(items), 2),
             "avg_official_cloud_similarity": round(sum(item.official_cloud_similarity for item in items) / len(items), 2),
@@ -10077,7 +10125,10 @@ def build_reports(db: Session, run_id: str) -> None:
             "dimension_scores": dimension_scores,
             "scoring_dimensions": scoring_dimensions,
             "confidence": confidence,
-            "red_flags": sorted(set(labels).intersection(ALERT_RED_FLAGS)),
+            "red_flags": red_flags,
+            "classification_label": _grade_classification_label(grade),
+            "classification_reason": summary,
+            "improvement_suggestions": _report_improvement_suggestions(red_flags, dimension_scores),
             "top_evidence": top_evidence_for(items, cases),
             "comparison_count": len(items),
             "test_scope": run.test_scope if run else "full",
@@ -11053,6 +11104,45 @@ def _summary_for(grade: str) -> str:
         "D": "疑似非原生 Claude 或严重偏离官方行为。",
         "E": "高风险，不建议标称 Claude 官方同等质量。",
     }[grade]
+
+
+def _grade_classification_label(grade: str) -> str:
+    """Map a report grade to the risk-phrased classification label shown in the
+    RunDetail "AI 判定" tab. Phrasing follows CLAUDE.md (risk/confidence, not
+    absolute claims)."""
+    return {
+        "A": "高度一致",
+        "B": "基本可信",
+        "C": "可疑（疑似中间层影响）",
+        "D": "疑似非原生 Claude",
+        "E": "高风险",
+    }.get(grade, "待复核")
+
+
+def _report_improvement_suggestions(red_flags: list[str], dimension_scores: dict[str, Any]) -> list[str]:
+    """Build reviewer-facing suggestions for a normal eval run from red-flag
+    labels and low-scoring dimensions, so the "改进建议" panel has content even
+    without an AI judge."""
+    suggestions: list[str] = []
+    for label in red_flags:
+        base_label = label.split(":", 1)[0] if ":" in label else label
+        explanation = LABEL_EXPLANATIONS.get(label) or LABEL_EXPLANATIONS.get(base_label)
+        suggestions.append(f"关注标签 {base_label}：{explanation}" if explanation else f"关注异常标签 {base_label}，需结合原始响应复核。")
+    weak = sorted(
+        (
+            (name, float(value))
+            for name, value in (dimension_scores or {}).items()
+            if isinstance(value, (int, float)) and float(value) < 70
+        ),
+        key=lambda item: item[1],
+    )
+    for name, value in weak[:3]:
+        suggestions.append(f"维度「{name}」得分偏低（{value:.0f}），建议补充同题多轮复核。")
+    if not suggestions:
+        suggestions.append("未发现显著异常；如需更高置信度可增加同题重复次数或对比更多官方参考。")
+    # De-duplicate, preserve order, cap for a compact panel.
+    seen: set[str] = set()
+    return [item for item in suggestions if not (item in seen or seen.add(item))][:6]
 
 
 def report_markdown(channel: Channel, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:

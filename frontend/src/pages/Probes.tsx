@@ -1,9 +1,12 @@
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Badge, Button, Col, Input, Row, Select, Space, Spin, Table, Tag, Tabs, Typography } from 'antd';
-import { RefreshCw } from 'lucide-react';
-import { api } from '../api';
-import type { TestCase, TestSuite } from '../types';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { Alert, Badge, Button, Col, Descriptions, Input, Modal, Row, Select, Space, Spin, Table, Tag, Tabs, Typography, message } from 'antd';
+import { RefreshCw, Send } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { api, getErrorMessage } from '../api';
+import { formatChannelDisplayName } from '../channelCredentials';
+import { responseSnippet } from './runDetailUtils';
+import type { Channel, ModelRequestTestResult, TestCase, TestSuite } from '../types';
 
 const { Title, Text } = Typography;
 
@@ -77,15 +80,32 @@ function suiteCategory(suite: TestSuite): string {
   return '普通套件';
 }
 
+function channelApiKey(channel: Channel) {
+  const value = channel.auth_config?.api_key;
+  return typeof value === 'string' ? value : '';
+}
+
+type SourceFilter = 'all' | 'builtin' | 'public';
+
 export default function Probes() {
+  const navigate = useNavigate();
   const cases = useQuery({ queryKey: ['cases'], queryFn: () => api.cases() });
   const suites = useQuery({ queryKey: ['suites'], queryFn: api.suites });
+  const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
 
   const [search, setSearch] = useState('');
   const [protocolFilter, setProtocolFilter] = useState<string>('all');
   const [moduleFilter, setModuleFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
-  const [suiteFilter, setSuiteFilter] = useState<string>('all');
+  const [librarySuiteFilter, setLibrarySuiteFilter] = useState<string>('all');
+  const [suiteTabFilter, setSuiteTabFilter] = useState<string>('all');
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [activeTab, setActiveTab] = useState<'library' | 'suites'>('library');
+
+  // 发起测试 Modal 状态
+  const [testProbe, setTestProbe] = useState<TestCase | null>(null);
+  const [testChannelId, setTestChannelId] = useState<string | undefined>(undefined);
+  const [testResult, setTestResult] = useState<ModelRequestTestResult | null>(null);
 
   const allCases: TestCase[] = cases.data ?? [];
   const allSuites: TestSuite[] = suites.data ?? [];
@@ -94,23 +114,86 @@ export default function Probes() {
     return new Set(allSuites.filter((s) => s.visibility !== 'public').map((s) => s.id));
   }, [allSuites]);
 
+  const testableChannels = useMemo(
+    () => (channels.data ?? []).filter((channel) => channel.enabled && channel.base_url && channelApiKey(channel)),
+    [channels.data],
+  );
+
   const filteredCases = useMemo(() => {
     const q = search.trim().toLowerCase();
     return allCases.filter((tc) => {
       if (q && !tc.id.toLowerCase().includes(q) && !tc.title.toLowerCase().includes(q) && !(tc.prompt ?? '').toLowerCase().includes(q)) return false;
       if (moduleFilter !== 'all' && tc.module !== moduleFilter) return false;
       if (typeFilter !== 'all' && probeType(tc.module) !== typeFilter) return false;
-      if (suiteFilter !== 'all' && tc.suite_id !== suiteFilter) return false;
+      if (librarySuiteFilter !== 'all' && tc.suite_id !== librarySuiteFilter) return false;
+      if (sourceFilter === 'builtin' && !builtinSuiteIds.has(tc.suite_id)) return false;
+      if (sourceFilter === 'public' && builtinSuiteIds.has(tc.suite_id)) return false;
       if (protocolFilter === 'stream' && !inferProtocol(tc).includes('stream')) return false;
       if (protocolFilter === 'thinking' && !inferProtocol(tc).includes('thinking')) return false;
       if (protocolFilter === 'tools' && !inferProtocol(tc).includes('tools')) return false;
       if (protocolFilter === 'standard' && inferProtocol(tc) !== 'anthropic_messages') return false;
       return true;
     });
-  }, [allCases, search, moduleFilter, typeFilter, suiteFilter, protocolFilter]);
+  }, [allCases, search, moduleFilter, typeFilter, librarySuiteFilter, sourceFilter, protocolFilter, builtinSuiteIds]);
+
+  const filteredSuites = useMemo(() => {
+    if (suiteTabFilter === 'all') return allSuites;
+    return allSuites.filter((s) => s.id === suiteTabFilter);
+  }, [allSuites, suiteTabFilter]);
 
   const builtinCount = allCases.filter((tc) => builtinSuiteIds.has(tc.suite_id)).length;
   const publicCount = allCases.filter((tc) => !builtinSuiteIds.has(tc.suite_id)).length;
+
+  const runProbeTest = useMutation({
+    mutationFn: ({ channelId, probe }: { channelId: string; probe: TestCase }) =>
+      api.modelRequestTest(channelId, {
+        prompt: probe.prompt,
+        system_prompt: probe.system_prompt?.trim() || null,
+        request_params: (probe.request_params as Record<string, unknown> | null) ?? { max_tokens: 256, temperature: 0 },
+        run_name: `探针测试 · ${probe.title}`,
+      }),
+    onSuccess: (payload) => {
+      setTestResult(payload);
+      if (payload.result.score === 100) {
+        message.success('探针测试完成');
+      } else {
+        message.warning('探针测试完成，结果需复核');
+      }
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
+
+  function openTestModal(probe: TestCase) {
+    setTestProbe(probe);
+    setTestResult(null);
+    setTestChannelId(testableChannels[0]?.id);
+    runProbeTest.reset();
+  }
+
+  function closeTestModal() {
+    setTestProbe(null);
+    setTestResult(null);
+    runProbeTest.reset();
+  }
+
+  function submitProbeTest() {
+    if (!testProbe) return;
+    if (!testChannelId) {
+      message.warning('请选择请求渠道');
+      return;
+    }
+    setTestResult(null);
+    runProbeTest.mutate({ channelId: testChannelId, probe: testProbe });
+  }
+
+  function selectStat(stat: 'all' | 'builtin' | 'public' | 'suites') {
+    if (stat === 'suites') {
+      setActiveTab('suites');
+      return;
+    }
+    setSourceFilter(stat);
+    setActiveTab('library');
+  }
 
   const probeColumns = [
     {
@@ -162,6 +245,16 @@ export default function Probes() {
           : <Tag color="blue">公开</Tag>
       ),
     },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 110,
+      render: (_: unknown, tc: TestCase) => (
+        <Button size="small" icon={<Send size={13} />} onClick={() => openTestModal(tc)}>
+          发起测试
+        </Button>
+      ),
+    },
   ];
 
   const suiteColumns = [
@@ -201,6 +294,16 @@ export default function Probes() {
       width: 80,
       render: (_: unknown, suite: TestSuite) => (
         <Text>{allCases.filter((tc) => tc.suite_id === suite.id).length}</Text>
+      ),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 120,
+      render: (_: unknown, suite: TestSuite) => (
+        <Button size="small" icon={<Send size={13} />} onClick={() => navigate('/new-run', { state: { suiteId: suite.id } })}>
+          运行套件
+        </Button>
       ),
     },
   ];
@@ -258,6 +361,17 @@ export default function Probes() {
                 ]}
               />
             </Col>
+            <Col>
+              <Select
+                value={librarySuiteFilter}
+                onChange={setLibrarySuiteFilter}
+                style={{ width: 200 }}
+                options={[
+                  { value: 'all', label: '全部套件' },
+                  ...allSuites.map((s) => ({ value: s.id, label: s.name })),
+                ]}
+              />
+            </Col>
           </Row>
           <div style={{ marginBottom: 12 }}>
             <Text type="secondary">
@@ -283,8 +397,8 @@ export default function Probes() {
           <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
             <Col flex="1">
               <Select
-                value={suiteFilter}
-                onChange={setSuiteFilter}
+                value={suiteTabFilter}
+                onChange={setSuiteTabFilter}
                 style={{ width: 220 }}
                 options={[
                   { value: 'all', label: '全部套件' },
@@ -294,7 +408,7 @@ export default function Probes() {
             </Col>
           </Row>
           <Table
-            dataSource={allSuites}
+            dataSource={filteredSuites}
             columns={suiteColumns}
             rowKey="id"
             size="small"
@@ -315,6 +429,16 @@ export default function Probes() {
                           <Tag color={moduleColor[tc.module] ?? 'default'}>{moduleLabel(tc.module)}</Tag>
                         ),
                       },
+                      {
+                        title: '操作',
+                        key: 'actions',
+                        width: 110,
+                        render: (_: unknown, tc: TestCase) => (
+                          <Button size="small" icon={<Send size={13} />} onClick={() => openTestModal(tc)}>
+                            发起测试
+                          </Button>
+                        ),
+                      },
                     ]}
                     rowKey="id"
                     size="small"
@@ -332,6 +456,13 @@ export default function Probes() {
 
   const loading = cases.isLoading || suites.isLoading;
 
+  const stats: Array<{ key: 'all' | 'builtin' | 'public' | 'suites'; label: string; count: number; active: boolean }> = [
+    { key: 'all', label: '探针', count: allCases.length, active: activeTab === 'library' && sourceFilter === 'all' },
+    { key: 'builtin', label: '内置', count: builtinCount, active: activeTab === 'library' && sourceFilter === 'builtin' },
+    { key: 'public', label: '公开', count: publicCount, active: activeTab === 'library' && sourceFilter === 'public' },
+    { key: 'suites', label: '套件', count: allSuites.length, active: activeTab === 'suites' },
+  ];
+
   return (
     <div style={{ padding: '24px 32px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -342,6 +473,7 @@ export default function Probes() {
             onClick={() => {
               void cases.refetch();
               void suites.refetch();
+              void channels.refetch();
             }}
             loading={loading}
           >
@@ -353,22 +485,26 @@ export default function Probes() {
         按探针用途、适用模型族和区分点管理探针，把常用组合保存成套件。
       </Text>
 
-      {/* 顶部统计 tab 栏 */}
+      {/* 顶部统计 tab 栏（可点击筛选） */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid #f0f0f0', paddingBottom: 8 }}>
-        {[
-          { label: '探针', count: allCases.length, active: true },
-          { label: '内置', count: builtinCount, active: false },
-          { label: '公开', count: publicCount, active: false },
-          { label: '套件', count: allSuites.length, active: false },
-        ].map((item) => (
+        {stats.map((item) => (
           <div
-            key={item.label}
+            key={item.key}
+            role="button"
+            tabIndex={0}
+            onClick={() => selectStat(item.key)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                selectStat(item.key);
+              }
+            }}
             style={{
               padding: '4px 14px',
               borderRadius: 6,
               background: item.active ? '#1677ff' : 'transparent',
               color: item.active ? '#fff' : '#595959',
-              cursor: 'default',
+              cursor: 'pointer',
               fontWeight: 500,
               fontSize: 13,
             }}
@@ -378,7 +514,57 @@ export default function Probes() {
         ))}
       </div>
 
-      <Tabs items={tabItems} defaultActiveKey="library" />
+      <Tabs items={tabItems} activeKey={activeTab} onChange={(key) => setActiveTab(key as 'library' | 'suites')} />
+
+      <Modal
+        open={Boolean(testProbe)}
+        title={testProbe ? `发起测试 · ${testProbe.title}` : '发起测试'}
+        onCancel={closeTestModal}
+        onOk={submitProbeTest}
+        okText="发送真实请求"
+        confirmLoading={runProbeTest.isPending}
+        okButtonProps={{ disabled: !testableChannels.length }}
+        width={640}
+        destroyOnClose
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {!testableChannels.length ? (
+            <Alert type="warning" showIcon message="没有可请求渠道" description="请先到渠道管理页为启用渠道配置 Base URL 和 API Key。" />
+          ) : (
+            <Alert type="info" showIcon message="会向所选渠道发起真实请求" description="请求和响应会保存为一条手动模型请求任务，API Key 只读取渠道配置。" />
+          )}
+          <div>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>请求渠道</Text>
+            <Select
+              value={testChannelId}
+              onChange={setTestChannelId}
+              style={{ width: '100%' }}
+              loading={channels.isLoading}
+              placeholder="选择已配置密钥的渠道"
+              options={testableChannels.map((channel) => ({
+                value: channel.id,
+                label: `${formatChannelDisplayName(channel)} · ${channel.model_name || '未配置模型'}`,
+              }))}
+            />
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>探针 Prompt</Text>
+            <Input.TextArea value={testProbe?.prompt ?? ''} rows={3} readOnly />
+          </div>
+          {testResult && (
+            <Descriptions bordered size="small" column={1}>
+              <Descriptions.Item label="任务">
+                <Link to={`/runs/${testResult.run.id}`}>{testResult.run.id}</Link>
+              </Descriptions.Item>
+              <Descriptions.Item label="评分">{testResult.result.score}</Descriptions.Item>
+              <Descriptions.Item label="标签">{(testResult.result.labels ?? []).join(', ') || '-'}</Descriptions.Item>
+              <Descriptions.Item label="Message ID">{testResult.message_id || '-'}</Descriptions.Item>
+              <Descriptions.Item label="渠道特征">{testResult.message_channel_type}</Descriptions.Item>
+              <Descriptions.Item label="输出摘要">{responseSnippet(testResult.result)}</Descriptions.Item>
+            </Descriptions>
+          )}
+        </Space>
+      </Modal>
     </div>
   );
 }
