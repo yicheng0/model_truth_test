@@ -16,6 +16,7 @@ type FormValues = {
   include_error_probe: boolean;
   include_thinking: boolean;
   include_vision: boolean;
+  include_capability_suite: boolean;
   timeout_seconds: number;
 };
 
@@ -336,6 +337,7 @@ export default function FullModelCheck() {
   const watchedError = Form.useWatch('include_error_probe', form);
   const watchedThinking = Form.useWatch('include_thinking', form);
   const watchedVision = Form.useWatch('include_vision', form);
+  const watchedCapabilitySuite = Form.useWatch('include_capability_suite', form);
   const watchedRepeat = Form.useWatch('repeat_count', form);
 
   const planPayload = useMemo<Partial<FullModelCheckRequest>>(() => ({
@@ -347,7 +349,8 @@ export default function FullModelCheck() {
     include_error_probe: watchedError ?? true,
     include_thinking: watchedThinking ?? true,
     include_vision: watchedVision ?? false,
-  }), [watchedChannelIds, watchedRepeat, watchedStream, watchedTools, watchedParams, watchedError, watchedThinking, watchedVision]);
+    include_capability_suite: watchedCapabilitySuite ?? true,
+  }), [watchedChannelIds, watchedRepeat, watchedStream, watchedTools, watchedParams, watchedError, watchedThinking, watchedVision, watchedCapabilitySuite]);
 
   const availableChannels = useMemo(() => (channels.data ?? []).filter((channel) => channel.enabled && channel.base_url), [channels.data]);
   const channelOptions = availableChannels.map((channel) => ({ value: channel.id, label: protocolLabel(channel) }));
@@ -363,6 +366,7 @@ export default function FullModelCheck() {
         include_error_probe: values.include_error_probe,
         include_thinking: values.include_thinking,
         include_vision: values.include_vision,
+        include_capability_suite: values.include_capability_suite,
         timeout_seconds: values.timeout_seconds ?? 120,
       };
       return api.fullModelCheck(payload);
@@ -396,7 +400,7 @@ export default function FullModelCheck() {
         <Form
           form={form}
           layout="vertical"
-          initialValues={{ repeat_count: 1, include_stream: true, include_tools: true, include_params: true, include_error_probe: true, include_thinking: true, include_vision: false, timeout_seconds: 120 }}
+          initialValues={{ repeat_count: 1, include_stream: true, include_tools: true, include_params: true, include_error_probe: true, include_thinking: true, include_vision: false, include_capability_suite: true, timeout_seconds: 120 }}
           onFinish={(values) => runCheck.mutate(values)}
         >
           <Form.Item name="channel_ids" label="待测渠道 / 模型" rules={[{ required: true, message: '请选择至少一个渠道' }]}> 
@@ -417,6 +421,7 @@ export default function FullModelCheck() {
             <Form.Item name="include_thinking" valuePropName="checked"><Checkbox>Claude Thinking</Checkbox></Form.Item>
             <Form.Item name="include_error_probe" valuePropName="checked"><Checkbox>错误包裹</Checkbox></Form.Item>
             <Form.Item name="include_vision" valuePropName="checked"><Checkbox>图片输入烟测</Checkbox></Form.Item>
+            <Form.Item name="include_capability_suite" valuePropName="checked"><Checkbox>题库能力探针</Checkbox></Form.Item>
           </Space>
           <Button type="primary" htmlType="submit" loading={runCheck.isPending} icon={<Play size={16} />} disabled={!availableChannels.length}>开始完整检测</Button>
         </Form>

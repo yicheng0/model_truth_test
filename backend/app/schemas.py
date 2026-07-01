@@ -242,6 +242,7 @@ class FullModelCheckCreate(BaseModel):
     include_error_probe: bool = True
     include_thinking: bool = True
     include_vision: bool = False
+    include_capability_suite: bool = True
     timeout_seconds: int = Field(default=120, ge=30, le=240)
 
 
@@ -255,6 +256,7 @@ class FullModelCheckPlanCreate(BaseModel):
     include_error_probe: bool = True
     include_thinking: bool = True
     include_vision: bool = False
+    include_capability_suite: bool = True
     timeout_seconds: int = Field(default=120, ge=30, le=240)
 
 

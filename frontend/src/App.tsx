@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Typography } from 'antd';
-import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, Layers, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
+import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, Database, DatabaseZap, Gauge, GitCompare, Layers, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
@@ -56,7 +56,6 @@ const navItems = [
   { key: '/openai-resource-check', icon: ShieldCheck, label: 'OpenAI 直连', to: '/openai-resource-check' },
   { key: '/gemini-resource-check', icon: ShieldCheck, label: 'Gemini 直连', to: '/gemini-resource-check' },
   { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
-  { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },
   { key: '/baselines', icon: Database, label: '渠道指纹', to: '/baselines' },
   { key: '/scheduled-tests', icon: CalendarClock, label: '自动巡检', to: '/scheduled-tests' },
   { key: '/new-run', icon: ListChecks, label: '新建任务', to: '/new-run' },

@@ -329,6 +329,7 @@ export type FullModelCheckRequest = {
   include_error_probe?: boolean;
   include_thinking?: boolean;
   include_vision?: boolean;
+  include_capability_suite?: boolean;
   timeout_seconds?: number;
 };
 
