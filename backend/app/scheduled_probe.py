@@ -15,6 +15,11 @@ EXPECTED_CLAUDE_PROBE_LABELS = {
     "unexpected_error_response",
     "thinking_adaptive_enabled_wrong_error",
 }
+PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL = "provider_temporarily_unavailable"
+TEMPORARY_PROVIDER_UNAVAILABLE_PATTERN = re.compile(
+    r"\b503\b|service unavailable|no available channel|overloaded|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable",
+    re.IGNORECASE,
+)
 BLOCKING_SCHEDULED_PROBE_LABELS = {
     "thinking_adaptive_not_supported",
     "thinking_temperature_not_rejected",
@@ -26,6 +31,29 @@ NATIVE_PARAMETER_UNSUPPORTED_PATTERN = re.compile(
     r"400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool",
     re.IGNORECASE,
 )
+
+
+def provider_temporarily_unavailable(error_text: str | None, *, http_status: Any | None = None) -> bool:
+    text = str(error_text or "")
+    if http_status is not None:
+        text = f"{http_status} {text}"
+    return bool(TEMPORARY_PROVIDER_UNAVAILABLE_PATTERN.search(text))
+
+
+def _probe_temporarily_unavailable(item: dict[str, Any]) -> bool:
+    labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
+    if PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL in labels:
+        return True
+    return provider_temporarily_unavailable(str(item.get("error") or ""))
+
+
+def _all_probe_labels_are_temporarily_unavailable(model_requests: list[dict[str, Any]], labels: set[str]) -> bool:
+    if not model_requests:
+        return False
+    non_temp_labels = labels - {PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL}
+    if non_temp_labels:
+        return False
+    return all(_probe_temporarily_unavailable(item) for item in model_requests)
 
 
 def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
@@ -108,9 +136,11 @@ def _scheduled_probe_display_title(item: dict[str, Any]) -> str:
 
 
 def _probe_status_text(item: dict[str, Any]) -> str:
+    labels = item.get("labels") if isinstance(item.get("labels"), list) else []
+    if PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL in {str(label) for label in labels}:
+        return "上游暂不可用"
     if item.get("error"):
         return "请求错误"
-    labels = item.get("labels") if isinstance(item.get("labels"), list) else []
     return "异常" if labels else "正常"
 
 
@@ -150,6 +180,13 @@ def scheduled_probe_classification(
     provider_hint = scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels)
     probe_count = len({str(item.get("key") or "") for item in model_requests if str(item.get("key") or "")}) or len(model_requests)
     probe_count_text = f"{probe_count} 项" if probe_count else "所选"
+    if _all_probe_labels_are_temporarily_unavailable(model_requests, label_set):
+        return {
+            "status": "provider_temporarily_unavailable",
+            "label": "上游资源暂不可用",
+            "reason": "本轮巡检无有效判定：上游资源暂不可用或资源池暂无可用通道，已跳过真伪/协议异常告警。",
+            "score": max(normalized_score, 90),
+        }
     if _scheduled_probe_all_parameter_unsupported(model_requests):
         return {
             "status": "aws_resource",
@@ -204,6 +241,8 @@ def scheduled_probe_needs_ai_judge(model_requests: list[dict[str, Any]], labels:
     if not model_requests:
         return False
     label_set = {str(label) for label in labels}
+    if str(classification.get("status") or "") == "provider_temporarily_unavailable" or _all_probe_labels_are_temporarily_unavailable(model_requests, label_set):
+        return False
     if str(classification.get("status") or "") == "anomaly":
         return True
     unsupported = [_probe_parameter_unsupported(item) for item in model_requests]
@@ -243,6 +282,8 @@ def scheduled_provider_hint_from_evidence(model_requests: list[dict[str, Any]], 
         str(signature_evidence.get("relay_message_channel_type") or ""),
     ]
     joined = " ".join(types).lower()
+    if PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL in labels:
+        return "上游资源暂不可用"
     if "thinking_temperature_not_rejected" in labels or "thinking_adaptive_not_supported" in labels or "thinking_adaptive_enabled_not_rejected" in labels:
         return "疑似 adaptive thinking 中间层改写"
     if "signature_interop_failed" in labels:

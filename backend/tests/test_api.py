@@ -1854,6 +1854,16 @@ def test_score_result_validates_thinking_adaptive_enabled_expected_error() -> No
                 "content_text": "",
             },
         )
+        unavailable_score, unavailable_labels = score_result(
+            channel,
+            case,
+            {
+                "raw_response": {"error": {"message": "No available channel for model claude-sonnet-4-6 under group awsp"}},
+                "error": "Server error '503 Service Unavailable'; response body: No available channel for model claude-sonnet-4-6 under group awsp",
+                "status_code": 503,
+                "content_text": "",
+            },
+        )
         normal_score, normal_labels = score_result(
             channel,
             case,
@@ -1875,6 +1885,8 @@ def test_score_result_validates_thinking_adaptive_enabled_expected_error() -> No
     assert variant_labels == ["provider_error_variant"]
     assert wrong_error_score == 0
     assert wrong_error_labels == ["thinking_adaptive_enabled_wrong_error"]
+    assert unavailable_score == 0
+    assert unavailable_labels == ["provider_temporarily_unavailable"]
     assert normal_score == 0
     assert normal_labels == ["thinking_adaptive_enabled_not_rejected"]
 
@@ -3026,6 +3038,61 @@ def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypa
     assert "Thinking Signature 互通" in (report.markdown or "")
     assert signature_alerts[0]["evidence_summary"]["signature_source_message_id"] == "msg_bdrk_01source"
     assert signature_alerts[0]["evidence_summary"]["signature_relay_channel_type"] == "unknown"
+
+
+def test_scheduled_signature_relay_no_available_channel_does_not_create_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        run = Run(
+            id="run_signature_provider_unavailable",
+            suite_id=scheduled.suite_id,
+            name="signature unavailable",
+            mode="manual_probe",
+            test_scope="quick",
+            scheduled_test_id=scheduled.id,
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=1,
+            completed_jobs=1,
+        )
+        db.add(run)
+        scheduled.last_run_id = run.id
+        report = asyncio.run(
+            build_scheduled_probe_report(
+                SessionLocal,
+                db,
+                scheduled,
+                run.id,
+                None,
+                {
+                    "ok": False,
+                    "status": "fail",
+                    "reason": "relay 请求失败",
+                    "raw_error": "Server error '503 Service Unavailable'; response body: No available channel for model claude-sonnet-4-6 under group awsp",
+                    "error_http_status": 503,
+                    "error_stage": "relay",
+                    "relay_channel_id": "negative_sample",
+                    "steps": [{"name": "步骤 B：发送 Relay 复用请求", "status": "fail", "detail": "relay 请求失败", "excerpt": "No available channel"}],
+                },
+            )
+        )
+
+    assert report.evidence["labels"] == ["provider_temporarily_unavailable"]
+    assert "signature_interop_failed" not in report.evidence["labels"]
+
+    alerts = asyncio.run(create_alerts_for_run(SessionLocal, "run_signature_provider_unavailable", schedule["id"]))
+    with TestClient(app) as client:
+        pending_alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    assert alerts == []
+    assert pending_alerts == []
 
 
 def test_scheduled_alert_policy_uses_grade_score_and_red_flag_settings(monkeypatch) -> None:
@@ -8054,6 +8121,46 @@ def test_scheduled_probe_classification_returns_aws_resource_for_three_parameter
     assert "参数不支持" in result["reason"]
 
 
+def test_scheduled_probe_classification_treats_no_available_channel_as_no_verdict() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {
+                "key": "thinking_temperature",
+                "labels": ["provider_temporarily_unavailable"],
+                "error": "Server error '503 Service Unavailable'; response body: No available channel for model claude-sonnet-4-6 under group awsp",
+            },
+            {
+                "key": "web_search",
+                "labels": ["provider_temporarily_unavailable"],
+                "error": "503 Service Unavailable: No available channel for model claude-sonnet-4-6",
+            },
+            {
+                "key": "thinking_adaptive_enabled",
+                "labels": ["provider_temporarily_unavailable"],
+                "error": "temporarily unavailable",
+            },
+        ],
+        signature_evidence={"ok": True},
+        labels=["provider_temporarily_unavailable"],
+        score=0,
+    )
+
+    from app.services import scheduled_probe_needs_ai_judge
+
+    assert result["status"] == "provider_temporarily_unavailable"
+    assert result["label"] == "上游资源暂不可用"
+    assert "本轮巡检无有效判定" in result["reason"]
+    assert scheduled_probe_needs_ai_judge(
+        [
+            {"key": "thinking_temperature", "labels": ["provider_temporarily_unavailable"], "error": "503 Service Unavailable"},
+            {"key": "web_search", "labels": ["provider_temporarily_unavailable"], "error": "No available channel"},
+            {"key": "thinking_adaptive_enabled", "labels": ["provider_temporarily_unavailable"], "error": "temporarily unavailable"},
+        ],
+        ["provider_temporarily_unavailable"],
+        result,
+    ) is False
+
+
 def test_scheduled_probe_classifies_partial_parameter_unsupported_as_anomaly() -> None:
     result = scheduled_probe_classification(
         model_requests=[
@@ -8126,6 +8233,64 @@ def test_scheduled_probe_classifies_all_parameter_unsupported_as_aws_resource_wi
     assert alerts == []
     assert updated_schedule["latest_probe_summary"]["classification_status"] == "aws_resource"
     assert updated_schedule["latest_probe_summary"]["classification_label"] == "AWS 资源"
+    assert pending_alerts == []
+
+
+def test_scheduled_probe_no_available_channel_does_not_create_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        run = Run(
+            id="run_provider_temporarily_unavailable",
+            suite_id=scheduled.suite_id,
+            name="provider temporarily unavailable",
+            mode="manual_probe",
+            test_scope="quick",
+            scheduled_test_id=scheduled.id,
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=3,
+            completed_jobs=3,
+        )
+        db.add(run)
+        scheduled.last_run_id = run.id
+        err = "Server error '503 Service Unavailable'; response body: No available channel for model claude-sonnet-4-6 under group awsp"
+        model_payload = {
+            "run": run,
+            "results": [
+                {"key": "thinking_temperature", "title": "Adaptive thinking 协议", "run_id": run.id, "result_id": "res_a", "labels": ["provider_temporarily_unavailable"], "score": 0, "error": err},
+                {"key": "web_search", "title": "Web Search tool", "run_id": run.id, "result_id": "res_b", "labels": ["provider_temporarily_unavailable"], "score": 0, "error": err},
+                {"key": "thinking_adaptive_enabled", "title": "Adaptive thinking effort", "run_id": run.id, "result_id": "res_c", "labels": ["provider_temporarily_unavailable"], "score": 0, "error": err},
+            ],
+        }
+        report = asyncio.run(
+            build_scheduled_probe_report(
+                SessionLocal,
+                db,
+                scheduled,
+                run.id,
+                model_payload,
+                {"ok": True, "status": "skipped", "reason": "本计划未选择 Thinking Signature 互通模块"},
+            )
+        )
+        assert report.evidence["classification_status"] == "provider_temporarily_unavailable"
+        assert report.grade == "A"
+        assert report.final_score == 90
+
+    alerts = asyncio.run(create_alerts_for_run(SessionLocal, "run_provider_temporarily_unavailable", schedule["id"]))
+    with TestClient(app) as client:
+        updated_schedule = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
+        pending_alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
+
+    assert alerts == []
+    assert updated_schedule["latest_probe_summary"]["classification_status"] == "provider_temporarily_unavailable"
+    assert "本轮巡检无有效判定" in updated_schedule["latest_probe_summary"]["classification_reason"]
     assert pending_alerts == []
 
 

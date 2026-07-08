@@ -27,7 +27,9 @@ from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, Chann
 from .redaction import merge_redacted_config, redact_secrets, redact_text
 from .scheduled_probe import (
     EXPECTED_CLAUDE_PROBE_LABELS,
+    PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL,
     _probe_parameter_unsupported,
+    provider_temporarily_unavailable,
     scheduled_probe_classification,
     scheduled_probe_markdown,
     scheduled_probe_needs_ai_judge,
@@ -4974,6 +4976,21 @@ async def _run_claude_code_signature_interop_probe(
                 channel.auth_config_encrypted = original_auth
         ok = bool(payload.get("ok"))
         error_excerpt = str(payload.get("reason") or payload.get("error") or "")
+        if not ok and _signature_temporarily_unavailable(payload):
+            return {
+                **config,
+                "section": "signature",
+                "status": "warning",
+                "score": 0.0,
+                "labels": [PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL],
+                "run_id": None,
+                "result_id": None,
+                "message_id": payload.get("relay_message_id") or payload.get("source_message_id"),
+                "request_id": payload.get("relay_request_id") or payload.get("source_request_id"),
+                "request_protocol": None,
+                "provider_endpoint": payload.get("relay_endpoint"),
+                "evidence_excerpt": error_excerpt[:1200],
+            }
         if not ok and _claude_probe_is_not_supported({"labels": ["signature_interop_failed"], "evidence_excerpt": error_excerpt}):
             return {
                 **config,
@@ -5004,7 +5021,8 @@ async def _run_claude_code_signature_interop_probe(
             "evidence_excerpt": error_excerpt[:1200],
         }
     except Exception as exc:
-        probe = {**_claude_code_failed_probe(config, str(exc)), "labels": ["signature_interop_failed"]}
+        labels = [PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL] if provider_temporarily_unavailable(str(exc)) else ["signature_interop_failed"]
+        probe = {**_claude_code_failed_probe(config, str(exc)), "labels": labels}
         return _claude_code_normalize_optional_probe(probe)
 
 
@@ -5898,11 +5916,25 @@ def _attach_signature_interop_result_to_reports(
     signature_result: dict[str, Any],
 ) -> None:
     reports = db.scalars(select(Report).where(Report.run_id == run_id, Report.channel_id == relay_channel_id)).all()
+    signature_unavailable = _signature_temporarily_unavailable(signature_result)
+    if signature_unavailable:
+        signature_labels = sorted(
+            {
+                *(str(label) for label in signature_result.get("labels", []) if isinstance(label, str)),
+                PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL,
+            }
+        )
+        signature_result = {**signature_result, "labels": signature_labels}
     for report in reports:
         evidence = dict(report.evidence or {})
         labels = sorted({str(label) for label in evidence.get("labels", []) if isinstance(label, str)})
         labels = sorted(set(labels).union(str(label) for label in signature_result.get("labels", []) if isinstance(label, str)))
-        if signature_result.get("status") != "skipped" and not signature_result.get("ok") and "signature_interop_failed" not in labels:
+        if (
+            signature_result.get("status") != "skipped"
+            and not signature_result.get("ok")
+            and not signature_unavailable
+            and "signature_interop_failed" not in labels
+        ):
             labels.append("signature_interop_failed")
         evidence["labels"] = sorted(labels)
         evidence["red_flags"] = sorted(set(labels).intersection(ALERT_RED_FLAGS))
@@ -5910,7 +5942,7 @@ def _attach_signature_interop_result_to_reports(
         evidence["signature_interop"] = _signature_interop_report_evidence(signature_result)
         safe_evidence = redact_secrets(evidence)
         report.evidence = safe_evidence
-        if signature_result.get("status") != "skipped" and not signature_result.get("ok"):
+        if signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_unavailable:
             report.grade = worse_grade(report.grade, "D")
             report.summary = f"{report.summary or _summary_for(report.grade)} Signature 互通检测未通过，仅表示 ClaudeCode/原生 thinking 链路不可验证。"
         channel = db.get(Channel, report.channel_id)
@@ -5960,6 +5992,20 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "fallback_note": result.get("fallback_note") or SIGNATURE_FALLBACK_NOTE,
         "steps": result.get("steps") or [],
     }
+
+
+def _signature_temporarily_unavailable(result: dict[str, Any] | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    text_parts = [
+        str(result.get("reason") or ""),
+        str(result.get("raw_error") or ""),
+        str(result.get("error") or ""),
+    ]
+    for step in result.get("steps") or []:
+        if isinstance(step, dict):
+            text_parts.extend([str(step.get("detail") or ""), str(step.get("excerpt") or ""), str(step.get("error") or "")])
+    return provider_temporarily_unavailable("\n".join(text_parts), http_status=result.get("error_http_status"))
 
 
 def _hydrate_signature_channel_names(db: Session, signature: dict[str, Any]) -> dict[str, Any]:
@@ -6126,7 +6172,10 @@ async def build_scheduled_probe_report(
     signature_evidence = _signature_interop_report_evidence(signature_result or {})
     _hydrate_signature_channel_names(db, signature_evidence)
     labels.update(label for label in (signature_result or {}).get("labels", []) if isinstance(label, str))
-    if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok"):
+    signature_unavailable = _signature_temporarily_unavailable(signature_result or {})
+    if signature_unavailable:
+        labels.add(PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL)
+    if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_unavailable:
         labels.add("signature_interop_failed")
     modules = scheduled_patrol_modules(scheduled)
     probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
@@ -7010,6 +7059,8 @@ def report_needs_alert(report: Report, labels: list[str] | None = None, schedule
     classification_status = evidence.get("classification_status")
     if scheduled and scheduled.test_scope == "scheduled_probe" and classification_status in {"claude", "aws_resource", "claude_signature"}:
         return False
+    if scheduled and scheduled.test_scope == "scheduled_probe" and _scheduled_probe_only_temporarily_unavailable(evidence, labels):
+        return False
     if scheduled and scheduled.test_scope == "scheduled_probe":
         return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels)) or (report.final_score < 90 and bool(labels))
     if not scheduled:
@@ -7019,6 +7070,20 @@ def report_needs_alert(report: Report, labels: list[str] | None = None, schedule
     score_alert = scheduled.alert_score_threshold is not None and report.final_score <= scheduled.alert_score_threshold
     red_flag_alert = scheduled.alert_red_flags_enabled and bool(ALERT_RED_FLAGS.intersection(labels))
     return grade_alert or score_alert or red_flag_alert
+
+
+def _scheduled_probe_only_temporarily_unavailable(evidence: dict[str, Any], labels: list[str]) -> bool:
+    if not labels or set(labels) != {PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL}:
+        return False
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    if isinstance(evidence.get("model_request"), dict):
+        model_requests = [evidence["model_request"], *[item for item in model_requests if isinstance(item, dict)]]
+    signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    has_model_unavailable = any(
+        isinstance(item, dict) and provider_temporarily_unavailable(str(item.get("error") or ""))
+        for item in model_requests
+    )
+    return has_model_unavailable or _signature_temporarily_unavailable(signature)
 
 
 def alert_dedupe_key(report: Report, labels: list[str], scheduled: ScheduledChannelTest | None = None) -> str:
@@ -8948,6 +9013,9 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         "provider_model": result_payload.get("model"),
         "signature_interop": result_payload,
     }
+    result_labels = [] if result_payload.get("ok") else (
+        [PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL] if _signature_temporarily_unavailable(result_payload) else ["signature_interop_failed"]
+    )
     result = Result(
         id=new_id("res"),
         run_id=run.id,
@@ -8966,7 +9034,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         raw_response=result_payload,
         metrics={"status_code": 200 if result_payload.get("ok") else 500, "error_type": "signature_interop" if (error or not result_payload.get("ok")) else None},
         score=100 if result_payload.get("ok") else 0,
-        labels=[] if result_payload.get("ok") else ["signature_interop_failed"],
+        labels=result_labels,
     )
     run.completed_jobs = 1
     run.finished_at = finished_at
@@ -9781,6 +9849,8 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         unexpected_label = str(rules.get("expected_error_unexpected_label") or "unexpected_error_response")
         if not error_text:
             return 0.0, [missing_label]
+        if provider_temporarily_unavailable(error_text):
+            return 0.0, [PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL]
         required_all = [_lower_text(item) for item in rules.get("expected_error_required_all", []) if _lower_text(item)]
         if required_all:
             lowered_error = _lower_text(error_text)
@@ -11048,6 +11118,7 @@ LABEL_EXPLANATIONS = {
     "thinking_temperature_not_rejected": "Adaptive thinking/旧 temperature 冲突探针未命中预期拒绝，疑似中间层改写、吞参或非原生协议。",
     "thinking_adaptive_enabled_not_rejected": "Adaptive thinking effort 探针未命中预期拒绝，疑似中间层改写、吞参或非原生 AWS/Claude 路径。",
     "thinking_adaptive_enabled_wrong_error": "上游返回了错误，但错误内容不是 adaptive thinking effort 目标参数的原生拒绝。",
+    "provider_temporarily_unavailable": "上游资源暂不可用、过载或资源池暂无可用通道；本轮样本不用于 Claude 真伪/协议异常判断，且不触发自动巡检告警。",
     "signature_source_missing": "未找到可用的参考 source 渠道，无法执行 Thinking Signature 互通检测。",
     "provider_error_variant": "上游返回了等价的参数不支持原生约束错误，保留差异标签。",
     "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
