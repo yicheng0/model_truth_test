@@ -1,19 +1,13 @@
 import { useMemo, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Descriptions, Form, Input, Space, Table, Tag, Typography, message } from 'antd';
+import { Alert, AutoComplete, Button, Card, Col, Descriptions, Form, Input, Progress, Radio, Row, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { ShieldCheck } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import type { OpenAIResourceCheckRequest, OpenAIResourceCheckResult, OpenAIResourceEvidenceItem } from '../types';
+import { capabilityState, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, resourceFamilyMeta, type OpenAIResourceFormValues } from '../openAIResourceCheckUtils';
 
-type FormValues = {
-  base_url?: string;
-  api_key: string;
-  organization?: string;
-  project?: string;
-  model?: string;
-  include_response_probe?: boolean;
-};
+type FormValues = OpenAIResourceFormValues;
 
 function prettyJson(value: unknown) {
   return JSON.stringify(value ?? null, null, 2);
@@ -23,6 +17,8 @@ function classificationTag(classification: string) {
   const map: Record<string, { color: string; text: string }> = {
     official_openai_direct_likely: { color: 'green', text: '官方直连高一致' },
     openai_compatible_proxy: { color: 'orange', text: 'OpenAI-compatible 中转' },
+    codex_compatible_relay_likely: { color: 'purple', text: '疑似 Codex-compatible 中转' },
+    hybrid_or_translated_gateway: { color: 'geekblue', text: '混合 / 协议转换网关' },
     suspicious_proxy_or_rewrite: { color: 'red', text: '疑似代理改写' },
     invalid_or_unverified: { color: 'default', text: '未验证' },
   };
@@ -31,7 +27,7 @@ function classificationTag(classification: string) {
 }
 
 function directnessTag(value?: string | null) {
-  if (value === 'official_direct') return <Tag color="green">官方直连</Tag>;
+  if (value === 'official_direct' || value === 'official_openai_host') return <Tag color="green">官方 OpenAI host</Tag>;
   if (value === 'relay_or_proxy') return <Tag color="blue">中转 / 代理</Tag>;
   return <Tag>{value || '-'}</Tag>;
 }
@@ -69,6 +65,19 @@ const evidenceColumns: ColumnsType<OpenAIResourceEvidenceItem> = [
   },
 ];
 
+const capabilityLabels: Record<string, string> = {
+  models: 'Models',
+  chat_completions: 'Chat Completions',
+  responses: 'Responses',
+  responses_stream: 'Responses SSE',
+  codex_metadata: 'Codex 元数据',
+  tools: '工具调用',
+  reasoning_controls: 'Reasoning 参数',
+  multi_turn: '连续会话',
+  codex_client_payload: 'Codex Agent 请求',
+  compact: 'Responses Compact',
+};
+
 export default function OpenAIResourceCheck() {
   const [form] = Form.useForm<FormValues>();
   const [result, setResult] = useState<OpenAIResourceCheckResult | null>(null);
@@ -78,21 +87,14 @@ export default function OpenAIResourceCheck() {
 
   const runCheck = useMutation({
     mutationFn: (values: FormValues) => {
-      const payload: OpenAIResourceCheckRequest = {
-        base_url: values.base_url?.trim() || 'https://api.openai.com/v1',
-        api_key: values.api_key.trim(),
-        organization: values.organization?.trim() || null,
-        project: values.project?.trim() || null,
-        model: values.model?.trim() || null,
-        include_response_probe: Boolean(values.include_response_probe),
-      };
+      const payload: OpenAIResourceCheckRequest = openAIResourcePayload(values);
       return api.openAIResourceCheck(payload);
     },
     onSuccess: (payload) => {
       setResult(payload);
       setRequestError(null);
       form.setFieldValue('api_key', '');
-      message.success('OpenAI 官转检测完成，API Key 输入框已清空');
+      message.success('资源检测完成，API Key 输入框已清空');
     },
     onError: (error) => {
       const detail = getErrorMessage(error);
@@ -106,9 +108,9 @@ export default function OpenAIResourceCheck() {
     <Space direction="vertical" size={18} className="full-width">
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>OpenAI 官转/中转检测</Typography.Title>
+          <Typography.Title level={2}>OpenAI API / Codex 资源检测</Typography.Title>
           <Typography.Paragraph type="secondary">
-            区分连接形态和上游一致性：非官方 host 会被标记为中转/代理，但会继续通过 Models、Chat、Responses 与校验错误探针判断是否高度像官方 OpenAI 上游。
+            从连接形态、OpenAI API 一致性和 Codex 客户端兼容性三个维度进行黑盒检测。结果是特征推断，不代表确认某个 OAuth 账户或官方订阅来源。
           </Typography.Paragraph>
         </div>
       </div>
@@ -117,14 +119,14 @@ export default function OpenAIResourceCheck() {
         showIcon
         type="warning"
         message="截图安全提醒"
-        description="不要截图或传播 API Key；如果密钥已经出现在截图、聊天或日志中，请立即在对应平台撤销并轮换。检测完成或失败后本页面会自动清空 API Key 输入框。"
+        description="只填写目标网关提供的 API Key。不要提交 ChatGPT OAuth token、refresh token 或 auth.json，也不要截图传播密钥；检测结束后输入框会自动清空。"
       />
 
       <Card title={<span className="card-title-with-icon"><ShieldCheck size={18} />联网验证</span>} bordered={false}>
         <Form
           form={form}
           layout="vertical"
-          initialValues={{ base_url: 'https://api.openai.com/v1', include_response_probe: true, model: 'gpt-4.1-mini' }}
+          initialValues={{ base_url: 'https://api.openai.com/v1', detection_mode: 'auto', probe_depth: 'quick' }}
           onFinish={(values) => runCheck.mutate(values)}
         >
           <Form.Item name="base_url" label="Base URL">
@@ -141,12 +143,30 @@ export default function OpenAIResourceCheck() {
               <Input placeholder="proj_..." />
             </Form.Item>
             <Form.Item name="model" label="探针模型（可选）">
-              <Input placeholder="优先用填写模型；否则从 /models 自动选择" />
+              <AutoComplete
+                allowClear
+                options={OPENAI_COMMON_MODEL_OPTIONS}
+                placeholder="留空自动选择，或选择/输入模型"
+                style={{ minWidth: 280 }}
+              />
             </Form.Item>
           </Space>
-          <Form.Item name="include_response_probe" valuePropName="checked">
-            <Checkbox>执行 POST /responses 有效探针（使用 max_output_tokens=16）</Checkbox>
-          </Form.Item>
+          <Space size={24} wrap align="start">
+            <Form.Item name="detection_mode" label="检测模式">
+              <Select style={{ width: 220 }} options={[
+                { value: 'auto', label: '自动识别' },
+                { value: 'openai_api', label: 'OpenAI API' },
+                { value: 'codex_relay', label: 'Codex 逆向 / 中转' },
+              ]} />
+            </Form.Item>
+            <Form.Item name="probe_depth" label="检测深度">
+              <Radio.Group optionType="button" buttonStyle="solid" options={[
+                { value: 'quick', label: '快速检测' },
+                { value: 'deep', label: '深度检测' },
+              ]} />
+            </Form.Item>
+          </Space>
+          <Alert type="info" showIcon message="快速检测通常 30–60 秒；深度检测增加工具调用、Reasoning、连续会话和 Compact 探针，可能消耗更多 token。" className="form-inline-alert" />
           <Button type="primary" htmlType="submit" loading={runCheck.isPending}>
             开始检测
           </Button>
@@ -158,9 +178,19 @@ export default function OpenAIResourceCheck() {
       {result ? (
         <Card title="检测结果" bordered={false}>
           <Space direction="vertical" size={16} className="full-width">
+            <Row gutter={[12, 12]}>
+              <Col xs={24} md={8}><Card size="small"><Statistic title="连接形态" valueRender={() => directnessTag(result.connection_type || result.directness)} /></Card></Col>
+              <Col xs={24} md={8}><Card size="small"><Statistic title="资源类型" valueRender={() => { const meta = resourceFamilyMeta(result.resource_family); return <Tag color={meta.color}>{meta.text}</Tag>; }} /></Card></Col>
+              <Col xs={24} md={8}><Card size="small"><Statistic title="来源置信度" value={result.source_confidence ?? result.confidence_score} suffix="/ 100" /></Card></Col>
+            </Row>
+            <Row gutter={[12, 12]}>
+              <Col xs={24} md={12}><Card size="small" title="OpenAI API 一致分"><Progress percent={Math.round(result.openai_api_score ?? result.upstream_score ?? 0)} /></Card></Col>
+              <Col xs={24} md={12}><Card size="small" title="Codex 兼容分"><Progress percent={Math.round(result.codex_compatibility_score ?? 0)} strokeColor="#722ed1" /></Card></Col>
+            </Row>
             <Descriptions bordered size="small" column={2}>
               <Descriptions.Item label="综合分类">{classificationTag(result.classification)}</Descriptions.Item>
               <Descriptions.Item label="综合置信分">{result.confidence_score}</Descriptions.Item>
+              <Descriptions.Item label="检测深度">{result.probe_depth === 'deep' ? '深度检测' : '快速检测'}</Descriptions.Item>
               <Descriptions.Item label="连接形态">{directnessTag(result.directness)}</Descriptions.Item>
               <Descriptions.Item label="上游一致性">{upstreamTag(result.upstream_assessment)}</Descriptions.Item>
               <Descriptions.Item label="上游分">{result.upstream_score ?? '-'}</Descriptions.Item>
@@ -173,6 +203,14 @@ export default function OpenAIResourceCheck() {
               <Descriptions.Item label="Chat Endpoint" span={2}>{result.chat_endpoint || '-'}</Descriptions.Item>
               <Descriptions.Item label="Responses Endpoint" span={2}>{result.response_endpoint || '-'}</Descriptions.Item>
             </Descriptions>
+            <Card size="small" title="能力矩阵">
+              <Space wrap size={[8, 8]}>
+                {Object.entries(result.capabilities ?? {}).map(([key, value]) => {
+                  const state = capabilityState(value);
+                  return <Tag key={key} color={state.color}>{capabilityLabels[key] || key}: {state.text}</Tag>;
+                })}
+              </Space>
+            </Card>
             <Alert type={result.upstream_assessment === 'official_upstream_likely' ? 'success' : 'warning'} showIcon message={result.summary} />
             <Space wrap>
               {(result.labels.length ? result.labels : ['no_blocking_labels']).map((label) => (

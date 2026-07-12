@@ -348,6 +348,8 @@ class OpenAIResourceCheckCreate(BaseModel):
     project: str | None = Field(default=None, max_length=200)
     model: str | None = Field(default=None, max_length=200)
     include_response_probe: bool = False
+    detection_mode: Literal["auto", "openai_api", "codex_relay"] = "auto"
+    probe_depth: Literal["quick", "deep"] = "quick"
 
 
 class GeminiResourceCheckCreate(BaseModel):
@@ -1355,10 +1357,27 @@ class OpenAIResourceCheckRead(BaseModel):
     classification: Literal[
         "official_openai_direct_likely",
         "openai_compatible_proxy",
+        "codex_compatible_relay_likely",
+        "hybrid_or_translated_gateway",
         "suspicious_proxy_or_rewrite",
         "invalid_or_unverified",
     ]
     confidence_score: float
+    connection_type: Literal["official_openai_host", "relay_or_proxy"]
+    resource_family: Literal[
+        "official_openai_api_likely",
+        "openai_api_relay_likely",
+        "codex_compatible_relay_likely",
+        "hybrid_or_translated_gateway",
+        "openai_compatible_unverified",
+        "suspicious_rewrite",
+        "invalid_or_unverified",
+    ]
+    openai_api_score: float
+    codex_compatibility_score: float
+    source_confidence: float
+    probe_depth: Literal["quick", "deep"]
+    capabilities: dict[str, bool | None] = Field(default_factory=dict)
     directness: Literal["official_direct", "relay_or_proxy"]
     upstream_assessment: Literal[
         "official_upstream_likely",

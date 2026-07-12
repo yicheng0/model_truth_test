@@ -442,6 +442,8 @@ export type OpenAIResourceCheckRequest = {
   project?: string | null;
   model?: string | null;
   include_response_probe?: boolean;
+  detection_mode?: 'auto' | 'openai_api' | 'codex_relay';
+  probe_depth?: 'quick' | 'deep';
 };
 
 export type OpenAIResourceEvidenceItem = {
@@ -453,8 +455,15 @@ export type OpenAIResourceEvidenceItem = {
 };
 
 export type OpenAIResourceCheckResult = {
-  classification: 'official_openai_direct_likely' | 'openai_compatible_proxy' | 'suspicious_proxy_or_rewrite' | 'invalid_or_unverified' | string;
+  classification: 'official_openai_direct_likely' | 'openai_compatible_proxy' | 'codex_compatible_relay_likely' | 'hybrid_or_translated_gateway' | 'suspicious_proxy_or_rewrite' | 'invalid_or_unverified' | string;
   confidence_score: number;
+  connection_type?: 'official_openai_host' | 'relay_or_proxy' | string;
+  resource_family?: 'official_openai_api_likely' | 'openai_api_relay_likely' | 'codex_compatible_relay_likely' | 'hybrid_or_translated_gateway' | 'openai_compatible_unverified' | 'suspicious_rewrite' | 'invalid_or_unverified' | string;
+  openai_api_score?: number;
+  codex_compatibility_score?: number;
+  source_confidence?: number;
+  probe_depth?: 'quick' | 'deep' | string;
+  capabilities?: Record<string, boolean | null>;
   directness?: 'official_direct' | 'relay_or_proxy' | string;
   upstream_assessment?: 'official_upstream_likely' | 'openai_compatible_unverified' | 'suspicious_rewrite' | 'invalid_or_unverified' | string;
   upstream_score?: number;

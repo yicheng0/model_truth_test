@@ -2411,7 +2411,15 @@ async def create_model_request_test(db: Session, channel: Channel, data: ModelRe
 
 
 OPENAI_OFFICIAL_BASE_URL = "https://api.openai.com/v1"
-OPENAI_MODEL_PREFERENCE = ("gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o-mini")
+OPENAI_MODEL_PREFERENCE = (
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol",
+    "gpt-5.6",
+    "gpt-5.5",
+    "gpt-5.4-mini",
+    "gpt-5.4",
+)
 OPENAI_SAFE_RESPONSE_HEADERS = (
     "x-request-id",
     "openai-request-id",
@@ -2437,6 +2445,8 @@ OPENAI_ERROR_CODES = {
     "missing_required_parameter",
     "unknown_parameter",
 }
+OPENAI_CODEX_MODEL_MARKERS = ("codex", "-sol", "-terra", "-luna")
+OPENAI_CODEX_QUOTA_MARKERS = ("codex", "5-hour", "5 hour", "weekly limit", "usage limit", "subscription")
 
 
 def _normalize_openai_resource_base_url(value: str | None) -> str:
@@ -2573,6 +2583,34 @@ def _openai_collect_response(raw_evidence: dict[str, Any], key: str, response: h
     )
     raw_evidence[key] = safe
     return safe
+
+
+def _openai_response_ok(response: httpx.Response, payload: Any) -> bool:
+    return response.status_code == 200 and isinstance(payload, dict) and str(payload.get("object") or "").startswith("response") and bool(payload.get("id"))
+
+
+def _openai_sse_event_types(response: httpx.Response) -> list[str]:
+    event_types: list[str] = []
+    for line in response.text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            continue
+        event_type = payload.get("type") if isinstance(payload, dict) else None
+        if isinstance(event_type, str) and event_type:
+            event_types.append(event_type)
+    return event_types
+
+
+def _openai_codex_quota_signal(payload: Any) -> bool:
+    error = _openai_payload_error(payload)
+    text = " ".join(str(error.get(key) or "") for key in ("message", "type", "code")).lower()
+    return bool(text) and any(marker in text for marker in OPENAI_CODEX_QUOTA_MARKERS)
 
 
 GEMINI_OFFICIAL_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -3446,7 +3484,9 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
 
     models_url = _openai_models_url(base_url)
     chat_url = _openai_chat_completions_url(base_url)
-    response_url = _openai_responses_url(base_url) if data.include_response_probe else None
+    run_codex_probes = data.detection_mode != "openai_api" and ("detection_mode" in data.model_fields_set or "probe_depth" in data.model_fields_set)
+    include_response_probe = data.include_response_probe or "detection_mode" in data.model_fields_set or "probe_depth" in data.model_fields_set
+    response_url = _openai_responses_url(base_url) if include_response_probe else None
     validation_url = _openai_responses_url(base_url)
     raw_evidence.update({"models_endpoint": models_url, "chat_endpoint": chat_url, "response_endpoint": response_url, "validation_endpoint": validation_url})
 
@@ -3459,6 +3499,22 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
     selected_model: str | None = None
     model_selection_reason = "none"
     model_ids: list[str] = []
+    capabilities: dict[str, bool | None] = {
+        "models": False,
+        "chat_completions": False,
+        "responses": False,
+        "responses_stream": False,
+        "codex_metadata": False,
+        "tools": None,
+        "reasoning_controls": None,
+        "multi_turn": None,
+        "codex_client_payload": None,
+        "compact": None,
+    }
+    codex_stream_ok = False
+    codex_metadata_ok = False
+    codex_quota_signal = False
+    basic_response_id: str | None = None
 
     timeout = httpx.Timeout(connect=10, read=30, write=10, pool=10)
     try:
@@ -3491,6 +3547,7 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
             first_model = models_data[0] if isinstance(models_data, list) and models_data else None
             first_model_has_id = first_model is None or (isinstance(first_model, dict) and bool(first_model.get("id")))
             models_ok = isinstance(models_payload, dict) and models_payload.get("object") == "list" and isinstance(models_data, list) and first_model_has_id
+            capabilities["models"] = models_ok
             if models_ok:
                 evidence.append(_openai_evidence("Models", "models_shape", "ok", "模型列表符合 OpenAI list object 形态，且模型项包含 id。", models_safe["shape"]))
             else:
@@ -3498,6 +3555,9 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                 evidence.append(_openai_evidence("Models", "models_shape", "fail", "模型列表响应不符合 object=list 且 data=[]/model.id 的形态。", models_safe["shape"]))
 
             selected_model, model_selection_reason = _choose_openai_probe_model(data.model, model_ids)
+            if any(any(marker in model.lower() for marker in OPENAI_CODEX_MODEL_MARKERS) for model in model_ids):
+                labels.add("codex_model_catalog_signal")
+                evidence.append(_openai_evidence("Models", "codex_model_catalog", "info", "模型目录包含 Codex-oriented 模型标识；该信号不能单独证明资源来源。", None))
             raw_evidence["model_selection"] = {"requested_model": data.model, "selected_model": selected_model, "reason": model_selection_reason, "model_count": len(model_ids)}
             if selected_model:
                 evidence.append(_openai_evidence("Models", "selected_model", "ok", "已选择模型执行 Chat/Responses 有效探针。", {"model": selected_model, "reason": model_selection_reason}))
@@ -3519,6 +3579,7 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                 chat_safe = _openai_collect_response(raw_evidence, "chat_probe", chat_response, chat_latency_ms, chat_payload)
                 choices = chat_payload.get("choices") if isinstance(chat_payload, dict) else None
                 chat_ok = chat_response.status_code == 200 and isinstance(chat_payload, dict) and chat_payload.get("object") == "chat.completion" and isinstance(choices, list)
+                capabilities["chat_completions"] = chat_ok
                 if chat_ok:
                     evidence.append(_openai_evidence("Chat", "chat_probe", "ok", "POST /chat/completions 返回 OpenAI Chat Completions 形态。", chat_safe["shape"]))
                 elif _openai_error_looks_official(chat_payload):
@@ -3528,7 +3589,7 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                     labels.add("chat_shape_mismatch")
                     evidence.append(_openai_evidence("Chat", "chat_probe", "fail", "Chat 探针未返回 OpenAI Chat Completions 形态。", chat_safe["shape"]))
 
-                if data.include_response_probe and response_url:
+                if include_response_probe and response_url:
                     response_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16}
                     started = time.perf_counter()
                     response_probe = await client.post(response_url, headers=headers, json=response_body)
@@ -3541,6 +3602,8 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                         response_payload = {"_non_json_excerpt": response_probe.text[:500]}
                     response_safe = _openai_collect_response(raw_evidence, "response_probe", response_probe, response_latency_ms, response_payload)
                     response_probe_ok = response_probe.status_code == 200 and isinstance(response_payload, dict) and str(response_payload.get("object") or "").startswith("response") and bool(response_payload.get("id"))
+                    basic_response_id = str(response_payload.get("id")) if response_probe_ok else None
+                    capabilities["responses"] = response_probe_ok
                     if response_probe_ok:
                         evidence.append(_openai_evidence("Responses", "responses_probe", "ok", "POST /responses 返回 OpenAI Responses API 形态。", response_safe["shape"]))
                     elif _openai_error_looks_official(response_payload):
@@ -3550,7 +3613,159 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                         labels.add("responses_probe_failed")
                         evidence.append(_openai_evidence("Responses", "responses_probe", "warning", "POST /responses 未返回预期 Responses API 形态。", response_safe["shape"]))
 
-            validation_body = {"model": selected_model or data.model or "gpt-4.1-mini", "input": "ok", "max_output_tokens": 0}
+                if run_codex_probes:
+                    stream_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16, "stream": True}
+                    started = time.perf_counter()
+                    stream_response = await client.post(_openai_responses_url(base_url), headers=headers, json=stream_body)
+                    stream_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += stream_latency_ms
+                    stream_events = _openai_sse_event_types(stream_response)
+                    codex_stream_ok = stream_response.status_code == 200 and "response.created" in stream_events and "response.completed" in stream_events
+                    capabilities["responses_stream"] = codex_stream_ok
+                    raw_evidence["responses_stream"] = redact_secrets({
+                        "status_code": stream_response.status_code,
+                        "latency_ms": stream_latency_ms,
+                        "headers": _safe_openai_response_headers(stream_response.headers),
+                        "event_types": stream_events,
+                    })
+                    if codex_stream_ok:
+                        labels.add("codex_stream_shape")
+                        evidence.append(_openai_evidence("Codex", "responses_stream", "ok", "Responses SSE 包含创建与完成事件，符合 Codex 客户端所需流式基础形态。", stream_events))
+                    else:
+                        labels.add("responses_stream_incomplete")
+                        evidence.append(_openai_evidence("Codex", "responses_stream", "warning", "Responses SSE 缺少创建或完成事件。", stream_events))
+
+                    probe_id = f"probe-{uuid.uuid4()}"
+                    metadata_headers = dict(headers)
+                    metadata_headers.update({
+                        "x-codex-window-id": probe_id,
+                        "x-codex-turn-metadata": json.dumps({"request_kind": "turn", "thread_id": probe_id}),
+                        "originator": "codex-resource-probe",
+                    })
+                    metadata_body = {
+                        "model": selected_model,
+                        "input": "Reply with exactly: ok",
+                        "max_output_tokens": 16,
+                        "client_metadata": {
+                            "x-codex-installation-id": probe_id,
+                            "x-codex-window-id": probe_id,
+                            "session_id": probe_id,
+                            "thread_id": probe_id,
+                        },
+                    }
+                    started = time.perf_counter()
+                    metadata_response = await client.post(_openai_responses_url(base_url), headers=metadata_headers, json=metadata_body)
+                    metadata_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += metadata_latency_ms
+                    try:
+                        metadata_payload: Any = metadata_response.json()
+                    except ValueError:
+                        metadata_payload = {"_non_json_excerpt": metadata_response.text[:500]}
+                    metadata_safe = _openai_collect_response(raw_evidence, "codex_metadata", metadata_response, metadata_latency_ms, metadata_payload)
+                    codex_metadata_ok = _openai_response_ok(metadata_response, metadata_payload)
+                    capabilities["codex_metadata"] = codex_metadata_ok
+                    if codex_metadata_ok:
+                        labels.add("codex_metadata_accepted")
+                        evidence.append(_openai_evidence("Codex", "metadata_acceptance", "ok", "网关接受了匿名 Codex-compatible 会话元数据。", metadata_safe["shape"]))
+                    else:
+                        evidence.append(_openai_evidence("Codex", "metadata_acceptance", "warning", "网关未接受 Codex-compatible 会话元数据。", metadata_safe["shape"]))
+
+                if data.probe_depth == "deep":
+                    tool_body = {
+                        "model": selected_model,
+                        "input": "Call probe_echo with value ok.",
+                        "max_output_tokens": 32,
+                        "tools": [{"type": "function", "name": "probe_echo", "description": "Echo a probe value.", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}],
+                        "tool_choice": "required",
+                    }
+                    started = time.perf_counter()
+                    tool_response = await client.post(_openai_responses_url(base_url), headers=headers, json=tool_body)
+                    tool_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += tool_latency_ms
+                    try:
+                        tool_payload: Any = tool_response.json()
+                    except ValueError:
+                        tool_payload = {"_non_json_excerpt": tool_response.text[:500]}
+                    tool_safe = _openai_collect_response(raw_evidence, "tool_call", tool_response, tool_latency_ms, tool_payload)
+                    tool_outputs = tool_payload.get("output") if isinstance(tool_payload, dict) else None
+                    tool_calls = [item for item in tool_outputs or [] if isinstance(item, dict) and item.get("type") == "function_call"]
+                    tool_ok = tool_response.status_code == 200 and any(item.get("call_id") and item.get("name") == "probe_echo" and isinstance(item.get("arguments"), str) for item in tool_calls)
+                    capabilities["tools"] = tool_ok
+                    if tool_ok:
+                        evidence.append(_openai_evidence("Codex", "tool_call", "ok", "Responses function tool 返回 call_id、名称和 JSON arguments。", tool_safe["shape"]))
+                    else:
+                        labels.add("tool_call_rewrite")
+                        evidence.append(_openai_evidence("Codex", "tool_call", "warning", "Function tool 响应缺失或被改写。", tool_safe["shape"]))
+
+                    reasoning_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16, "reasoning": {"effort": "low", "summary": "auto"}}
+                    started = time.perf_counter()
+                    reasoning_response = await client.post(_openai_responses_url(base_url), headers=headers, json=reasoning_body)
+                    reasoning_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += reasoning_latency_ms
+                    try:
+                        reasoning_payload: Any = reasoning_response.json()
+                    except ValueError:
+                        reasoning_payload = {"_non_json_excerpt": reasoning_response.text[:500]}
+                    reasoning_safe = _openai_collect_response(raw_evidence, "reasoning_controls", reasoning_response, reasoning_latency_ms, reasoning_payload)
+                    reasoning_ok = _openai_response_ok(reasoning_response, reasoning_payload)
+                    capabilities["reasoning_controls"] = reasoning_ok
+                    if reasoning_ok:
+                        evidence.append(_openai_evidence("Codex", "reasoning_controls", "ok", "网关接受 Responses reasoning controls。", reasoning_safe["shape"]))
+                    else:
+                        labels.add("unsupported_codex_parameter")
+                        evidence.append(_openai_evidence("Codex", "reasoning_controls", "info", "网关不支持或拒绝 reasoning controls；作为能力缺失记录。", reasoning_safe["shape"]))
+
+                    multi_turn_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16, "previous_response_id": basic_response_id or "resp_probe_missing"}
+                    started = time.perf_counter()
+                    multi_turn_response = await client.post(_openai_responses_url(base_url), headers=headers, json=multi_turn_body)
+                    multi_turn_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += multi_turn_latency_ms
+                    try:
+                        multi_turn_payload: Any = multi_turn_response.json()
+                    except ValueError:
+                        multi_turn_payload = {"_non_json_excerpt": multi_turn_response.text[:500]}
+                    multi_turn_safe = _openai_collect_response(raw_evidence, "multi_turn", multi_turn_response, multi_turn_latency_ms, multi_turn_payload)
+                    multi_turn_ok = bool(basic_response_id) and _openai_response_ok(multi_turn_response, multi_turn_payload)
+                    capabilities["multi_turn"] = multi_turn_ok
+                    evidence.append(_openai_evidence("Codex", "multi_turn_state", "ok" if multi_turn_ok else "warning", "网关支持 previous_response_id 连续会话。" if multi_turn_ok else "网关未确认 previous_response_id 连续会话能力。", multi_turn_safe["shape"]))
+
+                    codex_payload_body = {
+                        "model": selected_model,
+                        "instructions": "You are a coding agent. Reply with exactly: ok",
+                        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Reply with exactly: ok"}]}],
+                        "max_output_tokens": 16,
+                        "parallel_tool_calls": True,
+                        "tools": [{"type": "function", "name": "probe_echo", "description": "Echo a value.", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}}}],
+                    }
+                    started = time.perf_counter()
+                    codex_payload_response = await client.post(_openai_responses_url(base_url), headers=metadata_headers, json=codex_payload_body)
+                    codex_payload_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += codex_payload_latency_ms
+                    try:
+                        codex_payload: Any = codex_payload_response.json()
+                    except ValueError:
+                        codex_payload = {"_non_json_excerpt": codex_payload_response.text[:500]}
+                    codex_payload_safe = _openai_collect_response(raw_evidence, "codex_client_payload", codex_payload_response, codex_payload_latency_ms, codex_payload)
+                    codex_payload_ok = _openai_response_ok(codex_payload_response, codex_payload)
+                    capabilities["codex_client_payload"] = codex_payload_ok
+                    evidence.append(_openai_evidence("Codex", "codex_client_payload", "ok" if codex_payload_ok else "warning", "网关接受精简 Codex agent 请求结构。" if codex_payload_ok else "网关未接受精简 Codex agent 请求结构。", codex_payload_safe["shape"]))
+
+                    compact_url = f"{_openai_responses_url(base_url)}/compact"
+                    compact_body = {"model": selected_model, "input": [{"role": "user", "content": [{"type": "input_text", "text": "Compact this short probe."}]}]}
+                    started = time.perf_counter()
+                    compact_response = await client.post(compact_url, headers=headers, json=compact_body)
+                    compact_latency_ms = int((time.perf_counter() - started) * 1000)
+                    total_latency_ms += compact_latency_ms
+                    try:
+                        compact_payload: Any = compact_response.json()
+                    except ValueError:
+                        compact_payload = {"_non_json_excerpt": compact_response.text[:500]}
+                    compact_safe = _openai_collect_response(raw_evidence, "compact_capability", compact_response, compact_latency_ms, compact_payload)
+                    compact_ok = compact_response.status_code == 200 and isinstance(compact_payload, dict)
+                    capabilities["compact"] = compact_ok
+                    evidence.append(_openai_evidence("Codex", "compact_capability", "ok" if compact_ok else "info", "网关支持 Responses compact。" if compact_ok else "网关未提供 Responses compact；不作为来源判定失败。", compact_safe["shape"]))
+
+            validation_body = {"model": selected_model or data.model or "gpt-5.6-luna", "input": "ok", "max_output_tokens": 0}
             started = time.perf_counter()
             validation_response = await client.post(validation_url, headers=headers, json=validation_body)
             validation_latency_ms = int((time.perf_counter() - started) * 1000)
@@ -3562,6 +3777,10 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                 validation_payload = {"_non_json_excerpt": validation_response.text[:500]}
             validation_safe = _openai_collect_response(raw_evidence, "validation_error_probe", validation_response, validation_latency_ms, validation_payload)
             validation_error_ok = validation_response.status_code in {400, 422} and _openai_error_looks_official(validation_payload)
+            codex_quota_signal = _openai_codex_quota_signal(validation_payload)
+            if codex_quota_signal:
+                labels.add("codex_quota_semantics")
+                evidence.append(_openai_evidence("Errors", "codex_quota_semantics", "info", "错误语义包含 Codex/订阅额度窗口特征。", validation_safe["shape"]))
             if _openai_has_middleware_trace(validation_payload):
                 labels.add("middleware_wrapper_trace")
                 evidence.append(_openai_evidence("Middleware Trace", "middleware_wrapper", "info", "错误响应包含中转包装字段，说明存在代理/网关加工痕迹。", validation_safe["shape"]))
@@ -3629,20 +3848,87 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         confidence_score = min(95.0, confidence_score)
     confidence_score = max(0.0, min(100.0, confidence_score))
 
+    openai_api_score = upstream_score
+    codex_compatibility_score = 0.0
+    if response_probe_ok is True:
+        codex_compatibility_score += 20
+    if codex_stream_ok:
+        codex_compatibility_score += 35
+    if codex_metadata_ok:
+        codex_compatibility_score += 25
+    if "codex_model_catalog_signal" in labels:
+        codex_compatibility_score += 8
+    if codex_quota_signal:
+        codex_compatibility_score += 22
+    if "responses_stream_incomplete" in labels:
+        codex_compatibility_score -= 15
+    for capability in ("tools", "reasoning_controls", "multi_turn", "codex_client_payload"):
+        if capabilities.get(capability) is True:
+            codex_compatibility_score += 5
+    if capabilities.get("tools") is False:
+        codex_compatibility_score -= 8
+    codex_compatibility_score = max(0.0, min(100.0, codex_compatibility_score))
+
+    connection_type = "official_openai_host" if directness == "official_direct" else "relay_or_proxy"
+    codex_catalog_signal = "codex_model_catalog_signal" in labels
+    codex_origin_signal = codex_quota_signal or (codex_catalog_signal and codex_stream_ok and codex_metadata_ok)
+    if hard_failure:
+        resource_family = "invalid_or_unverified"
+    elif directness == "official_direct" and upstream_assessment == "official_upstream_likely":
+        resource_family = "official_openai_api_likely"
+    elif directness != "official_direct" and codex_origin_signal and codex_compatibility_score >= 60:
+        resource_family = "codex_compatible_relay_likely"
+    elif directness != "official_direct" and chat_ok and response_probe_ok is True and codex_compatibility_score >= 60:
+        resource_family = "hybrid_or_translated_gateway"
+        labels.add("protocol_translation_detected")
+    elif directness != "official_direct" and upstream_assessment == "official_upstream_likely":
+        resource_family = "openai_api_relay_likely"
+    elif upstream_assessment == "openai_compatible_unverified":
+        resource_family = "openai_compatible_unverified"
+        labels.add("source_indeterminate")
+    elif upstream_assessment == "suspicious_rewrite":
+        resource_family = "suspicious_rewrite"
+    else:
+        resource_family = "invalid_or_unverified"
+
+    if resource_family == "codex_compatible_relay_likely":
+        classification = "codex_compatible_relay_likely"
+    elif resource_family == "hybrid_or_translated_gateway":
+        classification = "hybrid_or_translated_gateway"
+    source_confidence = max(openai_api_score, codex_compatibility_score)
+    if resource_family in {"openai_compatible_unverified", "invalid_or_unverified"}:
+        source_confidence = min(source_confidence, 45.0)
+
     summaries = {
         "official_upstream_likely": "中转资源的模型列表、有效请求和校验错误多项证据接近 OpenAI 官方 API，上游高度疑似官方 OpenAI；但非官方 host 仍只能称为官转高一致性。",
         "openai_compatible_unverified": "资源呈现 OpenAI-compatible 特征，但有效上游证据不足，暂不能判断为官转高一致性。",
         "suspicious_rewrite": "资源部分响应与 OpenAI API 形态不一致，存在中转改写或兼容层漂移风险。",
         "invalid_or_unverified": "认证、网络或关键响应失败导致证据不足，无法验证官转资源。",
     }
-    raw_evidence = redact_secrets(raw_evidence)
-    return {
+    resource_summaries = {
+        "official_openai_api_likely": "目标为 OpenAI 官方 host，且标准 API 探针高度一致。该结论描述本次连接与协议证据。",
+        "openai_api_relay_likely": "目标为非官方 host，标准 OpenAI API 探针高度一致，更像 OpenAI API 中转资源。",
+        "codex_compatible_relay_likely": "目标为非官方 host，并同时出现 Codex-oriented 目录、客户端兼容或订阅额度语义，疑似 Codex-compatible 中转资源。",
+        "hybrid_or_translated_gateway": "Chat 与 Responses/Codex 特征并存，疑似多上游路由或协议转换网关。",
+        "openai_compatible_unverified": summaries["openai_compatible_unverified"],
+        "suspicious_rewrite": summaries["suspicious_rewrite"],
+        "invalid_or_unverified": summaries["invalid_or_unverified"],
+    }
+    raw_evidence = redact_secrets(_redact_literal_secret(raw_evidence, data.api_key))
+    output = {
         "classification": classification,
         "confidence_score": round(confidence_score, 2),
+        "connection_type": connection_type,
+        "resource_family": resource_family,
+        "openai_api_score": round(openai_api_score, 2),
+        "codex_compatibility_score": round(codex_compatibility_score, 2),
+        "source_confidence": round(source_confidence, 2),
+        "probe_depth": data.probe_depth,
+        "capabilities": capabilities,
         "directness": directness,
         "upstream_assessment": upstream_assessment,
         "upstream_score": round(upstream_score, 2),
-        "summary": summaries[upstream_assessment],
+        "summary": resource_summaries[resource_family],
         "labels": sorted(labels),
         "base_url": data.base_url or OPENAI_OFFICIAL_BASE_URL,
         "normalized_base_url": base_url,
@@ -3653,9 +3939,10 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         "selected_model": selected_model,
         "request_id": request_id,
         "latency_ms": total_latency_ms or None,
-        "evidence": evidence,
+        "evidence": _redact_literal_secret(evidence, data.api_key),
         "raw_evidence": raw_evidence,
     }
+    return _redact_literal_secret(output, data.api_key)
 
 async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheHitRateTestCreate, progress_callback: Any | None = None) -> dict[str, Any]:
     if not channel.enabled:
@@ -11925,4 +12212,3 @@ async def create_full_model_check(db: Session, data: FullModelCheckCreate) -> di
         "categories": FULL_MODEL_CHECK_CATEGORIES,
         "channels": output_channels,
     }
-

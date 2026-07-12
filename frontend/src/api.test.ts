@@ -552,6 +552,8 @@ describe('api request handling', () => {
       project: null,
       model: 'gpt-4.1-mini',
       include_response_probe: true,
+      detection_mode: 'auto',
+      probe_depth: 'quick',
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -565,6 +567,8 @@ describe('api request handling', () => {
           project: null,
           model: 'gpt-4.1-mini',
           include_response_probe: true,
+          detection_mode: 'auto',
+          probe_depth: 'quick',
         }),
       }),
     );

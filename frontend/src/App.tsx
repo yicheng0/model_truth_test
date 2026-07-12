@@ -53,7 +53,7 @@ const navItems = [
   { key: '/claude-code-check', icon: TerminalSquare, label: 'Claude 指纹', to: '/claude-code-check' },
   { key: '/model-request-test', icon: Send, label: '模型请求', to: '/model-request-test' },
   { key: '/full-model-check', icon: Gauge, label: '完整检测', to: '/full-model-check' },
-  { key: '/openai-resource-check', icon: ShieldCheck, label: 'OpenAI 直连', to: '/openai-resource-check' },
+  { key: '/openai-resource-check', icon: ShieldCheck, label: 'OpenAI / Codex 资源', to: '/openai-resource-check' },
   { key: '/gemini-resource-check', icon: ShieldCheck, label: 'Gemini 直连', to: '/gemini-resource-check' },
   { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
   { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },

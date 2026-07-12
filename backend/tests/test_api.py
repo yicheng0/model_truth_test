@@ -4306,12 +4306,31 @@ def test_openai_resource_check_classifies_official_endpoint(monkeypatch) -> None
     payload = response.json()
     assert response.status_code == 200
     assert payload["classification"] == "official_openai_direct_likely"
+    assert payload["connection_type"] == "official_openai_host"
+    assert payload["resource_family"] == "official_openai_api_likely"
+    assert payload["probe_depth"] == "quick"
+    assert payload["openai_api_score"] >= 70
+    assert payload["codex_compatibility_score"] >= 0
+    assert payload["capabilities"]["models"] is True
+    assert payload["capabilities"]["tools"] is None
     assert payload["directness"] == "official_direct"
     assert payload["upstream_assessment"] == "official_upstream_likely"
     assert payload["request_id"] == "req_official_123"
     assert payload["host"] == "api.openai.com"
     assert payload["selected_model"] == "gpt-4.1-mini"
     assert "sk-official-secret" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_openai_resource_check_prefers_current_common_model() -> None:
+    from app.services import _choose_openai_probe_model
+
+    selected, reason = _choose_openai_probe_model(
+        None,
+        ["gpt-5.4-mini", "gpt-5.6-luna", "gpt-5.6-sol"],
+    )
+
+    assert selected == "gpt-5.6-luna"
+    assert reason == "preferred"
 
 
 def test_openai_resource_check_classifies_relay_with_official_like_upstream(monkeypatch) -> None:
@@ -4489,6 +4508,197 @@ def test_openai_resource_check_non_json_response_is_unverified(monkeypatch) -> N
     assert response.status_code == 200
     assert payload["upstream_assessment"] == "invalid_or_unverified"
     assert "sk-non-json-secret" not in blob
+
+
+def test_openai_resource_check_detects_codex_compatible_relay(monkeypatch) -> None:
+    calls: list[tuple[str, dict, dict]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "gpt-5-codex", "object": "model"}]},
+                headers={"x-request-id": "req_models_codex"},
+                request=request,
+            )
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            calls.append((url, headers, json))
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(
+                    404,
+                    json={"error": {"message": "chat completions disabled for codex accounts", "type": "not_found_error", "code": "not_found_error"}},
+                    request=request,
+                )
+            if url.endswith("/responses") and json.get("stream") is True:
+                body = "\n\n".join(
+                    [
+                        'data: {"type":"response.created","response":{"id":"resp_codex_1","object":"response"}}',
+                        'data: {"type":"response.output_text.delta","delta":"ok"}',
+                        'data: {"type":"response.completed","response":{"id":"resp_codex_1","object":"response","usage":{"input_tokens":8,"output_tokens":1}}}',
+                        "data: [DONE]",
+                    ]
+                )
+                return httpx.Response(200, text=body, headers={"content-type": "text/event-stream", "x-codex-turn-state": "turn_state_1"}, request=request)
+            if url.endswith("/responses") and json.get("client_metadata"):
+                return httpx.Response(
+                    200,
+                    json={"id": "resp_codex_metadata", "object": "response", "output": [], "usage": {}},
+                    headers={"x-codex-turn-state": "turn_state_2"},
+                    request=request,
+                )
+            if url.endswith("/responses") and json.get("max_output_tokens") == 16:
+                return httpx.Response(200, json={"id": "resp_codex_basic", "object": "response", "output": [], "usage": {}}, request=request)
+            return httpx.Response(
+                429,
+                json={"error": {"message": "Your Codex 5-hour usage limit has been reached", "type": "rate_limit_error", "code": "usage_limit_reached"}},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/openai-resource-check",
+            json={
+                "base_url": "https://codex-relay.example/v1",
+                "api_key": "gateway-only-secret",
+                "detection_mode": "auto",
+                "probe_depth": "quick",
+            },
+        )
+
+    payload = response.json()
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 200
+    assert payload["connection_type"] == "relay_or_proxy"
+    assert payload["resource_family"] == "codex_compatible_relay_likely"
+    assert payload["codex_compatibility_score"] > payload["openai_api_score"]
+    assert payload["capabilities"]["responses"] is True
+    assert payload["capabilities"]["responses_stream"] is True
+    assert payload["capabilities"]["codex_metadata"] is True
+    assert payload["capabilities"]["tools"] is None
+    assert "codex_model_catalog_signal" in payload["labels"]
+    assert "codex_stream_shape" in payload["labels"]
+    assert "codex_metadata_accepted" in payload["labels"]
+    assert "codex_quota_semantics" in payload["labels"]
+    metadata_call = next(item for item in calls if item[2].get("client_metadata"))
+    assert metadata_call[1]["x-codex-window-id"].startswith("probe-")
+    assert "gateway-only-secret" not in blob
+
+
+def test_openai_resource_check_deep_mode_reports_optional_capabilities(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-5-codex"}]}, request=request)
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_1", "object": "chat.completion", "choices": []}, request=request)
+            if url.endswith("/responses/compact"):
+                return httpx.Response(404, json={"error": {"message": "compact is unavailable", "type": "not_found_error", "code": "not_found_error"}}, request=request)
+            if json.get("stream") is True:
+                return httpx.Response(200, text='data: {"type":"response.created"}\n\ndata: {"type":"response.completed"}\n\ndata: [DONE]', request=request)
+            if json.get("tools") and json.get("instructions"):
+                return httpx.Response(200, json={"id": "resp_codex_payload", "object": "response", "output": []}, request=request)
+            if json.get("tools"):
+                return httpx.Response(
+                    200,
+                    json={"id": "resp_tool", "object": "response", "output": [{"type": "function_call", "call_id": "call_1", "name": "probe_echo", "arguments": "{\"value\":\"ok\"}"}]},
+                    request=request,
+                )
+            if json.get("reasoning"):
+                return httpx.Response(400, json={"error": {"message": "reasoning effort unsupported", "type": "invalid_request_error", "code": "unsupported_parameter", "param": "reasoning"}}, request=request)
+            if json.get("previous_response_id"):
+                return httpx.Response(200, json={"id": "resp_turn_2", "object": "response", "output": []}, request=request)
+            if json.get("client_metadata"):
+                return httpx.Response(200, json={"id": "resp_metadata", "object": "response", "output": []}, request=request)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid max_output_tokens", "type": "invalid_request_error", "code": "integer_below_min_value"}}, request=request)
+            return httpx.Response(200, json={"id": "resp_basic", "object": "response", "output": [], "usage": {}}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://deep.example/v1", "api_key": "deep-secret", "probe_depth": "deep", "detection_mode": "auto"},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["probe_depth"] == "deep"
+    assert payload["capabilities"]["tools"] is True
+    assert payload["capabilities"]["reasoning_controls"] is False
+    assert payload["capabilities"]["multi_turn"] is True
+    assert payload["capabilities"]["codex_client_payload"] is True
+    assert payload["capabilities"]["compact"] is False
+    assert "unsupported_codex_parameter" in payload["labels"]
+    assert any(item["key"] == "tool_call" and item["status"] == "ok" for item in payload["evidence"])
+    assert any(item["key"] == "compact_capability" and item["status"] == "info" for item in payload["evidence"])
+
+
+def test_openai_resource_check_does_not_classify_codex_from_metadata_alone(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-4.1-mini"}]}, request=request)
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_1", "object": "chat.completion", "choices": []}, request=request)
+            if json.get("stream") is True:
+                return httpx.Response(200, text='data: {"type":"response.created"}\n\ndata: {"type":"response.completed"}', request=request)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid value", "type": "invalid_request_error", "code": "integer_below_min_value"}}, request=request)
+            return httpx.Response(200, json={"id": "resp_1", "object": "response", "output": [], "usage": {}}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://generic-relay.example/v1", "api_key": "generic-key", "detection_mode": "auto", "probe_depth": "quick"},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["capabilities"]["codex_metadata"] is True
+    assert payload["resource_family"] != "codex_compatible_relay_likely"
+    assert "codex_model_catalog_signal" not in payload["labels"]
+    assert "codex_quota_semantics" not in payload["labels"]
 
 
 def test_gemini_resource_check_classifies_official_endpoint(monkeypatch) -> None:
@@ -9359,5 +9569,3 @@ def test_full_model_check_supports_gemini_protocol(monkeypatch) -> None:
     assert channel_payload["probes"][0]["request_id"] == "goog_req_full"
     assert any(":generateContent" in url for url in captured["urls"])
     assert captured["json"]["contents"][0]["parts"][0]["text"]
-
-
