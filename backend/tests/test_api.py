@@ -4594,6 +4594,27 @@ def test_openai_resource_check_detects_codex_compatible_relay(monkeypatch) -> No
     assert "codex_stream_shape" in payload["labels"]
     assert "codex_metadata_accepted" in payload["labels"]
     assert "codex_quota_semantics" in payload["labels"]
+    probe_analysis = {item["key"]: item for item in payload["probe_analysis"]}
+    assert set(probe_analysis) == {
+        "endpoint_identity",
+        "models_catalog",
+        "chat_compatibility",
+        "responses_basic",
+        "responses_stream",
+        "codex_metadata_acceptance",
+        "validation_error",
+        "tool_call",
+        "reasoning_controls",
+        "multi_turn_state",
+        "codex_client_payload",
+        "compact_capability",
+    }
+    assert probe_analysis["responses_stream"]["difference_level"] == "strong"
+    assert probe_analysis["responses_stream"]["execution_status"] == "passed"
+    assert "response.created" in probe_analysis["responses_stream"]["observed"]
+    assert "Codex" in probe_analysis["responses_stream"]["codex_expected"]
+    assert probe_analysis["chat_compatibility"]["execution_status"] == "warning"
+    assert probe_analysis["tool_call"]["execution_status"] == "not_run"
     metadata_call = next(item for item in calls if item[2].get("client_metadata"))
     assert metadata_call[1]["x-codex-window-id"].startswith("probe-")
     assert "gateway-only-secret" not in blob
@@ -4659,6 +4680,12 @@ def test_openai_resource_check_deep_mode_reports_optional_capabilities(monkeypat
     assert "unsupported_codex_parameter" in payload["labels"]
     assert any(item["key"] == "tool_call" and item["status"] == "ok" for item in payload["evidence"])
     assert any(item["key"] == "compact_capability" and item["status"] == "info" for item in payload["evidence"])
+    probe_analysis = {item["key"]: item for item in payload["probe_analysis"]}
+    assert probe_analysis["tool_call"]["execution_status"] == "passed"
+    assert probe_analysis["reasoning_controls"]["execution_status"] == "unsupported"
+    assert probe_analysis["multi_turn_state"]["execution_status"] == "passed"
+    assert probe_analysis["compact_capability"]["execution_status"] == "unsupported"
+    assert probe_analysis["compact_capability"]["difference_level"] == "supporting"
 
 
 def test_openai_resource_check_does_not_classify_codex_from_metadata_alone(monkeypatch) -> None:

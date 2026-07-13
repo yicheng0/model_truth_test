@@ -38,6 +38,26 @@ export function capabilityState(value?: boolean | null) {
   return { color: 'orange', text: '不支持 / 未通过' };
 }
 
+export function probeExecutionMeta(value?: string | null) {
+  const map: Record<string, { color: string; text: string }> = {
+    passed: { color: 'green', text: '通过' },
+    warning: { color: 'orange', text: '有差异' },
+    failed: { color: 'red', text: '失败' },
+    unsupported: { color: 'gold', text: '不支持' },
+    not_run: { color: 'default', text: '未执行' },
+  };
+  return map[value || ''] ?? { color: 'default', text: value || '-' };
+}
+
+export function probeDifferenceMeta(value?: string | null) {
+  const map: Record<string, { color: string; text: string }> = {
+    strong: { color: 'purple', text: '强区分项' },
+    moderate: { color: 'geekblue', text: '中等区分项' },
+    supporting: { color: 'blue', text: '辅助区分项' },
+  };
+  return map[value || ''] ?? { color: 'default', text: value || '-' };
+}
+
 export function resourceFamilyMeta(value?: string | null) {
   const map: Record<string, { color: string; text: string }> = {
     official_openai_api_likely: { color: 'green', text: 'OpenAI API 官方直连高一致' },

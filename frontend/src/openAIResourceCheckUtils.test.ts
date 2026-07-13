@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { capabilityState, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, resourceFamilyMeta } from './openAIResourceCheckUtils';
+import { capabilityState, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, probeDifferenceMeta, probeExecutionMeta, resourceFamilyMeta } from './openAIResourceCheckUtils';
 
 describe('OpenAI/Codex resource check helpers', () => {
   it('builds the new auto-detection payload', () => {
@@ -37,5 +37,12 @@ describe('OpenAI/Codex resource check helpers', () => {
     expect(models).toContain('gpt-5.6-terra');
     expect(models).toContain('gpt-5.6-sol');
     expect(models.some((model) => model.includes('4.1'))).toBe(false);
+  });
+
+  it('renders probe execution and difference strength in user-facing language', () => {
+    expect(probeExecutionMeta('passed')).toEqual({ color: 'green', text: '通过' });
+    expect(probeExecutionMeta('not_run')).toEqual({ color: 'default', text: '未执行' });
+    expect(probeDifferenceMeta('strong')).toEqual({ color: 'purple', text: '强区分项' });
+    expect(probeDifferenceMeta('supporting')).toEqual({ color: 'blue', text: '辅助区分项' });
   });
 });

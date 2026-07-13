@@ -4,8 +4,8 @@ import { Alert, AutoComplete, Button, Card, Col, Descriptions, Form, Input, Prog
 import type { ColumnsType } from 'antd/es/table';
 import { ShieldCheck } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import type { OpenAIResourceCheckRequest, OpenAIResourceCheckResult, OpenAIResourceEvidenceItem } from '../types';
-import { capabilityState, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, resourceFamilyMeta, type OpenAIResourceFormValues } from '../openAIResourceCheckUtils';
+import type { OpenAIProbeAnalysisItem, OpenAIResourceCheckRequest, OpenAIResourceCheckResult, OpenAIResourceEvidenceItem } from '../types';
+import { capabilityState, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, probeDifferenceMeta, probeExecutionMeta, resourceFamilyMeta, type OpenAIResourceFormValues } from '../openAIResourceCheckUtils';
 
 type FormValues = OpenAIResourceFormValues;
 
@@ -61,6 +61,42 @@ const evidenceColumns: ColumnsType<OpenAIResourceEvidenceItem> = [
       <Typography.Text copyable={typeof value === 'string' && value ? { text: value } : false} ellipsis={{ tooltip: typeof value === 'string' ? value : prettyJson(value) }}>
         {value == null ? '-' : typeof value === 'string' ? value : prettyJson(value)}
       </Typography.Text>
+    ),
+  },
+];
+
+const probeAnalysisColumns: ColumnsType<OpenAIProbeAnalysisItem> = [
+  {
+    title: '探针',
+    dataIndex: 'title',
+    width: 190,
+    render: (value: string, row) => (
+      <Space direction="vertical" size={2}>
+        <Typography.Text strong>{value}</Typography.Text>
+        <Typography.Text type="secondary">{row.group}</Typography.Text>
+        <Tag color={probeDifferenceMeta(row.difference_level).color}>{probeDifferenceMeta(row.difference_level).text}</Tag>
+      </Space>
+    ),
+  },
+  { title: '状态', dataIndex: 'execution_status', width: 100, render: (value: string) => { const meta = probeExecutionMeta(value); return <Tag color={meta.color}>{meta.text}</Tag>; } },
+  {
+    title: '区分依据',
+    width: 480,
+    render: (_, row) => (
+      <Space direction="vertical" size={5}>
+        <Typography.Text><Typography.Text strong>检测目标：</Typography.Text>{row.goal}</Typography.Text>
+        <Typography.Text><Tag color="green">OpenAI API</Tag>{row.openai_expected}</Typography.Text>
+        <Typography.Text><Tag color="purple">Codex relay</Tag>{row.codex_expected}</Typography.Text>
+      </Space>
+    ),
+  },
+  {
+    title: '本次观测与结论',
+    render: (_, row) => (
+      <Space direction="vertical" size={5}>
+        <Typography.Text>{row.observed}</Typography.Text>
+        <Typography.Text type="secondary">{row.conclusion}</Typography.Text>
+      </Space>
     ),
   },
 ];
@@ -217,6 +253,22 @@ export default function OpenAIResourceCheck() {
                 <Tag key={label} color={label === 'no_blocking_labels' ? 'green' : label === 'middleware_wrapper_trace' ? 'blue' : 'orange'}>{label}</Tag>
               ))}
             </Space>
+            <Typography.Title level={4}>逐探针区分依据</Typography.Title>
+            <Alert
+              type="info"
+              showIcon
+              message="强区分项需要组合判断"
+              description="Responses SSE、Codex 元数据、额度语义、工具调用和多轮状态更能体现 Codex-compatible 差异；模型名称、单个 header 或仅接受元数据都不能单独决定来源。"
+            />
+            <Table
+              size="small"
+              rowKey="key"
+              pagination={false}
+              scroll={{ x: 1180 }}
+              dataSource={result.probe_analysis ?? []}
+              columns={probeAnalysisColumns}
+            />
+            <Typography.Title level={4}>本次证据明细</Typography.Title>
             <Table size="small" rowKey={(row) => `${row.group || 'group'}:${row.key}`} pagination={false} dataSource={groupedEvidence} columns={evidenceColumns} />
             <Typography.Title level={4}>脱敏原始证据</Typography.Title>
             <pre className="json-block">{prettyJson(result.raw_evidence)}</pre>

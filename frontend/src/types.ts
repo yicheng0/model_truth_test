@@ -454,6 +454,19 @@ export type OpenAIResourceEvidenceItem = {
   group?: string | null;
 };
 
+export type OpenAIProbeAnalysisItem = {
+  key: string;
+  title: string;
+  group: string;
+  goal: string;
+  difference_level: 'strong' | 'moderate' | 'supporting' | string;
+  execution_status: 'passed' | 'warning' | 'failed' | 'unsupported' | 'not_run' | string;
+  openai_expected: string;
+  codex_expected: string;
+  observed: string;
+  conclusion: string;
+};
+
 export type OpenAIResourceCheckResult = {
   classification: 'official_openai_direct_likely' | 'openai_compatible_proxy' | 'codex_compatible_relay_likely' | 'hybrid_or_translated_gateway' | 'suspicious_proxy_or_rewrite' | 'invalid_or_unverified' | string;
   confidence_score: number;
@@ -479,6 +492,7 @@ export type OpenAIResourceCheckResult = {
   request_id?: string | null;
   latency_ms?: number | null;
   evidence: OpenAIResourceEvidenceItem[];
+  probe_analysis?: OpenAIProbeAnalysisItem[];
   raw_evidence: Record<string, unknown>;
 };
 

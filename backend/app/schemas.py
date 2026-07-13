@@ -1353,6 +1353,19 @@ class OpenAIResourceEvidenceItem(BaseModel):
     group: str | None = None
 
 
+class OpenAIProbeAnalysisItem(BaseModel):
+    key: str
+    title: str
+    group: str
+    goal: str
+    difference_level: Literal["strong", "moderate", "supporting"]
+    execution_status: Literal["passed", "warning", "failed", "unsupported", "not_run"]
+    openai_expected: str
+    codex_expected: str
+    observed: str
+    conclusion: str
+
+
 class OpenAIResourceCheckRead(BaseModel):
     classification: Literal[
         "official_openai_direct_likely",
@@ -1398,6 +1411,7 @@ class OpenAIResourceCheckRead(BaseModel):
     request_id: str | None = None
     latency_ms: int | None = None
     evidence: list[OpenAIResourceEvidenceItem] = Field(default_factory=list)
+    probe_analysis: list[OpenAIProbeAnalysisItem] = Field(default_factory=list)
     raw_evidence: dict[str, Any] = Field(default_factory=dict)
 
 

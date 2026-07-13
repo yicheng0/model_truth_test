@@ -2514,6 +2514,218 @@ def _openai_evidence(group: str, key: str, status: str, detail: str, value: Any 
     return {"group": group, "key": key, "status": status, "detail": detail, "value": value}
 
 
+OPENAI_PROBE_BASIS: tuple[dict[str, str], ...] = (
+    {
+        "key": "endpoint_identity",
+        "title": "Endpoint 身份",
+        "group": "Endpoint",
+        "goal": "确认连接 host、HTTPS 和官方直连/中转形态。",
+        "difference_level": "supporting",
+        "openai_expected": "官方 API 使用 HTTPS 且 host 为 api.openai.com；非官方 host 只能推断为中转。",
+        "codex_expected": "Codex-compatible 资源通常由非官方网关提供，host 本身不能证明 OAuth 或订阅来源。",
+    },
+    {
+        "key": "models_catalog",
+        "title": "Models 模型目录",
+        "group": "Models",
+        "goal": "检查 GET /models 的 OpenAI list 结构和模型家族。",
+        "difference_level": "supporting",
+        "openai_expected": "返回 object=list、data[] 和 model.id；标准 GPT 模型目录支持 OpenAI API 一致性。",
+        "codex_expected": "可能集中暴露 Codex-oriented 模型或别名；模型名只能作为辅助信号，不能单独定来源。",
+    },
+    {
+        "key": "chat_compatibility",
+        "title": "Chat Completions 兼容",
+        "group": "Chat",
+        "goal": "验证传统 /chat/completions 协议是否原生可用。",
+        "difference_level": "moderate",
+        "openai_expected": "标准 API 通常返回 chat.completion、choices[] 和 finish_reason。",
+        "codex_expected": "纯 Codex relay 可能不支持 Chat，或将 Chat 翻译到 Responses；Chat 与 Responses 同时可用可能表示混合网关。",
+    },
+    {
+        "key": "responses_basic",
+        "title": "Responses 基础协议",
+        "group": "Responses",
+        "goal": "验证 /responses 的 response 对象、id、output 和 usage 形态。",
+        "difference_level": "moderate",
+        "openai_expected": "OpenAI Platform Responses API 返回 response.* 对象和标准输出结构。",
+        "codex_expected": "Codex 当前也使用 Responses wire API，因此通过仅证明协议兼容，需要结合 SSE、元数据和额度语义。",
+    },
+    {
+        "key": "responses_stream",
+        "title": "Responses SSE 事件流",
+        "group": "Codex",
+        "goal": "检查 Codex 客户端依赖的 SSE 事件顺序和完成事件。",
+        "difference_level": "strong",
+        "openai_expected": "标准 Responses 流应包含 response.created、增量事件和 response.completed。",
+        "codex_expected": "Codex relay 必须稳定转发这些事件；事件缺失、改名或中途断流是重要兼容差异。",
+    },
+    {
+        "key": "codex_metadata_acceptance",
+        "title": "Codex 元数据接受",
+        "group": "Codex",
+        "goal": "判断网关是否接受匿名 Codex session/thread/window 元数据和兼容请求头。",
+        "difference_level": "strong",
+        "openai_expected": "标准 API 可能忽略或接受额外元数据，单独接受不能证明 Codex 来源。",
+        "codex_expected": "Codex-compatible relay 通常能接受并保留这类会话元数据；拒绝会影响 Codex 客户端兼容性。",
+    },
+    {
+        "key": "validation_error",
+        "title": "校验错误语义",
+        "group": "Errors",
+        "goal": "用无害非法参数观察错误 schema、包装层和额度语义。",
+        "difference_level": "strong",
+        "openai_expected": "通常返回 400/422、error.message/type/code/param 等 OpenAI 风格字段。",
+        "codex_expected": "可能出现 Codex 订阅时间窗/usage limit 语义；中间件包装字段则说明存在网关加工。",
+    },
+    {
+        "key": "tool_call",
+        "title": "Responses 工具调用",
+        "group": "Codex Deep",
+        "goal": "验证 function_call、call_id、name 和 arguments 是否完整保留。",
+        "difference_level": "strong",
+        "openai_expected": "标准 Responses 工具调用返回结构化 function_call item。",
+        "codex_expected": "Codex agent 强依赖工具调用；参数字符串化、改名或丢失会直接暴露协议翻译差异。",
+    },
+    {
+        "key": "reasoning_controls",
+        "title": "Reasoning 控制参数",
+        "group": "Codex Deep",
+        "goal": "检查 reasoning effort/summary 是否接受、拒绝或被裁剪。",
+        "difference_level": "supporting",
+        "openai_expected": "支持的模型按官方 Responses 参数处理，不支持时应返回结构化错误。",
+        "codex_expected": "Codex-oriented 路由常支持或明确处理 reasoning 控制；静默吞参属于可疑改写。",
+    },
+    {
+        "key": "multi_turn_state",
+        "title": "连续会话状态",
+        "group": "Codex Deep",
+        "goal": "使用 previous_response_id 验证上下文和路由稳定性。",
+        "difference_level": "strong",
+        "openai_expected": "Responses API 应按 previous_response_id 延续会话。",
+        "codex_expected": "Codex relay 需要跨轮保持 response/item 状态；丢失状态可能说明无状态协议翻译。",
+    },
+    {
+        "key": "codex_client_payload",
+        "title": "Codex Agent 请求结构",
+        "group": "Codex Deep",
+        "goal": "验证 instructions、input items、tools 和 parallel_tool_calls 组合。",
+        "difference_level": "strong",
+        "openai_expected": "完整 Responses API 可接受这些标准字段，但不代表订阅来源。",
+        "codex_expected": "Codex-compatible relay 需要整体保留 agent payload；字段裁剪或改写会影响真实客户端。",
+    },
+    {
+        "key": "compact_capability",
+        "title": "Responses Compact",
+        "group": "Codex Deep",
+        "goal": "探测 /responses/compact 能力是否存在。",
+        "difference_level": "supporting",
+        "openai_expected": "是否开放取决于 API 能力和模型，不支持不代表伪造。",
+        "codex_expected": "部分 Codex-compatible 实现会提供 compact；缺失只记能力差异，不作为真伪失败。",
+    },
+)
+
+
+def _openai_probe_runtime_status(value: bool | None, *, unsupported_when_false: bool = False) -> str:
+    if value is None:
+        return "not_run"
+    if value:
+        return "passed"
+    return "unsupported" if unsupported_when_false else "warning"
+
+
+def _openai_raw_observation(raw_evidence: dict[str, Any], key: str) -> str:
+    item = raw_evidence.get(key)
+    if not isinstance(item, dict):
+        return "未执行或未获得可用响应。"
+    parts: list[str] = []
+    if item.get("status_code") is not None:
+        parts.append(f"HTTP {item['status_code']}")
+    if item.get("latency_ms") is not None:
+        parts.append(f"{item['latency_ms']} ms")
+    event_types = item.get("event_types")
+    if isinstance(event_types, list) and event_types:
+        parts.append("事件：" + ", ".join(str(value) for value in event_types[:8]))
+    shape = item.get("shape")
+    if isinstance(shape, dict) and shape:
+        top_keys = shape.get("top_level_keys")
+        if isinstance(top_keys, list) and top_keys:
+            parts.append("字段：" + ", ".join(str(value) for value in top_keys[:8]))
+        elif shape.get("type"):
+            parts.append(f"JSON 类型：{shape['type']}")
+    return "；".join(parts) or "已执行，响应证据已脱敏保存。"
+
+
+def _build_openai_probe_analysis(
+    *,
+    directness: str,
+    host: str | None,
+    parsed_scheme: str,
+    model_ids: list[str],
+    selected_model: str | None,
+    include_response_probe: bool,
+    run_codex_probes: bool,
+    probe_depth: str,
+    capabilities: dict[str, bool | None],
+    labels: set[str],
+    raw_evidence: dict[str, Any],
+    validation_error_ok: bool,
+    codex_quota_signal: bool,
+) -> list[dict[str, Any]]:
+    codex_models = [model for model in model_ids if any(marker in model.lower() for marker in OPENAI_CODEX_MODEL_MARKERS)]
+    status_by_key = {
+        "endpoint_identity": "passed" if parsed_scheme == "https" else "failed",
+        "models_catalog": _openai_probe_runtime_status(capabilities.get("models")),
+        "chat_compatibility": _openai_probe_runtime_status(capabilities.get("chat_completions")) if selected_model else "not_run",
+        "responses_basic": _openai_probe_runtime_status(capabilities.get("responses")) if selected_model and include_response_probe else "not_run",
+        "responses_stream": _openai_probe_runtime_status(capabilities.get("responses_stream")) if selected_model and run_codex_probes else "not_run",
+        "codex_metadata_acceptance": _openai_probe_runtime_status(capabilities.get("codex_metadata")) if selected_model and run_codex_probes else "not_run",
+        "validation_error": "passed" if validation_error_ok else ("warning" if "validation_error_shape_mismatch" in labels else "not_run"),
+        "tool_call": _openai_probe_runtime_status(capabilities.get("tools")) if selected_model and probe_depth == "deep" else "not_run",
+        "reasoning_controls": _openai_probe_runtime_status(capabilities.get("reasoning_controls"), unsupported_when_false=True) if selected_model and probe_depth == "deep" else "not_run",
+        "multi_turn_state": _openai_probe_runtime_status(capabilities.get("multi_turn")) if selected_model and probe_depth == "deep" else "not_run",
+        "codex_client_payload": _openai_probe_runtime_status(capabilities.get("codex_client_payload")) if selected_model and probe_depth == "deep" else "not_run",
+        "compact_capability": _openai_probe_runtime_status(capabilities.get("compact"), unsupported_when_false=True) if selected_model and probe_depth == "deep" else "not_run",
+    }
+    observed_by_key = {
+        "endpoint_identity": f"{parsed_scheme.upper()}；host={host or '-'}；连接形态={'官方 host' if directness == 'official_direct' else '非官方中转 host'}。",
+        "models_catalog": f"发现 {len(model_ids)} 个模型；选用 {selected_model or '-'}；Codex-oriented 模型：{', '.join(codex_models[:5]) or '未发现'}。",
+        "chat_compatibility": _openai_raw_observation(raw_evidence, "chat_probe"),
+        "responses_basic": _openai_raw_observation(raw_evidence, "response_probe"),
+        "responses_stream": _openai_raw_observation(raw_evidence, "responses_stream"),
+        "codex_metadata_acceptance": _openai_raw_observation(raw_evidence, "codex_metadata"),
+        "validation_error": _openai_raw_observation(raw_evidence, "validation_error_probe") + ("；命中 Codex/订阅额度语义。" if codex_quota_signal else ""),
+        "tool_call": _openai_raw_observation(raw_evidence, "tool_call"),
+        "reasoning_controls": _openai_raw_observation(raw_evidence, "reasoning_controls"),
+        "multi_turn_state": _openai_raw_observation(raw_evidence, "multi_turn"),
+        "codex_client_payload": _openai_raw_observation(raw_evidence, "codex_client_payload"),
+        "compact_capability": _openai_raw_observation(raw_evidence, "compact_capability"),
+    }
+    conclusions = {
+        "endpoint_identity": "官方 host 是 OpenAI 直连强连接证据；非官方 host 只说明存在中转。",
+        "models_catalog": "目录结构用于 API 一致性，Codex 模型名仅为辅助来源信号。",
+        "chat_compatibility": "Chat 可用偏向标准 OpenAI API；Chat 不可用但 Responses/Codex 探针通过偏向 Codex relay。",
+        "responses_basic": "Responses 同时被 OpenAI API 与 Codex 使用，需结合后续强区分项。",
+        "responses_stream": "完整 SSE 是 Codex 客户端兼容的核心依据，事件不完整会降低 Codex 兼容分。",
+        "codex_metadata_acceptance": "接受元数据说明客户端兼容，但不能单独证明上游是 ChatGPT/Codex 订阅。",
+        "validation_error": "OpenAI 错误 schema 支持标准 API 一致性；Codex 额度语义和包装字段支持 relay 来源推断。",
+        "tool_call": "结构完整说明 agent 工具链兼容；字段改写说明存在协议翻译。",
+        "reasoning_controls": "用于发现参数支持或吞参差异，仅作辅助证据。",
+        "multi_turn_state": "跨轮状态稳定是 Codex agent 使用的重要依据。",
+        "codex_client_payload": "整体接受 agent payload 是 Codex-compatible 网关的重要兼容依据。",
+        "compact_capability": "仅表示额外能力，不支持不影响真伪结论。",
+    }
+    return [
+        {
+            **basis,
+            "execution_status": status_by_key[basis["key"]],
+            "observed": observed_by_key[basis["key"]],
+            "conclusion": conclusions[basis["key"]],
+        }
+        for basis in OPENAI_PROBE_BASIS
+    ]
+
+
 def _openai_payload_error(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -3919,6 +4131,21 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         "suspicious_rewrite": summaries["suspicious_rewrite"],
         "invalid_or_unverified": summaries["invalid_or_unverified"],
     }
+    probe_analysis = _build_openai_probe_analysis(
+        directness=directness,
+        host=host,
+        parsed_scheme=parsed.scheme,
+        model_ids=model_ids,
+        selected_model=selected_model,
+        include_response_probe=include_response_probe,
+        run_codex_probes=run_codex_probes,
+        probe_depth=data.probe_depth,
+        capabilities=capabilities,
+        labels=labels,
+        raw_evidence=raw_evidence,
+        validation_error_ok=validation_error_ok,
+        codex_quota_signal=codex_quota_signal,
+    )
     raw_evidence = redact_secrets(_redact_literal_secret(raw_evidence, data.api_key))
     output = {
         "classification": classification,
@@ -3945,6 +4172,7 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         "request_id": request_id,
         "latency_ms": total_latency_ms or None,
         "evidence": _redact_literal_secret(evidence, data.api_key),
+        "probe_analysis": _redact_literal_secret(probe_analysis, data.api_key),
         "raw_evidence": raw_evidence,
     }
     return _redact_literal_secret(output, data.api_key)
