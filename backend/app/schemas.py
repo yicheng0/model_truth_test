@@ -421,6 +421,8 @@ class ClaudeCodeJobProbeRead(BaseModel):
     severity: str | None = None
     score: float | int = 0
     labels: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    label_explanations: list[dict[str, str]] = Field(default_factory=list)
     detail: str | None = None
     run_id: str | None = None
     result_id: str | None = None
@@ -432,8 +434,18 @@ class ClaudeCodeJobProbeRead(BaseModel):
     request_normalization_notes: list[str] = Field(default_factory=list)
     latency_ms: int | float | None = None
     first_token_ms: int | float | None = None
+    http_status: int | None = None
+    error_type: str | None = None
+    error_detail: str | None = None
+    response_excerpt: str | None = None
+    request_snapshot: dict[str, Any] = Field(default_factory=dict)
+    raw_evidence: dict[str, Any] = Field(default_factory=dict)
     evidence_excerpt: str | None = None
     input_preview: dict[str, Any] | None = None
+
+    @field_serializer("reason", "label_explanations", "error_detail", "response_excerpt", "request_snapshot", "raw_evidence", "evidence_excerpt", "input_preview")
+    def serialize_probe_diagnostics(self, value: Any) -> Any:
+        return redact_secrets(value)
 
 
 class ClaudeCodeJobSectionRead(BaseModel):
@@ -493,6 +505,8 @@ class ClaudeCodeProbeResultRead(BaseModel):
     severity: str
     score: float
     labels: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    label_explanations: list[dict[str, str]] = Field(default_factory=list)
     run_id: str | None = None
     result_id: str | None = None
     message_id: str | None = None
@@ -503,8 +517,18 @@ class ClaudeCodeProbeResultRead(BaseModel):
     request_normalization_notes: list[str] = Field(default_factory=list)
     latency_ms: int | float | None = None
     first_token_ms: int | float | None = None
+    http_status: int | None = None
+    error_type: str | None = None
+    error_detail: str | None = None
+    response_excerpt: str | None = None
+    request_snapshot: dict[str, Any] = Field(default_factory=dict)
+    raw_evidence: dict[str, Any] = Field(default_factory=dict)
     evidence_excerpt: str | None = None
     input_preview: dict[str, Any] | None = None
+
+    @field_serializer("reason", "label_explanations", "error_detail", "response_excerpt", "request_snapshot", "raw_evidence", "evidence_excerpt", "input_preview")
+    def serialize_probe_diagnostics(self, value: Any) -> Any:
+        return redact_secrets(value)
 
 
 class ClaudeCodeSectionRead(BaseModel):

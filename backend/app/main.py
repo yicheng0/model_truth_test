@@ -972,8 +972,14 @@ def list_claude_code_source_channels(db: Session = Depends(get_db)) -> list[dict
 
 
 @app.get("/api/claude-code-history", response_model=list[ClaudeCodeEvidenceListItemRead])
-def list_claude_code_history(db: Session = Depends(get_db)) -> list[dict[str, object]]:
-    return claude_code_evidence_list(db)
+def list_claude_code_history(
+    from_time: datetime | None = Query(default=None, alias="from"),
+    to_time: datetime | None = Query(default=None, alias="to"),
+    db: Session = Depends(get_db),
+) -> list[dict[str, object]]:
+    if from_time and to_time and from_time >= to_time:
+        raise HTTPException(status_code=422, detail="from must be earlier than to")
+    return claude_code_evidence_list(db, from_time=from_time, to_time=to_time)
 
 
 @app.get("/api/claude-code-history/{evidence_id}", response_model=ClaudeCodeEvidenceRead)

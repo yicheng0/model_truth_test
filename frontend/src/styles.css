@@ -2135,6 +2135,38 @@ textarea:focus-visible,
   white-space: nowrap;
 }
 
+.claude-probe-detail {
+  display: grid;
+  gap: 12px;
+  padding: 8px 4px;
+}
+
+.claude-probe-detail-labels {
+  display: grid;
+  gap: 6px;
+}
+
+.claude-probe-detail-labels > div {
+  display: grid;
+  grid-template-columns: minmax(108px, auto) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.claude-probe-detail-meta .ant-descriptions-item-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.claude-probe-detail-pre {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.6 "Fira Code", "Consolas", monospace;
+}
+
 .claude-risk-row {
   display: flex;
   flex-wrap: wrap;
@@ -2157,16 +2189,8 @@ textarea:focus-visible,
   min-width: 0;
 }
 
-.claude-history-drawer-trigger {
-  position: fixed;
-  top: 50%;
-  right: 18px;
-  z-index: 30;
-  transform: translateY(-50%);
-}
-
-.claude-history-drawer-trigger .ant-btn {
-  box-shadow: 0 12px 28px rgba(31, 73, 125, 0.2);
+.claude-heading-actions {
+  justify-content: flex-end;
 }
 
 .claude-history-drawer .ant-drawer-body {
@@ -2180,6 +2204,24 @@ textarea:focus-visible,
 .claude-history-card-active {
   border-color: #91caff !important;
   background: #f5f9ff;
+}
+
+.claude-history-day {
+  display: grid;
+  gap: 10px;
+}
+
+.claude-history-day + .claude-history-day {
+  padding-top: 14px;
+  border-top: 1px solid #e4e9f0;
+}
+
+.claude-history-day-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .claude-multimodal-table .ant-table-cell {
@@ -3004,13 +3046,6 @@ textarea:focus-visible,
   body::after {
     opacity: 0.42;
     background-size: 28px 28px;
-  }
-
-  .claude-history-drawer-trigger {
-    top: auto;
-    right: 14px;
-    bottom: 18px;
-    transform: none;
   }
 
   .site-frame {

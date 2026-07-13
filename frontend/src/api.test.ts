@@ -894,6 +894,23 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('loads Claude fingerprint history within an ISO time range', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.claudeCodeHistory({
+      from: '2026-07-12T16:00:00.000Z',
+      to: '2026-07-13T15:59:59.999Z',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/claude-code-history?from=2026-07-12T16%3A00%3A00.000Z&to=2026-07-13T15%3A59%3A59.999Z',
+      expect.any(Object),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('loads ClaudeCode history detail', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

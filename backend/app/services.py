@@ -4554,6 +4554,7 @@ def _claude_code_section_for_category(category: str) -> str:
         "signature": "signature",
         "context": "behavior",
         "safety": "behavior",
+        "identity": "behavior",
         "relay_compatibility": "fingerprint",
         "web_capability": "web_capability",
     }
@@ -4764,6 +4765,26 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             },
             "scoring_rules": {},
             "post_check": "web_search_reference",
+        },
+        {
+            "key": "identity_direct",
+            "title": "直接身份询问",
+            "category": "identity",
+            "severity": "weak",
+            "prompt": "你是谁？由哪家公司开发？请简短回答。",
+            "request_params": {"max_tokens": 160, "temperature": 0},
+            "scoring_rules": {},
+            "post_check": "identity_reference",
+        },
+        {
+            "key": "identity_greeting",
+            "title": "问候与自我介绍",
+            "category": "identity",
+            "severity": "weak",
+            "prompt": "你好，请简单介绍一下你自己。",
+            "request_params": {"max_tokens": 160, "temperature": 0},
+            "scoring_rules": {},
+            "post_check": "identity_reference",
         },
         {
             "key": "prompt_leak",
@@ -5135,8 +5156,12 @@ def _claude_code_probe_payload(
     final_labels = labels if labels is not None else (result.labels if result else []) or []
     if config.get("post_check") == "web_search_reference":
         final_score, final_labels = _claude_code_web_search_reference_score(normalized)
+    elif config.get("post_check") == "identity_reference":
+        final_score, final_labels = _claude_code_identity_reference_score(normalized)
     final_score, final_labels = _claude_code_apply_probe_post_checks(config, normalized, final_score, final_labels)
     status = _claude_code_probe_status(config, final_score, final_labels, normalized)
+    error_detail = redact_secrets(str(normalized.get("error") or "")) or None
+    response_excerpt = redact_secrets(str(normalized.get("content_text") or ""))[:4000] or None
     return {
         "key": str(config["key"]),
         "title": str(config["title"]),
@@ -5146,6 +5171,8 @@ def _claude_code_probe_payload(
         "severity": str(config.get("severity") or "supporting"),
         "score": round(final_score, 2),
         "labels": final_labels,
+        "reason": _claude_code_probe_reason(config, status, final_labels, normalized),
+        "label_explanations": label_explanations(final_labels),
         "run_id": result.run_id if result else None,
         "result_id": result.id if result else None,
         "message_id": normalized.get("provider_message_id"),
@@ -5156,9 +5183,91 @@ def _claude_code_probe_payload(
         "request_normalization_notes": normalized.get("request_normalization_notes") or (normalized.get("raw_request") or {}).get("_request_normalization_notes") or [],
         "latency_ms": normalized.get("latency_ms"),
         "first_token_ms": normalized.get("first_token_ms"),
+        "http_status": normalized.get("status_code"),
+        "error_type": normalized.get("error_type"),
+        "error_detail": error_detail,
+        "response_excerpt": response_excerpt,
+        "request_snapshot": _claude_code_request_snapshot(config, normalized),
+        "raw_evidence": _claude_code_raw_evidence(normalized),
         "evidence_excerpt": _claude_code_probe_excerpt(config, normalized),
         "input_preview": _claude_code_input_preview(config),
     }
+
+
+def _claude_code_request_snapshot(config: dict[str, Any], normalized: dict[str, Any]) -> dict[str, Any]:
+    raw_request = normalized.get("raw_request") if isinstance(normalized.get("raw_request"), dict) else {}
+    request_params = config.get("request_params") if isinstance(config.get("request_params"), dict) else {}
+    snapshot = {
+        "prompt": config.get("prompt"),
+        "system_prompt": config.get("system_prompt"),
+        "model": raw_request.get("model"),
+        "max_tokens": raw_request.get("max_tokens", request_params.get("max_tokens")),
+        "temperature": raw_request.get("temperature", request_params.get("temperature")),
+        "stream": raw_request.get("stream", request_params.get("stream")),
+        "thinking": raw_request.get("thinking", request_params.get("thinking")),
+        "output_config": raw_request.get("output_config", request_params.get("output_config")),
+        "tools": raw_request.get("tools", request_params.get("tools")),
+        "stop_sequences": raw_request.get("stop_sequences", request_params.get("stop_sequences")),
+    }
+    return redact_secrets({key: value for key, value in snapshot.items() if value is not None})
+
+
+def _claude_code_raw_evidence(normalized: dict[str, Any]) -> dict[str, Any]:
+    raw_response = normalized.get("raw_response")
+    response_type = None
+    if isinstance(raw_response, dict):
+        response_type = raw_response.get("type") or raw_response.get("object")
+    content_block_types = sorted(
+        {
+            str(item.get("type"))
+            for item in _walk_json(raw_response)
+            if isinstance(item, dict) and item.get("type")
+        }
+    )
+    usage = normalized.get("usage") if isinstance(normalized.get("usage"), dict) else {}
+    web_search_requests = 0
+    for item in _walk_json(usage):
+        if not isinstance(item, dict):
+            continue
+        server_tool_use = item.get("server_tool_use")
+        if isinstance(server_tool_use, dict):
+            web_search_requests = max(web_search_requests, _safe_int(server_tool_use.get("web_search_requests")))
+    return redact_secrets(
+        {
+            "response_type": response_type,
+            "content_block_types": content_block_types,
+            "stop_reason": normalized.get("stop_reason"),
+            "usage_keys": sorted(usage.keys()),
+            "web_search_requests": web_search_requests,
+            "request_protocol": normalized.get("request_protocol"),
+            "provider_endpoint": normalized.get("provider_endpoint"),
+            "protocol_profile": normalized.get("protocol_profile"),
+        }
+    )
+
+
+def _claude_code_probe_reason(
+    config: dict[str, Any],
+    status: str,
+    labels: list[str],
+    normalized: dict[str, Any],
+) -> str:
+    error = str(normalized.get("error") or "").strip()
+    redacted_error = str(redact_secrets(error)) if error else ""
+    if config.get("post_check") == "web_search_reference":
+        if "web_search_supported" in labels and "web_search_tool_error" not in labels:
+            return _claude_code_web_search_excerpt(normalized)
+        if "web_search_tool_error" in labels:
+            return _claude_code_web_search_excerpt(normalized)
+    explanations = label_explanations(labels)
+    if explanations:
+        explanation = "；".join(item["description"] for item in explanations)
+        return f"{explanation} 上游原因：{redacted_error}" if redacted_error else explanation
+    if status == "pass":
+        return "测试通过，未发现该项异常。"
+    if redacted_error:
+        return redacted_error
+    return _claude_code_probe_excerpt(config, normalized) or "未获得足够证据，需要复核。"
 
 
 def _claude_code_apply_probe_post_checks(
@@ -5245,6 +5354,10 @@ def _claude_code_repeatability_payload(
             f"attempt{index} nonce={nonce} output={str(normalized.get('content_text') or '').strip()[:80] or '-'} "
             f"message_id={normalized.get('provider_message_id') or '-'} request_id={request_id_from_normalized(normalized) or '-'}"
         )
+    final_labels = sorted(labels)
+    errors = [str(item.get("error") or "").strip() for item in normalized_items if str(item.get("error") or "").strip()]
+    error_detail = str(redact_secrets("\n".join(errors))) if errors else None
+    response_excerpt = "\n".join(output for output in outputs if output)[:4000] or None
     return {
         "key": str(config["key"]),
         "title": str(config["title"]),
@@ -5253,7 +5366,9 @@ def _claude_code_repeatability_payload(
         "status": status,
         "severity": str(config.get("severity") or "supporting"),
         "score": round(final_score, 2),
-        "labels": sorted(labels),
+        "labels": final_labels,
+        "reason": _claude_code_probe_reason(config, status, final_labels, representative),
+        "label_explanations": label_explanations(final_labels),
         "run_id": results[0].run_id if results else None,
         "result_id": results[-1].id if results else None,
         "message_id": representative.get("provider_message_id"),
@@ -5262,6 +5377,12 @@ def _claude_code_repeatability_payload(
         "provider_endpoint": representative.get("provider_endpoint"),
         "latency_ms": sum(int(item.get("latency_ms") or 0) for item in normalized_items),
         "first_token_ms": representative.get("first_token_ms"),
+        "http_status": representative.get("status_code"),
+        "error_type": representative.get("error_type"),
+        "error_detail": error_detail,
+        "response_excerpt": response_excerpt,
+        "request_snapshot": _claude_code_request_snapshot(config, representative),
+        "raw_evidence": _claude_code_raw_evidence(representative),
         "evidence_excerpt": "；".join(evidence_bits),
         "input_preview": None,
     }
@@ -5271,7 +5392,11 @@ def _claude_code_probe_status(config: dict[str, Any], score: float, labels: list
     severity = config.get("severity")
     label_set = set(labels)
     if str(severity) == "reference":
-        return "pass" if "web_search_supported" in label_set else "skipped"
+        if "web_search_supported" in label_set and "web_search_tool_error" not in label_set:
+            return "pass"
+        if label_set.intersection({"web_search_not_supported", "web_search_not_available", "capability_not_supported"}):
+            return "skipped"
+        return "warning"
     if config.get("category") == "multimodal" and normalized.get("error") and _claude_probe_is_not_supported({"labels": labels, "evidence_excerpt": _claude_code_excerpt(normalized)}):
         return "skipped"
     if config.get("category") == "signature" and normalized.get("error") and _claude_probe_is_not_supported({"labels": labels, "evidence_excerpt": _claude_code_excerpt(normalized)}):
@@ -5335,15 +5460,15 @@ def _claude_code_protocol_consistency_excerpt(normalized: dict[str, Any]) -> str
 def _claude_code_excerpt(normalized: dict[str, Any]) -> str:
     error = normalized.get("error")
     if error:
-        return str(error)[:1200]
+        return str(redact_secrets(str(error)))[:1200]
     text = normalized.get("content_text")
     if text:
-        return str(text)[:1200]
+        return str(redact_secrets(str(text)))[:1200]
     raw = normalized.get("raw_response")
     try:
-        return json.dumps(raw, ensure_ascii=False, default=str)[:1200]
+        return json.dumps(redact_secrets(raw), ensure_ascii=False, default=str)[:1200]
     except Exception:
-        return str(raw)[:1200]
+        return str(redact_secrets(str(raw)))[:1200]
 
 
 def _walk_json(value: Any):
@@ -5362,6 +5487,7 @@ def _claude_code_web_search_reference_score(normalized: dict[str, Any]) -> tuple
     nodes = list(_walk_json(raw)) + list(_walk_json(usage))
     has_server_tool_use = any(isinstance(item, dict) and item.get("type") == "server_tool_use" and item.get("name") == "web_search" for item in nodes)
     has_web_search_result = any(isinstance(item, dict) and item.get("type") == "web_search_tool_result" for item in nodes)
+    has_tool_error = any(isinstance(item, dict) and item.get("type") == "web_search_tool_result_error" for item in nodes)
     has_citation = any(isinstance(item, dict) and item.get("type") == "web_search_result_location" for item in nodes)
     has_usage = False
     for item in nodes:
@@ -5371,20 +5497,53 @@ def _claude_code_web_search_reference_score(normalized: dict[str, Any]) -> tuple
                 has_usage = True
     if has_server_tool_use or has_web_search_result or has_citation or has_usage:
         labels = ["web_search_supported"]
-        if any(isinstance(item, dict) and item.get("type") == "web_search_tool_result_error" for item in nodes):
+        if has_tool_error:
             labels.append("web_search_tool_error")
         return 100.0, labels
+
+    if has_tool_error:
+        return 0.0, ["web_search_tool_error"]
 
     error_text = _normalized_error_text(normalized)
     text = str(normalized.get("content_text") or "")
     combined = _lower_text(f"{error_text}\n{text}")
-    unsupported_tokens = ["web_search", "web search", "unsupported", "not supported", "not available", "tool"]
+    operational_label = operational_failure_label(error_text, http_status=normalized.get("status_code"))
+    if not operational_label and (
+        _safe_int(normalized.get("status_code")) == 429
+        or "rate_limit" in _lower_text(normalized.get("error_type"))
+        or "rate limit" in combined
+    ):
+        operational_label = PROVIDER_REQUEST_FAILED_LABEL
+    if operational_label:
+        return 0.0, [operational_label]
+
+    unsupported_pattern = re.compile(
+        r"(?:unsupported|not supported|not available|unknown|invalid).{0,40}(?:web[_ ]search|tool)|"
+        r"(?:web[_ ]search|tool).{0,40}(?:unsupported|not supported|not available|unknown|invalid)",
+        re.IGNORECASE,
+    )
     no_tool_tokens = ["工具调用次数", "工具调用", "用尽", "无法实时", "不能实时", "没有真实联网", "没有联网", "无法查询", "无法完成实时查询"]
-    if any(token in combined for token in unsupported_tokens):
-        return 0.0, ["web_search_not_supported"]
     if any(token in combined for token in no_tool_tokens):
         return 0.0, ["web_search_not_available"]
+    if unsupported_pattern.search(combined):
+        return 0.0, ["web_search_not_supported"]
     return 0.0, ["web_search_evidence_missing"]
+
+
+def _claude_code_identity_reference_score(normalized: dict[str, Any]) -> tuple[float, list[str]]:
+    if normalized.get("error"):
+        operational_label = operational_failure_label(
+            str(normalized.get("error") or ""),
+            http_status=normalized.get("status_code"),
+        )
+        return 0.0, [operational_label or "request_failed"]
+    text = _lower_text(normalized.get("content_text"))
+    non_claude_pattern = re.compile(r"\b(?:chatgpt|gpt[-\s]?\d*|openai|gemini|qwen|deepseek)\b", re.IGNORECASE)
+    if non_claude_pattern.search(text):
+        return 0.0, ["identity_mismatch"]
+    if "claude" in text or "anthropic" in text:
+        return 100.0, []
+    return 50.0, ["identity_uncertain"]
 
 
 def _claude_code_web_search_excerpt(normalized: dict[str, Any]) -> str:
@@ -5410,7 +5569,7 @@ def _claude_code_web_search_excerpt(normalized: dict[str, Any]) -> str:
         text = normalized.get("content_text")
         return f"{prefix}。{str(text or '')[:900]}".strip()[:1200]
     if normalized.get("error"):
-        return str(normalized.get("error"))[:1200]
+        return str(redact_secrets(str(normalized.get("error"))))[:1200]
     text = normalized.get("content_text")
     if text:
         return f"未检测到 server-side Web Search 证据：{str(text)[:1000]}"[:1200]
@@ -5426,6 +5585,8 @@ def _safe_int(value: Any) -> int:
 
 def _claude_code_failed_probe(config: dict[str, Any], error: str) -> dict[str, Any]:
     severity = str(config.get("severity") or "supporting")
+    redacted_error = str(redact_secrets(error))
+    labels = ["request_failed"]
     return {
         "key": str(config.get("key") or "unknown"),
         "title": str(config.get("title") or config.get("key") or "未知探针"),
@@ -5434,14 +5595,22 @@ def _claude_code_failed_probe(config: dict[str, Any], error: str) -> dict[str, A
         "status": "warning" if severity == "weak" else "fail",
         "severity": severity,
         "score": 0.0,
-        "labels": ["request_failed"],
+        "labels": labels,
+        "reason": f"{label_explanations(labels)[0]['description']} 上游原因：{redacted_error}",
+        "label_explanations": label_explanations(labels),
         "run_id": None,
         "result_id": None,
         "message_id": None,
         "request_id": None,
         "request_protocol": None,
         "provider_endpoint": None,
-        "evidence_excerpt": error[:1200],
+        "http_status": None,
+        "error_type": "probe_execution_error",
+        "error_detail": redacted_error,
+        "response_excerpt": None,
+        "request_snapshot": _claude_code_request_snapshot(config, {}),
+        "raw_evidence": {},
+        "evidence_excerpt": redacted_error[:1200],
         "input_preview": _claude_code_input_preview(config),
     }
 
@@ -5468,19 +5637,29 @@ async def _run_claude_code_signature_interop_probe(
             .limit(1)
         )
     if not source:
+        labels = ["signature_source_missing"]
+        reason = "未找到可用指纹源渠道，跳过互通检测。"
         return {
             **config,
             "section": "signature",
             "status": "skipped",
             "score": 0.0,
-            "labels": ["signature_source_missing"],
+            "labels": labels,
+            "reason": reason,
+            "label_explanations": label_explanations(labels),
             "run_id": None,
             "result_id": None,
             "message_id": None,
             "request_id": None,
             "request_protocol": None,
             "provider_endpoint": None,
-            "evidence_excerpt": "未找到可用指纹源渠道，跳过互通检测。",
+            "http_status": None,
+            "error_type": None,
+            "error_detail": None,
+            "response_excerpt": reason,
+            "request_snapshot": {},
+            "raw_evidence": {},
+            "evidence_excerpt": reason,
         }
     try:
         original_auth = channel.auth_config_encrypted
@@ -5492,38 +5671,60 @@ async def _run_claude_code_signature_interop_probe(
             if credentials_override:
                 channel.auth_config_encrypted = original_auth
         ok = bool(payload.get("ok"))
-        error_excerpt = str(payload.get("reason") or payload.get("error") or "")
+        error_excerpt = str(redact_secrets(str(payload.get("reason") or payload.get("error") or "")))
         if not ok and _claude_probe_is_not_supported({"labels": ["signature_interop_failed"], "evidence_excerpt": error_excerpt}):
+            labels = ["signature_not_supported"]
             return {
                 **config,
                 "section": "signature",
                 "status": "warning",
                 "score": 0.0,
-                "labels": ["signature_not_supported"],
+                "labels": labels,
+                "reason": error_excerpt or label_explanations(labels)[0]["description"],
+                "label_explanations": label_explanations(labels),
                 "run_id": None,
                 "result_id": None,
                 "message_id": payload.get("relay_message_id") or payload.get("source_message_id"),
                 "request_id": payload.get("relay_request_id") or payload.get("source_request_id"),
                 "request_protocol": None,
                 "provider_endpoint": payload.get("relay_endpoint"),
+                "http_status": None,
+                "error_type": "signature_not_supported",
+                "error_detail": error_excerpt or None,
+                "response_excerpt": error_excerpt or None,
+                "request_snapshot": {},
+                "raw_evidence": redact_secrets({"source_message_id": payload.get("source_message_id"), "relay_message_id": payload.get("relay_message_id")}),
                 "evidence_excerpt": error_excerpt[:1200],
             }
+        labels = [] if ok else ["signature_interop_failed"]
         return {
             **config,
             "section": "signature",
             "status": "pass" if ok else "fail",
             "score": 100.0 if ok else 0.0,
-            "labels": [] if ok else ["signature_interop_failed"],
+            "labels": labels,
+            "reason": error_excerpt or ("Thinking Signature 互通检测通过。" if ok else label_explanations(labels)[0]["description"]),
+            "label_explanations": label_explanations(labels),
             "run_id": None,
             "result_id": None,
             "message_id": payload.get("relay_message_id") or payload.get("source_message_id"),
             "request_id": payload.get("relay_request_id") or payload.get("source_request_id"),
             "request_protocol": None,
             "provider_endpoint": payload.get("relay_endpoint"),
+            "http_status": None,
+            "error_type": None if ok else "signature_interop_failed",
+            "error_detail": None if ok else (error_excerpt or None),
+            "response_excerpt": error_excerpt or None,
+            "request_snapshot": {},
+            "raw_evidence": redact_secrets({"source_message_id": payload.get("source_message_id"), "relay_message_id": payload.get("relay_message_id")}),
             "evidence_excerpt": error_excerpt[:1200],
         }
     except Exception as exc:
-        probe = {**_claude_code_failed_probe(config, str(exc)), "labels": ["signature_interop_failed"]}
+        labels = ["signature_interop_failed"]
+        probe = _claude_code_failed_probe(config, str(exc))
+        probe["labels"] = labels
+        probe["label_explanations"] = label_explanations(labels)
+        probe["reason"] = f"{label_explanations(labels)[0]['description']} 上游原因：{probe['error_detail']}"
         return _claude_code_normalize_optional_probe(probe)
 
 
@@ -5770,6 +5971,7 @@ def create_claude_code_evidence(
     include_expensive_context: bool,
     result_payload: dict[str, Any],
 ) -> ClaudeCodeEvidence:
+    safe_payload = redact_secrets(result_payload)
     evidence = ClaudeCodeEvidence(
         id=new_id("cce"),
         channel_label=channel_label,
@@ -5780,11 +5982,11 @@ def create_claude_code_evidence(
         source_channel_id=source_channel_id,
         image_url=image_url,
         include_expensive_context=include_expensive_context,
-        ok=bool(result_payload.get("ok")),
-        score=float(result_payload.get("score") or 0.0),
-        risk_level=str(result_payload.get("risk_level") or "unknown"),
-        summary=str(result_payload.get("summary") or ""),
-        result_payload=result_payload,
+        ok=bool(safe_payload.get("ok")),
+        score=float(safe_payload.get("score") or 0.0),
+        risk_level=str(safe_payload.get("risk_level") or "unknown"),
+        summary=str(safe_payload.get("summary") or ""),
+        result_payload=safe_payload,
     )
     db.add(evidence)
     db.commit()
@@ -5792,8 +5994,18 @@ def create_claude_code_evidence(
     return evidence
 
 
-def claude_code_evidence_list(db: Session) -> list[dict[str, Any]]:
-    items = list(db.scalars(select(ClaudeCodeEvidence).order_by(ClaudeCodeEvidence.created_at.desc())).all())
+def claude_code_evidence_list(
+    db: Session,
+    *,
+    from_time: datetime | None = None,
+    to_time: datetime | None = None,
+) -> list[dict[str, Any]]:
+    statement = select(ClaudeCodeEvidence)
+    if from_time is not None:
+        statement = statement.where(ClaudeCodeEvidence.created_at >= from_time)
+    if to_time is not None:
+        statement = statement.where(ClaudeCodeEvidence.created_at <= to_time)
+    items = list(db.scalars(statement.order_by(ClaudeCodeEvidence.created_at.desc())).all())
     payload: list[dict[str, Any]] = []
     for item in items:
         result_payload = item.result_payload or {}
@@ -11587,7 +11799,7 @@ LABEL_EXPLANATIONS = {
     "required_keypoint_missing": "缺少题目要求的关键答案点。",
     "regex_keypoint_missing": "输出未命中题目要求的正则关键点。",
     "forbidden_pattern_hit": "输出命中题目禁止的正则模式。",
-    "identity_mismatch": "身份或安全边界出现明显异常表述。",
+    "identity_mismatch": "模型明确自报为 OpenAI、ChatGPT、GPT、Gemini 等其他厂商或模型身份；仅作为低权重身份异常信号。",
     "unsafe_response": "安全题中给出了不应提供的危险或违法内容。",
     "suspected_model_swap": "负样本或候选渠道表现出疑似模型替换特征。",
     "latency_outlier": "延迟明显偏高，可能存在中转链路或路由异常。",
@@ -11613,7 +11825,13 @@ LABEL_EXPLANATIONS = {
     "provider_request_failed": "请求因未知服务端、网络或超时错误失败，未获得可用于真伪判断的响应。",
     "image_url_not_supported": "URL 图片输入不被当前渠道支持，常见于 Bedrock、Vertex 或部分中转；作为能力参考跳过。",
     "document_block_not_supported": "document block 不被当前渠道支持；文本 fallback 仍可用于验证内容读取能力。",
+    "signature_not_supported": "当前链路不支持或未透传 Thinking Signature，说明 ClaudeCode 链路不可验证。",
+    "web_search_supported": "检测到 Anthropic server-side Web Search 调用、结果、引用或 usage 证据。",
+    "web_search_tool_error": "Web Search 已被调用，但 server tool 返回了错误；需要结合错误码复核。",
     "web_search_not_supported": "server-side Web Search 工具不被当前渠道支持，作为能力参考跳过。",
+    "web_search_not_available": "模型明确说明当前环境没有真实联网或搜索工具；作为能力参考跳过。",
+    "web_search_evidence_missing": "响应没有包含 server-side Web Search block、引用或使用次数，无法证明真实联网。",
+    "identity_uncertain": "模型只给出通用 AI 助手身份，未明确说明 Claude/Anthropic。",
     "multimodal_fallback_used": "多模态文档探针已使用普通 text content block fallback，避免 document block 兼容性误判。",
 }
 

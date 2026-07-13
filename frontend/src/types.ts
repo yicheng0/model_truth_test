@@ -612,6 +612,8 @@ export type ClaudeCodeProbeResult = {
   severity: 'core' | 'supporting' | 'weak' | string;
   score: number;
   labels: string[];
+  reason?: string | null;
+  label_explanations?: Array<{ label: string; description: string }>;
   run_id?: string | null;
   result_id?: string | null;
   message_id?: string | null;
@@ -622,6 +624,12 @@ export type ClaudeCodeProbeResult = {
   request_normalization_notes?: string[];
   latency_ms?: number | null;
   first_token_ms?: number | null;
+  http_status?: number | null;
+  error_type?: string | null;
+  error_detail?: string | null;
+  response_excerpt?: string | null;
+  request_snapshot?: Record<string, unknown>;
+  raw_evidence?: Record<string, unknown>;
   evidence_excerpt?: string | null;
   input_preview?: {
     kind: 'image_base64' | 'image_url' | 'document_text' | string;
@@ -738,6 +746,8 @@ export type ClaudeCodeJobProbe = {
   severity?: string | null;
   score: number;
   labels: string[];
+  reason?: string | null;
+  label_explanations?: Array<{ label: string; description: string }>;
   detail?: string | null;
   run_id?: string | null;
   result_id?: string | null;
@@ -749,6 +759,12 @@ export type ClaudeCodeJobProbe = {
   request_normalization_notes?: string[];
   latency_ms?: number | null;
   first_token_ms?: number | null;
+  http_status?: number | null;
+  error_type?: string | null;
+  error_detail?: string | null;
+  response_excerpt?: string | null;
+  request_snapshot?: Record<string, unknown>;
+  raw_evidence?: Record<string, unknown>;
   evidence_excerpt?: string | null;
   input_preview?: {
     kind: 'image_base64' | 'image_url' | 'document_text' | string;
@@ -810,6 +826,11 @@ export type ClaudeCodeHistoryItem = {
   warning_count: number;
   created_at?: string | null;
   result_payload?: ClaudeCodeTestResult | null;
+};
+
+export type ClaudeCodeHistoryFilters = {
+  from?: string;
+  to?: string;
 };
 
 export type ClaudeCodeHistoryDetail = {

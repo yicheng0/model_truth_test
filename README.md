@@ -116,6 +116,14 @@ npm run build
 
 真实调用时关闭 mock，并在创建检测页填写对应渠道的运行时密钥。
 
+## Claude 指纹检测说明
+
+「Claude 指纹」页面会保存每次检测的脱敏证据，并支持按日期范围查看每天的检测记录。警告和失败探针可展开查看判定原因、标签解释、HTTP 状态、上游错误、脱敏请求快照和结构化证据。
+
+- Web Search 使用 Anthropic server-side tool block、引用和 `usage.server_tool_use.web_search_requests` 作为成功证据；能力不支持会跳过，工具错误、限流和证据缺失会分别保留具体原因，不单独作为 Claude 真伪核心失败。
+- 身份探针使用“你是谁”和“你好，请介绍一下你自己”等自然问题。模型自报身份只作为低权重辅助信号，不能覆盖协议结构、message id、usage 和 tool use 等硬证据。
+- 运行时 API Key 只用于本次调用，不写入 Claude 指纹历史；请求快照和错误文本在返回及持久化前都会脱敏。
+
 ## 自动巡检配置说明
 
 自动巡检在“自动巡检”页面按渠道创建计划。每个计划只检测一个待测渠道，创建时只需要选择待测渠道和执行间隔。
@@ -150,4 +158,3 @@ npm run build
 ```
 
 运行时会把 `secret_ref` / `credential_ref` 解析为 `api_key`。同一次 run 传入的 runtime credentials 仍然优先于渠道配置。当前已支持 `env:NAME` 形式；Vault、KMS、云 Secret Manager 属于后续企业级扩展。
-

@@ -52,4 +52,23 @@ describe('claudeCodeDiagnostics', () => {
     expect(probeDiagnosis({ key: 'ok', status: 'pass', labels: [] })).toBe('测试通过，未发现该项异常。');
     expect(probeDiagnosis({ key: 'legacy', status: 'warning', labels: [], evidence_excerpt: 'legacy evidence' })).toBe('legacy evidence');
   });
+
+  it('prioritizes backend reason and full upstream error before legacy evidence', () => {
+    expect(
+      probeDiagnosis({
+        key: 'web_search_reference',
+        status: 'warning',
+        labels: ['web_search_tool_error'],
+        reason: 'Web Search 工具返回错误：max_uses_exceeded',
+        error_detail: 'upstream error',
+        evidence_excerpt: 'legacy evidence',
+      }),
+    ).toBe('Web Search 工具返回错误：max_uses_exceeded');
+    expect(
+      probeDiagnosis({ key: 'request', status: 'warning', labels: [], error_detail: '完整上游错误', evidence_excerpt: 'legacy evidence' }),
+    ).toBe('完整上游错误');
+    expect(labelDescription('web_search_evidence_missing')).toContain('无法证明真实联网');
+    expect(labelDescription('identity_uncertain')).toContain('未明确');
+    expect(labelDescription('identity_mismatch')).toContain('其他厂商');
+  });
 });

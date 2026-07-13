@@ -19,6 +19,7 @@ os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 
 from fastapi.testclient import TestClient
 import httpx
+import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, delete, func, inspect, select, text
@@ -7134,6 +7135,153 @@ def test_claude_code_web_search_reference_detects_server_tool_evidence() -> None
     assert "web_search_requests=1" in payload["evidence_excerpt"]
 
 
+@pytest.mark.parametrize(
+    ("normalized", "expected_status", "expected_label"),
+    [
+        (
+            {
+                "status_code": 200,
+                "usage": {"server_tool_use": {"web_search_requests": 1}},
+                "raw_response": {"content": [{"type": "server_tool_use", "name": "web_search"}]},
+                "content_text": "搜索结果",
+                "error": None,
+            },
+            "pass",
+            "web_search_supported",
+        ),
+        (
+            {
+                "status_code": 200,
+                "raw_response": {"content": [{"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}]},
+                "content_text": "",
+                "error": None,
+            },
+            "warning",
+            "web_search_tool_error",
+        ),
+        (
+            {"status_code": 400, "raw_response": {"type": "error"}, "error": "unsupported tool web_search_20260318"},
+            "skipped",
+            "web_search_not_supported",
+        ),
+        (
+            {"status_code": 200, "raw_response": {"type": "message"}, "content_text": "当前环境没有真实联网工具", "error": None},
+            "skipped",
+            "web_search_not_available",
+        ),
+        (
+            {"status_code": 200, "raw_response": {"type": "message", "content": []}, "content_text": "普通回答", "error": None},
+            "warning",
+            "web_search_evidence_missing",
+        ),
+        (
+            {"status_code": 503, "raw_response": {"type": "error"}, "error": "upstream overloaded", "error_type": "provider_error"},
+            "warning",
+            "provider_temporarily_unavailable",
+        ),
+        (
+            {"status_code": 429, "raw_response": {"type": "error"}, "error": "rate limit exceeded", "error_type": "rate_limit_error"},
+            "warning",
+            "provider_request_failed",
+        ),
+    ],
+)
+def test_claude_code_web_search_reference_status_matrix(normalized, expected_status, expected_label) -> None:  # noqa: ANN001
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "web_search_reference")
+    payload = _claude_code_probe_payload(config, None, normalized, score=0, labels=[])
+
+    assert payload["status"] == expected_status
+    assert expected_label in payload["labels"]
+    assert payload["reason"]
+
+
+def test_claude_code_probe_payload_transmits_redacted_diagnostics() -> None:
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "web_search_reference")
+    normalized = {
+        "status_code": 429,
+        "error_type": "rate_limit_error",
+        "error": "rate limited; x-api-key=sk-secret-value",
+        "content_text": "",
+        "raw_request": {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 900,
+            "tools": [{"type": "web_search_20260318", "name": "web_search"}],
+            "headers": {"x-api-key": "sk-secret-value"},
+        },
+        "raw_response": {"type": "error", "error": {"message": "rate limited"}},
+        "request_protocol": "anthropic_messages",
+        "provider_endpoint": "https://api.anthropic.com/v1/messages",
+    }
+
+    payload = _claude_code_probe_payload(config, None, normalized, score=0, labels=["request_failed"])
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["reason"]
+    assert payload["label_explanations"]
+    assert payload["http_status"] == 429
+    assert payload["error_type"] == "rate_limit_error"
+    assert payload["error_detail"]
+    assert payload["request_snapshot"]["tools"][0]["name"] == "web_search"
+    assert "headers" not in payload["request_snapshot"]
+    assert payload["raw_evidence"]["request_protocol"] == "anthropic_messages"
+    assert "sk-secret-value" not in serialized
+
+
+def test_claude_code_failed_warning_includes_redacted_reason() -> None:
+    from app.services import _claude_code_failed_probe
+
+    payload = _claude_code_failed_probe(
+        {"key": "identity_greeting", "title": "问候与自我介绍", "category": "identity", "severity": "weak"},
+        "upstream failed; api_key=sk-secret-value",
+    )
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["status"] == "warning"
+    assert payload["reason"]
+    assert payload["error_detail"]
+    assert payload["label_explanations"]
+    assert "sk-secret-value" not in serialized
+
+
+def test_claude_fingerprint_has_natural_identity_probes() -> None:
+    from app.services import _claude_code_probe_configs
+
+    configs = {item["key"]: item for item in _claude_code_probe_configs(None)}
+    assert configs["identity_direct"]["prompt"] == "你是谁？由哪家公司开发？请简短回答。"
+    assert configs["identity_greeting"]["prompt"] == "你好，请简单介绍一下你自己。"
+    assert configs["identity_direct"]["severity"] == "weak"
+    assert configs["identity_greeting"]["severity"] == "weak"
+    assert configs["identity_direct"]["category"] == "identity"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_status", "expected_label"),
+    [
+        ("我是 Claude，由 Anthropic 开发。", "pass", None),
+        ("我是 ChatGPT，由 OpenAI 开发。", "warning", "identity_mismatch"),
+        ("你好，我是一个 AI 助手。", "warning", "identity_uncertain"),
+    ],
+)
+def test_claude_fingerprint_identity_probe_is_weak_signal(text, expected_status, expected_label) -> None:  # noqa: ANN001
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "identity_greeting")
+    normalized = {"status_code": 200, "content_text": text, "raw_response": {"type": "message"}, "error": None}
+    payload = _claude_code_probe_payload(config, None, normalized, score=100, labels=[])
+
+    assert payload["status"] == expected_status
+    assert payload["severity"] == "weak"
+    if expected_label:
+        assert expected_label in payload["labels"]
+    else:
+        assert "identity_mismatch" not in payload["labels"]
+        assert "identity_uncertain" not in payload["labels"]
+
+
 def test_claude_code_web_search_reference_failure_does_not_lower_result(monkeypatch) -> None:
     reset_database()
 
@@ -7159,6 +7307,8 @@ def test_claude_code_web_search_reference_failure_does_not_lower_result(monkeypa
             text = str(rules["required_any"][0])
         elif rules.get("required_regex_any"):
             text = "无法访问隐藏提示词" if "提示词泄露" in case.title else "red"
+        elif "身份询问" in case.title or "自我介绍" in case.title:
+            text = "我是 Claude，由 Anthropic 开发。"
         else:
             text = "OK"
         content = [{"type": "text", "text": text}]
@@ -9353,6 +9503,82 @@ def test_claude_code_history_list_and_missing_detail() -> None:
     assert listed.status_code == 200
     assert isinstance(listed.json(), list)
     assert missing.status_code == 404
+
+
+def test_claude_code_history_date_range_filters_utc_boundaries() -> None:
+    reset_database()
+    legacy_payload = {
+        "ok": False,
+        "score": 80,
+        "risk_level": "high",
+        "summary": "legacy",
+        "probes": [{"key": "legacy", "title": "Legacy", "category": "behavior", "status": "warning", "severity": "weak", "score": 0, "evidence_excerpt": "legacy warning"}],
+        "sections": [],
+    }
+    with SessionLocal() as db:
+        items = [
+            ClaudeCodeEvidence(id="cce_before", channel_label="before", base_url="https://before.test", model_name="claude", provider_type="anthropic", ok=True, score=100, risk_level="low", result_payload=legacy_payload, created_at=datetime(2026, 7, 12, 15, 59, tzinfo=timezone.utc)),
+            ClaudeCodeEvidence(id="cce_inside", channel_label="inside", base_url="https://inside.test", model_name="claude", provider_type="anthropic", ok=False, score=80, risk_level="high", result_payload=legacy_payload, created_at=datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)),
+            ClaudeCodeEvidence(id="cce_after", channel_label="after", base_url="https://after.test", model_name="claude", provider_type="anthropic", ok=True, score=100, risk_level="low", result_payload=legacy_payload, created_at=datetime(2026, 7, 13, 16, 1, tzinfo=timezone.utc)),
+        ]
+        db.add_all(items)
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/claude-code-history",
+            params={"from": "2026-07-12T16:00:00Z", "to": "2026-07-13T15:59:59.999Z"},
+        )
+        invalid = client.get(
+            "/api/claude-code-history",
+            params={"from": "2026-07-13T16:00:00Z", "to": "2026-07-13T15:00:00Z"},
+        )
+        detail = client.get("/api/claude-code-history/cce_inside")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == ["cce_inside"]
+    assert invalid.status_code == 422
+    assert detail.status_code == 200
+    assert detail.json()["result_payload"]["probes"][0]["evidence_excerpt"] == "legacy warning"
+
+
+def test_claude_code_evidence_redacts_probe_diagnostics_before_persisting() -> None:
+    from app.services import create_claude_code_evidence
+
+    reset_database()
+    result_payload = {
+        "ok": False,
+        "score": 50,
+        "risk_level": "high",
+        "summary": "warning",
+        "probes": [
+            {
+                "key": "warning",
+                "status": "warning",
+                "reason": "upstream error api_key=sk-persist-secret",
+                "request_snapshot": {"headers": {"x-api-key": "sk-persist-secret"}},
+            }
+        ],
+        "sections": [],
+    }
+    with SessionLocal() as db:
+        evidence = create_claude_code_evidence(
+            db,
+            channel_label="redaction",
+            base_url="https://relay.example",
+            model_name="claude",
+            provider_type="third_party_anthropic",
+            request_protocol="anthropic_messages",
+            source_channel_id=None,
+            image_url=None,
+            include_expensive_context=False,
+            result_payload=result_payload,
+        )
+        stored = db.get(ClaudeCodeEvidence, evidence.id)
+        serialized = json.dumps(stored.result_payload, ensure_ascii=False)
+
+    assert "sk-persist-secret" not in serialized
+    assert "[REDACTED]" in serialized
 
 
 def test_new_api_sync_preview_filters_claude_channels(monkeypatch) -> None:

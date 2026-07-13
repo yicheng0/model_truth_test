@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Badge, Button, Card, Checkbox, Drawer, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Badge, Button, Card, Checkbox, Collapse, DatePicker, Descriptions, Drawer, Empty, Form, Input, Popconfirm, Progress, Select, Space, Statistic, Table, Tag, Tooltip, Typography, message } from 'antd';
+import dayjs, { type Dayjs } from 'dayjs';
 import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { labelText, labelTooltip, probeDiagnosis, topRiskLabels } from '../claudeCodeDiagnostics';
+import { labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
+import { groupClaudeFingerprintHistory, localDayRangeIso, probeDiagnosticText } from '../claudeFingerprintHistory';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
@@ -122,7 +124,7 @@ function ProbeLabelTags({ labels }: { labels?: string[] | null }) {
     <Space size={[4, 4]} wrap className="claude-probe-tags">
       {labels.map((label) => (
         <Tooltip key={label} title={labelTooltip(label)}>
-          <Tag color="orange" className="claude-probe-tag">
+          <Tag color={label === 'web_search_supported' ? 'green' : 'orange'} className="claude-probe-tag">
             {labelText(label)}
           </Tag>
         </Tooltip>
@@ -131,14 +133,67 @@ function ProbeLabelTags({ labels }: { labels?: string[] | null }) {
   );
 }
 
-function ProbeEvidenceText({ probe }: { probe: { status: string; labels?: string[] | null; evidence_excerpt?: string | null; detail?: string | null } }) {
-  const raw = probe.evidence_excerpt || probe.detail || '';
-  if (probe.status === 'pass' && !probe.labels?.length) {
-    return raw ? <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: raw }}>{raw}</Typography.Text> : <EmptyProbeValue />;
-  }
-  const diagnosis = probeDiagnosis(probe);
-  const display = raw && raw !== diagnosis ? `${diagnosis} · ${raw}` : diagnosis;
-  return <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: display }}>{display}</Typography.Text>;
+type ProbeDisplay = ClaudeCodeProbeResult | ClaudeCodeJobProbe;
+
+function ProbeEvidenceText({ probe }: { probe: ProbeDisplay }) {
+  const display = probeDiagnosticText(probe);
+  return display ? <Typography.Text className="claude-probe-evidence" ellipsis={{ tooltip: display }}>{display}</Typography.Text> : <EmptyProbeValue />;
+}
+
+function probeJson(value?: Record<string, unknown> | null) {
+  if (!value || !Object.keys(value).length) return '-';
+  return JSON.stringify(value, null, 2);
+}
+
+function hasProbeDetail(probe: ProbeDisplay) {
+  return Boolean(
+    probe.reason
+    || probe.error_detail
+    || probe.response_excerpt
+    || probe.evidence_excerpt
+    || probe.label_explanations?.length
+    || Object.keys(probe.request_snapshot ?? {}).length
+    || Object.keys(probe.raw_evidence ?? {}).length,
+  );
+}
+
+function ProbeDetailPanel({ probe }: { probe: ProbeDisplay }) {
+  const alertType = probe.status === 'fail' ? 'error' : probe.status === 'warning' ? 'warning' : 'info';
+  const collapseItems = [
+    probe.error_detail ? { key: 'error', label: '完整上游错误', children: <pre className="claude-probe-detail-pre">{probe.error_detail}</pre> } : null,
+    Object.keys(probe.request_snapshot ?? {}).length
+      ? { key: 'request', label: '脱敏请求快照', children: <pre className="claude-probe-detail-pre">{probeJson(probe.request_snapshot)}</pre> }
+      : null,
+    Object.keys(probe.raw_evidence ?? {}).length
+      ? { key: 'evidence', label: '结构化原始证据', children: <pre className="claude-probe-detail-pre">{probeJson(probe.raw_evidence)}</pre> }
+      : null,
+    probe.response_excerpt || probe.evidence_excerpt
+      ? { key: 'response', label: '响应与证据摘要', children: <pre className="claude-probe-detail-pre">{probe.response_excerpt || probe.evidence_excerpt}</pre> }
+      : null,
+  ].filter((item): item is NonNullable<typeof item> => Boolean(item));
+  return (
+    <div className="claude-probe-detail">
+      <Alert type={alertType} showIcon message="判定原因" description={probeDiagnosticText(probe)} />
+      {probe.label_explanations?.length ? (
+        <div className="claude-probe-detail-labels">
+          {probe.label_explanations.map((item) => (
+            <div key={item.label}><Tag>{labelText(item.label)}</Tag><Typography.Text type="secondary">{item.description}</Typography.Text></div>
+          ))}
+        </div>
+      ) : null}
+      <Descriptions size="small" column={2} className="claude-probe-detail-meta">
+        <Descriptions.Item label="HTTP 状态">{probe.http_status ?? '-'}</Descriptions.Item>
+        <Descriptions.Item label="错误类型">{probe.error_type ?? '-'}</Descriptions.Item>
+        <Descriptions.Item label="请求协议">{probe.request_protocol ?? '-'}</Descriptions.Item>
+        <Descriptions.Item label="Endpoint">{probe.provider_endpoint ?? '-'}</Descriptions.Item>
+        <Descriptions.Item label="Run ID">{probe.run_id ?? '-'}</Descriptions.Item>
+        <Descriptions.Item label="Result ID">{probe.result_id ?? '-'}</Descriptions.Item>
+        <Descriptions.Item label="Message ID">{probe.message_id ?? '-'}</Descriptions.Item>
+        <Descriptions.Item label="Request ID">{probe.request_id ?? '-'}</Descriptions.Item>
+      </Descriptions>
+      {collapseItems.length ? <Collapse size="small" items={collapseItems} /> : null}
+    </div>
+  );
 }
 
 function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
@@ -150,6 +205,7 @@ function ProbeTable({ probes }: { probes: ClaudeCodeProbeResult[] }) {
       pagination={false}
       size="small"
       scroll={{ x: 980 }}
+      expandable={{ expandedRowRender: (item) => <ProbeDetailPanel probe={item} />, rowExpandable: hasProbeDetail }}
       columns={[
         {
           title: '测试项',
@@ -206,6 +262,7 @@ function JobProbeTable({ probes, currentKey }: { probes: ClaudeCodeJobProbe[]; c
       pagination={false}
       size="small"
       rowClassName={(item) => item.key === currentKey ? 'claude-job-row-active' : ''}
+      expandable={{ expandedRowRender: (item) => <ProbeDetailPanel probe={item} />, rowExpandable: hasProbeDetail }}
       columns={[
         {
           title: '测试项',
@@ -274,6 +331,7 @@ function MultimodalProbeTable({ probes, currentKey }: { probes: MultimodalProbe[
       tableLayout="fixed"
       rowClassName={(item) => item.key === currentKey ? 'claude-job-row-active' : ''}
       scroll={{ x: 1484 }}
+      expandable={{ expandedRowRender: (item) => <ProbeDetailPanel probe={item} />, rowExpandable: hasProbeDetail }}
       columns={[
         {
           title: '测试项',
@@ -496,11 +554,19 @@ export default function ClaudeCodeCheck() {
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyRiskFilter, setHistoryRiskFilter] = useState('all');
   const [historyMatchCurrent, setHistoryMatchCurrent] = useState(false);
+  const [historyDateRange, setHistoryDateRange] = useState<[Dayjs, Dayjs] | null>([
+    dayjs().subtract(6, 'day').startOf('day'),
+    dayjs().endOf('day'),
+  ]);
   const watchedChannelLabel = Form.useWatch('channel_label', relayForm);
   const watchedBaseUrl = Form.useWatch('base_url', relayForm);
+  const historyFilters = useMemo(() => localDayRangeIso(historyDateRange), [historyDateRange]);
 
   const sources = useQuery<ClaudeCodeSourceChannel[]>({ queryKey: ['claudeCodeSourceChannels'], queryFn: api.claudeCodeSourceChannels });
-  const history = useQuery<ClaudeCodeHistoryItem[]>({ queryKey: ['claudeCodeHistory'], queryFn: api.claudeCodeHistory });
+  const history = useQuery<ClaudeCodeHistoryItem[]>({
+    queryKey: ['claudeCodeHistory', historyFilters.from, historyFilters.to],
+    queryFn: () => api.claudeCodeHistory(historyFilters),
+  });
   const historyDetail = useQuery<ClaudeCodeHistoryDetail>({
     queryKey: ['claudeCodeHistoryDetail', selectedHistoryId],
     queryFn: () => api.claudeCodeHistoryDetail(selectedHistoryId!),
@@ -544,6 +610,7 @@ export default function ClaudeCodeCheck() {
       return true;
     });
   }, [history.data, historyMatchCurrent, historyQuery, historyRiskFilter, watchedBaseUrl, watchedChannelLabel]);
+  const historyGroups = useMemo(() => groupClaudeFingerprintHistory(filteredHistory), [filteredHistory]);
 
   useEffect(() => {
     const payload = relayJob.data;
@@ -606,6 +673,12 @@ export default function ClaudeCodeCheck() {
         value={historyQuery}
         onChange={(event) => setHistoryQuery(event.target.value)}
       />
+      <DatePicker.RangePicker
+        value={historyDateRange}
+        allowClear
+        style={{ width: '100%' }}
+        onChange={(range) => setHistoryDateRange(range?.[0] && range[1] ? [range[0], range[1]] : null)}
+      />
       <Space wrap>
         <Select
           value={historyRiskFilter}
@@ -625,23 +698,39 @@ export default function ClaudeCodeCheck() {
       </Space>
       {history.isError ? <Alert type="error" showIcon message="历史记录加载失败" description={getErrorMessage(history.error)} /> : null}
       {history.isLoading ? <Typography.Text type="secondary">正在加载历史记录...</Typography.Text> : null}
-      {!history.isLoading && !(history.data?.length) ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Claude 资源指纹证据历史" /> : null}
-      {!history.isLoading && Boolean(history.data?.length) && !filteredHistory.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的历史记录" /> : null}
-      {filteredHistory.map((item) => (
-        <HistoryCard
-          key={item.id}
-          item={item}
-          selected={selectedHistoryId === item.id}
-          deleting={deletingHistoryId === item.id}
-          onSelect={() => {
-            setSelectedHistoryId(item.id);
-            setHistoryDrawerOpen(false);
-          }}
-          onDelete={() => {
-            setDeletingHistoryId(item.id);
-            deleteHistory.mutate(item.id);
-          }}
-        />
+      {!history.isLoading && !(history.data?.length) ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={historyDateRange ? '所选日期没有 Claude 指纹检测记录' : '暂无 Claude 资源指纹证据历史'} />
+      ) : null}
+      {!history.isLoading && Boolean(history.data?.length) && !filteredHistory.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选条件没有匹配记录" /> : null}
+      {historyGroups.map((group) => (
+        <div key={group.date} className="claude-history-day">
+          <div className="claude-history-day-head">
+            <Typography.Text strong>{group.date === 'unknown' ? '时间未知' : dayjs(group.date).format('YYYY年M月D日')}</Typography.Text>
+            <Space wrap size={[4, 4]}>
+              <Tag>{group.runCount} 次</Tag>
+              <Tag color="green">通过 {group.passCount}</Tag>
+              <Tag color="red">失败 {group.failCount}</Tag>
+              <Tag color="orange">警告 {group.warningCount}</Tag>
+              <Tag>跳过 {group.skippedCount}</Tag>
+            </Space>
+          </div>
+          {group.items.map((item) => (
+            <HistoryCard
+              key={item.id}
+              item={item}
+              selected={selectedHistoryId === item.id}
+              deleting={deletingHistoryId === item.id}
+              onSelect={() => {
+                setSelectedHistoryId(item.id);
+                setHistoryDrawerOpen(false);
+              }}
+              onDelete={() => {
+                setDeletingHistoryId(item.id);
+                deleteHistory.mutate(item.id);
+              }}
+            />
+          ))}
+        </div>
       ))}
     </Space>
   );
@@ -656,7 +745,18 @@ export default function ClaudeCodeCheck() {
             输入 Claude 或第三方中转的 URL、API Key 和模型名，先判断是否 Claude-compatible；Opus 4.7/4.8+ 会自动归一化 adaptive thinking，并清洗旧 enabled / budget_tokens / temperature / top_p / top_k 字段，避免协议 400。
           </Typography.Paragraph>
         </div>
-        <Tag color="blue">临时凭据不落库</Tag>
+        <Space wrap className="claude-heading-actions">
+          <Tag color="blue">临时凭据不落库</Tag>
+          <Badge count={historyCount} overflowCount={99} size="small">
+            <Button
+              icon={<History size={16} />}
+              onClick={() => setHistoryDrawerOpen(true)}
+              aria-label="打开历史记录"
+            >
+              历史记录
+            </Button>
+          </Badge>
+        </Space>
       </div>
 
       <div className="claude-page-layout">
@@ -789,19 +889,6 @@ export default function ClaudeCodeCheck() {
             {activeResult ? <ClaudeCodeResultView result={activeResult} meta={selectedHistoryId ? historyDetail.data : null} /> : null}
           </Space>
         </main>
-      </div>
-      <div className="claude-history-drawer-trigger">
-        <Badge count={historyCount} overflowCount={99} size="small">
-          <Button
-            type="primary"
-            shape="round"
-            icon={<History size={16} />}
-            onClick={() => setHistoryDrawerOpen(true)}
-            aria-label="打开历史记录"
-          >
-            历史记录
-          </Button>
-        </Badge>
       </div>
       <Drawer
         title={<span className="card-title-with-icon"><History size={18} />历史记录</span>}

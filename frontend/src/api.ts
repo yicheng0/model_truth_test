@@ -14,6 +14,7 @@ import type {
   ChannelTaxonomyUpdate,
   ClaudeCodeCheckResult,
   ClaudeCodeHistoryDetail,
+  ClaudeCodeHistoryFilters,
   ClaudeCodeHistoryItem,
   ClaudeCodeJobCreate,
   ClaudeCodeJobStatus,
@@ -210,7 +211,8 @@ export const api = {
     request<ClaudeCodeJobCreate>('/api/claude-code-test/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   claudeCodeRelayTestJob: (jobId: string) => request<ClaudeCodeJobStatus>(`/api/claude-code-test/jobs/${jobId}`),
   claudeCodeSourceChannels: () => request<ClaudeCodeSourceChannel[]>('/api/claude-code-test/source-channels'),
-  claudeCodeHistory: () => request<ClaudeCodeHistoryItem[]>('/api/claude-code-history'),
+  claudeCodeHistory: (filters: ClaudeCodeHistoryFilters = {}) =>
+    request<ClaudeCodeHistoryItem[]>(`/api/claude-code-history${queryString(filters)}`),
   claudeCodeHistoryDetail: (id: string) => request<ClaudeCodeHistoryDetail>(`/api/claude-code-history/${id}`),
   deleteClaudeCodeHistory: (id: string) => request<{ deleted: boolean }>(`/api/claude-code-history/${id}`, { method: 'DELETE', headers: adminHeaders() }),
   claudeCodeCheckStatus: () => request<ClaudeCodeCheckStatus>('/api/claude-code-check/status'),

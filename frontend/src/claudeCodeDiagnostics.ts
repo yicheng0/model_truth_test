@@ -4,6 +4,8 @@ type ClaudeCodeDiagnosticProbe = {
   status?: string | null;
   severity?: string | null;
   labels?: string[] | null;
+  reason?: string | null;
+  error_detail?: string | null;
   evidence_excerpt?: string | null;
   detail?: string | null;
 };
@@ -165,6 +167,36 @@ const LABELS: Record<string, LabelInfo> = {
     description: '该渠道不支持 Anthropic server-side Web Search；作为能力参考跳过，不单独影响 Claude 判断。',
     priority: 42,
   },
+  web_search_supported: {
+    text: 'Web Search 已验证',
+    description: '检测到 Anthropic server-side Web Search 调用、结果、引用或 usage 证据。',
+    priority: 12,
+  },
+  web_search_tool_error: {
+    text: 'Web Search 工具错误',
+    description: 'Web Search 已被调用，但 server tool 返回了错误；需要结合错误码复核。',
+    priority: 44,
+  },
+  web_search_not_available: {
+    text: 'Web Search 当前不可用',
+    description: '模型明确说明当前环境没有真实联网或搜索工具；作为能力参考跳过。',
+    priority: 40,
+  },
+  web_search_evidence_missing: {
+    text: 'Web Search 证据缺失',
+    description: '响应没有包含 server-side Web Search block、引用或使用次数，无法证明真实联网。',
+    priority: 46,
+  },
+  identity_uncertain: {
+    text: '身份表述不明确',
+    description: '模型只给出通用 AI 助手身份，未明确说明 Claude/Anthropic；仅作为弱信号。',
+    priority: 20,
+  },
+  identity_mismatch: {
+    text: '身份不一致',
+    description: '模型明确自报为 OpenAI、ChatGPT、GPT、Gemini 等其他厂商或模型身份；仅作为低权重身份异常信号。',
+    priority: 48,
+  },
   multimodal_fallback_used: {
     text: '文本 fallback',
     description: '文档探针使用普通 text content block 传入 marker，避免 document block 兼容性导致误判。',
@@ -252,6 +284,8 @@ export function topRiskLabels(probes: ClaudeCodeDiagnosticProbe[], limit = 6): s
 
 export function probeDiagnosis(probe: ClaudeCodeDiagnosticProbe): string {
   const labels = probe.labels ?? [];
+  if (probe.reason?.trim()) return probe.reason.trim();
+  if (probe.error_detail?.trim()) return probe.error_detail.trim();
   if (probe.status === 'pass' && labels.length === 0) return '测试通过，未发现该项异常。';
   const evidence = `${probe.evidence_excerpt ?? ''}\n${probe.detail ?? ''}`.toLowerCase();
   if (evidence.includes('400') && /(temperature|top_p|top_k|budget_tokens|output_config|thinking|display|cache_control|image|document|web_search|web search|tool)/.test(evidence)) {
