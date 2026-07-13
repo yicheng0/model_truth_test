@@ -19,3 +19,4 @@ frontend/.vite/
 frontend/dist/
 .DS_Store
 *.code-workspace
+.worktrees/
