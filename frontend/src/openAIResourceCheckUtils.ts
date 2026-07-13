@@ -49,6 +49,30 @@ export function probeExecutionMeta(value?: string | null) {
   return map[value || ''] ?? { color: 'default', text: value || '-' };
 }
 
+export function probeAttemptStatusMeta(value?: string | null) {
+  const map: Record<string, { color: string; text: string }> = {
+    passed: { color: 'green', text: '通过' },
+    warning: { color: 'orange', text: '存在差异' },
+    operational_failure: { color: 'gold', text: '不可用样本' },
+    not_run: { color: 'default', text: '未执行' },
+  };
+  return map[value || ''] ?? { color: 'default', text: value || '-' };
+}
+
+export function mixedRoutingReasonText(reason: Record<string, unknown>) {
+  const probe = String(reason.probe || '未知探针');
+  const kind = String(reason.reason || 'routing_changed');
+  if (kind === 'cross_protocol_model_family_changed') {
+    const chatModels = Array.isArray(reason.chat_models) ? reason.chat_models.join(', ') : '-';
+    const responseModels = Array.isArray(reason.response_models) ? reason.response_models.join(', ') : '-';
+    return `Chat 与 Responses 返回不同模型家族：${chatModels} / ${responseModels}`;
+  }
+  const attempts = Array.isArray(reason.attempts) ? `（尝试 ${reason.attempts.join(', ')}）` : '';
+  if (kind === 'model_family_changed') return `${probe} 的返回模型家族发生切换${attempts}`;
+  if (kind === 'protocol_or_response_family_changed') return `${probe} 的协议、ID、错误或 SSE 轮廓发生切换${attempts}`;
+  return `${probe} 检测到路由差异${attempts}`;
+}
+
 export function probeDifferenceMeta(value?: string | null) {
   const map: Record<string, { color: string; text: string }> = {
     strong: { color: 'purple', text: '强区分项' },

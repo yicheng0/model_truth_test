@@ -465,6 +465,38 @@ export type OpenAIProbeAnalysisItem = {
   codex_expected: string;
   observed: string;
   conclusion: string;
+  attempt_count?: number;
+  valid_attempt_count?: number;
+  operational_failure_count?: number;
+  consistency_rate?: number | null;
+  model_families?: string[];
+  response_families?: string[];
+  sse_profiles?: string[];
+  difference_summary?: string | null;
+};
+
+export type OpenAIProbeAttempt = {
+  attempt: number;
+  status: 'passed' | 'warning' | 'operational_failure' | 'not_run' | string;
+  http_status?: number | null;
+  latency_ms?: number | null;
+  response_family?: string | null;
+  requested_model?: string | null;
+  returned_model?: string | null;
+  normalized_model_family?: string | null;
+  id_family?: string | null;
+  error_family?: string | null;
+  sse_profile?: string | null;
+  labels?: string[];
+};
+
+export type OpenAIRoutingStability = {
+  mixed_routing_detected?: boolean;
+  valid_attempts?: number;
+  operational_failures?: number;
+  model_consistency_rate?: number;
+  protocol_consistency_rate?: number;
+  mixed_routing_reasons?: Record<string, unknown>[];
 };
 
 export type OpenAIResourceCheckResult = {
@@ -475,6 +507,15 @@ export type OpenAIResourceCheckResult = {
   openai_api_score?: number;
   codex_compatibility_score?: number;
   source_confidence?: number;
+  protocol_compatibility_score?: number;
+  codex_client_score?: number;
+  source_evidence_score?: number;
+  routing_stability_score?: number;
+  evidence_sufficiency?: number;
+  classification_confidence?: number;
+  repeat_policy?: { standard_attempts?: number; critical_attempts?: number };
+  stability?: OpenAIRoutingStability;
+  probe_repeats?: Record<string, OpenAIProbeAttempt[]>;
   probe_depth?: 'quick' | 'deep' | string;
   capabilities?: Record<string, boolean | null>;
   directness?: 'official_direct' | 'relay_or_proxy' | string;

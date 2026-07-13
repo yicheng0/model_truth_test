@@ -2433,6 +2433,8 @@ OPENAI_SAFE_RESPONSE_HEADERS = (
     "openai-processing-ms",
     "openai-organization",
     "openai-version",
+    "x-codex-turn-state",
+    "x-codex-usage-limit",
     "cf-ray",
 )
 OPENAI_MIDDLEWARE_TRACE_KEYS = ("rix_api_error", "relay_error", "proxy_error", "upstream_error", "provider_error")
@@ -2636,6 +2638,16 @@ def _openai_probe_runtime_status(value: bool | None, *, unsupported_when_false: 
 
 def _openai_raw_observation(raw_evidence: dict[str, Any], key: str) -> str:
     item = raw_evidence.get(key)
+    if isinstance(item, list):
+        if not item:
+            return "未执行或未获得可用响应。"
+        statuses = [str(child.get("status") or "") for child in item if isinstance(child, dict)]
+        profiles = [child.get("profile") for child in item if isinstance(child, dict) and isinstance(child.get("profile"), dict)]
+        event_types = sorted({str(event) for profile in profiles for event in (profile.get("event_types") or [])})
+        parts = [f"尝试 {len(item)} 次", f"通过 {sum(status == 'passed' for status in statuses)} 次"]
+        if event_types:
+            parts.append("事件：" + ", ".join(event_types[:8]))
+        return "；".join(parts)
     if not isinstance(item, dict):
         return "未执行或未获得可用响应。"
     parts: list[str] = []
@@ -2671,6 +2683,7 @@ def _build_openai_probe_analysis(
     raw_evidence: dict[str, Any],
     validation_error_ok: bool,
     codex_quota_signal: bool,
+    probe_repeats: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     codex_models = [model for model in model_ids if any(marker in model.lower() for marker in OPENAI_CODEX_MODEL_MARKERS)]
     status_by_key = {
@@ -2715,12 +2728,26 @@ def _build_openai_probe_analysis(
         "codex_client_payload": "整体接受 agent payload 是 Codex-compatible 网关的重要兼容依据。",
         "compact_capability": "仅表示额外能力，不支持不影响真伪结论。",
     }
+    repeat_metrics = {key: _openai_probe_repeat_metrics(attempts) for key, attempts in probe_repeats.items()}
     return [
         {
             **basis,
             "execution_status": status_by_key[basis["key"]],
             "observed": observed_by_key[basis["key"]],
             "conclusion": conclusions[basis["key"]],
+            **repeat_metrics.get(
+                basis["key"],
+                {
+                    "attempt_count": 0,
+                    "valid_attempt_count": 0,
+                    "operational_failure_count": 0,
+                    "consistency_rate": None,
+                    "model_families": [],
+                    "response_families": [],
+                    "sse_profiles": [],
+                    "difference_summary": None,
+                },
+            ),
         }
         for basis in OPENAI_PROBE_BASIS
     ]
@@ -2822,6 +2849,575 @@ def _openai_sse_event_types(response: httpx.Response) -> list[str]:
         if isinstance(event_type, str) and event_type:
             event_types.append(event_type)
     return event_types
+
+
+def _normalize_openai_model_family(model: str | None) -> str | None:
+    value = str(model or "").strip().lower()
+    if not value:
+        return None
+    return re.sub(r"-(?:20\d{2}-\d{2}-\d{2}|20\d{6})$", "", value)
+
+
+def _openai_id_family(value: Any) -> str | None:
+    text = str(value or "")
+    if not text:
+        return None
+    match = re.match(r"^([a-z][a-z0-9]*_)", text, re.IGNORECASE)
+    return match.group(1).lower() if match else text[:12]
+
+
+def _openai_sse_response_id(payload: dict[str, Any]) -> str | None:
+    response = payload.get("response")
+    if isinstance(response, dict) and response.get("id"):
+        return str(response["id"])
+    for key in ("response_id", "id"):
+        if payload.get(key):
+            return str(payload[key])
+    return None
+
+
+def _openai_strict_sse_profile(status_code: int, content_type: str | None, text: str) -> dict[str, Any]:
+    labels: set[str] = set()
+    events: list[dict[str, Any]] = []
+    json_invalid_count = 0
+    data_lines: list[str] = []
+    frames: list[str] = []
+    for line in [*str(text or "").splitlines(), ""]:
+        if not line:
+            if data_lines:
+                frames.append("\n".join(data_lines))
+                data_lines = []
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    for data in frames:
+        data = data.strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            json_invalid_count += 1
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+
+    event_types = [str(item.get("type") or "") for item in events if item.get("type")]
+    lifecycle_events = [event_type for event_type in event_types if event_type.startswith("response.")]
+    terminal_types = {"response.completed", "response.failed", "response.incomplete"}
+    terminal_indices = [index for index, event_type in enumerate(event_types) if event_type in terminal_types]
+    has_output_event = any("output" in event_type or event_type.endswith(".delta") for event_type in event_types)
+    response_ids = [value for item in events if (value := _openai_sse_response_id(item))]
+    unique_response_ids = sorted(set(response_ids))
+    sequences = [item.get("sequence_number") for item in events if isinstance(item.get("sequence_number"), int)]
+    sequence_valid = all(current > previous for previous, current in zip(sequences, sequences[1:]))
+    first_lifecycle = lifecycle_events[0] if lifecycle_events else None
+    terminal_event = event_types[terminal_indices[0]] if len(terminal_indices) == 1 else None
+    business_after_terminal = bool(terminal_indices and terminal_indices[-1] < len(event_types) - 1)
+    completed_payload = next((item for item in events if item.get("type") == "response.completed"), None)
+    completed_response = completed_payload.get("response") if isinstance(completed_payload, dict) else None
+    has_usage = bool(isinstance(completed_response, dict) and isinstance(completed_response.get("usage"), dict))
+    returned_model = next(
+        (
+            str(response.get("model"))
+            for item in events
+            if isinstance((response := item.get("response")), dict) and response.get("model")
+        ),
+        None,
+    )
+
+    if status_code != 200 or "text/event-stream" not in str(content_type or "").lower():
+        labels.add("responses_stream_incomplete")
+    if json_invalid_count:
+        labels.add("sse_json_invalid")
+    if first_lifecycle != "response.created" or business_after_terminal:
+        labels.add("sse_event_order_invalid")
+    if not terminal_indices:
+        labels.add("sse_terminal_missing")
+    elif len(terminal_indices) > 1:
+        labels.add("sse_multiple_terminal_events")
+    if len(unique_response_ids) > 1:
+        labels.add("sse_response_id_mismatch")
+    if sequences and not sequence_valid:
+        labels.add("sse_sequence_invalid")
+    if completed_payload is not None and not has_usage:
+        labels.add("sse_usage_missing")
+    hard_labels = labels - {"sse_usage_missing"}
+    if not has_output_event:
+        hard_labels.add("responses_stream_incomplete")
+        labels.add("responses_stream_incomplete")
+    if hard_labels:
+        labels.add("responses_stream_incomplete")
+
+    return {
+        "ok": not bool(labels - {"sse_usage_missing"}),
+        "labels": sorted(labels),
+        "event_types": event_types,
+        "event_count": len(events),
+        "json_invalid_count": json_invalid_count,
+        "first_lifecycle_event": first_lifecycle,
+        "terminal_event": terminal_event,
+        "terminal_count": len(terminal_indices),
+        "has_output_event": has_output_event,
+        "response_id": unique_response_ids[0] if len(unique_response_ids) == 1 else None,
+        "response_ids": unique_response_ids,
+        "sequence_valid": sequence_valid,
+        "has_usage": has_usage,
+        "returned_model": returned_model,
+    }
+
+
+def _openai_consistency_rate(values: list[str]) -> float:
+    if not values:
+        return 0.0
+    counts: dict[str, int] = defaultdict(int)
+    for value in values:
+        counts[value] += 1
+    return max(counts.values()) / len(values)
+
+
+def _openai_probe_repeat_metrics(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    valid = [attempt for attempt in attempts if attempt.get("status") not in {"operational_failure", "not_run"}]
+    operational_failure_count = sum(1 for attempt in attempts if attempt.get("status") == "operational_failure")
+    model_families = sorted({str(attempt["normalized_model_family"]) for attempt in valid if attempt.get("normalized_model_family")})
+    response_families = sorted({str(attempt["response_family"]) for attempt in valid if attempt.get("response_family")})
+    sse_profiles = sorted({str(attempt["sse_profile"]) for attempt in valid if attempt.get("sse_profile")})
+    dimensions = [
+        [str(attempt[key]) for attempt in valid if attempt.get(key)]
+        for key in ("response_family", "normalized_model_family", "id_family", "error_family", "sse_profile")
+    ]
+    dimensions = [values for values in dimensions if values]
+    consistency_rate = sum(_openai_consistency_rate(values) for values in dimensions) / len(dimensions) if dimensions else (1.0 if valid else 0.0)
+    differences: list[str] = []
+    if len(response_families) > 1:
+        differences.append("响应协议族发生变化")
+    if len(model_families) > 1:
+        differences.append("返回模型家族发生变化")
+    if len(sse_profiles) > 1:
+        differences.append("SSE 事件轮廓发生变化")
+    if operational_failure_count:
+        differences.append(f"{operational_failure_count} 次不可用样本不参与一致性计算")
+    return {
+        "attempt_count": len(attempts),
+        "valid_attempt_count": len(valid),
+        "operational_failure_count": operational_failure_count,
+        "consistency_rate": round(consistency_rate, 4),
+        "model_families": model_families,
+        "response_families": response_families,
+        "sse_profiles": sse_profiles,
+        "difference_summary": "；".join(differences) + ("。" if differences else "") or "有效尝试未发现协议、模型或 SSE 轮廓切换。",
+    }
+
+
+def _analyze_openai_probe_repeats(probe_repeats: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    labels: set[str] = set()
+    valid_attempts: list[dict[str, Any]] = []
+    operational_failures = 0
+    probe_consistency: dict[str, float] = {}
+    mixed_reasons: list[dict[str, Any]] = []
+    alias_rewrite = False
+
+    for probe_key, attempts in probe_repeats.items():
+        valid = [attempt for attempt in attempts if attempt.get("status") not in {"operational_failure", "not_run"}]
+        operational_failures += sum(1 for attempt in attempts if attempt.get("status") == "operational_failure")
+        valid_attempts.extend(valid)
+        response_families = [str(attempt["response_family"]) for attempt in valid if attempt.get("response_family")]
+        model_families = [str(attempt["normalized_model_family"]) for attempt in valid if attempt.get("normalized_model_family")]
+        id_families = [str(attempt["id_family"]) for attempt in valid if attempt.get("id_family")]
+        error_families = [str(attempt["error_family"]) for attempt in valid if attempt.get("error_family")]
+        sse_profiles = [str(attempt["sse_profile"]) for attempt in valid if attempt.get("sse_profile")]
+        dimensions = [values for values in (response_families, model_families, id_families, error_families, sse_profiles) if values]
+        probe_consistency[probe_key] = sum(_openai_consistency_rate(values) for values in dimensions) / len(dimensions) if dimensions else (1.0 if valid else 0.0)
+
+        if len(set(response_families)) > 1 or len(set(id_families)) > 1 or len(set(error_families)) > 1 or len(set(sse_profiles)) > 1:
+            labels.update({"suspected_mixed_routing", "intermittent_protocol_switch"})
+            mixed_reasons.append({"probe": probe_key, "reason": "protocol_or_response_family_changed", "attempts": [attempt.get("attempt") for attempt in valid]})
+        if len(set(model_families)) > 1:
+            labels.update({"suspected_mixed_routing", "suspected_model_swap"})
+            mixed_reasons.append({"probe": probe_key, "reason": "model_family_changed", "attempts": [attempt.get("attempt") for attempt in valid]})
+        attempt_statuses = {str(attempt.get("status") or "") for attempt in valid}
+        if "passed" in attempt_statuses and "warning" in attempt_statuses:
+            labels.add("intermittent_downgrade")
+
+        for attempt in valid:
+            requested = str(attempt.get("requested_model") or "")
+            returned = str(attempt.get("returned_model") or "")
+            normalized = str(attempt.get("normalized_model_family") or "")
+            if requested and not returned:
+                labels.add("returned_model_missing")
+            elif requested and returned and requested != returned and _normalize_openai_model_family(requested) == normalized:
+                alias_rewrite = True
+
+    if alias_rewrite:
+        labels.add("model_alias_rewrite")
+
+    chat_models = {
+        str(attempt["normalized_model_family"])
+        for attempt in probe_repeats.get("chat_compatibility", [])
+        if attempt.get("status") != "operational_failure" and attempt.get("normalized_model_family")
+    }
+    response_models = {
+        str(attempt["normalized_model_family"])
+        for key in ("responses_basic", "responses_stream", "codex_metadata_acceptance")
+        for attempt in probe_repeats.get(key, [])
+        if attempt.get("status") != "operational_failure" and attempt.get("normalized_model_family")
+    }
+    if chat_models and response_models and chat_models.isdisjoint(response_models):
+        labels.update({"suspected_mixed_routing", "suspected_model_swap"})
+        mixed_reasons.append({"probe": "chat_vs_responses", "reason": "cross_protocol_model_family_changed", "chat_models": sorted(chat_models), "response_models": sorted(response_models)})
+
+    model_values = [str(attempt["normalized_model_family"]) for attempt in valid_attempts if attempt.get("normalized_model_family")]
+    protocol_values = [str(attempt["response_family"]) for attempt in valid_attempts if attempt.get("response_family")]
+    routing_stability_score = 100.0 * (sum(probe_consistency.values()) / len(probe_consistency) if probe_consistency else 0.0)
+    return {
+        "mixed_routing_detected": "suspected_mixed_routing" in labels,
+        "valid_attempts": len(valid_attempts),
+        "operational_failures": operational_failures,
+        "model_consistency_rate": round(_openai_consistency_rate(model_values), 4),
+        "protocol_consistency_rate": round(_openai_consistency_rate(protocol_values), 4),
+        "routing_stability_score": round(routing_stability_score, 2),
+        "probe_consistency": {key: round(value, 4) for key, value in probe_consistency.items()},
+        "probe_metrics": {key: _openai_probe_repeat_metrics(attempts) for key, attempts in probe_repeats.items()},
+        "labels": sorted(labels),
+        "mixed_routing_reasons": mixed_reasons,
+    }
+
+
+def _openai_response_family(payload: Any, expected_family: str) -> str:
+    if not isinstance(payload, dict):
+        return "non_json"
+    object_type = str(payload.get("object") or "")
+    if object_type == "chat.completion":
+        return "chat"
+    if object_type.startswith("response"):
+        return "responses"
+    if _openai_has_middleware_trace(payload):
+        return "middleware_error"
+    if _openai_payload_error(payload):
+        return "openai_error" if _openai_error_looks_official(payload) else "unknown_error"
+    return expected_family if payload.get("id") else "unknown_json"
+
+
+def _openai_error_family(response: httpx.Response, payload: Any) -> str | None:
+    error = _openai_payload_error(payload)
+    for key in ("code", "type"):
+        if error.get(key):
+            return str(error[key])[:120]
+    return f"http_{response.status_code}" if response.status_code >= 400 else None
+
+
+def _openai_operational_failure(response: httpx.Response, payload: Any) -> str | None:
+    error = _openai_payload_error(payload)
+    error_text = " ".join(str(error.get(key) or "") for key in ("message", "type", "code"))
+    if response.status_code == 429:
+        return "provider_quota_or_balance_exhausted" if _openai_codex_quota_signal(payload) else "rate_limited"
+    return operational_failure_label(error_text or _response_error_detail(response), http_status=response.status_code)
+
+
+def _openai_attempt_summary(
+    *,
+    attempt: int,
+    response: httpx.Response,
+    payload: Any,
+    latency_ms: int,
+    requested_model: str | None,
+    expected_family: str,
+    passed: bool,
+    sse_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    operational = _openai_operational_failure(response, payload)
+    returned_model = str(payload.get("model")) if isinstance(payload, dict) and payload.get("model") else None
+    response_id = payload.get("id") if isinstance(payload, dict) else None
+    if sse_profile:
+        response_id = sse_profile.get("response_id")
+        returned_model = sse_profile.get("returned_model") or returned_model
+    status = "operational_failure" if operational else ("passed" if passed else "warning")
+    return {
+        "attempt": attempt,
+        "status": status,
+        "http_status": response.status_code,
+        "latency_ms": latency_ms,
+        "request_id": request_id_from_headers(response.headers),
+        "response_family": "responses_sse" if sse_profile and response.status_code == 200 else _openai_response_family(payload, expected_family),
+        "requested_model": requested_model,
+        "returned_model": returned_model,
+        "normalized_model_family": _normalize_openai_model_family(returned_model),
+        "id_family": _openai_id_family(response_id),
+        "error_family": operational or _openai_error_family(response, payload),
+        "sse_profile": (
+            f"{sse_profile.get('first_lifecycle_event') or '-'}>{sse_profile.get('terminal_event') or '-'}"
+            f"|output:{int(bool(sse_profile.get('has_output_event')))}"
+            if sse_profile
+            else None
+        ),
+        "labels": list(sse_profile.get("labels") or []) if sse_profile else [],
+    }
+
+
+def _openai_attempt_safe_evidence(response: httpx.Response, payload: Any, latency_ms: int, summary: dict[str, Any]) -> dict[str, Any]:
+    return redact_secrets(
+        {
+            "attempt": summary["attempt"],
+            "status": summary["status"],
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "headers": _safe_openai_response_headers(response.headers),
+            "shape": _json_shape_summary(payload),
+            "error_detail": redact_text(_response_error_detail(response)) if response.status_code >= 400 else None,
+            "summary": summary,
+        }
+    )
+
+
+def _openai_failed_attempt_summary(attempt: int, requested_model: str, expected_family: str, exc: Exception, latency_ms: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    error_detail = redact_text(_message_from_exception(exc))[:500]
+    error_family = operational_failure_label(error_detail) or "provider_request_failed"
+    summary = {
+        "attempt": attempt,
+        "status": "operational_failure",
+        "http_status": None,
+        "latency_ms": latency_ms,
+        "request_id": None,
+        "response_family": expected_family,
+        "requested_model": requested_model,
+        "returned_model": None,
+        "normalized_model_family": None,
+        "id_family": None,
+        "error_family": error_family,
+        "sse_profile": None,
+        "labels": [],
+    }
+    safe_evidence = redact_secrets({
+        "attempt": attempt,
+        "status": "operational_failure",
+        "status_code": None,
+        "latency_ms": latency_ms,
+        "headers": {},
+        "shape": {"type": "network_error"},
+        "error_detail": error_detail,
+        "summary": summary,
+    })
+    return summary, safe_evidence
+
+
+def _openai_pass_rate(attempts: list[dict[str, Any]]) -> float:
+    valid = [attempt for attempt in attempts if attempt.get("status") != "operational_failure"]
+    if not valid:
+        return 0.0
+    return sum(1 for attempt in valid if attempt.get("status") == "passed") / len(valid)
+
+
+def _openai_account_pool_signal(probe_repeats: dict[str, list[dict[str, Any]]], raw_evidence: dict[str, Any]) -> bool:
+    markers = ("no available channel", "account pool", "account_pool", "upstream account", "resource pool", "账号池", "账户池", "无可用通道")
+    values: list[str] = []
+    for attempts in probe_repeats.values():
+        for attempt in attempts:
+            values.extend([str(attempt.get("error_family") or ""), str(attempt.get("response_family") or "")])
+    for key, item in raw_evidence.items():
+        if isinstance(item, dict):
+            values.append(str(item.get("error_detail") or ""))
+        elif isinstance(item, list):
+            values.extend(str(child.get("error_detail") or "") for child in item if isinstance(child, dict))
+    joined = " ".join(values).lower()
+    return any(marker in joined for marker in markers)
+
+
+async def _run_openai_json_probe_repeats(
+    client: httpx.AsyncClient,
+    *,
+    url: str,
+    attempts: int,
+    requested_model: str,
+    expected_family: str,
+    request_factory: Any,
+    pass_checker: Any,
+    semaphore: asyncio.Semaphore,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[Any], int]:
+    summaries: list[dict[str, Any]] = []
+    safe_evidence: list[dict[str, Any]] = []
+    payloads: list[Any] = []
+    total_latency_ms = 0
+    async with semaphore:
+        for attempt in range(1, attempts + 1):
+            attempt_headers, body = request_factory(attempt)
+            started = time.perf_counter()
+            try:
+                response = await client.post(url, headers=attempt_headers, json=body)
+            except (httpx.HTTPError, TimeoutError, OSError) as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                total_latency_ms += latency_ms
+                summary, safe = _openai_failed_attempt_summary(attempt, requested_model, expected_family, exc, latency_ms)
+                summaries.append(summary)
+                safe_evidence.append(safe)
+                payloads.append(None)
+                continue
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            total_latency_ms += latency_ms
+            try:
+                payload: Any = response.json()
+            except ValueError:
+                payload = {"_non_json_excerpt": response.text[:500]}
+            passed = bool(pass_checker(response, payload))
+            summary = _openai_attempt_summary(
+                attempt=attempt,
+                response=response,
+                payload=payload,
+                latency_ms=latency_ms,
+                requested_model=requested_model,
+                expected_family=expected_family,
+                passed=passed,
+            )
+            summaries.append(summary)
+            safe_evidence.append(_openai_attempt_safe_evidence(response, payload, latency_ms, summary))
+            payloads.append(payload)
+    return summaries, safe_evidence, payloads, total_latency_ms
+
+
+async def _run_openai_sse_probe_repeats(
+    client: httpx.AsyncClient,
+    *,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    attempts: int,
+    requested_model: str,
+    semaphore: asyncio.Semaphore,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int]:
+    summaries: list[dict[str, Any]] = []
+    safe_evidence: list[dict[str, Any]] = []
+    profiles: list[dict[str, Any]] = []
+    total_latency_ms = 0
+    async with semaphore:
+        for attempt in range(1, attempts + 1):
+            started = time.perf_counter()
+            try:
+                response = await client.post(url, headers=headers, json=body)
+            except (httpx.HTTPError, TimeoutError, OSError) as exc:
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                total_latency_ms += latency_ms
+                summary, safe = _openai_failed_attempt_summary(attempt, requested_model, "responses_sse", exc, latency_ms)
+                summaries.append(summary)
+                safe_evidence.append(safe)
+                profiles.append({"ok": False, "labels": [], "event_types": [], "operational_failure": True})
+                continue
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            total_latency_ms += latency_ms
+            profile = _openai_strict_sse_profile(response.status_code, response.headers.get("content-type"), response.text)
+            payload = {"object": "responses.sse", "id": profile.get("response_id"), "model": profile.get("returned_model")}
+            summary = _openai_attempt_summary(
+                attempt=attempt,
+                response=response,
+                payload=payload,
+                latency_ms=latency_ms,
+                requested_model=requested_model,
+                expected_family="responses_sse",
+                passed=bool(profile.get("ok")),
+                sse_profile=profile,
+            )
+            summaries.append(summary)
+            safe_evidence.append(
+                redact_secrets(
+                    {
+                        "attempt": attempt,
+                        "status": summary["status"],
+                        "status_code": response.status_code,
+                        "latency_ms": latency_ms,
+                        "headers": _safe_openai_response_headers(response.headers),
+                        "profile": profile,
+                        "summary": summary,
+                    }
+                )
+            )
+            profiles.append(profile)
+    return summaries, safe_evidence, profiles, total_latency_ms
+
+
+async def _run_openai_quick_probe_groups(
+    client: httpx.AsyncClient,
+    *,
+    base_url: str,
+    chat_url: str,
+    response_url: str | None,
+    headers: dict[str, str],
+    selected_model: str,
+    attempts: int,
+    include_response_probe: bool,
+    run_codex_probes: bool,
+    semaphore: asyncio.Semaphore,
+) -> dict[str, Any]:
+    chat_body = {"model": selected_model, "messages": [{"role": "user", "content": "Reply with exactly: ok"}], "max_tokens": 8, "temperature": 0}
+    jobs: dict[str, Any] = {
+        "chat_compatibility": _run_openai_json_probe_repeats(
+            client,
+            url=chat_url,
+            attempts=attempts,
+            requested_model=selected_model,
+            expected_family="chat",
+            request_factory=lambda _attempt: (headers, chat_body),
+            pass_checker=lambda response, payload: response.status_code == 200
+            and isinstance(payload, dict)
+            and payload.get("object") == "chat.completion"
+            and isinstance(payload.get("choices"), list),
+            semaphore=semaphore,
+        )
+    }
+    if include_response_probe and response_url:
+        response_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16}
+        jobs["responses_basic"] = _run_openai_json_probe_repeats(
+            client,
+            url=response_url,
+            attempts=attempts,
+            requested_model=selected_model,
+            expected_family="responses",
+            request_factory=lambda _attempt: (headers, response_body),
+            pass_checker=_openai_response_ok,
+            semaphore=semaphore,
+        )
+    if run_codex_probes:
+        responses_url = _openai_responses_url(base_url)
+        stream_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16, "stream": True}
+        jobs["responses_stream"] = _run_openai_sse_probe_repeats(
+            client,
+            url=responses_url,
+            headers=headers,
+            body=stream_body,
+            attempts=attempts,
+            requested_model=selected_model,
+            semaphore=semaphore,
+        )
+
+        def metadata_request_factory(_attempt: int) -> tuple[dict[str, str], dict[str, Any]]:
+            probe_id = f"probe-{uuid.uuid4()}"
+            attempt_headers = dict(headers)
+            attempt_headers.update({
+                "x-codex-window-id": probe_id,
+                "x-codex-turn-metadata": json.dumps({"request_kind": "turn", "thread_id": probe_id}),
+                "originator": "codex-resource-probe",
+            })
+            return attempt_headers, {
+                "model": selected_model,
+                "input": "Reply with exactly: ok",
+                "max_output_tokens": 16,
+                "client_metadata": {
+                    "x-codex-installation-id": probe_id,
+                    "x-codex-window-id": probe_id,
+                    "session_id": probe_id,
+                    "thread_id": probe_id,
+                },
+            }
+
+        jobs["codex_metadata_acceptance"] = _run_openai_json_probe_repeats(
+            client,
+            url=responses_url,
+            attempts=attempts,
+            requested_model=selected_model,
+            expected_family="responses",
+            request_factory=metadata_request_factory,
+            pass_checker=_openai_response_ok,
+            semaphore=semaphore,
+        )
+    results = await asyncio.gather(*jobs.values())
+    return dict(zip(jobs, results))
 
 
 def _openai_codex_quota_signal(payload: Any) -> bool:
@@ -3732,8 +4328,11 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
     codex_metadata_ok = False
     codex_quota_signal = False
     basic_response_id: str | None = None
+    probe_repeats: dict[str, list[dict[str, Any]]] = {}
+    repeat_policy = {"standard_attempts": 1, "critical_attempts": 3}
+    critical_attempts = repeat_policy["critical_attempts"]
 
-    timeout = httpx.Timeout(connect=10, read=30, write=10, pool=10)
+    timeout = httpx.Timeout(connect=10, read=180 if data.probe_depth == "deep" else 90, write=10, pool=10)
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             started = time.perf_counter()
@@ -3783,109 +4382,93 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                 evidence.append(_openai_evidence("Models", "selected_model", "warning", "未能从 /models 选择可用模型，跳过有效模型请求探针。", None))
 
             if selected_model:
-                chat_body = {"model": selected_model, "messages": [{"role": "user", "content": "Reply with exactly: ok"}], "max_tokens": 8, "temperature": 0}
-                started = time.perf_counter()
-                chat_response = await client.post(chat_url, headers=headers, json=chat_body)
-                chat_latency_ms = int((time.perf_counter() - started) * 1000)
-                total_latency_ms += chat_latency_ms
-                request_id = request_id or request_id_from_headers(chat_response.headers)
-                try:
-                    chat_payload: Any = chat_response.json()
-                except ValueError:
-                    chat_payload = {"_non_json_excerpt": chat_response.text[:500]}
-                chat_safe = _openai_collect_response(raw_evidence, "chat_probe", chat_response, chat_latency_ms, chat_payload)
-                choices = chat_payload.get("choices") if isinstance(chat_payload, dict) else None
-                chat_ok = chat_response.status_code == 200 and isinstance(chat_payload, dict) and chat_payload.get("object") == "chat.completion" and isinstance(choices, list)
+                probe_semaphore = asyncio.Semaphore(2)
+                quick_probe_results = await _run_openai_quick_probe_groups(
+                    client,
+                    base_url=base_url,
+                    chat_url=chat_url,
+                    response_url=response_url,
+                    headers=headers,
+                    selected_model=selected_model,
+                    attempts=critical_attempts,
+                    include_response_probe=include_response_probe,
+                    run_codex_probes=run_codex_probes,
+                    semaphore=probe_semaphore,
+                )
+                chat_attempts, chat_safe_attempts, chat_payloads, chat_total_latency = quick_probe_results["chat_compatibility"]
+                total_latency_ms += chat_total_latency
+                probe_repeats["chat_compatibility"] = chat_attempts
+                raw_evidence["chat_probe"] = chat_safe_attempts
+                chat_ok = _openai_pass_rate(chat_attempts) >= 2 / 3
                 capabilities["chat_completions"] = chat_ok
                 if chat_ok:
-                    evidence.append(_openai_evidence("Chat", "chat_probe", "ok", "POST /chat/completions 返回 OpenAI Chat Completions 形态。", chat_safe["shape"]))
-                elif _openai_error_looks_official(chat_payload):
+                    evidence.append(_openai_evidence("Chat", "chat_probe", "ok", "三次 Chat 探针多数返回 OpenAI Chat Completions 形态。", {"pass_rate": _openai_pass_rate(chat_attempts), "attempts": chat_attempts}))
+                elif any(_openai_error_looks_official(payload) for payload in chat_payloads):
                     labels.add("chat_official_error_shape")
-                    evidence.append(_openai_evidence("Chat", "chat_probe", "warning", "Chat 探针未成功，但错误 schema 仍接近 OpenAI 官方风格。", chat_safe["shape"]))
+                    evidence.append(_openai_evidence("Chat", "chat_probe", "warning", "Chat 重复探针未稳定成功，但至少一次错误 schema 接近 OpenAI 官方风格。", {"pass_rate": _openai_pass_rate(chat_attempts), "attempts": chat_attempts}))
                 else:
                     labels.add("chat_shape_mismatch")
-                    evidence.append(_openai_evidence("Chat", "chat_probe", "fail", "Chat 探针未返回 OpenAI Chat Completions 形态。", chat_safe["shape"]))
+                    evidence.append(_openai_evidence("Chat", "chat_probe", "fail", "Chat 重复探针未稳定返回 OpenAI Chat Completions 形态。", {"pass_rate": _openai_pass_rate(chat_attempts), "attempts": chat_attempts}))
 
                 if include_response_probe and response_url:
-                    response_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16}
-                    started = time.perf_counter()
-                    response_probe = await client.post(response_url, headers=headers, json=response_body)
-                    response_latency_ms = int((time.perf_counter() - started) * 1000)
-                    total_latency_ms += response_latency_ms
-                    request_id = request_id or request_id_from_headers(response_probe.headers)
-                    try:
-                        response_payload: Any = response_probe.json()
-                    except ValueError:
-                        response_payload = {"_non_json_excerpt": response_probe.text[:500]}
-                    response_safe = _openai_collect_response(raw_evidence, "response_probe", response_probe, response_latency_ms, response_payload)
-                    response_probe_ok = response_probe.status_code == 200 and isinstance(response_payload, dict) and str(response_payload.get("object") or "").startswith("response") and bool(response_payload.get("id"))
-                    basic_response_id = str(response_payload.get("id")) if response_probe_ok else None
+                    response_attempts, response_safe_attempts, response_payloads, response_total_latency = quick_probe_results["responses_basic"]
+                    total_latency_ms += response_total_latency
+                    probe_repeats["responses_basic"] = response_attempts
+                    raw_evidence["response_probe"] = response_safe_attempts
+                    response_probe_ok = _openai_pass_rate(response_attempts) >= 2 / 3
+                    basic_response_id = next(
+                        (str(payload.get("id")) for payload in response_payloads if isinstance(payload, dict) and str(payload.get("object") or "").startswith("response") and payload.get("id")),
+                        None,
+                    )
                     capabilities["responses"] = response_probe_ok
                     if response_probe_ok:
-                        evidence.append(_openai_evidence("Responses", "responses_probe", "ok", "POST /responses 返回 OpenAI Responses API 形态。", response_safe["shape"]))
-                    elif _openai_error_looks_official(response_payload):
+                        evidence.append(_openai_evidence("Responses", "responses_probe", "ok", "三次 Responses 基础探针多数返回标准 response 对象。", {"pass_rate": _openai_pass_rate(response_attempts), "attempts": response_attempts}))
+                    elif any(_openai_error_looks_official(payload) for payload in response_payloads):
                         labels.add("responses_official_error_shape")
-                        evidence.append(_openai_evidence("Responses", "responses_probe", "warning", "Responses 有效探针未成功，但错误 schema 接近 OpenAI 官方风格；不按协议失败处理。", response_safe["shape"]))
+                        evidence.append(_openai_evidence("Responses", "responses_probe", "warning", "Responses 重复探针未稳定成功，但至少一次错误 schema 接近 OpenAI 官方风格。", {"pass_rate": _openai_pass_rate(response_attempts), "attempts": response_attempts}))
                     else:
                         labels.add("responses_probe_failed")
-                        evidence.append(_openai_evidence("Responses", "responses_probe", "warning", "POST /responses 未返回预期 Responses API 形态。", response_safe["shape"]))
+                        evidence.append(_openai_evidence("Responses", "responses_probe", "warning", "Responses 重复探针未稳定返回预期 API 形态。", {"pass_rate": _openai_pass_rate(response_attempts), "attempts": response_attempts}))
 
+                request_id = request_id or next(
+                    (
+                        str(attempt.get("request_id"))
+                        for probe_key in ("chat_compatibility", "responses_basic")
+                        for attempt in probe_repeats.get(probe_key, [])
+                        if attempt.get("request_id")
+                    ),
+                    None,
+                )
+
+                metadata_headers = dict(headers)
                 if run_codex_probes:
-                    stream_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16, "stream": True}
-                    started = time.perf_counter()
-                    stream_response = await client.post(_openai_responses_url(base_url), headers=headers, json=stream_body)
-                    stream_latency_ms = int((time.perf_counter() - started) * 1000)
-                    total_latency_ms += stream_latency_ms
-                    stream_events = _openai_sse_event_types(stream_response)
-                    codex_stream_ok = stream_response.status_code == 200 and "response.created" in stream_events and "response.completed" in stream_events
+                    stream_attempts, stream_safe_attempts, stream_profiles, stream_total_latency = quick_probe_results["responses_stream"]
+                    total_latency_ms += stream_total_latency
+                    probe_repeats["responses_stream"] = stream_attempts
+                    raw_evidence["responses_stream"] = stream_safe_attempts
+                    for attempt, profile in zip(stream_attempts, stream_profiles):
+                        if attempt.get("status") != "operational_failure":
+                            labels.update(profile.get("labels") or [])
+                    codex_stream_ok = _openai_pass_rate(stream_attempts) >= 2 / 3
                     capabilities["responses_stream"] = codex_stream_ok
-                    raw_evidence["responses_stream"] = redact_secrets({
-                        "status_code": stream_response.status_code,
-                        "latency_ms": stream_latency_ms,
-                        "headers": _safe_openai_response_headers(stream_response.headers),
-                        "event_types": stream_events,
-                    })
                     if codex_stream_ok:
                         labels.add("codex_stream_shape")
-                        evidence.append(_openai_evidence("Codex", "responses_stream", "ok", "Responses SSE 包含创建与完成事件，符合 Codex 客户端所需流式基础形态。", stream_events))
+                        evidence.append(_openai_evidence("Codex", "responses_stream", "ok", "三次 Responses SSE 多数通过严格事件校验。", {"pass_rate": _openai_pass_rate(stream_attempts), "profiles": stream_profiles}))
                     else:
                         labels.add("responses_stream_incomplete")
-                        evidence.append(_openai_evidence("Codex", "responses_stream", "warning", "Responses SSE 缺少创建或完成事件。", stream_events))
+                        evidence.append(_openai_evidence("Codex", "responses_stream", "warning", "Responses SSE 重复探针未稳定通过严格事件校验。", {"pass_rate": _openai_pass_rate(stream_attempts), "profiles": stream_profiles}))
 
-                    probe_id = f"probe-{uuid.uuid4()}"
-                    metadata_headers = dict(headers)
-                    metadata_headers.update({
-                        "x-codex-window-id": probe_id,
-                        "x-codex-turn-metadata": json.dumps({"request_kind": "turn", "thread_id": probe_id}),
-                        "originator": "codex-resource-probe",
-                    })
-                    metadata_body = {
-                        "model": selected_model,
-                        "input": "Reply with exactly: ok",
-                        "max_output_tokens": 16,
-                        "client_metadata": {
-                            "x-codex-installation-id": probe_id,
-                            "x-codex-window-id": probe_id,
-                            "session_id": probe_id,
-                            "thread_id": probe_id,
-                        },
-                    }
-                    started = time.perf_counter()
-                    metadata_response = await client.post(_openai_responses_url(base_url), headers=metadata_headers, json=metadata_body)
-                    metadata_latency_ms = int((time.perf_counter() - started) * 1000)
-                    total_latency_ms += metadata_latency_ms
-                    try:
-                        metadata_payload: Any = metadata_response.json()
-                    except ValueError:
-                        metadata_payload = {"_non_json_excerpt": metadata_response.text[:500]}
-                    metadata_safe = _openai_collect_response(raw_evidence, "codex_metadata", metadata_response, metadata_latency_ms, metadata_payload)
-                    codex_metadata_ok = _openai_response_ok(metadata_response, metadata_payload)
+                    metadata_attempts, metadata_safe_attempts, metadata_payloads, metadata_total_latency = quick_probe_results["codex_metadata_acceptance"]
+                    total_latency_ms += metadata_total_latency
+                    probe_repeats["codex_metadata_acceptance"] = metadata_attempts
+                    raw_evidence["codex_metadata"] = metadata_safe_attempts
+                    codex_metadata_ok = _openai_pass_rate(metadata_attempts) >= 2 / 3
                     capabilities["codex_metadata"] = codex_metadata_ok
                     if codex_metadata_ok:
                         labels.add("codex_metadata_accepted")
-                        evidence.append(_openai_evidence("Codex", "metadata_acceptance", "ok", "网关接受了匿名 Codex-compatible 会话元数据。", metadata_safe["shape"]))
+                        evidence.append(_openai_evidence("Codex", "metadata_acceptance", "ok", "三次匿名 Codex-compatible 元数据探针多数被接受。", {"pass_rate": _openai_pass_rate(metadata_attempts), "attempts": metadata_attempts}))
                     else:
-                        evidence.append(_openai_evidence("Codex", "metadata_acceptance", "warning", "网关未接受 Codex-compatible 会话元数据。", metadata_safe["shape"]))
+                        evidence.append(_openai_evidence("Codex", "metadata_acceptance", "warning", "网关未稳定接受 Codex-compatible 会话元数据。", {"pass_rate": _openai_pass_rate(metadata_attempts), "attempts": metadata_attempts}))
 
                 if data.probe_depth == "deep":
                     tool_body = {
@@ -3895,24 +4478,57 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                         "tools": [{"type": "function", "name": "probe_echo", "description": "Echo a probe value.", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}],
                         "tool_choice": "required",
                     }
-                    started = time.perf_counter()
-                    tool_response = await client.post(_openai_responses_url(base_url), headers=headers, json=tool_body)
-                    tool_latency_ms = int((time.perf_counter() - started) * 1000)
-                    total_latency_ms += tool_latency_ms
-                    try:
-                        tool_payload: Any = tool_response.json()
-                    except ValueError:
-                        tool_payload = {"_non_json_excerpt": tool_response.text[:500]}
-                    tool_safe = _openai_collect_response(raw_evidence, "tool_call", tool_response, tool_latency_ms, tool_payload)
-                    tool_outputs = tool_payload.get("output") if isinstance(tool_payload, dict) else None
-                    tool_calls = [item for item in tool_outputs or [] if isinstance(item, dict) and item.get("type") == "function_call"]
-                    tool_ok = tool_response.status_code == 200 and any(item.get("call_id") and item.get("name") == "probe_echo" and isinstance(item.get("arguments"), str) for item in tool_calls)
+                    def tool_pass_checker(response: httpx.Response, payload: Any) -> bool:
+                        outputs = payload.get("output") if isinstance(payload, dict) else None
+                        calls = [item for item in outputs or [] if isinstance(item, dict) and item.get("type") == "function_call"]
+                        return response.status_code == 200 and any(item.get("call_id") and item.get("name") == "probe_echo" and isinstance(item.get("arguments"), str) for item in calls)
+
+                    tool_job = _run_openai_json_probe_repeats(
+                        client,
+                        url=_openai_responses_url(base_url),
+                        attempts=critical_attempts,
+                        requested_model=selected_model,
+                        expected_family="responses",
+                        request_factory=lambda _attempt: (headers, tool_body),
+                        pass_checker=tool_pass_checker,
+                        semaphore=probe_semaphore,
+                    )
+                    codex_payload_body = {
+                        "model": selected_model,
+                        "instructions": "You are a coding agent. Reply with exactly: ok",
+                        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Reply with exactly: ok"}]}],
+                        "max_output_tokens": 16,
+                        "parallel_tool_calls": True,
+                        "tools": [{"type": "function", "name": "probe_echo", "description": "Echo a value.", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}}}],
+                    }
+                    codex_payload_job = _run_openai_json_probe_repeats(
+                        client,
+                        url=_openai_responses_url(base_url),
+                        attempts=critical_attempts,
+                        requested_model=selected_model,
+                        expected_family="responses",
+                        request_factory=lambda _attempt: (metadata_headers, codex_payload_body),
+                        pass_checker=_openai_response_ok,
+                        semaphore=probe_semaphore,
+                    )
+                    (tool_attempts, tool_safe_attempts, _tool_payloads, tool_total_latency), (codex_payload_attempts, codex_payload_safe_attempts, _codex_payloads, codex_payload_total_latency) = await asyncio.gather(tool_job, codex_payload_job)
+                    total_latency_ms += tool_total_latency
+                    probe_repeats["tool_call"] = tool_attempts
+                    raw_evidence["tool_call"] = tool_safe_attempts
+                    tool_ok = _openai_pass_rate(tool_attempts) >= 2 / 3
                     capabilities["tools"] = tool_ok
                     if tool_ok:
-                        evidence.append(_openai_evidence("Codex", "tool_call", "ok", "Responses function tool 返回 call_id、名称和 JSON arguments。", tool_safe["shape"]))
+                        evidence.append(_openai_evidence("Codex", "tool_call", "ok", "三次 function tool 探针多数完整返回 call_id、名称和 JSON arguments。", {"pass_rate": _openai_pass_rate(tool_attempts), "attempts": tool_attempts}))
                     else:
                         labels.add("tool_call_rewrite")
-                        evidence.append(_openai_evidence("Codex", "tool_call", "warning", "Function tool 响应缺失或被改写。", tool_safe["shape"]))
+                        evidence.append(_openai_evidence("Codex", "tool_call", "warning", "Function tool 重复响应缺失或被改写。", {"pass_rate": _openai_pass_rate(tool_attempts), "attempts": tool_attempts}))
+
+                    total_latency_ms += codex_payload_total_latency
+                    probe_repeats["codex_client_payload"] = codex_payload_attempts
+                    raw_evidence["codex_client_payload"] = codex_payload_safe_attempts
+                    codex_payload_ok = _openai_pass_rate(codex_payload_attempts) >= 2 / 3
+                    capabilities["codex_client_payload"] = codex_payload_ok
+                    evidence.append(_openai_evidence("Codex", "codex_client_payload", "ok" if codex_payload_ok else "warning", "网关稳定接受精简 Codex agent 请求结构。" if codex_payload_ok else "网关未稳定接受精简 Codex agent 请求结构。", {"pass_rate": _openai_pass_rate(codex_payload_attempts), "attempts": codex_payload_attempts}))
 
                     reasoning_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16, "reasoning": {"effort": "low", "summary": "auto"}}
                     started = time.perf_counter()
@@ -3933,39 +4549,22 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
                         evidence.append(_openai_evidence("Codex", "reasoning_controls", "info", "网关不支持或拒绝 reasoning controls；作为能力缺失记录。", reasoning_safe["shape"]))
 
                     multi_turn_body = {"model": selected_model, "input": "Reply with exactly: ok", "max_output_tokens": 16, "previous_response_id": basic_response_id or "resp_probe_missing"}
-                    started = time.perf_counter()
-                    multi_turn_response = await client.post(_openai_responses_url(base_url), headers=headers, json=multi_turn_body)
-                    multi_turn_latency_ms = int((time.perf_counter() - started) * 1000)
-                    total_latency_ms += multi_turn_latency_ms
-                    try:
-                        multi_turn_payload: Any = multi_turn_response.json()
-                    except ValueError:
-                        multi_turn_payload = {"_non_json_excerpt": multi_turn_response.text[:500]}
-                    multi_turn_safe = _openai_collect_response(raw_evidence, "multi_turn", multi_turn_response, multi_turn_latency_ms, multi_turn_payload)
-                    multi_turn_ok = bool(basic_response_id) and _openai_response_ok(multi_turn_response, multi_turn_payload)
+                    multi_turn_attempts, multi_turn_safe_attempts, _multi_payloads, multi_turn_total_latency = await _run_openai_json_probe_repeats(
+                        client,
+                        url=_openai_responses_url(base_url),
+                        attempts=critical_attempts,
+                        requested_model=selected_model,
+                        expected_family="responses",
+                        request_factory=lambda _attempt: (headers, multi_turn_body),
+                        pass_checker=lambda response, payload: bool(basic_response_id) and _openai_response_ok(response, payload),
+                        semaphore=probe_semaphore,
+                    )
+                    total_latency_ms += multi_turn_total_latency
+                    probe_repeats["multi_turn_state"] = multi_turn_attempts
+                    raw_evidence["multi_turn"] = multi_turn_safe_attempts
+                    multi_turn_ok = _openai_pass_rate(multi_turn_attempts) >= 2 / 3
                     capabilities["multi_turn"] = multi_turn_ok
-                    evidence.append(_openai_evidence("Codex", "multi_turn_state", "ok" if multi_turn_ok else "warning", "网关支持 previous_response_id 连续会话。" if multi_turn_ok else "网关未确认 previous_response_id 连续会话能力。", multi_turn_safe["shape"]))
-
-                    codex_payload_body = {
-                        "model": selected_model,
-                        "instructions": "You are a coding agent. Reply with exactly: ok",
-                        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Reply with exactly: ok"}]}],
-                        "max_output_tokens": 16,
-                        "parallel_tool_calls": True,
-                        "tools": [{"type": "function", "name": "probe_echo", "description": "Echo a value.", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}}}],
-                    }
-                    started = time.perf_counter()
-                    codex_payload_response = await client.post(_openai_responses_url(base_url), headers=metadata_headers, json=codex_payload_body)
-                    codex_payload_latency_ms = int((time.perf_counter() - started) * 1000)
-                    total_latency_ms += codex_payload_latency_ms
-                    try:
-                        codex_payload: Any = codex_payload_response.json()
-                    except ValueError:
-                        codex_payload = {"_non_json_excerpt": codex_payload_response.text[:500]}
-                    codex_payload_safe = _openai_collect_response(raw_evidence, "codex_client_payload", codex_payload_response, codex_payload_latency_ms, codex_payload)
-                    codex_payload_ok = _openai_response_ok(codex_payload_response, codex_payload)
-                    capabilities["codex_client_payload"] = codex_payload_ok
-                    evidence.append(_openai_evidence("Codex", "codex_client_payload", "ok" if codex_payload_ok else "warning", "网关接受精简 Codex agent 请求结构。" if codex_payload_ok else "网关未接受精简 Codex agent 请求结构。", codex_payload_safe["shape"]))
+                    evidence.append(_openai_evidence("Codex", "multi_turn_state", "ok" if multi_turn_ok else "warning", "重复探针支持 previous_response_id 连续会话。" if multi_turn_ok else "重复探针未确认 previous_response_id 连续会话能力。", {"pass_rate": _openai_pass_rate(multi_turn_attempts), "attempts": multi_turn_attempts}))
 
                     compact_url = f"{_openai_responses_url(base_url)}/compact"
                     compact_body = {"model": selected_model, "input": [{"role": "user", "content": [{"type": "input_text", "text": "Compact this short probe."}]}]}
@@ -4012,6 +4611,20 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         evidence.append(_openai_evidence("Endpoint", "network_request", "fail", "联网验证请求失败，无法确认资源形态。", message))
         raw_evidence["error"] = message
 
+    stability = _analyze_openai_probe_repeats(probe_repeats)
+    labels.update(stability["labels"])
+    raw_evidence["probe_repeats"] = probe_repeats
+    repeated_attempts = sum(len(attempts) for attempts in probe_repeats.values())
+    valid_attempt_ratio = stability["valid_attempts"] / repeated_attempts if repeated_attempts else 0.0
+    required_quick_probes = {"chat_compatibility", "responses_basic"}
+    if run_codex_probes:
+        required_quick_probes.update({"responses_stream", "codex_metadata_acceptance"})
+    required_repeat_probes = required_quick_probes | ({"tool_call", "multi_turn_state", "codex_client_payload"} if data.probe_depth == "deep" else set())
+    executed_repeat_ratio = len(required_repeat_probes.intersection(probe_repeats)) / len(required_repeat_probes) if required_repeat_probes else 1.0
+    evidence_sufficiency = 100.0 * (0.6 * executed_repeat_ratio + 0.4 * valid_attempt_ratio)
+    if not selected_model:
+        evidence_sufficiency = min(evidence_sufficiency, 25.0)
+
     hard_failure = "network_or_auth_failure" in labels or ("models_http_error" in labels and not models_ok)
     official_like_count = sum(1 for value in (models_ok, chat_ok, response_probe_ok is True, validation_error_ok) if value)
     suspicious_failures = {"models_shape_mismatch", "chat_shape_mismatch"}.intersection(labels)
@@ -4035,13 +4648,20 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
     else:
         classification = "openai_compatible_proxy"
 
+    chat_pass_rate = _openai_pass_rate(probe_repeats.get("chat_compatibility", []))
+    responses_pass_rate = _openai_pass_rate(probe_repeats.get("responses_basic", []))
+    stream_pass_rate = _openai_pass_rate(probe_repeats.get("responses_stream", []))
+    metadata_pass_rate = _openai_pass_rate(probe_repeats.get("codex_metadata_acceptance", []))
+    tool_pass_rate = _openai_pass_rate(probe_repeats.get("tool_call", []))
+    multi_turn_pass_rate = _openai_pass_rate(probe_repeats.get("multi_turn_state", []))
+    codex_payload_pass_rate = _openai_pass_rate(probe_repeats.get("codex_client_payload", []))
+
     upstream_score = 0.0
     if models_ok:
         upstream_score += 25
-    if chat_ok:
-        upstream_score += 30
-    if response_probe_ok is True:
-        upstream_score += 20
+    upstream_score += 30 * chat_pass_rate
+    if response_probe_ok is not None:
+        upstream_score += 20 * responses_pass_rate
     elif response_probe_ok is None and selected_model:
         upstream_score += 0
     elif response_probe_ok is False and "responses_official_error_shape" in labels:
@@ -4065,40 +4685,71 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         confidence_score = min(95.0, confidence_score)
     confidence_score = max(0.0, min(100.0, confidence_score))
 
-    openai_api_score = upstream_score
+    protocol_compatibility_score = upstream_score
     codex_compatibility_score = 0.0
-    if response_probe_ok is True:
-        codex_compatibility_score += 20
-    if codex_stream_ok:
-        codex_compatibility_score += 35
-    if codex_metadata_ok:
-        codex_compatibility_score += 25
+    codex_compatibility_score += 20 * responses_pass_rate
+    codex_compatibility_score += 35 * stream_pass_rate
+    codex_compatibility_score += 25 * metadata_pass_rate
     if "codex_model_catalog_signal" in labels:
         codex_compatibility_score += 8
     if codex_quota_signal:
         codex_compatibility_score += 22
     if "responses_stream_incomplete" in labels:
         codex_compatibility_score -= 15
-    for capability in ("tools", "reasoning_controls", "multi_turn", "codex_client_payload"):
-        if capabilities.get(capability) is True:
-            codex_compatibility_score += 5
-    if capabilities.get("tools") is False:
+    codex_compatibility_score += 5 * tool_pass_rate
+    codex_compatibility_score += 5 * multi_turn_pass_rate
+    codex_compatibility_score += 5 * codex_payload_pass_rate
+    if capabilities.get("reasoning_controls") is True:
+        codex_compatibility_score += 5
+    if probe_repeats.get("tool_call") and tool_pass_rate == 0:
         codex_compatibility_score -= 8
     codex_compatibility_score = max(0.0, min(100.0, codex_compatibility_score))
+    codex_client_score = codex_compatibility_score
+
+    source_evidence_score = 0.0
+    if directness == "official_direct" and upstream_assessment == "official_upstream_likely":
+        source_evidence_score = 90.0
+        if request_id:
+            source_evidence_score += 5
+        if protocol_compatibility_score >= 90:
+            source_evidence_score += 5
+    else:
+        if codex_quota_signal:
+            source_evidence_score += 35
+        account_pool_signal = _openai_account_pool_signal(probe_repeats, raw_evidence)
+        if account_pool_signal:
+            source_evidence_score += 25
+        if "codex_model_catalog_signal" in labels:
+            source_evidence_score += 10
+        codex_header_signal = any(
+            any(str(header).lower().startswith("x-codex-") for header in (item.get("headers") or {}))
+            for key in ("responses_stream", "codex_metadata")
+            for item in (raw_evidence.get(key) if isinstance(raw_evidence.get(key), list) else [])
+            if isinstance(item, dict)
+        )
+        if codex_header_signal:
+            source_evidence_score += 10
+        compatibility_source_points = min(35.0, 10 * stream_pass_rate + 8 * metadata_pass_rate + 7 * tool_pass_rate + 5 * multi_turn_pass_rate + 5 * codex_payload_pass_rate)
+        source_evidence_score += compatibility_source_points
+        strong_source_groups = sum(bool(value) for value in (codex_quota_signal, account_pool_signal, codex_header_signal, "codex_model_catalog_signal" in labels))
+        if not codex_quota_signal and not account_pool_signal:
+            source_evidence_score = min(source_evidence_score, 35.0)
+        elif source_evidence_score > 70 and strong_source_groups < 2:
+            source_evidence_score = 70.0
+    source_evidence_score = max(0.0, min(100.0, source_evidence_score))
 
     connection_type = "official_openai_host" if directness == "official_direct" else "relay_or_proxy"
-    codex_catalog_signal = "codex_model_catalog_signal" in labels
-    codex_origin_signal = codex_quota_signal or (codex_catalog_signal and codex_stream_ok and codex_metadata_ok)
-    if hard_failure:
+    only_operational_evidence = stability["valid_attempts"] == 0 and stability["operational_failures"] > 0
+    if hard_failure or only_operational_evidence:
         resource_family = "invalid_or_unverified"
-    elif directness == "official_direct" and upstream_assessment == "official_upstream_likely":
-        resource_family = "official_openai_api_likely"
-    elif directness != "official_direct" and codex_origin_signal and codex_compatibility_score >= 60:
-        resource_family = "codex_compatible_relay_likely"
-    elif directness != "official_direct" and chat_ok and response_probe_ok is True and codex_compatibility_score >= 60:
+    elif stability["mixed_routing_detected"]:
         resource_family = "hybrid_or_translated_gateway"
         labels.add("protocol_translation_detected")
-    elif directness != "official_direct" and upstream_assessment == "official_upstream_likely":
+    elif directness == "official_direct" and upstream_assessment == "official_upstream_likely":
+        resource_family = "official_openai_api_likely"
+    elif directness != "official_direct" and codex_client_score >= 60 and source_evidence_score >= 60:
+        resource_family = "codex_compatible_relay_likely"
+    elif directness != "official_direct" and protocol_compatibility_score >= 75 and source_evidence_score < 60:
         resource_family = "openai_api_relay_likely"
     elif upstream_assessment == "openai_compatible_unverified":
         resource_family = "openai_compatible_unverified"
@@ -4112,9 +4763,31 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         classification = "codex_compatible_relay_likely"
     elif resource_family == "hybrid_or_translated_gateway":
         classification = "hybrid_or_translated_gateway"
-    source_confidence = max(openai_api_score, codex_compatibility_score)
-    if resource_family in {"openai_compatible_unverified", "invalid_or_unverified"}:
-        source_confidence = min(source_confidence, 45.0)
+    elif resource_family == "suspicious_rewrite":
+        classification = "suspicious_proxy_or_rewrite"
+    elif resource_family == "invalid_or_unverified":
+        classification = "invalid_or_unverified"
+    routing_stability_score = float(stability["routing_stability_score"])
+    main_family_score = {
+        "official_openai_api_likely": max(protocol_compatibility_score, source_evidence_score),
+        "openai_api_relay_likely": protocol_compatibility_score,
+        "codex_compatible_relay_likely": (codex_client_score + source_evidence_score) / 2,
+        "hybrid_or_translated_gateway": max(protocol_compatibility_score, codex_client_score),
+        "openai_compatible_unverified": protocol_compatibility_score,
+        "suspicious_rewrite": max(protocol_compatibility_score, codex_client_score),
+        "invalid_or_unverified": min(protocol_compatibility_score, 45.0),
+    }[resource_family]
+    classification_confidence = 0.5 * main_family_score + 0.3 * routing_stability_score + 0.2 * evidence_sufficiency
+    repeated_probes_with_valid_samples = sum(
+        1 for attempts in probe_repeats.values() if sum(1 for attempt in attempts if attempt.get("status") != "operational_failure") >= 2
+    )
+    if repeated_probes_with_valid_samples < 2:
+        classification_confidence = min(classification_confidence, 55.0)
+    classification_confidence = max(0.0, min(100.0, classification_confidence))
+    source_confidence = source_evidence_score
+    confidence_score = classification_confidence
+    openai_api_score = protocol_compatibility_score
+    codex_compatibility_score = codex_client_score
 
     summaries = {
         "official_upstream_likely": "中转资源的模型列表、有效请求和校验错误多项证据接近 OpenAI 官方 API，上游高度疑似官方 OpenAI；但非官方 host 仍只能称为官转高一致性。",
@@ -4145,6 +4818,7 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         raw_evidence=raw_evidence,
         validation_error_ok=validation_error_ok,
         codex_quota_signal=codex_quota_signal,
+        probe_repeats=probe_repeats,
     )
     raw_evidence = redact_secrets(_redact_literal_secret(raw_evidence, data.api_key))
     output = {
@@ -4155,6 +4829,22 @@ async def create_openai_resource_check(data: OpenAIResourceCheckCreate) -> dict[
         "openai_api_score": round(openai_api_score, 2),
         "codex_compatibility_score": round(codex_compatibility_score, 2),
         "source_confidence": round(source_confidence, 2),
+        "protocol_compatibility_score": round(protocol_compatibility_score, 2),
+        "codex_client_score": round(codex_client_score, 2),
+        "source_evidence_score": round(source_evidence_score, 2),
+        "routing_stability_score": round(routing_stability_score, 2),
+        "evidence_sufficiency": round(evidence_sufficiency, 2),
+        "classification_confidence": round(classification_confidence, 2),
+        "repeat_policy": repeat_policy,
+        "stability": {
+            "mixed_routing_detected": stability["mixed_routing_detected"],
+            "valid_attempts": stability["valid_attempts"],
+            "operational_failures": stability["operational_failures"],
+            "model_consistency_rate": stability["model_consistency_rate"],
+            "protocol_consistency_rate": stability["protocol_consistency_rate"],
+            "mixed_routing_reasons": stability["mixed_routing_reasons"],
+        },
+        "probe_repeats": probe_repeats,
         "probe_depth": data.probe_depth,
         "capabilities": capabilities,
         "directness": directness,

@@ -1364,6 +1364,14 @@ class OpenAIProbeAnalysisItem(BaseModel):
     codex_expected: str
     observed: str
     conclusion: str
+    attempt_count: int = 0
+    valid_attempt_count: int = 0
+    operational_failure_count: int = 0
+    consistency_rate: float | None = None
+    model_families: list[str] = Field(default_factory=list)
+    response_families: list[str] = Field(default_factory=list)
+    sse_profiles: list[str] = Field(default_factory=list)
+    difference_summary: str | None = None
 
 
 class OpenAIResourceCheckRead(BaseModel):
@@ -1389,6 +1397,15 @@ class OpenAIResourceCheckRead(BaseModel):
     openai_api_score: float
     codex_compatibility_score: float
     source_confidence: float
+    protocol_compatibility_score: float
+    codex_client_score: float
+    source_evidence_score: float
+    routing_stability_score: float
+    evidence_sufficiency: float
+    classification_confidence: float
+    repeat_policy: dict[str, int] = Field(default_factory=dict)
+    stability: dict[str, Any] = Field(default_factory=dict)
+    probe_repeats: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     probe_depth: Literal["quick", "deep"]
     capabilities: dict[str, bool | None] = Field(default_factory=dict)
     directness: Literal["official_direct", "relay_or_proxy"]

@@ -4,8 +4,8 @@ import { Alert, AutoComplete, Button, Card, Col, Descriptions, Form, Input, Prog
 import type { ColumnsType } from 'antd/es/table';
 import { ShieldCheck } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import type { OpenAIProbeAnalysisItem, OpenAIResourceCheckRequest, OpenAIResourceCheckResult, OpenAIResourceEvidenceItem } from '../types';
-import { capabilityState, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, probeDifferenceMeta, probeExecutionMeta, resourceFamilyMeta, type OpenAIResourceFormValues } from '../openAIResourceCheckUtils';
+import type { OpenAIProbeAnalysisItem, OpenAIProbeAttempt, OpenAIResourceCheckRequest, OpenAIResourceCheckResult, OpenAIResourceEvidenceItem } from '../types';
+import { capabilityState, mixedRoutingReasonText, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, probeAttemptStatusMeta, probeDifferenceMeta, probeExecutionMeta, resourceFamilyMeta, type OpenAIResourceFormValues } from '../openAIResourceCheckUtils';
 
 type FormValues = OpenAIResourceFormValues;
 
@@ -80,6 +80,28 @@ const probeAnalysisColumns: ColumnsType<OpenAIProbeAnalysisItem> = [
   },
   { title: '状态', dataIndex: 'execution_status', width: 100, render: (value: string) => { const meta = probeExecutionMeta(value); return <Tag color={meta.color}>{meta.text}</Tag>; } },
   {
+    title: '重复稳定性',
+    width: 240,
+    render: (_, row) => row.attempt_count ? (
+      <Space direction="vertical" size={3}>
+        <Typography.Text>尝试 {row.attempt_count} 次，有效 {row.valid_attempt_count ?? 0} 次</Typography.Text>
+        <Typography.Text>一致率 {Math.round((row.consistency_rate ?? 0) * 100)}%</Typography.Text>
+        {(row.operational_failure_count ?? 0) > 0 ? <Tag color="gold">不可用样本 {row.operational_failure_count} 次</Tag> : null}
+      </Space>
+    ) : <Typography.Text type="secondary">未重复执行</Typography.Text>,
+  },
+  {
+    title: '模型 / 协议差异',
+    width: 310,
+    render: (_, row) => (
+      <Space direction="vertical" size={3}>
+        <Typography.Text>模型：{row.model_families?.join(', ') || '-'}</Typography.Text>
+        <Typography.Text>协议：{row.response_families?.join(', ') || '-'}</Typography.Text>
+        <Typography.Text type="secondary">{row.difference_summary || '未执行重复稳定性比较。'}</Typography.Text>
+      </Space>
+    ),
+  },
+  {
     title: '区分依据',
     width: 480,
     render: (_, row) => (
@@ -101,6 +123,16 @@ const probeAnalysisColumns: ColumnsType<OpenAIProbeAnalysisItem> = [
   },
 ];
 
+const attemptColumns: ColumnsType<OpenAIProbeAttempt & { probe: string }> = [
+  { title: '探针', dataIndex: 'probe', width: 200 },
+  { title: '尝试', dataIndex: 'attempt', width: 70 },
+  { title: '样本状态', dataIndex: 'status', width: 120, render: (value: string) => { const meta = probeAttemptStatusMeta(value); return <Tag color={meta.color}>{meta.text}</Tag>; } },
+  { title: 'HTTP', dataIndex: 'http_status', width: 80, render: (value: number | null) => value ?? '-' },
+  { title: '返回模型家族', dataIndex: 'normalized_model_family', width: 180, render: (value: string | null) => value || '-' },
+  { title: '响应族', dataIndex: 'response_family', width: 150, render: (value: string | null) => value || '-' },
+  { title: 'SSE / 错误轮廓', render: (_, row) => row.sse_profile || row.error_family || '-' },
+];
+
 const capabilityLabels: Record<string, string> = {
   models: 'Models',
   chat_completions: 'Chat Completions',
@@ -120,6 +152,10 @@ export default function OpenAIResourceCheck() {
   const [requestError, setRequestError] = useState<string | null>(null);
 
   const groupedEvidence = useMemo(() => result?.evidence ?? [], [result]);
+  const repeatedAttempts = useMemo(
+    () => Object.entries(result?.probe_repeats ?? {}).flatMap(([probe, attempts]) => attempts.map((attempt) => ({ ...attempt, probe }))),
+    [result],
+  );
 
   const runCheck = useMutation({
     mutationFn: (values: FormValues) => {
@@ -217,15 +253,17 @@ export default function OpenAIResourceCheck() {
             <Row gutter={[12, 12]}>
               <Col xs={24} md={8}><Card size="small"><Statistic title="连接形态" valueRender={() => directnessTag(result.connection_type || result.directness)} /></Card></Col>
               <Col xs={24} md={8}><Card size="small"><Statistic title="资源类型" valueRender={() => { const meta = resourceFamilyMeta(result.resource_family); return <Tag color={meta.color}>{meta.text}</Tag>; }} /></Card></Col>
-              <Col xs={24} md={8}><Card size="small"><Statistic title="来源置信度" value={result.source_confidence ?? result.confidence_score} suffix="/ 100" /></Card></Col>
+              <Col xs={24} md={8}><Card size="small"><Statistic title="来源证据分" value={result.source_evidence_score ?? result.source_confidence ?? 0} suffix="/ 100" /><Typography.Text type="secondary">不会由单纯协议兼容直接推高</Typography.Text></Card></Col>
             </Row>
             <Row gutter={[12, 12]}>
-              <Col xs={24} md={12}><Card size="small" title="OpenAI API 一致分"><Progress percent={Math.round(result.openai_api_score ?? result.upstream_score ?? 0)} /></Card></Col>
-              <Col xs={24} md={12}><Card size="small" title="Codex 兼容分"><Progress percent={Math.round(result.codex_compatibility_score ?? 0)} strokeColor="#722ed1" /></Card></Col>
+              <Col xs={24} md={12}><Card size="small" title="协议兼容分"><Progress percent={Math.round(result.protocol_compatibility_score ?? result.openai_api_score ?? 0)} /></Card></Col>
+              <Col xs={24} md={12}><Card size="small" title="Codex 客户端分"><Progress percent={Math.round(result.codex_client_score ?? result.codex_compatibility_score ?? 0)} strokeColor="#722ed1" /></Card></Col>
+              <Col xs={24} md={12}><Card size="small" title="路由稳定分"><Progress percent={Math.round(result.routing_stability_score ?? 0)} strokeColor="#1677ff" /></Card></Col>
+              <Col xs={24} md={12}><Card size="small" title="证据充分度"><Progress percent={Math.round(result.evidence_sufficiency ?? 0)} strokeColor="#13a8a8" /></Card></Col>
             </Row>
             <Descriptions bordered size="small" column={2}>
               <Descriptions.Item label="综合分类">{classificationTag(result.classification)}</Descriptions.Item>
-              <Descriptions.Item label="综合置信分">{result.confidence_score}</Descriptions.Item>
+              <Descriptions.Item label="分类置信度">{result.classification_confidence ?? result.confidence_score}</Descriptions.Item>
               <Descriptions.Item label="检测深度">{result.probe_depth === 'deep' ? '深度检测' : '快速检测'}</Descriptions.Item>
               <Descriptions.Item label="连接形态">{directnessTag(result.directness)}</Descriptions.Item>
               <Descriptions.Item label="上游一致性">{upstreamTag(result.upstream_assessment)}</Descriptions.Item>
@@ -239,6 +277,20 @@ export default function OpenAIResourceCheck() {
               <Descriptions.Item label="Chat Endpoint" span={2}>{result.chat_endpoint || '-'}</Descriptions.Item>
               <Descriptions.Item label="Responses Endpoint" span={2}>{result.response_endpoint || '-'}</Descriptions.Item>
             </Descriptions>
+            {result.stability?.mixed_routing_detected ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="检测到疑似混合路由或协议转换"
+                description={
+                  <Space direction="vertical" size={2}>
+                    {(result.stability.mixed_routing_reasons ?? []).map((reason, index) => (
+                      <Typography.Text key={`${String(reason.probe || 'reason')}-${index}`}>{mixedRoutingReasonText(reason)}</Typography.Text>
+                    ))}
+                  </Space>
+                }
+              />
+            ) : null}
             <Card size="small" title="能力矩阵">
               <Space wrap size={[8, 8]}>
                 {Object.entries(result.capabilities ?? {}).map(([key, value]) => {
@@ -267,6 +319,16 @@ export default function OpenAIResourceCheck() {
               scroll={{ x: 1180 }}
               dataSource={result.probe_analysis ?? []}
               columns={probeAnalysisColumns}
+            />
+            <Typography.Title level={4}>重复尝试样本</Typography.Title>
+            <Alert type="info" showIcon message="429、5xx、超时、额度不足和无可用通道显示为“不可用样本”，不参与真伪一致性计算。" />
+            <Table
+              size="small"
+              rowKey={(row) => `${row.probe}:${row.attempt}`}
+              pagination={false}
+              scroll={{ x: 1050 }}
+              dataSource={repeatedAttempts}
+              columns={attemptColumns}
             />
             <Typography.Title level={4}>本次证据明细</Typography.Title>
             <Table size="small" rowKey={(row) => `${row.group || 'group'}:${row.key}`} pagination={false} dataSource={groupedEvidence} columns={evidenceColumns} />

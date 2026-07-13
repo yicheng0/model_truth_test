@@ -35,7 +35,7 @@ from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseC
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
 from app.scheduled_probe import _probe_status_text, operational_failure_label
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _analyze_openai_probe_repeats, _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _normalize_openai_model_family, _openai_compatible_call, _openai_probe_repeat_metrics, _openai_strict_sse_profile, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -4620,6 +4620,440 @@ def test_openai_resource_check_detects_codex_compatible_relay(monkeypatch) -> No
     assert "gateway-only-secret" not in blob
 
 
+def test_openai_model_family_normalization_distinguishes_aliases_from_swaps() -> None:
+    assert _normalize_openai_model_family("gpt-5.6-2026-06-01") == "gpt-5.6"
+    assert _normalize_openai_model_family("gpt-5.6") == "gpt-5.6"
+    assert _normalize_openai_model_family("gpt-5.6-mini-2026-06-01") == "gpt-5.6-mini"
+    assert _normalize_openai_model_family("gpt-5-codex") == "gpt-5-codex"
+
+
+def test_openai_strict_sse_profile_accepts_complete_ordered_stream() -> None:
+    body = "\n\n".join(
+        [
+            'data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response"}}',
+            'data: {"type":"response.output_item.added","sequence_number":1,"response_id":"resp_1","item":{"type":"message"}}',
+            'data: {"type":"response.output_text.delta","sequence_number":2,"response_id":"resp_1","delta":"ok"}',
+            'data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1","object":"response","usage":{"input_tokens":3,"output_tokens":1}}}',
+            "data: [DONE]",
+        ]
+    )
+
+    profile = _openai_strict_sse_profile(200, "text/event-stream", body)
+
+    assert profile["ok"] is True
+    assert profile["labels"] == []
+    assert profile["response_id"] == "resp_1"
+    assert profile["terminal_event"] == "response.completed"
+    assert profile["has_usage"] is True
+
+
+def test_openai_strict_sse_profile_reports_independent_shape_failures() -> None:
+    body = "\n\n".join(
+        [
+            'data: {"type":"response.output_text.delta","sequence_number":2,"response_id":"resp_other","delta":"early"}',
+            'data: {not-json}',
+            'data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_1"}}',
+            'data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1"}}',
+            'data: {"type":"response.failed","sequence_number":4,"response":{"id":"resp_1"}}',
+            'data: {"type":"response.output_text.delta","sequence_number":5,"response_id":"resp_1","delta":"late"}',
+        ]
+    )
+
+    profile = _openai_strict_sse_profile(200, "text/event-stream", body)
+
+    assert profile["ok"] is False
+    assert {
+        "sse_event_order_invalid",
+        "sse_json_invalid",
+        "sse_multiple_terminal_events",
+        "sse_response_id_mismatch",
+        "sse_sequence_invalid",
+        "sse_usage_missing",
+        "responses_stream_incomplete",
+    }.issubset(set(profile["labels"]))
+
+
+def test_openai_strict_sse_profile_ignores_comments_and_multiline_data_frames() -> None:
+    body = "\n".join(
+        [
+            ": keep-alive",
+            'event: response.created',
+            'data: {"type":"response.created",',
+            'data: "response":{"id":"resp_1","model":"gpt-5.6"}}',
+            "",
+            'data: {"type":"response.output_text.delta","response_id":"resp_1","delta":"ok"}',
+            "",
+            'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.6","usage":{}}}',
+            "",
+        ]
+    )
+
+    profile = _openai_strict_sse_profile(200, "text/event-stream; charset=utf-8", body)
+
+    assert profile["ok"] is True
+    assert profile["json_invalid_count"] == 0
+    assert profile["first_lifecycle_event"] == "response.created"
+
+
+def test_openai_repeat_analysis_ignores_operational_failure_but_detects_model_swap() -> None:
+    analysis = _analyze_openai_probe_repeats(
+        {
+            "responses_basic": [
+                {"attempt": 1, "status": "passed", "response_family": "responses", "normalized_model_family": "gpt-5.6", "id_family": "resp_"},
+                {"attempt": 2, "status": "operational_failure", "http_status": 503, "error_family": "provider_temporarily_unavailable"},
+                {"attempt": 3, "status": "passed", "response_family": "responses", "normalized_model_family": "gpt-4o", "id_family": "resp_"},
+            ]
+        }
+    )
+
+    assert analysis["mixed_routing_detected"] is True
+    assert analysis["valid_attempts"] == 2
+    assert analysis["operational_failures"] == 1
+    assert "suspected_model_swap" in analysis["labels"]
+    assert "suspected_mixed_routing" in analysis["labels"]
+    assert "intermittent_protocol_switch" not in analysis["labels"]
+
+
+def test_openai_repeat_analysis_marks_alias_rewrite_without_mixed_routing() -> None:
+    analysis = _analyze_openai_probe_repeats(
+        {
+            "chat_compatibility": [
+                {"attempt": 1, "status": "passed", "requested_model": "gpt-5.6", "returned_model": "gpt-5.6-2026-06-01", "normalized_model_family": "gpt-5.6", "response_family": "chat", "id_family": "chatcmpl_"},
+                {"attempt": 2, "status": "passed", "requested_model": "gpt-5.6", "returned_model": "gpt-5.6", "normalized_model_family": "gpt-5.6", "response_family": "chat", "id_family": "chatcmpl_"},
+                {"attempt": 3, "status": "passed", "requested_model": "gpt-5.6", "returned_model": "gpt-5.6-2026-06-01", "normalized_model_family": "gpt-5.6", "response_family": "chat", "id_family": "chatcmpl_"},
+            ]
+        }
+    )
+
+    assert analysis["mixed_routing_detected"] is False
+    assert "model_alias_rewrite" in analysis["labels"]
+    assert "suspected_model_swap" not in analysis["labels"]
+    assert analysis["model_consistency_rate"] == 1.0
+
+
+def test_openai_probe_repeat_metrics_separates_unavailable_samples() -> None:
+    metrics = _openai_probe_repeat_metrics(
+        [
+            {"attempt": 1, "status": "passed", "normalized_model_family": "gpt-5.6", "response_family": "responses", "sse_profile": "response.created>response.completed|output:1"},
+            {"attempt": 2, "status": "operational_failure", "http_status": 503, "error_family": "provider_temporarily_unavailable"},
+            {"attempt": 3, "status": "warning", "normalized_model_family": "gpt-5.6", "response_family": "responses", "sse_profile": "response.created>-|output:1"},
+        ]
+    )
+
+    assert metrics == {
+        "attempt_count": 3,
+        "valid_attempt_count": 2,
+        "operational_failure_count": 1,
+        "consistency_rate": 0.8333,
+        "model_families": ["gpt-5.6"],
+        "response_families": ["responses"],
+        "sse_profiles": ["response.created>-|output:1", "response.created>response.completed|output:1"],
+        "difference_summary": "SSE 事件轮廓发生变化；1 次不可用样本不参与一致性计算。",
+    }
+
+
+def test_openai_repeat_analysis_marks_missing_returned_model_as_weak_anomaly() -> None:
+    analysis = _analyze_openai_probe_repeats(
+        {
+            "responses_basic": [
+                {"attempt": 1, "status": "passed", "requested_model": "gpt-5.6", "returned_model": None, "response_family": "responses", "id_family": "resp_"},
+                {"attempt": 2, "status": "passed", "requested_model": "gpt-5.6", "returned_model": "gpt-5.6", "normalized_model_family": "gpt-5.6", "response_family": "responses", "id_family": "resp_"},
+                {"attempt": 3, "status": "passed", "requested_model": "gpt-5.6", "returned_model": "gpt-5.6", "normalized_model_family": "gpt-5.6", "response_family": "responses", "id_family": "resp_"},
+            ]
+        }
+    )
+
+    assert "returned_model_missing" in analysis["labels"]
+    assert analysis["mixed_routing_detected"] is False
+
+
+def test_openai_repeat_analysis_detects_response_family_switch() -> None:
+    analysis = _analyze_openai_probe_repeats(
+        {
+            "responses_basic": [
+                {"attempt": 1, "status": "passed", "response_family": "responses", "normalized_model_family": "gpt-5.6", "id_family": "resp_"},
+                {"attempt": 2, "status": "warning", "response_family": "middleware_error", "error_family": "relay_error"},
+                {"attempt": 3, "status": "passed", "response_family": "responses", "normalized_model_family": "gpt-5.6", "id_family": "resp_"},
+            ]
+        }
+    )
+
+    assert analysis["mixed_routing_detected"] is True
+    assert "intermittent_protocol_switch" in analysis["labels"]
+
+
+def test_openai_resource_check_repeats_critical_probes_and_ignores_single_503(monkeypatch) -> None:
+    call_counts: dict[str, int] = {"chat": 0, "responses": 0, "stream": 0, "metadata": 0}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-5.6"}]}, request=httpx.Request("GET", url))
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                call_counts["chat"] += 1
+                return httpx.Response(200, json={"id": f"chatcmpl_{call_counts['chat']}", "object": "chat.completion", "model": "gpt-5.6-2026-06-01", "choices": []}, request=request)
+            if json.get("stream") is True:
+                call_counts["stream"] += 1
+                if call_counts["stream"] == 2:
+                    return httpx.Response(503, json={"error": {"message": "No available channel", "type": "server_error"}}, request=request)
+                body = "\n\n".join([
+                    f'data: {{"type":"response.created","response":{{"id":"resp_stream_{call_counts["stream"]}","model":"gpt-5.6-2026-06-01"}}}}',
+                    'data: {"type":"response.output_text.delta","delta":"ok"}',
+                    f'data: {{"type":"response.completed","response":{{"id":"resp_stream_{call_counts["stream"]}","model":"gpt-5.6-2026-06-01","usage":{{"input_tokens":1,"output_tokens":1}}}}}}',
+                ])
+                return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"}, request=request)
+            if json.get("client_metadata"):
+                call_counts["metadata"] += 1
+                return httpx.Response(200, json={"id": f"resp_meta_{call_counts['metadata']}", "object": "response", "model": "gpt-5.6-2026-06-01", "output": []}, request=request)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid", "type": "invalid_request_error", "code": "integer_below_min_value"}}, request=request)
+            call_counts["responses"] += 1
+            return httpx.Response(200, json={"id": f"resp_{call_counts['responses']}", "object": "response", "model": "gpt-5.6-2026-06-01", "output": []}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        payload = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://relay.example/v1", "api_key": "secret", "detection_mode": "auto", "probe_depth": "quick"},
+        ).json()
+
+    assert call_counts == {"chat": 3, "responses": 3, "stream": 3, "metadata": 3}
+    assert payload["repeat_policy"] == {"standard_attempts": 1, "critical_attempts": 3}
+    assert payload["stability"]["operational_failures"] == 1
+    assert payload["stability"]["mixed_routing_detected"] is False
+    assert "suspected_mixed_routing" not in payload["labels"]
+    assert "responses_stream_incomplete" not in payload["labels"]
+    assert payload["routing_stability_score"] >= 90
+    assert payload["probe_repeats"]["responses_stream"][1]["status"] == "operational_failure"
+
+
+def test_openai_resource_check_keeps_valid_attempts_when_one_request_times_out(monkeypatch) -> None:
+    chat_attempt = 0
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-5.6"}]}, request=httpx.Request("GET", url))
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal chat_attempt
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                chat_attempt += 1
+                if chat_attempt == 2:
+                    raise httpx.ReadTimeout("request timed out", request=request)
+                return httpx.Response(200, json={"id": f"chatcmpl_{chat_attempt}", "object": "chat.completion", "model": "gpt-5.6", "choices": []}, request=request)
+            if json.get("stream") is True:
+                body = "\n\n".join([
+                    'data: {"type":"response.created","response":{"id":"resp_stream","model":"gpt-5.6"}}',
+                    'data: {"type":"response.output_text.delta","delta":"ok"}',
+                    'data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5.6","usage":{}}}',
+                ])
+                return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"}, request=request)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid", "type": "invalid_request_error"}}, request=request)
+            return httpx.Response(200, json={"id": "resp_1", "object": "response", "model": "gpt-5.6", "output": []}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        payload = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://relay.example/v1", "api_key": "secret", "detection_mode": "auto", "probe_depth": "quick"},
+        ).json()
+
+    assert [attempt["status"] for attempt in payload["probe_repeats"]["chat_compatibility"]] == ["passed", "operational_failure", "passed"]
+    assert payload["capabilities"]["chat_completions"] is True
+    assert payload["stability"]["mixed_routing_detected"] is False
+
+
+def test_openai_resource_check_runs_independent_probe_groups_with_two_way_concurrency(monkeypatch) -> None:
+    active_requests = 0
+    max_active_requests = 0
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-5.6"}]}, request=httpx.Request("GET", url))
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal active_requests, max_active_requests
+            request = httpx.Request("POST", url)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid", "type": "invalid_request_error"}}, request=request)
+            active_requests += 1
+            max_active_requests = max(max_active_requests, active_requests)
+            await asyncio.sleep(0.005)
+            active_requests -= 1
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_1", "object": "chat.completion", "model": "gpt-5.6", "choices": []}, request=request)
+            if json.get("stream") is True:
+                body = "\n\n".join([
+                    'data: {"type":"response.created","response":{"id":"resp_stream","model":"gpt-5.6"}}',
+                    'data: {"type":"response.output_text.delta","delta":"ok"}',
+                    'data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5.6","usage":{}}}',
+                ])
+                return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"}, request=request)
+            return httpx.Response(200, json={"id": "resp_1", "object": "response", "model": "gpt-5.6", "output": []}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://relay.example/v1", "api_key": "secret", "detection_mode": "auto", "probe_depth": "quick"},
+        )
+
+    assert response.status_code == 200
+    assert max_active_requests == 2
+
+
+def test_openai_resource_check_model_family_switch_forces_hybrid_classification(monkeypatch) -> None:
+    response_attempt = 0
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-5.6"}]}, request=httpx.Request("GET", url))
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal response_attempt
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_1", "object": "chat.completion", "model": "gpt-5.6", "choices": []}, request=request)
+            if json.get("stream") is True:
+                body = '\n\n'.join([
+                    'data: {"type":"response.created","response":{"id":"resp_stream","model":"gpt-5.6"}}',
+                    'data: {"type":"response.output_text.delta","delta":"ok"}',
+                    'data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5.6","usage":{}}}',
+                ])
+                return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"}, request=request)
+            if json.get("client_metadata"):
+                return httpx.Response(200, json={"id": "resp_meta", "object": "response", "model": "gpt-5.6", "output": []}, request=request)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid", "type": "invalid_request_error", "code": "integer_below_min_value"}}, request=request)
+            response_attempt += 1
+            model = "gpt-4o" if response_attempt == 2 else "gpt-5.6"
+            return httpx.Response(200, json={"id": f"resp_{response_attempt}", "object": "response", "model": model, "output": []}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        payload = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://mixed.example/v1", "api_key": "secret", "detection_mode": "auto", "probe_depth": "quick"},
+        ).json()
+
+    assert payload["resource_family"] == "hybrid_or_translated_gateway"
+    assert payload["stability"]["mixed_routing_detected"] is True
+    assert "suspected_model_swap" in payload["labels"]
+    assert "suspected_mixed_routing" in payload["labels"]
+
+
+def test_openai_resource_check_weak_codex_signals_cannot_raise_source_score_above_35(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-5-codex"}]}, request=httpx.Request("GET", url))
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_1", "object": "chat.completion", "model": "gpt-5-codex", "choices": []}, request=request)
+            if json.get("stream") is True:
+                body = '\n\n'.join([
+                    'data: {"type":"response.created","response":{"id":"resp_stream","model":"gpt-5-codex"}}',
+                    'data: {"type":"response.output_text.delta","delta":"ok"}',
+                    'data: {"type":"response.completed","response":{"id":"resp_stream","model":"gpt-5-codex","usage":{}}}',
+                ])
+                return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"}, request=request)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid", "type": "invalid_request_error", "code": "integer_below_min_value"}}, request=request)
+            return httpx.Response(200, json={"id": "resp_1", "object": "response", "model": "gpt-5-codex", "output": []}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        payload = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://generic.example/v1", "api_key": "secret", "detection_mode": "auto", "probe_depth": "quick"},
+        ).json()
+
+    assert payload["source_evidence_score"] <= 35
+    assert payload["resource_family"] != "codex_compatible_relay_likely"
+
+
+def test_openai_resource_check_caps_confidence_when_repeated_evidence_is_insufficient(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-5.6"}]}, request=httpx.Request("GET", url))
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid", "type": "invalid_request_error"}}, request=request)
+            raise httpx.ReadTimeout("request timed out", request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        payload = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://relay.example/v1", "api_key": "secret", "detection_mode": "auto", "probe_depth": "quick"},
+        ).json()
+
+    assert payload["classification_confidence"] <= 55
+    assert payload["resource_family"] == "invalid_or_unverified"
+    assert payload["stability"]["valid_attempts"] == 0
+
+
 def test_openai_resource_check_deep_mode_reports_optional_capabilities(monkeypatch) -> None:
     class FakeClient:
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
@@ -4686,6 +5120,43 @@ def test_openai_resource_check_deep_mode_reports_optional_capabilities(monkeypat
     assert probe_analysis["multi_turn_state"]["execution_status"] == "passed"
     assert probe_analysis["compact_capability"]["execution_status"] == "unsupported"
     assert probe_analysis["compact_capability"]["difference_level"] == "supporting"
+
+
+def test_openai_resource_check_openai_api_deep_mode_still_runs_deep_probes(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def get(self, url, headers):  # noqa: ANN001
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "gpt-5.6"}]}, request=httpx.Request("GET", url))
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            request = httpx.Request("POST", url)
+            if url.endswith("/chat/completions"):
+                return httpx.Response(200, json={"id": "chatcmpl_1", "object": "chat.completion", "model": "gpt-5.6", "choices": []}, request=request)
+            if url.endswith("/compact"):
+                return httpx.Response(404, json={"error": {"message": "not found", "type": "invalid_request_error"}}, request=request)
+            if json.get("max_output_tokens") == 0:
+                return httpx.Response(400, json={"error": {"message": "invalid", "type": "invalid_request_error"}}, request=request)
+            if json.get("tool_choice") == "required":
+                return httpx.Response(200, json={"id": "resp_tool", "object": "response", "model": "gpt-5.6", "output": [{"type": "function_call", "call_id": "call_1", "name": "probe_echo", "arguments": '{"value":"ok"}'}]}, request=request)
+            return httpx.Response(200, json={"id": "resp_1", "object": "response", "model": "gpt-5.6", "output": []}, request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/openai-resource-check",
+            json={"base_url": "https://relay.example/v1", "api_key": "secret", "detection_mode": "openai_api", "probe_depth": "deep"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["probe_repeats"]["tool_call"]
 
 
 def test_openai_resource_check_does_not_classify_codex_from_metadata_alone(monkeypatch) -> None:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { capabilityState, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, probeDifferenceMeta, probeExecutionMeta, resourceFamilyMeta } from './openAIResourceCheckUtils';
+import { capabilityState, mixedRoutingReasonText, OPENAI_COMMON_MODEL_OPTIONS, openAIResourcePayload, probeAttemptStatusMeta, probeDifferenceMeta, probeExecutionMeta, resourceFamilyMeta } from './openAIResourceCheckUtils';
 
 describe('OpenAI/Codex resource check helpers', () => {
   it('builds the new auto-detection payload', () => {
@@ -44,5 +44,19 @@ describe('OpenAI/Codex resource check helpers', () => {
     expect(probeExecutionMeta('not_run')).toEqual({ color: 'default', text: '未执行' });
     expect(probeDifferenceMeta('strong')).toEqual({ color: 'purple', text: '强区分项' });
     expect(probeDifferenceMeta('supporting')).toEqual({ color: 'blue', text: '辅助区分项' });
+  });
+
+  it('renders operational failures as unavailable samples instead of authenticity failures', () => {
+    expect(probeAttemptStatusMeta('operational_failure')).toEqual({ color: 'gold', text: '不可用样本' });
+    expect(probeAttemptStatusMeta('warning')).toEqual({ color: 'orange', text: '存在差异' });
+  });
+
+  it('renders mixed routing reasons with concrete model families', () => {
+    expect(mixedRoutingReasonText({
+      probe: 'chat_vs_responses',
+      reason: 'cross_protocol_model_family_changed',
+      chat_models: ['gpt-5.6'],
+      response_models: ['gpt-4o'],
+    })).toBe('Chat 与 Responses 返回不同模型家族：gpt-5.6 / gpt-4o');
   });
 });
