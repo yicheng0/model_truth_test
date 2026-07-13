@@ -15,6 +15,26 @@ EXPECTED_CLAUDE_PROBE_LABELS = {
     "unexpected_error_response",
     "thinking_adaptive_enabled_wrong_error",
 }
+PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL = "provider_temporarily_unavailable"
+PROVIDER_QUOTA_EXHAUSTED_LABEL = "provider_quota_or_balance_exhausted"
+PROVIDER_REQUEST_FAILED_LABEL = "provider_request_failed"
+OPERATIONAL_FAILURE_LABELS = {
+    PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL,
+    PROVIDER_QUOTA_EXHAUSTED_LABEL,
+    PROVIDER_REQUEST_FAILED_LABEL,
+}
+TEMPORARY_PROVIDER_UNAVAILABLE_PATTERN = re.compile(
+    r"\b503\b|service unavailable|no available channel|overloaded|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|资源池暂无可用|暂无可用通道",
+    re.IGNORECASE,
+)
+PROVIDER_QUOTA_EXHAUSTED_PATTERN = re.compile(
+    r"用户额度不足|额度不足|余额不足|剩余额度|quota(?:\s+or\s+balance)?\s+(?:is\s+)?(?:exhausted|insufficient|exceeded)|credit(?:s)?\s+(?:are\s+)?(?:exhausted|insufficient)|insufficient\s+(?:quota|balance|credit)|billing quota",
+    re.IGNORECASE,
+)
+PROVIDER_REQUEST_FAILED_PATTERN = re.compile(
+    r"\b5\d\d\b|internal server error|gateway timeout|bad gateway|request timeout|timed out|connection (?:failed|error|reset)|network error",
+    re.IGNORECASE,
+)
 BLOCKING_SCHEDULED_PROBE_LABELS = {
     "thinking_adaptive_not_supported",
     "thinking_temperature_not_rejected",
@@ -26,6 +46,43 @@ NATIVE_PARAMETER_UNSUPPORTED_PATTERN = re.compile(
     r"400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool",
     re.IGNORECASE,
 )
+
+
+def operational_failure_label(error_text: str | None, *, http_status: Any | None = None) -> str | None:
+    text = str(error_text or "")
+    combined = f"{http_status or ''} {text}".strip()
+    if re.search(r"缺少\s*api\s*key|missing\s+api\s*key|authentication required|unauthorized|invalid api key", combined, re.IGNORECASE):
+        return None
+    if PROVIDER_QUOTA_EXHAUSTED_PATTERN.search(combined):
+        return PROVIDER_QUOTA_EXHAUSTED_LABEL
+    if TEMPORARY_PROVIDER_UNAVAILABLE_PATTERN.search(combined):
+        return PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL
+    try:
+        status = int(http_status) if http_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if (status is not None and status >= 500) or PROVIDER_REQUEST_FAILED_PATTERN.search(combined):
+        return PROVIDER_REQUEST_FAILED_LABEL
+    return None
+
+
+def operational_failure_label_for_item(item: dict[str, Any]) -> str | None:
+    labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
+    matched = labels.intersection(OPERATIONAL_FAILURE_LABELS)
+    if matched:
+        return next(label for label in OPERATIONAL_FAILURE_LABELS if label in matched)
+    error_text = " ".join(
+        str(item.get(field) or "")
+        for field in ("error", "reason", "raw_error", "evidence_excerpt")
+        if str(item.get(field) or "").strip()
+    )
+    return operational_failure_label(error_text, http_status=item.get("error_http_status") or item.get("status_code"))
+
+
+def only_operational_failures(model_requests: list[dict[str, Any]], labels: set[str]) -> bool:
+    if not labels or not labels.issubset(OPERATIONAL_FAILURE_LABELS):
+        return False
+    return any(operational_failure_label_for_item(item) for item in model_requests)
 
 
 def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
@@ -108,10 +165,19 @@ def _scheduled_probe_display_title(item: dict[str, Any]) -> str:
 
 
 def _probe_status_text(item: dict[str, Any]) -> str:
-    if item.get("error"):
-        return "请求错误"
-    labels = item.get("labels") if isinstance(item.get("labels"), list) else []
-    return "异常" if labels else "正常"
+    labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
+    operational_label = operational_failure_label_for_item(item)
+    if operational_label == PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL:
+        return "资源暂不可用"
+    if operational_label == PROVIDER_QUOTA_EXHAUSTED_LABEL:
+        return "额度不足"
+    if operational_label == PROVIDER_REQUEST_FAILED_LABEL:
+        return "检测失败"
+    if labels.intersection({"provider_error_variant"}) or _probe_parameter_unsupported(item):
+        return "符合预期"
+    if labels:
+        return "真伪异常"
+    return "通过"
 
 
 def _probe_parameter_unsupported(item: dict[str, Any]) -> bool:
@@ -150,6 +216,23 @@ def scheduled_probe_classification(
     provider_hint = scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels)
     probe_count = len({str(item.get("key") or "") for item in model_requests if str(item.get("key") or "")}) or len(model_requests)
     probe_count_text = f"{probe_count} 项" if probe_count else "所选"
+    signature_operational_label = operational_failure_label_for_item(signature_evidence)
+    if only_operational_failures(model_requests, label_set) or (label_set and label_set.issubset(OPERATIONAL_FAILURE_LABELS) and signature_operational_label):
+        if PROVIDER_QUOTA_EXHAUSTED_LABEL in label_set:
+            display_label = "额度不足"
+            reason = "本轮无法判定：资源额度或余额不足，已作为运营问题记录，不参与真伪判断。"
+        elif PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL in label_set:
+            display_label = "资源暂不可用"
+            reason = "本轮无法判定：上游资源暂不可用或资源池暂无可用通道，已作为运营问题记录。"
+        else:
+            display_label = "检测失败"
+            reason = "本轮无法判定：请求失败且未获得可用于真伪判断的响应，已作为运营问题记录。"
+        return {
+            "status": "operational_issue",
+            "label": display_label,
+            "reason": reason,
+            "score": max(normalized_score, 90),
+        }
     if _scheduled_probe_all_parameter_unsupported(model_requests):
         return {
             "status": "aws_resource",
@@ -204,6 +287,8 @@ def scheduled_probe_needs_ai_judge(model_requests: list[dict[str, Any]], labels:
     if not model_requests:
         return False
     label_set = {str(label) for label in labels}
+    if str(classification.get("status") or "") == "operational_issue" or only_operational_failures(model_requests, label_set):
+        return False
     if str(classification.get("status") or "") == "anomaly":
         return True
     unsupported = [_probe_parameter_unsupported(item) for item in model_requests]
@@ -243,6 +328,12 @@ def scheduled_provider_hint_from_evidence(model_requests: list[dict[str, Any]], 
         str(signature_evidence.get("relay_message_channel_type") or ""),
     ]
     joined = " ".join(types).lower()
+    if PROVIDER_QUOTA_EXHAUSTED_LABEL in labels:
+        return "额度不足"
+    if PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL in labels:
+        return "资源暂不可用"
+    if PROVIDER_REQUEST_FAILED_LABEL in labels:
+        return "检测失败"
     if "thinking_temperature_not_rejected" in labels or "thinking_adaptive_not_supported" in labels or "thinking_adaptive_enabled_not_rejected" in labels:
         return "疑似 adaptive thinking 中间层改写"
     if "signature_interop_failed" in labels:

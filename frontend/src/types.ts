@@ -1352,7 +1352,7 @@ export type ScheduledChannelTest = {
     labels?: string[];
     label_explanations?: Array<{ label: string; description: string }>;
     detected_provider_hint?: string | null;
-    classification_status?: 'claude' | 'aws_resource' | 'anomaly' | string | null;
+    classification_status?: 'claude' | 'aws_resource' | 'operational_issue' | 'anomaly' | string | null;
     classification_label?: string | null;
     classification_reason?: string | null;
     ai_judge?: PatrolAiJudgeEvidence | null;
@@ -1444,6 +1444,7 @@ export type SmartPatrolChannelSummary = {
   channel_model_name?: string | null;
   run_count: number;
   alert_count: number;
+  operational_issue_count: number;
   pending_review_count: number;
   last_run_at?: string | null;
 };
@@ -1476,6 +1477,10 @@ export type SmartPatrolReport = {
   completed_run_count: number;
   failed_run_count: number;
   alert_count: number;
+  normal_count: number;
+  authenticity_anomaly_count: number;
+  operational_issue_count: number;
+  operational_issue_breakdown: Record<string, number>;
   pending_review_count: number;
   channel_summaries: SmartPatrolChannelSummary[];
   recent_alerts: ChannelAlert[];

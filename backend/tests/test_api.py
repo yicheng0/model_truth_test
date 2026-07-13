@@ -34,7 +34,8 @@ from app.models import AuditLog, BaselineResult, BaselineSnapshot, Channel, Chan
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate, TestSuiteCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.scheduled_probe import _probe_status_text, operational_failure_label
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -7988,7 +7989,8 @@ def test_smart_patrol_report_counts_scheduled_run_and_alert(monkeypatch) -> None
         assert "avg_score" not in report["trend"][0]
     assert markdown.status_code == 200
     assert "智能巡检汇总报告" in markdown.text
-    assert "成功 / 错误" in markdown.text
+    assert "真伪异常" in markdown.text
+    assert "运营问题" in markdown.text
     assert "渠道巡检汇总" in markdown.text
     assert "Negative Sample-third_party_openai_compatible" in markdown.text
     assert "最近错误" in markdown.text
@@ -8021,9 +8023,10 @@ def test_smart_patrol_daily_text_uses_scoreless_summary(monkeypatch) -> None:
         text = smart_patrol_daily_text(report, setting)
 
     assert "智能巡检日报" in text
-    assert "自动巡检：" in text
-    assert "成功" in text
-    assert "错误" in text
+    assert "巡检 " in text
+    assert "正常" in text
+    assert "真伪异常" in text
+    assert "运营问题" in text
     assert "重点渠道：" in text
     assert "Negative Sample-third_party_openai_compatible" in text
     assert "平均分" not in text
@@ -8031,6 +8034,58 @@ def test_smart_patrol_daily_text_uses_scoreless_summary(monkeypatch) -> None:
     assert "分数" not in text
     assert "score" not in text
     assert "grade" not in text
+
+
+def test_smart_patrol_daily_text_separates_normal_authenticity_and_operational_results() -> None:
+    setting = FeishuBroadcastSetting(app_base_url="http://localhost:5173")
+    now = datetime.now(timezone.utc)
+    report = {
+        "from_at": now - timedelta(days=1),
+        "to_at": now,
+        "run_count": 50,
+        "completed_run_count": 50,
+        "failed_run_count": 0,
+        "normal_count": 46,
+        "authenticity_anomaly_count": 0,
+        "pending_review_count": 0,
+        "operational_issue_count": 4,
+        "operational_issue_breakdown": {
+            "provider_temporarily_unavailable": 3,
+            "provider_quota_or_balance_exhausted": 1,
+            "provider_request_failed": 0,
+        },
+        "channel_summaries": [],
+    }
+
+    text = smart_patrol_daily_text(report, setting)
+
+    assert "巡检 50 次，正常 46" in text
+    assert "真伪异常 0" in text
+    assert "运营问题 4（暂不可用 3、额度不足 1）" in text
+    assert "错误 4" not in text
+
+
+def test_smart_patrol_daily_text_all_normal_is_compact() -> None:
+    setting = FeishuBroadcastSetting(app_base_url="http://localhost:5173")
+    now = datetime.now(timezone.utc)
+    report = {
+        "from_at": now - timedelta(days=1),
+        "to_at": now,
+        "run_count": 50,
+        "completed_run_count": 50,
+        "failed_run_count": 0,
+        "normal_count": 50,
+        "authenticity_anomaly_count": 0,
+        "pending_review_count": 0,
+        "operational_issue_count": 0,
+        "operational_issue_breakdown": {},
+        "channel_summaries": [],
+    }
+
+    text = smart_patrol_daily_text(report, setting)
+
+    assert "今日巡检 50 次，全部符合预期，未发现真伪异常。" in text
+    assert "重点渠道" not in text
 
 
 def test_scheduled_alert_notification_uses_error_message(monkeypatch) -> None:
@@ -8259,6 +8314,184 @@ def test_scheduled_probe_classification_returns_aws_resource_for_three_parameter
     assert result["status"] == "aws_resource"
     assert result["label"] == "AWS 资源"
     assert "参数不支持" in result["reason"]
+
+
+def test_scheduled_probe_expected_parameter_rejection_is_displayed_as_expected() -> None:
+    assert _probe_status_text(
+        {
+            "labels": ["provider_error_variant"],
+            "error": "Client error '400 Bad Request': temperature may only be set to 1 when thinking is enabled",
+        }
+    ) == "符合预期"
+
+
+def test_operational_failure_label_distinguishes_availability_quota_and_unknown_failures() -> None:
+    assert operational_failure_label("503 Service Unavailable: No available channel", http_status=503) == "provider_temporarily_unavailable"
+    assert operational_failure_label("用户额度不足, 剩余额度: ¥-0.580994", http_status=500) == "provider_quota_or_balance_exhausted"
+    assert operational_failure_label("429 quota exhausted", http_status=429) == "provider_quota_or_balance_exhausted"
+    assert operational_failure_label("500 Internal Server Error: upstream returned an unknown failure", http_status=500) == "provider_request_failed"
+
+
+def test_scheduled_probe_operational_failures_have_no_authenticity_verdict_or_ai_judge() -> None:
+    scenarios = [
+        ("provider_temporarily_unavailable", "资源暂不可用"),
+        ("provider_quota_or_balance_exhausted", "额度不足"),
+        ("provider_request_failed", "检测失败"),
+    ]
+    for label, display in scenarios:
+        model_requests = [{"key": "thinking_temperature", "labels": [label], "error": display}]
+        result = scheduled_probe_classification(model_requests, {}, [label], 0)
+        assert result["status"] == "operational_issue"
+        assert result["label"] == display
+        assert "本轮无法判定" in result["reason"]
+        assert scheduled_probe_needs_ai_judge(model_requests, [label], result) is False
+
+
+def test_scheduled_probe_partial_operational_failure_is_not_an_authenticity_anomaly() -> None:
+    model_requests = [
+        {"key": "thinking_temperature", "labels": [], "error": ""},
+        {"key": "web_search", "labels": ["provider_temporarily_unavailable"], "error": "503 No available channel"},
+        {"key": "thinking_adaptive_enabled", "labels": [], "error": ""},
+    ]
+
+    result = scheduled_probe_classification(model_requests, {}, ["provider_temporarily_unavailable"], 0)
+
+    assert result["status"] == "operational_issue"
+    assert result["label"] == "资源暂不可用"
+    assert scheduled_probe_needs_ai_judge(model_requests, ["provider_temporarily_unavailable"], result) is False
+
+
+def test_scheduled_probe_signature_operational_failure_does_not_override_normal_model_probes() -> None:
+    model_requests = [
+        {"key": "thinking_temperature", "labels": [], "error": ""},
+        {"key": "web_search", "labels": [], "error": ""},
+        {"key": "thinking_adaptive_enabled", "labels": [], "error": ""},
+    ]
+    signature = {
+        "labels": ["provider_temporarily_unavailable"],
+        "raw_error": "503 No available channel",
+        "error_http_status": 503,
+    }
+
+    result = scheduled_probe_classification(model_requests, signature, ["provider_temporarily_unavailable"], 0)
+
+    assert result["status"] == "operational_issue"
+    assert result["label"] == "资源暂不可用"
+
+
+def test_scheduled_operational_report_does_not_create_authenticity_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    run_id = create_report_for_schedule(schedule, grade="E", score=0, labels=["provider_quota_or_balance_exhausted"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {
+            "labels": ["provider_quota_or_balance_exhausted"],
+            "test_scope": "scheduled_probe",
+            "classification_status": "operational_issue",
+            "classification_label": "额度不足",
+            "classification_reason": "本轮无法判定：资源额度不足。",
+            "model_requests": [
+                {
+                    "key": "thinking_temperature",
+                    "labels": ["provider_quota_or_balance_exhausted"],
+                    "error": "HTTP 500: 用户额度不足, 剩余额度: ¥-0.580994",
+                }
+            ],
+        }
+        db.commit()
+
+    alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    assert alerts == []
+
+
+def test_scheduled_signature_operational_failure_is_recorded_without_authenticity_alert(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    scenarios = [
+        ("run_signature_503", 503, "No available channel for model claude-sonnet-4-6 under group vertex-claude", "provider_temporarily_unavailable", "资源暂不可用"),
+        ("run_signature_quota", 500, "用户额度不足, 剩余额度: ¥-0.580994", "provider_quota_or_balance_exhausted", "额度不足"),
+    ]
+    for run_id, status, error, expected_label, expected_display in scenarios:
+        with SessionLocal() as db:
+            scheduled = db.get(ScheduledChannelTest, schedule["id"])
+            assert scheduled is not None
+            db.add(
+                Run(
+                    id=run_id,
+                    suite_id=scheduled.suite_id,
+                    name=run_id,
+                    mode="manual_probe",
+                    test_scope="quick",
+                    scheduled_test_id=scheduled.id,
+                    status="completed",
+                    repeat_count=1,
+                    concurrency=1,
+                    total_jobs=1,
+                    completed_jobs=1,
+                )
+            )
+            db.commit()
+            report = asyncio.run(
+                build_scheduled_probe_report(
+                    SessionLocal,
+                    db,
+                    scheduled,
+                    run_id,
+                    None,
+                    {
+                        "ok": False,
+                        "status": "fail",
+                        "reason": "relay 请求失败",
+                        "raw_error": error,
+                        "error_http_status": status,
+                        "error_stage": "relay",
+                        "relay_channel_id": "negative_sample",
+                        "labels": ["signature_interop_failed"],
+                        "steps": [{"name": "Relay 请求", "status": "fail", "detail": error}],
+                    },
+                )
+            )
+
+        assert report.evidence["classification_status"] == "operational_issue"
+        assert report.evidence["classification_label"] == expected_display
+        assert expected_label in report.evidence["labels"]
+        assert "signature_interop_failed" not in report.evidence["labels"]
+        assert asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"])) == []
+
+
+def test_scheduled_mixed_operational_and_authenticity_evidence_still_alerts(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+
+    labels = ["provider_temporarily_unavailable", "protocol_mismatch"]
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=labels)
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {
+            "labels": labels,
+            "test_scope": "scheduled_probe",
+            "classification_status": "anomaly",
+            "classification_label": "真伪异常",
+            "classification_reason": "协议结构异常。",
+        }
+        db.commit()
+
+    alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+
+    assert len(alerts) == 1
+    assert "protocol_mismatch" in alerts[0].trigger_labels
 
 
 def test_scheduled_probe_classifies_partial_parameter_unsupported_as_anomaly() -> None:

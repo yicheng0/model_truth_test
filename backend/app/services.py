@@ -26,7 +26,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .redaction import merge_redacted_config, redact_secrets, redact_text
 from .scheduled_probe import (
+    OPERATIONAL_FAILURE_LABELS,
+    PROVIDER_QUOTA_EXHAUSTED_LABEL,
+    PROVIDER_REQUEST_FAILED_LABEL,
+    PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL,
     _probe_parameter_unsupported,
+    operational_failure_label,
     scheduled_probe_classification,
     scheduled_probe_markdown,
     scheduled_probe_needs_ai_judge,
@@ -6184,11 +6189,24 @@ def _attach_signature_interop_result_to_reports(
     signature_result: dict[str, Any],
 ) -> None:
     reports = db.scalars(select(Report).where(Report.run_id == run_id, Report.channel_id == relay_channel_id)).all()
+    signature_operational_label = _signature_operational_failure_label(signature_result)
+    if signature_operational_label:
+        signature_result = {
+            **signature_result,
+            "labels": sorted(
+                {
+                    *(str(label) for label in signature_result.get("labels", []) if isinstance(label, str) and label != "signature_interop_failed"),
+                    signature_operational_label,
+                }
+            ),
+        }
     for report in reports:
         evidence = dict(report.evidence or {})
         labels = sorted({str(label) for label in evidence.get("labels", []) if isinstance(label, str)})
         labels = sorted(set(labels).union(str(label) for label in signature_result.get("labels", []) if isinstance(label, str)))
-        if signature_result.get("status") != "skipped" and not signature_result.get("ok") and "signature_interop_failed" not in labels:
+        if signature_operational_label:
+            labels = [label for label in labels if label != "signature_interop_failed"]
+        if signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_operational_label and "signature_interop_failed" not in labels:
             labels.append("signature_interop_failed")
         evidence["labels"] = sorted(labels)
         evidence["red_flags"] = sorted(set(labels).intersection(ALERT_RED_FLAGS))
@@ -6196,7 +6214,7 @@ def _attach_signature_interop_result_to_reports(
         evidence["signature_interop"] = _signature_interop_report_evidence(signature_result)
         safe_evidence = redact_secrets(evidence)
         report.evidence = safe_evidence
-        if signature_result.get("status") != "skipped" and not signature_result.get("ok"):
+        if signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_operational_label:
             report.grade = worse_grade(report.grade, "D")
             report.summary = f"{report.summary or _summary_for(report.grade)} Signature 互通检测未通过，仅表示 ClaudeCode/原生 thinking 链路不可验证。"
         channel = db.get(Channel, report.channel_id)
@@ -6246,6 +6264,20 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "fallback_note": result.get("fallback_note") or SIGNATURE_FALLBACK_NOTE,
         "steps": result.get("steps") or [],
     }
+
+
+def _signature_operational_failure_label(result: dict[str, Any] | None) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    text_parts = [
+        str(result.get("reason") or ""),
+        str(result.get("raw_error") or ""),
+        str(result.get("error") or ""),
+    ]
+    for step in result.get("steps") or []:
+        if isinstance(step, dict):
+            text_parts.extend([str(step.get("detail") or ""), str(step.get("excerpt") or ""), str(step.get("error") or "")])
+    return operational_failure_label("\n".join(text_parts), http_status=result.get("error_http_status"))
 
 
 def _hydrate_signature_channel_names(db: Session, signature: dict[str, Any]) -> dict[str, Any]:
@@ -6412,7 +6444,12 @@ async def build_scheduled_probe_report(
     signature_evidence = _signature_interop_report_evidence(signature_result or {})
     _hydrate_signature_channel_names(db, signature_evidence)
     labels.update(label for label in (signature_result or {}).get("labels", []) if isinstance(label, str))
-    if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok"):
+    signature_operational_label = _signature_operational_failure_label(signature_result or {})
+    if signature_operational_label:
+        labels.discard("signature_interop_failed")
+        labels.add(signature_operational_label)
+        signature_evidence["labels"] = [signature_operational_label]
+    if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_operational_label:
         labels.add("signature_interop_failed")
     modules = scheduled_patrol_modules(scheduled)
     probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
@@ -6421,12 +6458,20 @@ async def build_scheduled_probe_report(
         classification = scheduled_probe_classification(model_requests, signature_evidence, sorted(labels), raw_score)
     else:
         signature_ok = signature_evidence.get("status") == "skipped" or bool(signature_evidence.get("ok"))
-        classification = {
-            "status": "claude_signature" if signature_ok else "anomaly",
-            "label": "Signature 互通通过" if signature_ok else "ClaudeCode Signature 链路不可验证",
-            "reason": str(signature_evidence.get("reason") or ("Thinking Signature 互通检测通过。" if signature_ok else "Thinking Signature 互通检测未通过。")),
-            "score": 95 if signature_ok else 60,
-        }
+        if signature_operational_label:
+            classification = scheduled_probe_classification(
+                [{"key": "signature_interop", "labels": [signature_operational_label], "error": signature_evidence.get("raw_error") or signature_evidence.get("reason")}],
+                signature_evidence,
+                [signature_operational_label],
+                0,
+            )
+        else:
+            classification = {
+                "status": "claude_signature" if signature_ok else "anomaly",
+                "label": "Signature 互通通过" if signature_ok else "ClaudeCode Signature 链路不可验证",
+                "reason": str(signature_evidence.get("reason") or ("Thinking Signature 互通检测通过。" if signature_ok else "Thinking Signature 互通检测未通过。")),
+                "score": 95 if signature_ok else 60,
+            }
     rule_classification = dict(classification)
     ai_judge = await scheduled_probe_ai_judge(session_factory, model_requests, signature_evidence, sorted(labels), classification)
     if ai_judge:
@@ -7250,6 +7295,10 @@ def report_needs_alert(report: Report, labels: list[str] | None = None, schedule
     classification_status = evidence.get("classification_status")
     if scheduled and scheduled.test_scope == "scheduled_probe" and classification_status in {"claude", "aws_resource", "claude_signature"}:
         return False
+    if scheduled and scheduled.test_scope == "scheduled_probe" and classification_status == "operational_issue":
+        return False
+    if scheduled and scheduled.test_scope == "scheduled_probe" and labels and set(labels).issubset(OPERATIONAL_FAILURE_LABELS):
+        return False
     if scheduled and scheduled.test_scope == "scheduled_probe":
         return report.grade in {"D", "E"} or bool(ALERT_RED_FLAGS.intersection(labels)) or (report.final_score < 90 and bool(labels))
     if not scheduled:
@@ -7442,10 +7491,18 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
     channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
     schedule_channel_by_id = {schedule.id: schedule.channel_id for schedule in schedules}
     reports_by_channel: dict[str, list[Report]] = defaultdict(list)
+    operational_issue_breakdown: dict[str, int] = defaultdict(int)
+    operational_issue_reports: list[Report] = []
     report_channels_by_run: dict[str, set[str]] = defaultdict(set)
     for report in reports:
         reports_by_channel[report.channel_id].append(report)
         report_channels_by_run[report.run_id].add(report.channel_id)
+        evidence = report.evidence if isinstance(report.evidence, dict) else {}
+        report_operational_labels = set(report_labels(report)).intersection(OPERATIONAL_FAILURE_LABELS)
+        if evidence.get("classification_status") == "operational_issue" or report_operational_labels:
+            operational_issue_reports.append(report)
+            for label in report_operational_labels or {PROVIDER_REQUEST_FAILED_LABEL}:
+                operational_issue_breakdown[label] += 1
     alerts_by_channel: dict[str, list[ChannelAlert]] = defaultdict(list)
     for alert in alerts:
         alerts_by_channel[alert.channel_id].append(alert)
@@ -7463,6 +7520,7 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
         channel = channels.get(channel_id)
         channel_runs = runs_by_channel.get(channel_id, [])
         channel_alerts = alerts_by_channel.get(channel_id, [])
+        channel_operational_issues = [report for report in operational_issue_reports if report.channel_id == channel_id]
         last_run_at = max([run.created_at for run in channel_runs if run.created_at], default=None)
         channel_summaries.append(
             {
@@ -7473,6 +7531,7 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
                 "channel_model_name": channel.model_name if channel else None,
                 "run_count": len(channel_runs),
                 "alert_count": len(channel_alerts),
+                "operational_issue_count": len(channel_operational_issues),
                 "pending_review_count": sum(1 for alert in channel_alerts if alert.status == "pending_review"),
                 "last_run_at": last_run_at,
             }
@@ -7495,6 +7554,8 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
         except Exception:
             logger.warning("Failed to serialize recent patrol alert %s", getattr(alert, "id", None), exc_info=True)
             db.rollback()
+    operational_run_ids = {report.run_id for report in operational_issue_reports}
+    authenticity_run_ids = {alert.run_id for alert in alerts}
     return {
         "from_at": from_at,
         "to_at": to_at,
@@ -7504,6 +7565,10 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
         "completed_run_count": sum(1 for run in runs if run.status == "completed"),
         "failed_run_count": sum(1 for run in runs if run.status == "failed"),
         "alert_count": len(alerts),
+        "authenticity_anomaly_count": len(alerts),
+        "operational_issue_count": len(operational_run_ids),
+        "operational_issue_breakdown": dict(operational_issue_breakdown),
+        "normal_count": max(0, len(runs) - len(operational_run_ids | authenticity_run_ids)),
         "pending_review_count": sum(1 for alert in alerts if alert.status == "pending_review"),
         "channel_names": {
             channel_id: _smart_patrol_channel_display(channel_id, channel.name, channel.provider_type)
@@ -7575,7 +7640,7 @@ def _smart_patrol_channel_display(
 def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
     channel_names = report.get("channel_names") or {}
     channel_lines = "\n".join(
-        f"- {_smart_patrol_channel_display(item.get('channel_id'), item.get('channel_name'), item.get('channel_provider_type'))}：巡检 {item['run_count']} 次，错误 {item['alert_count']} 次，待复审 {item['pending_review_count']}，最近巡检 {_fmt_datetime(item.get('last_run_at'))}"
+        f"- {_smart_patrol_channel_display(item.get('channel_id'), item.get('channel_name'), item.get('channel_provider_type'))}：巡检 {item['run_count']} 次，真伪异常 {item['alert_count']} 次，运营问题 {item.get('operational_issue_count', 0)} 次，待复审 {item['pending_review_count']}，最近巡检 {_fmt_datetime(item.get('last_run_at'))}"
         for item in report["channel_summaries"][:8]
     ) or "- 暂无渠道巡检数据"
     alert_lines = "\n".join(
@@ -7593,8 +7658,9 @@ def smart_patrol_report_markdown(report: dict[str, Any]) -> str:
 
 - 巡检计划：{report['enabled_schedule_count']} / {report['schedule_count']} 启用
 - 自动巡检任务：{report['run_count']} 次
-- 成功 / 错误：{report['completed_run_count']} / {report['failed_run_count']}
-- 异常告警：{report['alert_count']}
+- 正常：{report.get('normal_count', 0)}
+- 真伪异常：{report.get('authenticity_anomaly_count', report['alert_count'])}
+- 运营问题：{report.get('operational_issue_count', 0)}
 - 待复审：{report['pending_review_count']}
 
 ## 渠道巡检汇总
@@ -7654,16 +7720,38 @@ def daily_report_due(setting: FeishuBroadcastSetting, now_utc: datetime) -> bool
 def smart_patrol_daily_text(report: dict[str, Any], setting: FeishuBroadcastSetting) -> str:
     app_base_url = (setting.app_base_url or "").strip().rstrip("/")
     report_link = f"{app_base_url}/scheduled-tests?tab=report" if app_base_url else "/scheduled-tests?tab=report"
+    run_count = int(report.get("run_count") or 0)
+    normal_count = int(report.get("normal_count") or 0)
+    authenticity_count = int(report.get("authenticity_anomaly_count", report.get("alert_count", 0)) or 0)
+    operational_count = int(report.get("operational_issue_count") or 0)
+    if run_count > 0 and normal_count == run_count and authenticity_count == 0 and operational_count == 0:
+        return (
+            "智能巡检日报\n"
+            f"今日巡检 {run_count} 次，全部符合预期，未发现真伪异常。\n"
+            f"报告：{report_link}"
+        )
+    breakdown = report.get("operational_issue_breakdown") if isinstance(report.get("operational_issue_breakdown"), dict) else {}
+    operational_parts = []
+    for label, title in (
+        (PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL, "暂不可用"),
+        (PROVIDER_QUOTA_EXHAUSTED_LABEL, "额度不足"),
+        (PROVIDER_REQUEST_FAILED_LABEL, "检测失败"),
+    ):
+        count = int(breakdown.get(label) or 0)
+        if count:
+            operational_parts.append(f"{title} {count}")
+    operational_detail = f"（{'、'.join(operational_parts)}）" if operational_parts else ""
     top_channels = report["channel_summaries"][:5]
     channel_lines = "\n".join(
-        f"{index + 1}. {_smart_patrol_channel_display(item.get('channel_id'), item.get('channel_name'), item.get('channel_provider_type'))}：错误 {item['alert_count']}，待复审 {item['pending_review_count']}"
+        f"{index + 1}. {_smart_patrol_channel_display(item.get('channel_id'), item.get('channel_name'), item.get('channel_provider_type'))}：真伪异常 {item['alert_count']}，运营问题 {item.get('operational_issue_count', 0)}，待复审 {item['pending_review_count']}"
         for index, item in enumerate(top_channels)
     ) or "暂无渠道巡检数据"
     return (
         "智能巡检日报\n"
         f"时间范围：{report['from_at'].isoformat()} ~ {report['to_at'].isoformat()}\n"
-        f"自动巡检：{report['run_count']} 次，成功 {report['completed_run_count']}，错误 {report['failed_run_count']}\n"
-        f"异常：{report['alert_count']}，待复审 {report['pending_review_count']}\n"
+        f"巡检 {run_count} 次，正常 {normal_count}\n"
+        f"真伪异常 {authenticity_count}，待复审 {report['pending_review_count']}\n"
+        f"运营问题 {operational_count}{operational_detail}\n"
         "重点渠道：\n"
         f"{channel_lines}\n"
         f"报告：{report_link}"
@@ -10021,6 +10109,9 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         unexpected_label = str(rules.get("expected_error_unexpected_label") or "unexpected_error_response")
         if not error_text:
             return 0.0, [missing_label]
+        operational_label = operational_failure_label(error_text, http_status=normalized.get("status_code"))
+        if operational_label in {PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL, PROVIDER_QUOTA_EXHAUSTED_LABEL}:
+            return 0.0, [operational_label]
         required_all = [_lower_text(item) for item in rules.get("expected_error_required_all", []) if _lower_text(item)]
         if required_all:
             lowered_error = _lower_text(error_text)
@@ -10035,6 +10126,8 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         variant_any = [_lower_text(item) for item in rules.get("expected_error_variant_any", []) if _lower_text(item)]
         if variant_any and any(item in _lower_text(error_text) for item in variant_any):
             return 100.0, [variant_label]
+        if operational_label == PROVIDER_REQUEST_FAILED_LABEL:
+            return 0.0, [operational_label]
         return 0.0, [unexpected_label]
     if rules.get("invalid_request_probe"):
         if normalized.get("error") or normalized.get("status_code", 200) >= 400 or normalized["raw_response"].get("type") == "error":
@@ -11287,6 +11380,9 @@ LABEL_EXPLANATIONS = {
     "signature_source_missing": "未找到可用的参考 source 渠道，无法执行 Thinking Signature 互通检测。",
     "provider_error_variant": "上游返回了等价的参数不支持原生约束错误，保留差异标签。",
     "unexpected_error_response": "上游返回错误，但错误内容未命中该探针预期的 thinking/temperature 约束。",
+    "provider_temporarily_unavailable": "上游资源暂不可用、过载或资源池暂无可用通道；本轮不参与真伪判断，也不触发即时告警。",
+    "provider_quota_or_balance_exhausted": "渠道额度、余额或配额已耗尽；本轮不参与真伪判断，只作为运营问题汇总。",
+    "provider_request_failed": "请求因未知服务端、网络或超时错误失败，未获得可用于真伪判断的响应。",
     "image_url_not_supported": "URL 图片输入不被当前渠道支持，常见于 Bedrock、Vertex 或部分中转；作为能力参考跳过。",
     "document_block_not_supported": "document block 不被当前渠道支持；文本 fallback 仍可用于验证内容读取能力。",
     "web_search_not_supported": "server-side Web Search 工具不被当前渠道支持，作为能力参考跳过。",

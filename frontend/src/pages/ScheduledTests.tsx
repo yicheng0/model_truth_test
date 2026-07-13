@@ -21,6 +21,7 @@ import {
   patrolGuideSteps,
   patrolParameterFaq,
   probeSummary,
+  probeClassificationColor,
   rangeFromParams,
   reportRangeToDates,
   runWindowText,
@@ -1099,7 +1100,9 @@ export default function ScheduledTests() {
                           <div style={{ fontSize: 13 }}>
                             {selected.latest_probe_summary.classification_label && (
                               <div style={{ marginBottom: 8 }}>
-                                <Tag color="blue">{selected.latest_probe_summary.classification_label}</Tag>
+                                <Tag color={probeClassificationColor(selected.latest_probe_summary.classification_status, selected.latest_probe_summary.classification_label)}>
+                                  {selected.latest_probe_summary.classification_label}
+                                </Tag>
                                 {selected.latest_probe_summary.classification_reason && (
                                   <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
                                     {selected.latest_probe_summary.classification_reason}
@@ -1391,9 +1394,9 @@ export default function ScheduledTests() {
                         <>
                           <div className="smart-report-stats-grid">
                             <Card bordered={false}><Statistic title="巡检任务" value={smartReport.data?.run_count ?? 0} /></Card>
-                            <Card bordered={false}><Statistic title="成功" value={smartReport.data?.completed_run_count ?? 0} valueStyle={{ color: '#067647' }} /></Card>
-                            <Card bordered={false}><Statistic title="错误" value={smartReport.data?.failed_run_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card>
-                            <Card bordered={false}><Statistic title="异常告警" value={smartReport.data?.alert_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card>
+                            <Card bordered={false}><Statistic title="正常" value={smartReport.data?.normal_count ?? 0} valueStyle={{ color: '#067647' }} /></Card>
+                            <Card bordered={false}><Statistic title="真伪异常" value={smartReport.data?.authenticity_anomaly_count ?? smartReport.data?.alert_count ?? 0} valueStyle={{ color: '#b42318' }} /></Card>
+                            <Card bordered={false}><Statistic title="运营问题" value={smartReport.data?.operational_issue_count ?? 0} valueStyle={{ color: '#b54708' }} /></Card>
                             <Card bordered={false}><Statistic title="待复审" value={smartReport.data?.pending_review_count ?? 0} valueStyle={{ color: '#a35f45' }} /></Card>
                           </div>
                           <Typography.Title level={5} className="smart-report-section-title">渠道巡检汇总</Typography.Title>
@@ -1430,7 +1433,8 @@ export default function ScheduledTests() {
                                   },
                                 },
                                 { title: '巡检次数', dataIndex: 'run_count', width: 90 },
-                                { title: '错误数', dataIndex: 'alert_count', width: 78, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
+                                { title: '真伪异常', dataIndex: 'alert_count', width: 88, render: (value: number) => <Tag color={value ? 'red' : 'green'}>{value}</Tag> },
+                                { title: '运营问题', dataIndex: 'operational_issue_count', width: 88, render: (value: number) => <Tag color={value ? 'orange' : 'green'}>{value ?? 0}</Tag> },
                                 { title: '待复审', dataIndex: 'pending_review_count', width: 78 },
                                 { title: '最近巡检', dataIndex: 'last_run_at', width: 148, render: formatDateTime },
                               ]}
@@ -1944,4 +1948,3 @@ export default function ScheduledTests() {
     </Space>
   );
 }
-

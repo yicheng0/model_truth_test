@@ -98,6 +98,17 @@ export function alertChannelText(alert: ChannelAlert, channel?: Channel | null) 
   };
 }
 
+export function probeClassificationColor(status?: string | null, label?: string | null) {
+  if (status === 'operational_issue') {
+    if (label === '额度不足') return 'gold';
+    if (label === '检测失败') return 'default';
+    return 'orange';
+  }
+  if (status === 'anomaly') return 'red';
+  if (status === 'aws_resource') return 'green';
+  return 'blue';
+}
+
 export function probeSummary(schedule: ScheduledChannelTest) {
   const summary = schedule.latest_probe_summary;
   if (!summary) {
@@ -112,6 +123,9 @@ export function probeSummary(schedule: ScheduledChannelTest) {
   const hasModelError = modelRequests.some((item) => item.status === 'error' || Boolean(item.error) || (item.labels ?? []).some((label) => label !== 'provider_error_variant'));
   const hasSignatureError = signature.status === 'fail';
   const isFailed = classificationStatus === 'anomaly' || schedule.last_status === 'failed' || hasModelError || hasSignatureError || blockingLabels.length > 0;
+  if (classificationStatus === 'operational_issue') {
+    return <Tag color={probeClassificationColor(classificationStatus, classificationLabel)}>{classificationLabel || '本轮无法判定'}</Tag>;
+  }
   if (classificationStatus === 'claude' || classificationStatus === 'aws_resource') {
     return <Tag color={classificationStatus === 'aws_resource' ? 'green' : 'blue'}>{classificationLabel || (classificationStatus === 'aws_resource' ? 'AWS 资源' : 'Claude 资源')}</Tag>;
   }
