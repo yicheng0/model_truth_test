@@ -664,6 +664,18 @@ export type ClaudeCodeTestResult = {
   classification_status?: 'claude_code' | 'claude' | 'aws_resource' | 'non_claude' | 'anomaly' | 'unknown' | string | null;
   classification_label?: string | null;
   classification_reason?: string | null;
+  access_path_assessment?: 'anthropic_api_direct' | 'claude_code_gateway_like' | 'translated_gateway' | 'transparent_unresolved' | string | null;
+  access_path_label?: string | null;
+  access_path_reason?: string | null;
+  access_path_caveat?: string | null;
+  access_path_evidence?: Array<{
+    key?: string;
+    status?: string;
+    http_status?: number | null;
+    labels?: string[];
+    reason?: string | null;
+    raw_evidence?: Record<string, unknown>;
+  }>;
   capability_flags?: {
     is_claude_like?: boolean;
     is_claude_code_like?: boolean;

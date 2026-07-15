@@ -560,6 +560,11 @@ class ClaudeCodeTestRead(BaseModel):
     classification_status: str | None = None
     classification_label: str | None = None
     classification_reason: str | None = None
+    access_path_assessment: str | None = None
+    access_path_label: str | None = None
+    access_path_reason: str | None = None
+    access_path_caveat: str | None = None
+    access_path_evidence: list[dict[str, Any]] = Field(default_factory=list)
     capability_flags: dict[str, Any] = Field(default_factory=dict)
     claude_score: float | None = None
     claude_code_score: float | None = None

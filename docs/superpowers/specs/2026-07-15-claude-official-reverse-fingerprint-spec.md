@@ -26,6 +26,11 @@
 - Opus 4.7/4.8 等新模型拒绝非默认 `temperature`、`top_p`、`top_k`，与 thinking 是否开启无关。
 - 官方错误体有顶层 `error.type/message` 和 `request_id`；每个响应有 request-id header。Bedrock 还同时存在 AWS request id 和 Anthropic request id。
 - Claude Code 官方支持 Anthropic 直连，也支持 Bedrock、Google Cloud、Microsoft Foundry，以及通过 `ANTHROPIC_BASE_URL` 等配置 LLM Gateway。自定义 Base URL 本身不是假货证据。
+- Claude Code 与 Anthropic 直连都使用 Messages API；透明网关可以把 message、usage、SSE、tool/thinking 原样转发，因此普通响应完全相同是协议设计允许的结果。
+- Anthropic-format Claude Code 网关的核心契约包括 `/v1/messages`，可选 `/v1/messages/count_tokens`，以及启用发现后请求 `GET /v1/models?limit=1000`。
+- Claude Code 请求携带 `x-claude-code-session-id`，子代理场景可携带 agent/parent-agent id，并把 `anthropic-beta` 当开放列表透传。能力 body 字段和 beta header 必须成对转发。
+- Claude Code 会在 system 数组首项加入包含客户端版本和会话 fingerprint 的 attribution block。`api.anthropic.com` 只在该 block 保持首项且独立时剥离；其他上游会收到它。该行为只能作为组合证据，不能靠模型回显形成密码学证明。
+- 自定义 Base URL 默认关闭 fine-grained tool streaming；上游错误文案若被网关包裹，Claude Code 基于错误文本的自动降级/重试会失效。
 
 官方来源：
 
@@ -34,6 +39,9 @@
 - [Tool use overview](https://platform.claude.com/docs/en/build-with-claude/tool-use/overview)
 - [Claude API errors](https://platform.claude.com/docs/en/api/errors)
 - [Claude Code third-party integrations](https://code.claude.com/docs/en/third-party-integrations)
+- [Claude Code Gateway protocol reference](https://code.claude.com/docs/en/llm-gateway-protocol.md)
+- [Claude Code environment variables](https://code.claude.com/docs/en/env-vars.md)
+- [Anthropic beta headers](https://platform.claude.com/docs/en/api/beta-headers)
 
 ## 3. 四级证据模型
 
@@ -93,6 +101,19 @@
 4. 再判跨请求连续性：signature interop、nonce、上下文。
 5. 最后看行为和能力，且与 Anthropic gold + 官方云参考带比较。
 6. 至少三次重复；异常若偶发，标记混路由/不稳定风险，不直接宣判换模。
+
+### 6.1 访问路径独立分类
+
+访问路径与 Claude/ClaudeCode 得分分开计算，不用可选网关能力缺失惩罚模型兼容性：
+
+| 分类 | 条件 | 允许结论 |
+|---|---|---|
+| `anthropic_api_direct` | 目标为 `api.anthropic.com` | 官方域名直连；来源强度仍可用账单和 request id 回查补强 |
+| `claude_code_gateway_like` | 自定义 host，至少两项 Claude Code 契约成立，如 client headers、attribution、count_tokens、model discovery | Claude Code 网关兼容，不证明上游是官方 API、OAuth 还是其他 Claude 渠道 |
+| `translated_gateway` | OpenAI/Gemini shape、fallback、SSE/error 重建或模型字段改写 | 存在协议翻译/重建痕迹，需进一步检查换模和能力退化 |
+| `transparent_unresolved` | 自定义 host 仅表现为普通 Messages 高一致，缺少独立网关或来源证据 | response-only 无法区分透明 API/OAuth 转发和其他无改写代理，禁止标成官方直连 |
+
+响应头只保存名称，不保存认证值。`x-apipro-*`、`x-oneapi-*`、`via` 等中间层控制面头属于网关存在证据，但不能单独证明其上游模型。
 
 建议结论词：
 

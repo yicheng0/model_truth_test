@@ -14,6 +14,13 @@ export type ClaudeChannelDifference = {
   conclusion: string;
 };
 
+export type ClaudeAccessPath = {
+  key: 'anthropic_api_direct' | 'claude_code_gateway_like' | 'translated_gateway' | 'transparent_unresolved';
+  title: string;
+  description: string;
+  evidence: string;
+};
+
 export const CLAUDE_EVIDENCE_TIERS: ClaudeEvidenceTier[] = [
   {
     key: 'provenance',
@@ -73,5 +80,32 @@ export const CLAUDE_CHANNEL_DIFFERENCES: ClaudeChannelDifference[] = [
     expected: '可能自报 Claude，也可能伪造 msg_/toolu_，但多层协议边界、工具、上下文、能力和重复性通常难以长期同时贴合参考带。',
     redFlags: 'OpenAI/Gemini shape、硬参数不执行、能力持续低于官方带、跨请求串线，以及明确泄露其他模型身份。',
     conclusion: '需要多项独立异常和重复采样后，才使用“疑似换模”或“likely non-Claude”口径。',
+  },
+];
+
+export const CLAUDE_ACCESS_PATHS: ClaudeAccessPath[] = [
+  {
+    key: 'anthropic_api_direct',
+    title: 'Anthropic API 官方域名直连',
+    description: '目标为 api.anthropic.com；仍需用 Anthropic 账号账单和 request id 回查来补强来源证明。',
+    evidence: '官方域名、组织侧 request id、账单与控制面记录。',
+  },
+  {
+    key: 'claude_code_gateway_like',
+    title: 'Claude Code 网关兼容链路',
+    description: '自定义 Base URL 接受 Claude Code 客户端契约；说明网关兼容，不等于官方直连。',
+    evidence: 'x-claude-code-*、attribution block、/v1/models、count_tokens、beta/body 配对和中转响应头。',
+  },
+  {
+    key: 'translated_gateway',
+    title: '协议翻译网关',
+    description: '发现 OpenAI/Gemini shape、fallback、SSE 重建或模型字段改写等协议翻译痕迹。',
+    evidence: '协议族、错误 envelope、message/tool id、stream lifecycle 和模型名差异。',
+  },
+  {
+    key: 'transparent_unresolved',
+    title: '透明转发，来源无法解析',
+    description: '只看响应无法区分官方上游、OAuth/API 透明转发与无改写代理；不得据此标成官方直连。',
+    evidence: '普通 Messages 响应一致，但缺少可回查的来源或网关控制面证据。',
   },
 ];

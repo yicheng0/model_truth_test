@@ -319,6 +319,29 @@ def _initial_relay_job_state(include_expensive_context: bool, image_url: str | N
             "evidence_excerpt": None,
         }
     )
+    for key, title in (
+        ("gateway_count_tokens", "Claude Code count_tokens 端点"),
+        ("gateway_model_discovery", "Claude Code 网关模型发现"),
+    ):
+        probes.append(
+            {
+                "key": key,
+                "title": title,
+                "category": "relay_compatibility",
+                "section": "fingerprint",
+                "status": "queued",
+                "severity": "reference",
+                "score": 0.0,
+                "labels": [],
+                "run_id": None,
+                "result_id": None,
+                "message_id": None,
+                "request_id": None,
+                "request_protocol": None,
+                "provider_endpoint": None,
+                "evidence_excerpt": None,
+            }
+        )
     sections = _relay_job_sections(probes)
     for section in sections:
         section["title"] = section_titles.get(str(section["key"]), str(section["title"]))

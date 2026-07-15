@@ -6985,6 +6985,192 @@ def test_claude_fingerprint_stream_lifecycle_uses_official_sse_sequence(events, 
         assert payload["status"] == "pass"
 
 
+@pytest.mark.parametrize(
+    ("base_url", "probes", "expected_assessment"),
+    [
+        ("https://api.anthropic.com", [], "anthropic_api_direct"),
+        (
+            "https://gateway.example",
+            [
+                {"key": "claude_code_headers", "status": "pass", "raw_evidence": {"session_header_sent": True}},
+                {"key": "claude_code_attribution", "status": "pass", "raw_evidence": {"attribution_behavior": "accepted"}},
+                {"key": "gateway_count_tokens", "status": "pass"},
+            ],
+            "claude_code_gateway_like",
+        ),
+        (
+            "https://gateway.example",
+            [{"key": "response_schema", "status": "fail", "labels": ["openai_shape_response"]}],
+            "translated_gateway",
+        ),
+        (
+            "https://gateway.example",
+            [{"key": "response_schema", "status": "pass", "labels": []}],
+            "transparent_unresolved",
+        ),
+        (
+            "https://gateway.example",
+            [
+                {"key": "claude_code_headers", "status": "pass"},
+                {"key": "claude_code_attribution", "status": "pass"},
+            ],
+            "transparent_unresolved",
+        ),
+    ],
+)
+def test_claude_code_access_path_assessment_separates_origin_from_protocol(base_url, probes, expected_assessment) -> None:  # noqa: ANN001
+    from app.services import _claude_code_access_path_assessment
+
+    result = _claude_code_access_path_assessment(base_url, probes)
+
+    assert result["access_path_assessment"] == expected_assessment
+    assert result["access_path_reason"]
+    assert "response-only" in result["access_path_caveat"]
+
+
+def test_claude_code_gateway_probe_configs_use_client_contract_without_secrets() -> None:
+    from app.services import _claude_code_probe_configs
+
+    configs = {item["key"]: item for item in _claude_code_probe_configs(None)}
+    header_probe = configs["claude_code_headers"]
+    attribution_probe = configs["claude_code_attribution"]
+
+    assert header_probe["request_params"]["request_headers"]["x-claude-code-session-id"].startswith("ccprobe-")
+    assert "anthropic-beta" in header_probe["request_params"]["request_headers"]
+    assert attribution_probe["request_params"]["system_content"][0]["type"] == "text"
+    assert "Claude Code" in attribution_probe["request_params"]["system_content"][0]["text"]
+    assert "api_key" not in json.dumps(header_probe, ensure_ascii=False).lower()
+
+
+def test_anthropic_request_forwards_only_safe_probe_headers(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        text = "{}"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"type": "message", "content": [], "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *args) -> None:  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers=None, json=None):  # noqa: ANN001
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    channel = Channel(id="header_probe", name="Header Probe", provider_type="third_party_anthropic", role="candidate", model_name="claude-test")
+    case = TestCaseModel(
+        id="header_probe_case",
+        suite_id="manual_model_request_probe",
+        module="manual_probe",
+        title="Header probe",
+        prompt="OK",
+        request_params={
+            "max_tokens": 16,
+            "request_headers": {
+                "x-claude-code-session-id": "ccprobe-session-731",
+                "anthropic-beta": "prompt-caching-2024-07-31",
+                "authorization": "must-not-override",
+            },
+        },
+    )
+    raw_request = build_raw_request(channel, case)
+
+    asyncio.run(_anthropic_compatible_call(channel, raw_request, {"api_key": "test-key"}))
+
+    headers = captured["headers"]
+    assert headers["x-claude-code-session-id"] == "ccprobe-session-731"
+    assert headers["anthropic-beta"] == "prompt-caching-2024-07-31"
+    assert headers["authorization"] == "Bearer test-key"
+    assert raw_request["_request_header_names"] == ["anthropic-beta", "x-claude-code-session-id"]
+    assert "ccprobe-session-731" not in json.dumps(raw_request)
+
+
+def test_response_metadata_keeps_gateway_header_names_without_values() -> None:
+    from app.services import attach_response_metadata
+
+    response = httpx.Response(
+        200,
+        headers={
+            "x-apipro-version": "secret-ish-value",
+            "x-oneapi-request-id": "oneapi-731",
+            "server": "nginx",
+            "set-cookie": "must-not-persist",
+        },
+    )
+
+    payload = attach_response_metadata({"type": "message"}, response)
+    metadata = payload["_response_metadata"]
+
+    assert metadata["header_names"] == ["server", "x-apipro-version", "x-oneapi-request-id"]
+    assert "secret-ish-value" not in json.dumps(metadata)
+    assert "must-not-persist" not in json.dumps(metadata)
+
+
+def test_initial_relay_job_state_includes_gateway_endpoint_probes() -> None:
+    from app.main import _initial_relay_job_state
+
+    probes, _sections = _initial_relay_job_state(False, None)
+    keys = [str(item["key"]) for item in probes]
+
+    assert keys[-3:] == ["signature_interop", "gateway_count_tokens", "gateway_model_discovery"]
+
+
+def test_gateway_endpoint_probes_validate_schema_and_strip_runtime_values(monkeypatch) -> None:
+    from app.services import _run_claude_code_gateway_endpoint_probes
+
+    opaque_key = "customOpaqueCredential731XYZ"
+    session_value = "ccprobe-endpoint-731"
+    responses = [
+        httpx.Response(400, json={"error": {"message": f"echo {opaque_key} {session_value}"}}),
+        httpx.Response(200, json={"data": []}),
+    ]
+    captured_headers: list[dict[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *args) -> None:  # noqa: ANN002
+            return None
+
+        async def request(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            captured_headers.append(dict(kwargs.get("headers") or {}))
+            return responses.pop(0)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    channel = Channel(id="gateway_schema", name="Gateway Schema", provider_type="third_party_anthropic", role="candidate", base_url="https://gateway.example", model_name="claude-test")
+
+    probes = asyncio.run(
+        _run_claude_code_gateway_endpoint_probes(
+            channel,
+            credentials_override={"api_key": opaque_key, "base_url": channel.base_url, "model": channel.model_name},
+        )
+    )
+
+    assert [probe["status"] for probe in probes] == ["warning", "warning"]
+    assert all(probe["score"] == 0 for probe in probes)
+    assert captured_headers[1]["x-api-key"] == opaque_key
+    assert captured_headers[1]["authorization"] == f"Bearer {opaque_key}"
+    serialized = json.dumps(probes)
+    assert opaque_key not in serialized
+    assert session_value not in serialized
+
+
 def test_claude_code_strict_json_schema_scoring_labels() -> None:
     from app.services import _claude_code_probe_configs
 

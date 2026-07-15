@@ -6,7 +6,7 @@ import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
 import { groupClaudeFingerprintHistory, localDayRangeIso, probeDiagnosticText } from '../claudeFingerprintHistory';
-import { CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS } from '../claudeFingerprintSpec';
+import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS } from '../claudeFingerprintSpec';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
@@ -69,8 +69,19 @@ function FingerprintMethodologyPanel() {
                   { title: '允许结论', dataIndex: 'conclusion', width: 270 },
                 ]}
               />
+              <Table
+                rowKey="key"
+                size="small"
+                pagination={false}
+                dataSource={CLAUDE_ACCESS_PATHS}
+                columns={[
+                  { title: '访问路径', dataIndex: 'title', width: 220 },
+                  { title: '判定边界', dataIndex: 'description', width: 500 },
+                  { title: '主要证据', dataIndex: 'evidence' },
+                ]}
+              />
               <Typography.Text type="secondary">
-                当前页面的 Claude 得分衡量基础协议与行为一致性；ClaudeCode 得分衡量 Thinking Signature、兼容参数和链路能力。两者都不是来源证明。
+                当前页面的 Claude 得分衡量基础协议与行为一致性；ClaudeCode 得分衡量 Thinking Signature、兼容参数和链路能力；访问路径判定单独描述直连、网关或翻译痕迹。透明转发仍可能无法区分。
               </Typography.Text>
             </Space>
           ),
@@ -121,6 +132,14 @@ function classificationColor(status?: string | null) {
   if (status === 'claude' || status === 'aws_resource') return 'green';
   if (status === 'anomaly' || status === 'unknown') return 'orange';
   if (status === 'non_claude') return 'red';
+  return 'default';
+}
+
+function accessPathColor(status?: string | null) {
+  if (status === 'anthropic_api_direct') return 'green';
+  if (status === 'claude_code_gateway_like') return 'purple';
+  if (status === 'translated_gateway') return 'red';
+  if (status === 'transparent_unresolved') return 'orange';
   return 'default';
 }
 
@@ -460,6 +479,11 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
             <Tag color={classificationColor(result.classification_status)}>
               Claude 判断 {result.classification_label ?? result.classification_status ?? '未分类'}
             </Tag>
+            {result.access_path_assessment ? (
+              <Tag color={accessPathColor(result.access_path_assessment)}>
+                访问路径 {result.access_path_label ?? result.access_path_assessment}
+              </Tag>
+            ) : null}
             <Tag color={result.capability_flags?.is_claude_code_like ? 'purple' : 'default'}>
               ClaudeCode 链路 {claudeCodeLinkLabel(result)}
             </Tag>
@@ -471,6 +495,35 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
         )}
         description={result.classification_reason ? `${result.summary} · ${result.classification_reason}` : result.summary}
       />
+      {result.access_path_assessment ? (
+        <Card bordered={false} title="访问路径判定（独立于 Claude 得分）">
+          <Space direction="vertical" size={12} className="full-width">
+            <Alert
+              type={result.access_path_assessment === 'translated_gateway' ? 'warning' : 'info'}
+              showIcon
+              message={result.access_path_label ?? result.access_path_assessment}
+              description={`${result.access_path_reason ?? ''}${result.access_path_caveat ? ` · ${result.access_path_caveat}` : ''}`}
+            />
+            <Descriptions size="small" bordered column={{ xs: 1, md: 3 }}>
+              <Descriptions.Item label="Claude 得分">模型与 Messages API 兼容性</Descriptions.Item>
+              <Descriptions.Item label="ClaudeCode 得分">Thinking / 工具 / 客户端能力</Descriptions.Item>
+              <Descriptions.Item label="访问路径">直连、网关、协议翻译或透明未决</Descriptions.Item>
+            </Descriptions>
+            <Table
+              rowKey={(item) => String(item.key)}
+              size="small"
+              pagination={false}
+              dataSource={result.access_path_evidence ?? []}
+              columns={[
+                { title: '证据', dataIndex: 'key', width: 210 },
+                { title: '状态', dataIndex: 'status', width: 90, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
+                { title: 'HTTP', dataIndex: 'http_status', width: 85, render: (value: number | null) => value ?? '-' },
+                { title: '结论', dataIndex: 'reason' },
+              ]}
+            />
+          </Space>
+        </Card>
+      ) : null}
       {result.request_normalization_notes?.length ? (
         <Alert
           type="info"
