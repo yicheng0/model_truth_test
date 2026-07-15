@@ -122,6 +122,8 @@ npm run build
 
 - Web Search 使用 Anthropic server-side tool block、引用和 `usage.server_tool_use.web_search_requests` 作为成功证据；能力不支持会跳过，工具错误、限流和证据缺失会分别保留具体原因，不单独作为 Claude 真伪核心失败。
 - 身份探针使用“你是谁”和“你好，请介绍一下你自己”等自然问题。模型自报身份只作为低权重辅助信号，不能覆盖协议结构、message id、usage 和 tool use 等硬证据。
+- 流式协议探针检查 Anthropic 官方 SSE 关键生命周期；事件可被仿造，因此只证明原生协议兼容度，不证明第三方 URL 的来源。
+- 页面内置四级证据 Spec 和渠道差异矩阵：来源/控制面证据最高，跨请求 Signature 连续性其次，协议形态为中等证据，行为与自报仅作弱信号。
 - 运行时 API Key 只用于本次调用，不写入 Claude 指纹历史；请求快照和错误文本在返回及持久化前都会脱敏。
 
 ## 自动巡检配置说明

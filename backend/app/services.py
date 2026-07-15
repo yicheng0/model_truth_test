@@ -4584,6 +4584,16 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "scoring_rules": {"raw_response_type_required": "message", "provider_message_id_prefix_any": ["msg_", "msg_bdrk_", "msg_vrtx_"]},
         },
         {
+            "key": "stream_lifecycle",
+            "title": "Anthropic SSE 生命周期",
+            "category": "protocol",
+            "severity": "supporting",
+            "prompt": "只输出 CC-STREAM-518，不要输出其他内容。",
+            "request_params": {"max_tokens": 64, "stream": True},
+            "scoring_rules": {},
+            "post_check": "stream_lifecycle",
+        },
+        {
             "key": "max_tokens",
             "title": "max_tokens 截断",
             "category": "protocol",
@@ -5158,6 +5168,8 @@ def _claude_code_probe_payload(
         final_score, final_labels = _claude_code_web_search_reference_score(normalized)
     elif config.get("post_check") == "identity_reference":
         final_score, final_labels = _claude_code_identity_reference_score(normalized)
+    elif config.get("post_check") == "stream_lifecycle":
+        final_score, final_labels = _claude_code_stream_lifecycle_score(normalized)
     final_score, final_labels = _claude_code_apply_probe_post_checks(config, normalized, final_score, final_labels)
     status = _claude_code_probe_status(config, final_score, final_labels, normalized)
     error_detail = redact_secrets(str(normalized.get("error") or "")) or None
@@ -5242,6 +5254,7 @@ def _claude_code_raw_evidence(normalized: dict[str, Any]) -> dict[str, Any]:
             "request_protocol": normalized.get("request_protocol"),
             "provider_endpoint": normalized.get("provider_endpoint"),
             "protocol_profile": normalized.get("protocol_profile"),
+            "stream_events": [str(item) for item in normalized.get("stream_events") or []],
         }
     )
 
@@ -5528,6 +5541,31 @@ def _claude_code_web_search_reference_score(normalized: dict[str, Any]) -> tuple
     if unsupported_pattern.search(combined):
         return 0.0, ["web_search_not_supported"]
     return 0.0, ["web_search_evidence_missing"]
+
+
+def _claude_code_stream_lifecycle_score(normalized: dict[str, Any]) -> tuple[float, list[str]]:
+    if normalized.get("error"):
+        operational_label = operational_failure_label(
+            str(normalized.get("error") or ""),
+            http_status=normalized.get("status_code"),
+        )
+        return 0.0, [operational_label or "request_failed"]
+
+    events = [str(item) for item in normalized.get("stream_events") or []]
+    required = [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    if any(event not in events for event in required):
+        return 0.0, ["streaming_event_missing"]
+    positions = [events.index(event) for event in required]
+    if positions != sorted(positions):
+        return 0.0, ["streaming_event_order_mismatch"]
+    return 100.0, []
 
 
 def _claude_code_identity_reference_score(normalized: dict[str, Any]) -> tuple[float, list[str]]:
@@ -11790,6 +11828,7 @@ LABEL_EXPLANATIONS = {
     "stop_sequence_not_enforced": "stop sequence 没有按预期触发。",
     "stop_sequence_leaked": "输出中泄露了应触发截断的 stop sequence。",
     "streaming_event_missing": "流式响应缺少关键结束事件。",
+    "streaming_event_order_mismatch": "Anthropic SSE 关键事件存在，但首次出现顺序不符合 message/content block/message stop 生命周期。",
     "json_invalid": "要求严格 JSON 时返回了非法 JSON。",
     "json_object_expected": "要求 JSON 对象时返回的不是对象。",
     "json_schema_invalid": "JSON 输出未通过题目要求的字段类型、枚举或数组长度校验。",

@@ -6485,7 +6485,11 @@ def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> Non
             "content_text": "\n".join(block.get("text", "") for block in raw_response.get("content", []) if isinstance(block, dict)),
             "content_blocks": raw_response.get("content", []),
             "tool_calls": [block for block in raw_response.get("content", []) if isinstance(block, dict) and block.get("type") == "tool_use"],
-            "stream_events": ["message_stop"],
+            "stream_events": (
+                ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+                if case.request_params.get("stream")
+                else []
+            ),
             "raw_request": {"messages": [{"role": "user", "content": params.get("message_content") or case.prompt}], "params": params},
             "raw_response": raw_response,
             "error": error,
@@ -6569,7 +6573,11 @@ def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(
             "content_text": "OK",
             "content_blocks": raw_response["content"],
             "tool_calls": [],
-            "stream_events": ["message_stop"],
+            "stream_events": (
+                ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+                if case.request_params.get("stream")
+                else []
+            ),
             "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
             "raw_response": raw_response,
             "error": None,
@@ -6923,6 +6931,58 @@ def test_claude_code_probe_configs_include_stronger_relay_probes() -> None:
     assert configs["thinking_signature"]["request_params"]["output_config"] == {"effort": "medium"}
     assert "budget_tokens" not in configs["thinking_signature"]["request_params"]["thinking"]
     assert "temperature" not in configs["basic_echo"]["request_params"]
+
+
+def test_claude_fingerprint_has_anthropic_stream_lifecycle_probe() -> None:
+    from app.services import _claude_code_probe_configs
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "stream_lifecycle")
+
+    assert config["category"] == "protocol"
+    assert config["severity"] == "supporting"
+    assert config["request_params"]["stream"] is True
+    assert config["post_check"] == "stream_lifecycle"
+
+
+@pytest.mark.parametrize(
+    ("events", "expected_score", "expected_label"),
+    [
+        (
+            ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+            100.0,
+            None,
+        ),
+        (["message_start", "content_block_start", "content_block_delta", "message_delta"], 0.0, "streaming_event_missing"),
+        (
+            ["message_start", "content_block_delta", "content_block_start", "content_block_stop", "message_delta", "message_stop"],
+            0.0,
+            "streaming_event_order_mismatch",
+        ),
+        (["chat.completion.chunk", "chat.completion.chunk"], 0.0, "streaming_event_missing"),
+    ],
+)
+def test_claude_fingerprint_stream_lifecycle_uses_official_sse_sequence(events, expected_score, expected_label) -> None:  # noqa: ANN001
+    from app.services import _claude_code_probe_configs, _claude_code_probe_payload
+
+    config = next(item for item in _claude_code_probe_configs(None) if item["key"] == "stream_lifecycle")
+    normalized = {
+        "status_code": 200,
+        "content_text": "CC-STREAM-518",
+        "raw_response": {"type": "message"},
+        "stream_events": events,
+        "error": None,
+    }
+
+    payload = _claude_code_probe_payload(config, None, normalized, score=100, labels=[])
+
+    assert payload["score"] == expected_score
+    assert payload["raw_evidence"]["stream_events"] == events
+    if expected_label:
+        assert expected_label in payload["labels"]
+        assert payload["status"] == "fail"
+    else:
+        assert payload["labels"] == []
+        assert payload["status"] == "pass"
 
 
 def test_claude_code_strict_json_schema_scoring_labels() -> None:
@@ -7371,7 +7431,11 @@ def test_claude_code_web_search_reference_failure_does_not_lower_result(monkeypa
             "content_text": text,
             "content_blocks": raw_response.get("content", []),
             "tool_calls": [block for block in raw_response.get("content", []) if isinstance(block, dict) and block.get("type") == "tool_use"],
-            "stream_events": ["message_stop"],
+            "stream_events": (
+                ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+                if case.request_params.get("stream")
+                else []
+            ),
             "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
             "raw_response": raw_response,
             "error": error,

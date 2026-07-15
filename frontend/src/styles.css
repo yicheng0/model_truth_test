@@ -2141,6 +2141,30 @@ textarea:focus-visible,
   padding: 8px 4px;
 }
 
+.claude-fingerprint-methodology .ant-collapse-header-text {
+  font-weight: 600;
+}
+
+.claude-spec-tier-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.claude-spec-copy {
+  margin-bottom: 8px !important;
+}
+
+.claude-spec-copy:last-child {
+  margin-bottom: 0 !important;
+}
+
+@media (max-width: 900px) {
+  .claude-spec-tier-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .claude-probe-detail-labels {
   display: grid;
   gap: 6px;

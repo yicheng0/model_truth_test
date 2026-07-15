@@ -6,6 +6,7 @@ import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
 import { groupClaudeFingerprintHistory, localDayRangeIso, probeDiagnosticText } from '../claudeFingerprintHistory';
+import { CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS } from '../claudeFingerprintSpec';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
@@ -30,6 +31,54 @@ const SECTION_DESCRIPTIONS: Record<string, string> = {
   multimodal: '能力参考：图片 base64 优先；URL 图片和 document block 取决于渠道是否支持，不作为 Claude 真伪核心判断。',
   web_capability: '能力参考：使用 web_search_20260318；不支持时跳过，不作为 Claude 真伪判断。',
 };
+
+function FingerprintMethodologyPanel() {
+  return (
+    <Collapse
+      className="claude-fingerprint-methodology"
+      items={[
+        {
+          key: 'methodology',
+          label: '判别 Spec：官方直连、官方云、Gateway / 逆向和换模怎么区分',
+          children: (
+            <Space direction="vertical" size={16} className="full-width">
+              <Alert
+                type="info"
+                showIcon
+                message="先判来源，再判协议和行为"
+                description="msg_、toolu_、SSE、错误文案和模型自报都能被中转仿造。第三方 URL 检测通过，只能说明 Claude-compatible 或官转高一致性；官方直连必须结合域名、账号、云资源和审计记录。"
+              />
+              <div className="claude-spec-tier-grid">
+                {CLAUDE_EVIDENCE_TIERS.map((item) => (
+                  <Card key={item.key} size="small" title={<Space><span>{item.title}</span><Tag>{item.weight}</Tag></Space>}>
+                    <Typography.Paragraph className="claude-spec-copy"><strong>看什么：</strong>{item.signals}</Typography.Paragraph>
+                    <Typography.Paragraph type="secondary" className="claude-spec-copy"><strong>边界：</strong>{item.caveat}</Typography.Paragraph>
+                  </Card>
+                ))}
+              </div>
+              <Table
+                rowKey="key"
+                size="small"
+                pagination={false}
+                scroll={{ x: 1120 }}
+                dataSource={CLAUDE_CHANNEL_DIFFERENCES}
+                columns={[
+                  { title: '渠道类型', dataIndex: 'title', width: 190 },
+                  { title: '正常差异 / 预期', dataIndex: 'expected', width: 330 },
+                  { title: '重点红旗', dataIndex: 'redFlags', width: 330 },
+                  { title: '允许结论', dataIndex: 'conclusion', width: 270 },
+                ]}
+              />
+              <Typography.Text type="secondary">
+                当前页面的 Claude 得分衡量基础协议与行为一致性；ClaudeCode 得分衡量 Thinking Signature、兼容参数和链路能力。两者都不是来源证明。
+              </Typography.Text>
+            </Space>
+          ),
+        },
+      ]}
+    />
+  );
+}
 
 function statusColor(status: string) {
   if (status === 'pass' || status === 'passed') return 'green';
@@ -762,6 +811,7 @@ export default function ClaudeCodeCheck() {
       <div className="claude-page-layout">
         <main className="claude-main-pane">
           <Space direction="vertical" size={18} className="full-width">
+            <FingerprintMethodologyPanel />
             <Card title={<span className="card-title-with-icon"><ShieldCheck size={18} />接口配置</span>} bordered={false}>
               <Form
                 form={relayForm}

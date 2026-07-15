@@ -102,6 +102,16 @@ const LABELS: Record<string, LabelInfo> = {
     description: '响应结构偏离 Claude Messages API，协议可信度下降。',
     priority: 72,
   },
+  streaming_event_missing: {
+    text: 'SSE 事件缺失',
+    description: '流式响应缺少 Anthropic message/content block/message stop 生命周期中的关键事件。',
+    priority: 73,
+  },
+  streaming_event_order_mismatch: {
+    text: 'SSE 顺序异常',
+    description: '关键 SSE 事件存在，但首次出现顺序不符合 Anthropic 官方生命周期，可能经过协议转换或重组。',
+    priority: 74,
+  },
   usage_missing: {
     text: 'usage 缺失',
     description: '缺少 token usage 字段或字段族不对，可能是中间层裁剪或协议转换。',
