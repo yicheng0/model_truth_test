@@ -15,10 +15,27 @@ export type ClaudeChannelDifference = {
 };
 
 export type ClaudeAccessPath = {
-  key: 'anthropic_api_direct' | 'claude_code_gateway_like' | 'translated_gateway' | 'transparent_unresolved';
+  key: 'anthropic_endpoint_configured' | 'claude_code_gateway_like' | 'translated_gateway' | 'transparent_unresolved';
   title: string;
   description: string;
   evidence: string;
+};
+
+export type UpstreamIntegrityClassification =
+  | 'signature_chain_verified'
+  | 'mixed_routing_suspected'
+  | 'protocol_reconstruction_suspected'
+  | 'model_swap_suspected'
+  | 'insufficient_evidence'
+  | 'operationally_inconclusive';
+
+export const UPSTREAM_INTEGRITY_META: Record<UpstreamIntegrityClassification, { label: string; color: string; description: string }> = {
+  signature_chain_verified: { label: 'Signature 链路已验证', color: 'green', description: '双向 signature 与篡改对照通过；证明 Claude signature 链路，不等于官方直连。' },
+  mixed_routing_suspected: { label: '疑似混合路由', color: 'red', description: '重复采样出现关联硬协议特征切换或 signature 验证间歇变化。' },
+  protocol_reconstruction_suspected: { label: '疑似协议重建', color: 'orange', description: '多个独立参数、错误或 SSE 边界持续偏离官方基线。' },
+  model_swap_suspected: { label: '疑似换模或严重降级', color: 'red', description: 'Signature 不可验证，并伴随至少两类独立硬异常。' },
+  insufficient_evidence: { label: '证据不足', color: 'default', description: '缺少可比官方基线、模型不兼容或仅有网关兼容证据。' },
+  operationally_inconclusive: { label: '运营异常，无法判定', color: 'gold', description: '本轮仅获得认证、配额、限流、超时或服务端错误。' },
 };
 
 export const CLAUDE_EVIDENCE_TIERS: ClaudeEvidenceTier[] = [
@@ -85,9 +102,9 @@ export const CLAUDE_CHANNEL_DIFFERENCES: ClaudeChannelDifference[] = [
 
 export const CLAUDE_ACCESS_PATHS: ClaudeAccessPath[] = [
   {
-    key: 'anthropic_api_direct',
-    title: 'Anthropic API 官方域名直连',
-    description: '目标为 api.anthropic.com；仍需用 Anthropic 账号账单和 request id 回查来补强来源证明。',
+    key: 'anthropic_endpoint_configured',
+    title: '已配置 Anthropic 官方端点',
+    description: '目标为 api.anthropic.com；这只确认端点配置，仍需用账号账单和 request id 回查来源。',
     evidence: '官方域名、组织侧 request id、账单与控制面记录。',
   },
   {

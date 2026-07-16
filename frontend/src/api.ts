@@ -203,7 +203,7 @@ export const api = {
   startCacheHitRateTestJob: (channelId: string, payload: { test_count?: number; interval_seconds?: number; warmup_wait_seconds?: number; cache_ttl?: '5m' | '1h'; run_name?: string | null }) =>
     request<CacheHitRateJobCreate>(`/api/channels/${channelId}/cache-hit-rate-test/jobs`, { method: 'POST', body: JSON.stringify(payload) }),
   cacheHitRateJob: (jobId: string) => request<CacheHitRateJobStatus>(`/api/cache-hit-rate-test/jobs/${jobId}`),
-  claudeCodeTest: (channelId: string, payload: { source_channel_id?: string | null; image_url?: string | null; include_expensive_context?: boolean }) =>
+  claudeCodeTest: (channelId: string, payload: { source_channel_id?: string | null; image_url?: string | null; include_expensive_context?: boolean; probe_depth?: 'standard' | 'deep'; repeat_count?: 3 | 5 }) =>
     request<ClaudeCodeTestResult>(`/api/channels/${channelId}/claude-code-test`, { method: 'POST', body: JSON.stringify(payload) }),
   runClaudeCodeRelayTest: (payload: ClaudeCodeRelayTestCreate) =>
     request<ClaudeCodeTestResult>('/api/claude-code-test', { method: 'POST', body: JSON.stringify(payload) }),

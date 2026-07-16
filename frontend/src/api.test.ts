@@ -812,6 +812,37 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('sends deep upstream integrity settings through the ClaudeCode job endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ job_id: 'job_deep', status: 'queued' }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.startClaudeCodeRelayTestJob({
+      base_url: 'https://relay.example',
+      api_key: 'runtime-key',
+      model_name: 'claude-sonnet-4-6',
+      source_channel_id: 'anthropic_official',
+      probe_depth: 'deep',
+      repeat_count: 5,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/claude-code-test/jobs',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          base_url: 'https://relay.example',
+          api_key: 'runtime-key',
+          model_name: 'claude-sonnet-4-6',
+          source_channel_id: 'anthropic_official',
+          probe_depth: 'deep',
+          repeat_count: 5,
+        }),
+      }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('starts ClaudeCode CLI jobs and polls progress', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(

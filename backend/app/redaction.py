@@ -78,6 +78,19 @@ def redact_secrets(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
+def redact_signatures(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: redact_secret(item) if str(key).strip().lower() == "signature" else redact_signatures(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_signatures(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_signatures(item) for item in value]
+    return copy.deepcopy(value)
+
+
 def redact_channel_auth_config(config: dict[str, Any] | None) -> dict[str, Any]:
     if not config:
         return {}

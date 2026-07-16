@@ -499,6 +499,8 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
                 source_channel_id=payload.source_channel_id,
                 image_url=payload.image_url,
                 include_expensive_context=payload.include_expensive_context,
+                probe_depth=payload.probe_depth,
+                repeat_count=payload.repeat_count,
                 credentials_override={
                     "api_key": api_key,
                     "base_url": base_url,
@@ -890,6 +892,8 @@ async def channel_claude_code_test(channel_id: str, data: ClaudeCodeTestCreate, 
             source_channel_id=data.source_channel_id,
             image_url=data.image_url,
             include_expensive_context=data.include_expensive_context,
+            probe_depth=data.probe_depth,
+            repeat_count=data.repeat_count,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -927,6 +931,8 @@ async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Se
             source_channel_id=data.source_channel_id,
             image_url=data.image_url,
             include_expensive_context=data.include_expensive_context,
+            probe_depth=data.probe_depth,
+            repeat_count=data.repeat_count,
             credentials_override={
                 "api_key": api_key,
                 "base_url": base_url,

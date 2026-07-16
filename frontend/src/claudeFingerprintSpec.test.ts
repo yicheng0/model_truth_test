@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS } from './claudeFingerprintSpec';
+import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS, UPSTREAM_INTEGRITY_META } from './claudeFingerprintSpec';
 
 describe('claudeFingerprintSpec', () => {
   it('separates provenance from protocol compatibility and weak behavior signals', () => {
@@ -26,11 +26,23 @@ describe('claudeFingerprintSpec', () => {
 
   it('keeps transparent Claude Code forwarding unresolved', () => {
     expect(CLAUDE_ACCESS_PATHS.map((item) => item.key)).toEqual([
-      'anthropic_api_direct',
+      'anthropic_endpoint_configured',
       'claude_code_gateway_like',
       'translated_gateway',
       'transparent_unresolved',
     ]);
     expect(CLAUDE_ACCESS_PATHS.find((item) => item.key === 'transparent_unresolved')?.description).toContain('无法区分');
+  });
+
+  it('documents all upstream integrity outcomes without claiming official origin', () => {
+    expect(Object.keys(UPSTREAM_INTEGRITY_META)).toEqual([
+      'signature_chain_verified',
+      'mixed_routing_suspected',
+      'protocol_reconstruction_suspected',
+      'model_swap_suspected',
+      'insufficient_evidence',
+      'operationally_inconclusive',
+    ]);
+    expect(UPSTREAM_INTEGRITY_META.signature_chain_verified.description).toContain('不等于官方直连');
   });
 });

@@ -124,8 +124,9 @@ npm run build
 - 身份探针使用“你是谁”和“你好，请介绍一下你自己”等自然问题。模型自报身份只作为低权重辅助信号，不能覆盖协议结构、message id、usage 和 tool use 等硬证据。
 - 流式协议探针检查 Anthropic 官方 SSE 关键生命周期；事件可被仿造，因此只证明原生协议兼容度，不证明第三方 URL 的来源。
 - 页面内置四级证据 Spec 和渠道差异矩阵：来源/控制面证据最高，跨请求 Signature 连续性其次，协议形态为中等证据，行为与自报仅作弱信号。
-- 页面把结论拆成三层：Claude 得分衡量模型与 Messages API 兼容性，ClaudeCode 得分衡量客户端/网关能力，访问路径判定描述官方域名直连、Claude Code 网关、协议翻译或透明未决。自定义 Base URL 即使响应与官方完全相同，也不会被标成官方直连。
+- 页面把结论拆成四层：Claude 得分衡量模型与 Messages API 兼容性，ClaudeCode 得分衡量客户端/网关能力，访问路径描述官方端点配置、网关、协议翻译或透明未决，上游完整性独立汇总双向验签与差分证据。自定义 Base URL 即使响应与官方完全相同，也不会被标成官方直连。
 - Claude Code 网关专项检查 `x-claude-code-session-id`、`anthropic-beta`、attribution system block、`/v1/messages/count_tokens` 和 `/v1/models?limit=1000`；这些是兼容证据，不是上游来源证明，并且不会降低 Claude 基础分。
+- 深度模式需要可比的官方基线，重复执行双向 thinking signature、篡改对照、thinking + tool loop、参数/错误、SSE、usage/tokenizer 和路由指纹探针。`signature_chain_verified` 只表示 Claude signature 链路已由基线验证，不等于官方直连；API Key、Claude.ai OAuth 和透明转发仍需账单、request-id 或云审计确认。
 - 运行时 API Key 只用于本次调用，不写入 Claude 指纹历史；请求快照和错误文本在返回及持久化前都会脱敏。
 
 ## 自动巡检配置说明
