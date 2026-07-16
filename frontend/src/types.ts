@@ -664,6 +664,33 @@ export type ClaudeCodeTestResult = {
   classification_status?: 'claude_code' | 'claude' | 'aws_resource' | 'non_claude' | 'anomaly' | 'unknown' | string | null;
   classification_label?: string | null;
   classification_reason?: string | null;
+  access_path_assessment?: 'anthropic_endpoint_configured' | 'anthropic_api_direct' | 'claude_code_gateway_like' | 'translated_gateway' | 'transparent_unresolved' | string | null;
+  access_path_label?: string | null;
+  access_path_reason?: string | null;
+  access_path_caveat?: string | null;
+  access_path_evidence?: Array<{
+    key?: string;
+    status?: string;
+    http_status?: number | null;
+    labels?: string[];
+    reason?: string | null;
+    raw_evidence?: Record<string, unknown>;
+  }>;
+  upstream_integrity?: {
+    classification: 'signature_chain_verified' | 'mixed_routing_suspected' | 'protocol_reconstruction_suspected' | 'model_swap_suspected' | 'insufficient_evidence' | 'operationally_inconclusive' | string;
+    confidence: 'low' | 'medium' | 'high' | string;
+    official_origin_confirmed: boolean;
+    reason?: string | null;
+    labels?: string[];
+    probe_matrix?: Array<Record<string, unknown>>;
+    limitations?: string[];
+    gateway_evidence?: string[];
+    source_channel_id?: string | null;
+    candidate_channel_id?: string | null;
+    source_model?: string | null;
+    candidate_model?: string | null;
+    repeat_count?: number | null;
+  } | null;
   capability_flags?: {
     is_claude_like?: boolean;
     is_claude_code_like?: boolean;
@@ -697,6 +724,8 @@ export type ClaudeCodeRelayTestCreate = {
   source_channel_id?: string | null;
   image_url?: string | null;
   include_expensive_context?: boolean;
+  probe_depth?: 'standard' | 'deep';
+  repeat_count?: 3 | 5;
 };
 
 export type ClaudeCodeCheckStatus = {

@@ -6,7 +6,7 @@ import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
 import { groupClaudeFingerprintHistory, localDayRangeIso, probeDiagnosticText } from '../claudeFingerprintHistory';
-import { CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS } from '../claudeFingerprintSpec';
+import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS, UPSTREAM_INTEGRITY_META, type UpstreamIntegrityClassification } from '../claudeFingerprintSpec';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
@@ -21,6 +21,8 @@ type RelayFormValues = {
   source_channel_id?: string;
   image_url?: string;
   include_expensive_context?: boolean;
+  probe_depth?: 'standard' | 'deep';
+  repeat_count?: 3 | 5;
 };
 
 const SECTION_DESCRIPTIONS: Record<string, string> = {
@@ -69,8 +71,19 @@ function FingerprintMethodologyPanel() {
                   { title: '允许结论', dataIndex: 'conclusion', width: 270 },
                 ]}
               />
+              <Table
+                rowKey="key"
+                size="small"
+                pagination={false}
+                dataSource={CLAUDE_ACCESS_PATHS}
+                columns={[
+                  { title: '访问路径', dataIndex: 'title', width: 220 },
+                  { title: '判定边界', dataIndex: 'description', width: 500 },
+                  { title: '主要证据', dataIndex: 'evidence' },
+                ]}
+              />
               <Typography.Text type="secondary">
-                当前页面的 Claude 得分衡量基础协议与行为一致性；ClaudeCode 得分衡量 Thinking Signature、兼容参数和链路能力。两者都不是来源证明。
+                当前页面的 Claude 得分衡量基础协议与行为一致性；ClaudeCode 得分衡量 Thinking Signature、兼容参数和链路能力；访问路径判定单独描述直连、网关或翻译痕迹。透明转发仍可能无法区分。
               </Typography.Text>
             </Space>
           ),
@@ -95,6 +108,7 @@ function statusLabel(status: string) {
   if (status === 'fail') return '失败';
   if (status === 'warning') return '警告';
   if (status === 'skipped') return '跳过';
+  if (status === 'not_applicable') return '不适用';
   if (status === 'running') return '运行中';
   if (status === 'queued') return '等待中';
   return status;
@@ -122,6 +136,60 @@ function classificationColor(status?: string | null) {
   if (status === 'anomaly' || status === 'unknown') return 'orange';
   if (status === 'non_claude') return 'red';
   return 'default';
+}
+
+function accessPathColor(status?: string | null) {
+  if (status === 'anthropic_endpoint_configured' || status === 'anthropic_api_direct') return 'green';
+  if (status === 'claude_code_gateway_like') return 'purple';
+  if (status === 'translated_gateway') return 'red';
+  if (status === 'transparent_unresolved') return 'orange';
+  return 'default';
+}
+
+function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
+  const integrity = result.upstream_integrity;
+  if (!integrity?.classification) return null;
+  const meta = UPSTREAM_INTEGRITY_META[integrity.classification as UpstreamIntegrityClassification] ?? {
+    label: integrity.classification,
+    color: 'default',
+    description: integrity.reason ?? '本轮没有可显示的上游完整性说明。',
+  };
+  const rows = integrity.probe_matrix ?? [];
+  return (
+    <Card bordered={false} title="上游完整性（独立于兼容得分与访问路径）">
+      <Space direction="vertical" size={12} className="full-width">
+        <Alert
+          type={integrity.classification === 'signature_chain_verified' ? 'success' : integrity.classification === 'insufficient_evidence' ? 'info' : 'warning'}
+          showIcon
+          message={<Space wrap><span>{meta.label}</span><Tag color={meta.color}>置信度 {integrity.confidence}</Tag><Tag>官方来源未确认</Tag></Space>}
+          description={integrity.reason || meta.description}
+        />
+        <Descriptions size="small" bordered column={{ xs: 1, md: 3 }}>
+          <Descriptions.Item label="官方来源确认">{integrity.official_origin_confirmed ? '已确认' : '未确认'}</Descriptions.Item>
+          <Descriptions.Item label="重复次数">{integrity.repeat_count ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="官方基线">{integrity.source_channel_id ?? '未配置或未执行'}</Descriptions.Item>
+        </Descriptions>
+        <Table<Record<string, unknown>>
+          rowKey={(item) => String(item.key)}
+          size="small"
+          pagination={false}
+          scroll={{ x: 980 }}
+          dataSource={rows}
+          columns={[
+            { title: '挑战', dataIndex: 'title', width: 250, render: (value: unknown, item) => <ProbeNameCell title={String(value || item.key)} probeKey={String(item.key)} /> },
+            { title: '状态', dataIndex: 'status', width: 110, render: (value: unknown) => <Tag color={statusColor(String(value))}>{statusLabel(String(value))}</Tag> },
+            { title: '重复', dataIndex: 'repeat_count', width: 75, render: (value: unknown) => value == null ? '-' : String(value) },
+            { title: '正向通过', dataIndex: 'positive_pass_count', width: 95, render: (value: unknown) => value == null ? '-' : String(value) },
+            { title: '篡改拒绝', dataIndex: 'tamper_rejected_count', width: 95, render: (value: unknown) => value == null ? '-' : String(value) },
+            { title: '协议偏离', dataIndex: 'protocol_mismatch_count', width: 95, render: (value: unknown) => value == null ? '-' : String(value) },
+            { title: '运营失败', dataIndex: 'operational_failure_count', width: 95, render: (value: unknown) => value == null ? '-' : String(value) },
+            { title: '证据引用', dataIndex: 'evidence_refs', render: (value: unknown) => Array.isArray(value) ? value.join('、') : '-' },
+          ]}
+        />
+        {(integrity.limitations ?? []).map((item) => <Typography.Text key={item} type="secondary">• {item}</Typography.Text>)}
+      </Space>
+    </Card>
+  );
 }
 
 function claudeCodeLinkLabel(result: ClaudeCodeTestResult) {
@@ -460,6 +528,11 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
             <Tag color={classificationColor(result.classification_status)}>
               Claude 判断 {result.classification_label ?? result.classification_status ?? '未分类'}
             </Tag>
+            {result.access_path_assessment ? (
+              <Tag color={accessPathColor(result.access_path_assessment)}>
+                访问路径 {result.access_path_label ?? result.access_path_assessment}
+              </Tag>
+            ) : null}
             <Tag color={result.capability_flags?.is_claude_code_like ? 'purple' : 'default'}>
               ClaudeCode 链路 {claudeCodeLinkLabel(result)}
             </Tag>
@@ -471,6 +544,36 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
         )}
         description={result.classification_reason ? `${result.summary} · ${result.classification_reason}` : result.summary}
       />
+      {result.access_path_assessment ? (
+        <Card bordered={false} title="访问路径判定（独立于 Claude 得分）">
+          <Space direction="vertical" size={12} className="full-width">
+            <Alert
+              type={result.access_path_assessment === 'translated_gateway' ? 'warning' : 'info'}
+              showIcon
+              message={result.access_path_label ?? result.access_path_assessment}
+              description={`${result.access_path_reason ?? ''}${result.access_path_caveat ? ` · ${result.access_path_caveat}` : ''}`}
+            />
+            <Descriptions size="small" bordered column={{ xs: 1, md: 3 }}>
+              <Descriptions.Item label="Claude 得分">模型与 Messages API 兼容性</Descriptions.Item>
+              <Descriptions.Item label="ClaudeCode 得分">Thinking / 工具 / 客户端能力</Descriptions.Item>
+              <Descriptions.Item label="访问路径">直连、网关、协议翻译或透明未决</Descriptions.Item>
+            </Descriptions>
+            <Table
+              rowKey={(item) => String(item.key)}
+              size="small"
+              pagination={false}
+              dataSource={result.access_path_evidence ?? []}
+              columns={[
+                { title: '证据', dataIndex: 'key', width: 210 },
+                { title: '状态', dataIndex: 'status', width: 90, render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
+                { title: 'HTTP', dataIndex: 'http_status', width: 85, render: (value: number | null) => value ?? '-' },
+                { title: '结论', dataIndex: 'reason' },
+              ]}
+            />
+          </Space>
+        </Card>
+      ) : null}
+      <UpstreamIntegrityPanel result={result} />
       {result.request_normalization_notes?.length ? (
         <Alert
           type="info"
@@ -686,6 +789,8 @@ export default function ClaudeCodeCheck() {
         source_channel_id: values.source_channel_id || null,
         image_url: values.image_url?.trim() || null,
         include_expensive_context: Boolean(values.include_expensive_context),
+        probe_depth: values.probe_depth || 'standard',
+        repeat_count: values.repeat_count || 3,
       };
       return api.startClaudeCodeRelayTestJob(payload);
     },
@@ -816,7 +921,7 @@ export default function ClaudeCodeCheck() {
               <Form
                 form={relayForm}
                 layout="vertical"
-                initialValues={{ provider_type: 'third_party_anthropic', request_protocol: 'auto', include_expensive_context: false }}
+                initialValues={{ provider_type: 'third_party_anthropic', request_protocol: 'auto', include_expensive_context: false, probe_depth: 'standard', repeat_count: 3 }}
                 onFinish={submitRelay}
               >
                 <div className="signature-config-grid">
@@ -856,6 +961,12 @@ export default function ClaudeCodeCheck() {
                   <Form.Item name="image_url" label="图片 URL">
                     <Input placeholder="可选；留空使用默认红色测试图" />
                   </Form.Item>
+                  <Form.Item name="probe_depth" label="上游完整性探针">
+                    <Select options={[{ value: 'standard', label: '标准：兼容性与访问路径' }, { value: 'deep', label: '深度：双向验签与差分矩阵（高请求量）' }]} />
+                  </Form.Item>
+                  <Form.Item name="repeat_count" label="深度探针重复次数" dependencies={['probe_depth']}>
+                    <Select options={[{ value: 3, label: '3 次（默认）' }, { value: 5, label: '5 次（更强混路由采样）' }]} />
+                  </Form.Item>
                 </div>
                 <Space wrap>
                   <Form.Item name="include_expensive_context" valuePropName="checked" style={{ marginBottom: 0 }}>
@@ -866,6 +977,7 @@ export default function ClaudeCodeCheck() {
                   </Button>
                   <Typography.Text type="secondary">API Key 只随本次请求发送，后端不写入渠道配置。</Typography.Text>
                   <Typography.Text type="secondary">检测完成后会自动保存为右侧历史证据。</Typography.Text>
+                  <Typography.Text type="secondary">深度模式为串行高请求量检测，需要 Signature Source；没有可比基线时会返回“证据不足”，不会误判失败。</Typography.Text>
                 </Space>
               </Form>
             </Card>

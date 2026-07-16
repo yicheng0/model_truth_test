@@ -319,6 +319,29 @@ def _initial_relay_job_state(include_expensive_context: bool, image_url: str | N
             "evidence_excerpt": None,
         }
     )
+    for key, title in (
+        ("gateway_count_tokens", "Claude Code count_tokens 端点"),
+        ("gateway_model_discovery", "Claude Code 网关模型发现"),
+    ):
+        probes.append(
+            {
+                "key": key,
+                "title": title,
+                "category": "relay_compatibility",
+                "section": "fingerprint",
+                "status": "queued",
+                "severity": "reference",
+                "score": 0.0,
+                "labels": [],
+                "run_id": None,
+                "result_id": None,
+                "message_id": None,
+                "request_id": None,
+                "request_protocol": None,
+                "provider_endpoint": None,
+                "evidence_excerpt": None,
+            }
+        )
     sections = _relay_job_sections(probes)
     for section in sections:
         section["title"] = section_titles.get(str(section["key"]), str(section["title"]))
@@ -476,6 +499,8 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
                 source_channel_id=payload.source_channel_id,
                 image_url=payload.image_url,
                 include_expensive_context=payload.include_expensive_context,
+                probe_depth=payload.probe_depth,
+                repeat_count=payload.repeat_count,
                 credentials_override={
                     "api_key": api_key,
                     "base_url": base_url,
@@ -867,6 +892,8 @@ async def channel_claude_code_test(channel_id: str, data: ClaudeCodeTestCreate, 
             source_channel_id=data.source_channel_id,
             image_url=data.image_url,
             include_expensive_context=data.include_expensive_context,
+            probe_depth=data.probe_depth,
+            repeat_count=data.repeat_count,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -904,6 +931,8 @@ async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Se
             source_channel_id=data.source_channel_id,
             image_url=data.image_url,
             include_expensive_context=data.include_expensive_context,
+            probe_depth=data.probe_depth,
+            repeat_count=data.repeat_count,
             credentials_override={
                 "api_key": api_key,
                 "base_url": base_url,

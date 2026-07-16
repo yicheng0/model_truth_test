@@ -6985,6 +6985,192 @@ def test_claude_fingerprint_stream_lifecycle_uses_official_sse_sequence(events, 
         assert payload["status"] == "pass"
 
 
+@pytest.mark.parametrize(
+    ("base_url", "probes", "expected_assessment"),
+    [
+        ("https://api.anthropic.com", [], "anthropic_endpoint_configured"),
+        (
+            "https://gateway.example",
+            [
+                {"key": "claude_code_headers", "status": "pass", "raw_evidence": {"session_header_sent": True}},
+                {"key": "claude_code_attribution", "status": "pass", "raw_evidence": {"attribution_behavior": "accepted"}},
+                {"key": "gateway_count_tokens", "status": "pass"},
+            ],
+            "claude_code_gateway_like",
+        ),
+        (
+            "https://gateway.example",
+            [{"key": "response_schema", "status": "fail", "labels": ["openai_shape_response"]}],
+            "translated_gateway",
+        ),
+        (
+            "https://gateway.example",
+            [{"key": "response_schema", "status": "pass", "labels": []}],
+            "transparent_unresolved",
+        ),
+        (
+            "https://gateway.example",
+            [
+                {"key": "claude_code_headers", "status": "pass"},
+                {"key": "claude_code_attribution", "status": "pass"},
+            ],
+            "transparent_unresolved",
+        ),
+    ],
+)
+def test_claude_code_access_path_assessment_separates_origin_from_protocol(base_url, probes, expected_assessment) -> None:  # noqa: ANN001
+    from app.services import _claude_code_access_path_assessment
+
+    result = _claude_code_access_path_assessment(base_url, probes)
+
+    assert result["access_path_assessment"] == expected_assessment
+    assert result["access_path_reason"]
+    assert "response-only" in result["access_path_caveat"]
+
+
+def test_claude_code_gateway_probe_configs_use_client_contract_without_secrets() -> None:
+    from app.services import _claude_code_probe_configs
+
+    configs = {item["key"]: item for item in _claude_code_probe_configs(None)}
+    header_probe = configs["claude_code_headers"]
+    attribution_probe = configs["claude_code_attribution"]
+
+    assert header_probe["request_params"]["request_headers"]["x-claude-code-session-id"].startswith("ccprobe-")
+    assert "anthropic-beta" in header_probe["request_params"]["request_headers"]
+    assert attribution_probe["request_params"]["system_content"][0]["type"] == "text"
+    assert "Claude Code" in attribution_probe["request_params"]["system_content"][0]["text"]
+    assert "api_key" not in json.dumps(header_probe, ensure_ascii=False).lower()
+
+
+def test_anthropic_request_forwards_only_safe_probe_headers(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        text = "{}"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"type": "message", "content": [], "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *args) -> None:  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers=None, json=None):  # noqa: ANN001
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    channel = Channel(id="header_probe", name="Header Probe", provider_type="third_party_anthropic", role="candidate", model_name="claude-test")
+    case = TestCaseModel(
+        id="header_probe_case",
+        suite_id="manual_model_request_probe",
+        module="manual_probe",
+        title="Header probe",
+        prompt="OK",
+        request_params={
+            "max_tokens": 16,
+            "request_headers": {
+                "x-claude-code-session-id": "ccprobe-session-731",
+                "anthropic-beta": "prompt-caching-2024-07-31",
+                "authorization": "must-not-override",
+            },
+        },
+    )
+    raw_request = build_raw_request(channel, case)
+
+    asyncio.run(_anthropic_compatible_call(channel, raw_request, {"api_key": "test-key"}))
+
+    headers = captured["headers"]
+    assert headers["x-claude-code-session-id"] == "ccprobe-session-731"
+    assert headers["anthropic-beta"] == "prompt-caching-2024-07-31"
+    assert headers["authorization"] == "Bearer test-key"
+    assert raw_request["_request_header_names"] == ["anthropic-beta", "x-claude-code-session-id"]
+    assert "ccprobe-session-731" not in json.dumps(raw_request)
+
+
+def test_response_metadata_keeps_gateway_header_names_without_values() -> None:
+    from app.services import attach_response_metadata
+
+    response = httpx.Response(
+        200,
+        headers={
+            "x-apipro-version": "secret-ish-value",
+            "x-oneapi-request-id": "oneapi-731",
+            "server": "nginx",
+            "set-cookie": "must-not-persist",
+        },
+    )
+
+    payload = attach_response_metadata({"type": "message"}, response)
+    metadata = payload["_response_metadata"]
+
+    assert metadata["header_names"] == ["server", "x-apipro-version", "x-oneapi-request-id"]
+    assert "secret-ish-value" not in json.dumps(metadata)
+    assert "must-not-persist" not in json.dumps(metadata)
+
+
+def test_initial_relay_job_state_includes_gateway_endpoint_probes() -> None:
+    from app.main import _initial_relay_job_state
+
+    probes, _sections = _initial_relay_job_state(False, None)
+    keys = [str(item["key"]) for item in probes]
+
+    assert keys[-3:] == ["signature_interop", "gateway_count_tokens", "gateway_model_discovery"]
+
+
+def test_gateway_endpoint_probes_validate_schema_and_strip_runtime_values(monkeypatch) -> None:
+    from app.services import _run_claude_code_gateway_endpoint_probes
+
+    opaque_key = "customOpaqueCredential731XYZ"
+    session_value = "ccprobe-endpoint-731"
+    responses = [
+        httpx.Response(400, json={"error": {"message": f"echo {opaque_key} {session_value}"}}),
+        httpx.Response(200, json={"data": []}),
+    ]
+    captured_headers: list[dict[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *args) -> None:  # noqa: ANN002
+            return None
+
+        async def request(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            captured_headers.append(dict(kwargs.get("headers") or {}))
+            return responses.pop(0)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    channel = Channel(id="gateway_schema", name="Gateway Schema", provider_type="third_party_anthropic", role="candidate", base_url="https://gateway.example", model_name="claude-test")
+
+    probes = asyncio.run(
+        _run_claude_code_gateway_endpoint_probes(
+            channel,
+            credentials_override={"api_key": opaque_key, "base_url": channel.base_url, "model": channel.model_name},
+        )
+    )
+
+    assert [probe["status"] for probe in probes] == ["warning", "warning"]
+    assert all(probe["score"] == 0 for probe in probes)
+    assert captured_headers[1]["x-api-key"] == opaque_key
+    assert captured_headers[1]["authorization"] == f"Bearer {opaque_key}"
+    serialized = json.dumps(probes)
+    assert opaque_key not in serialized
+    assert session_value not in serialized
+
+
 def test_claude_code_strict_json_schema_scoring_labels() -> None:
     from app.services import _claude_code_probe_configs
 
@@ -7602,6 +7788,419 @@ def test_claude_code_source_channels_endpoint() -> None:
     payload = response.json()
     assert payload
     assert any(item["id"] == "anthropic_official" for item in payload)
+
+
+def test_claude_code_deep_probe_input_defaults_and_validation() -> None:
+    from pydantic import ValidationError
+
+    from app.schemas import ClaudeCodeTestCreate
+
+    standard = ClaudeCodeTestCreate()
+    assert standard.probe_depth == "standard"
+    assert standard.repeat_count == 3
+    assert ClaudeCodeTestCreate(probe_depth="deep", repeat_count=5).repeat_count == 5
+    with pytest.raises(ValidationError):
+        ClaudeCodeTestCreate(probe_depth="deep", repeat_count=4)
+    with pytest.raises(ValidationError):
+        ClaudeCodeTestCreate(probe_depth="unknown")
+
+
+def test_upstream_integrity_requires_baseline_and_ignores_gateway_compatibility() -> None:
+    from app.services import _claude_upstream_integrity_assessment
+
+    payload = _claude_upstream_integrity_assessment(
+        [],
+        baseline_configured=False,
+        models_comparable=False,
+        gateway_evidence=["claude_code_headers", "gateway_model_discovery"],
+    )
+
+    assert payload["classification"] == "insufficient_evidence"
+    assert payload["confidence"] == "low"
+    assert payload["official_origin_confirmed"] is False
+    assert payload["probe_matrix"] == []
+    assert "OAuth" in " ".join(payload["limitations"])
+
+
+@pytest.mark.parametrize("repeat_count", [3, 5])
+def test_upstream_integrity_verifies_bidirectional_signature_chain(repeat_count: int) -> None:
+    from app.services import _claude_upstream_integrity_assessment
+
+    rows = [
+        {
+            "key": "official_signature_control",
+            "status": "pass",
+            "repeat_count": repeat_count,
+            "positive_pass_count": repeat_count,
+            "tamper_rejected_count": repeat_count,
+        },
+        {
+            "key": "official_to_candidate_signature",
+            "status": "pass",
+            "repeat_count": repeat_count,
+            "positive_pass_count": repeat_count,
+        },
+        {
+            "key": "candidate_to_official_signature",
+            "status": "pass",
+            "repeat_count": repeat_count,
+            "positive_pass_count": repeat_count,
+            "tamper_rejected_count": repeat_count,
+        },
+    ]
+
+    payload = _claude_upstream_integrity_assessment(
+        rows,
+        baseline_configured=True,
+        models_comparable=True,
+    )
+
+    assert payload["classification"] == "signature_chain_verified"
+    assert payload["confidence"] == "high"
+    assert payload["official_origin_confirmed"] is False
+
+
+def test_upstream_integrity_detects_mixed_routing_before_protocol_reconstruction() -> None:
+    from app.services import _claude_upstream_integrity_assessment
+
+    payload = _claude_upstream_integrity_assessment(
+        [
+            {
+                "key": "candidate_to_official_signature",
+                "status": "warning",
+                "repeat_count": 3,
+                "positive_pass_count": 2,
+                "tamper_rejected_count": 3,
+                "control_valid": True,
+            },
+            {
+                "key": "route_fingerprint",
+                "status": "warning",
+                "repeat_count": 3,
+                "fingerprint_variant_count": 2,
+                "correlated_change_count": 2,
+            },
+            {"key": "parameter_error_matrix", "status": "warning", "protocol_mismatch_count": 2},
+        ],
+        baseline_configured=True,
+        models_comparable=True,
+    )
+
+    assert payload["classification"] == "mixed_routing_suspected"
+    assert payload["confidence"] == "high"
+
+
+def test_upstream_integrity_detects_protocol_reconstruction_and_model_swap() -> None:
+    from app.services import _claude_upstream_integrity_assessment
+
+    reconstructed = _claude_upstream_integrity_assessment(
+        [
+            {"key": "parameter_error_matrix", "status": "warning", "protocol_mismatch_count": 2},
+            {"key": "sse_lifecycle", "status": "warning", "protocol_mismatch_count": 1},
+        ],
+        baseline_configured=True,
+        models_comparable=True,
+    )
+    swapped = _claude_upstream_integrity_assessment(
+        [
+            {"key": "candidate_to_official_signature", "status": "fail", "signature_unverifiable": True},
+            {"key": "parameter_error_matrix", "status": "fail", "protocol_mismatch_count": 2},
+            {"key": "usage_tokenizer_matrix", "status": "fail", "usage_outlier_count": 3},
+        ],
+        baseline_configured=True,
+        models_comparable=True,
+    )
+
+    assert reconstructed["classification"] == "protocol_reconstruction_suspected"
+    assert swapped["classification"] == "model_swap_suspected"
+    assert "tokenizer_or_usage_rewrite_suspected" in swapped["labels"]
+
+
+def test_upstream_integrity_separates_operational_failures() -> None:
+    from app.services import _claude_upstream_integrity_assessment
+
+    payload = _claude_upstream_integrity_assessment(
+        [
+            {"key": "official_signature_control", "status": "warning", "operational_failure_count": 3},
+            {"key": "parameter_error_matrix", "status": "warning", "operational_failure_count": 9},
+        ],
+        baseline_configured=True,
+        models_comparable=True,
+    )
+
+    assert payload["classification"] == "operationally_inconclusive"
+    assert payload["confidence"] == "low"
+
+
+def test_upstream_integrity_operational_result_ignores_route_summary_row() -> None:
+    from app.services import _claude_upstream_integrity_assessment
+
+    payload = _claude_upstream_integrity_assessment(
+        [
+            {"key": "official_signature_control", "status": "warning", "operational_failure_count": 3},
+            {"key": "official_to_candidate_signature", "status": "fail", "operational_failure_count": 0},
+            {"key": "candidate_to_official_signature", "status": "warning", "operational_failure_count": 3},
+            {"key": "parameter_error_matrix", "status": "warning", "operational_failure_count": 18},
+            {"key": "route_fingerprint", "status": "pass", "fingerprint_variant_count": 0},
+        ],
+        baseline_configured=True,
+        models_comparable=True,
+    )
+
+    assert payload["classification"] == "operationally_inconclusive"
+
+
+def test_upstream_integrity_does_not_verify_when_other_hard_probes_fail() -> None:
+    from app.services import _claude_upstream_integrity_assessment
+
+    rows = [
+        {"key": "official_signature_control", "repeat_count": 3, "positive_pass_count": 3, "tamper_rejected_count": 3},
+        {"key": "official_to_candidate_signature", "repeat_count": 3, "positive_pass_count": 3},
+        {"key": "candidate_to_official_signature", "repeat_count": 3, "positive_pass_count": 3, "tamper_rejected_count": 3},
+        {"key": "thinking_tool_loop", "status": "fail", "structure_failure_count": 3},
+        {"key": "sse_lifecycle", "status": "warning", "protocol_mismatch_count": 1},
+    ]
+
+    payload = _claude_upstream_integrity_assessment(rows, baseline_configured=True, models_comparable=True)
+
+    assert payload["classification"] != "signature_chain_verified"
+
+
+def test_upstream_integrity_payload_redacts_complete_signatures_and_credentials() -> None:
+    from app.schemas import ClaudeCodeTestRead
+
+    secret_signature = "sig_" + "a" * 160
+    payload = ClaudeCodeTestRead(
+        ok=True,
+        score=100,
+        risk_level="low",
+        summary="ok",
+        upstream_integrity={
+            "classification": "signature_chain_verified",
+            "confidence": "high",
+            "official_origin_confirmed": False,
+            "probe_matrix": [{"key": "signature", "signature": secret_signature, "authorization": "Bearer sk-secret"}],
+            "limitations": [],
+        },
+    ).model_dump_json()
+
+    assert secret_signature not in payload
+    assert "sk-secret" not in payload
+
+
+def test_upstream_integrity_stream_evidence_preserves_delta_order_and_tool_json() -> None:
+    from app.services import _anthropic_stream_evidence
+
+    raw = "\n\n".join(
+        [
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12}}}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"x"}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-secret-value"}}',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"lookup","input":{}}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"id\\":1}"}}',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":8}}',
+            'event: message_stop\ndata: {"type":"message_stop"}',
+        ]
+    )
+
+    evidence = _anthropic_stream_evidence(raw)
+
+    assert evidence["event_sequence"][0] == "message_start"
+    assert evidence["delta_types"] == ["thinking_delta", "signature_delta", "input_json_delta"]
+    assert evidence["thinking_signature_order_valid"] is True
+    assert evidence["tool_json_valid"] is True
+    assert evidence["message_delta_usage_keys"] == ["output_tokens"]
+    assert "sig-secret-value" not in json.dumps(evidence)
+
+
+def test_signature_stream_parser_keeps_full_structured_evidence_beyond_excerpt() -> None:
+    from app.services import _parse_signature_stream_response
+
+    filler = "x" * 2600
+    raw = "\n\n".join(
+        [
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_01stream","usage":{"input_tokens":12}}}',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+            f'event: content_block_delta\ndata: {{"type":"content_block_delta","index":0,"delta":{{"type":"thinking_delta","thinking":"{filler}"}}}}',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-secret-value"}}',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}',
+            'event: message_stop\ndata: {"type":"message_stop"}',
+        ]
+    )
+
+    payload = _parse_signature_stream_response(raw)
+
+    assert len(payload["raw_stream_excerpt"]) == 2000
+    assert payload["stream_evidence"]["event_sequence"][-1] == "message_stop"
+    assert payload["stream_evidence"]["thinking_signature_order_valid"] is True
+    assert "sig-secret-value" not in json.dumps(payload["stream_evidence"])
+
+
+def test_upstream_integrity_tamper_changes_signature_without_returning_it() -> None:
+    from app.services import _tampered_thinking_blocks
+
+    original = [{"type": "thinking", "thinking": "hidden", "signature": "sig-abcdef"}]
+    tampered = _tampered_thinking_blocks(original)
+
+    assert tampered[0]["signature"] != original[0]["signature"]
+    assert original[0]["signature"] == "sig-abcdef"
+
+
+def test_upstream_integrity_models_must_share_family_and_protocol() -> None:
+    from app.services import _claude_models_comparable
+
+    assert _claude_models_comparable("claude-sonnet-4-6", "claude-sonnet-4-6") is True
+    assert _claude_models_comparable("claude-sonnet-4-6", "claude-opus-4-6") is False
+    assert _claude_models_comparable("claude-opus-4-8", "claude-opus-4-6") is False
+    assert _claude_models_comparable("unknown", "claude-sonnet-4-6") is False
+
+
+def test_integrity_route_fingerprint_ignores_expected_probe_outcomes() -> None:
+    from app.services import _route_fingerprint_variants
+
+    variants, correlated = _route_fingerprint_variants(
+        [
+            {"probe_key": "max_tokens_one", "message_id_family": "Anthropic", "model": "claude-sonnet-4-6", "signature_present": False, "error_type": "", "usage_keys": ["input_tokens"], "response_header_names": ["request-id"], "http_status": 200},
+            {"probe_key": "invalid_max_tokens_type", "message_id_family": "未知", "model": "", "signature_present": False, "error_type": "invalid_request_error", "usage_keys": [], "response_header_names": ["request-id"], "http_status": 400},
+            {"probe_key": "max_tokens_one", "message_id_family": "Anthropic", "model": "claude-sonnet-4-6", "signature_present": False, "error_type": "", "usage_keys": ["input_tokens"], "response_header_names": ["request-id"], "http_status": 200},
+            {"probe_key": "invalid_max_tokens_type", "message_id_family": "未知", "model": "", "signature_present": False, "error_type": "invalid_request_error", "usage_keys": [], "response_header_names": ["request-id"], "http_status": 400},
+        ]
+    )
+
+    assert variants == 1
+    assert correlated == 0
+
+
+def test_integrity_route_fingerprint_ignores_operational_samples() -> None:
+    from app.services import _route_fingerprint_variants
+
+    variants, correlated = _route_fingerprint_variants(
+        [
+            {"probe_key": "signature_generation", "message_id_family": "Anthropic", "model": "claude-sonnet-4-6", "signature_present": True, "error_type": "", "usage_keys": ["input_tokens"], "response_header_names": ["request-id"], "http_status": 200},
+            {"probe_key": "signature_generation", "message_id_family": "未知", "model": "", "signature_present": False, "error_type": "rate_limit_error", "usage_keys": [], "response_header_names": ["cf-ray"], "http_status": 429},
+            {"probe_key": "signature_generation", "message_id_family": "Anthropic", "model": "claude-sonnet-4-6", "signature_present": True, "error_type": "", "usage_keys": ["input_tokens"], "response_header_names": ["request-id"], "http_status": 200},
+        ]
+    )
+
+    assert variants == 1
+    assert correlated == 0
+
+
+def test_deep_upstream_probe_runs_bidirectional_challenges_and_redacts(monkeypatch) -> None:
+    from app.services import _run_claude_upstream_integrity_probes
+
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call(endpoint, api_key, payload):  # noqa: ANN001
+        calls.append((endpoint, payload))
+        serialized = json.dumps(payload)
+        if "tampered" in serialized:
+            return {"type": "error", "error": {"type": "invalid_request_error", "message": "invalid signature"}}, {
+                "ok": False,
+                "http_status": 400,
+                "error": "invalid signature",
+                "endpoint": endpoint,
+            }
+        messages = payload.get("messages") or []
+        is_generation = len(messages) == 1
+        signature = "sig-official-secret" if "official" in endpoint else "sig-candidate-secret"
+        content = (
+            [{"type": "thinking", "thinking": "hidden", "signature": signature}, {"type": "text", "text": "ok"}]
+            if is_generation and payload.get("thinking")
+            else [{"type": "text", "text": "ok"}]
+        )
+        return {
+            "type": "message",
+            "id": "msg_01test",
+            "model": payload.get("model"),
+            "content": content,
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        }, {"ok": True, "http_status": 200, "endpoint": endpoint, "message_id": "msg_01test"}
+
+    monkeypatch.setattr("app.services._signature_messages_call", fake_call)
+    source = Channel(id="official", name="official", provider_type="anthropic", role="gold", base_url="https://official.example", model_name="claude-sonnet-4-6", enabled=True)
+    candidate = Channel(id="candidate", name="candidate", provider_type="third_party_anthropic", role="candidate", base_url="https://candidate.example", model_name="claude-sonnet-4-6", enabled=True)
+
+    payload = asyncio.run(
+        _run_claude_upstream_integrity_probes(
+            source,
+            candidate,
+            source_credentials={"api_key": "sk-official", "base_url": "https://official.example", "model": "claude-sonnet-4-6"},
+            candidate_credentials={"api_key": "sk-candidate", "base_url": "https://candidate.example", "model": "claude-sonnet-4-6"},
+            repeat_count=3,
+        )
+    )
+
+    assert payload["classification"] == "signature_chain_verified"
+    by_key = {row["key"]: row for row in payload["probe_matrix"]}
+    assert by_key["official_signature_control"]["positive_pass_count"] == 3
+    assert by_key["candidate_to_official_signature"]["tamper_rejected_count"] == 3
+    assert {"thinking_tool_loop", "parameter_error_matrix", "sse_lifecycle", "usage_tokenizer_matrix", "route_fingerprint"} <= set(by_key)
+    serialized = json.dumps(payload)
+    assert "sig-official-secret" not in serialized
+    assert "sig-candidate-secret" not in serialized
+    assert "sk-official" not in serialized
+    assert "sk-candidate" not in serialized
+    assert len(calls) > 20
+
+
+def test_create_claude_code_test_runs_deep_integrity_only_with_source(monkeypatch) -> None:
+    from app.services import create_claude_code_test
+
+    reset_database()
+    deep_calls: list[tuple[str, str, int]] = []
+
+    async def fake_model_probe(db, channel, config, **kwargs):  # noqa: ANN001
+        return {
+            "key": config["key"],
+            "title": config["title"],
+            "category": config["category"],
+            "section": "structure",
+            "status": "pass",
+            "severity": config["severity"],
+            "score": 100,
+            "labels": [],
+        }
+
+    async def fake_signature_probe(db, channel, source_channel_id, **kwargs):  # noqa: ANN001
+        return {"key": "signature_interop", "title": "Signature", "category": "signature", "section": "signature", "status": "pass", "severity": "core", "score": 100, "labels": []}
+
+    async def fake_integrity(source, candidate, *, repeat_count, **kwargs):  # noqa: ANN001
+        deep_calls.append((source.id, candidate.id, repeat_count))
+        return {
+            "classification": "signature_chain_verified",
+            "confidence": "high",
+            "official_origin_confirmed": False,
+            "reason": "verified",
+            "labels": [],
+            "probe_matrix": [],
+            "limitations": ["transparent"],
+        }
+
+    monkeypatch.setattr("app.services._run_claude_code_model_probe", fake_model_probe)
+    monkeypatch.setattr("app.services._run_claude_code_repeatability_probe", fake_model_probe)
+    monkeypatch.setattr("app.services._run_claude_code_signature_interop_probe", fake_signature_probe)
+    async def fake_gateway_probes(channel, **kwargs):  # noqa: ANN001
+        return []
+
+    monkeypatch.setattr("app.services._run_claude_code_gateway_endpoint_probes", fake_gateway_probes)
+    monkeypatch.setattr("app.services._run_claude_upstream_integrity_probes", fake_integrity)
+
+    with SessionLocal() as db:
+        source = db.get(Channel, "anthropic_official")
+        candidate = db.get(Channel, "third_party_demo")
+        assert source is not None and candidate is not None
+        deep = asyncio.run(create_claude_code_test(db, candidate, source_channel_id=source.id, probe_depth="deep", repeat_count=5))
+        standard = asyncio.run(create_claude_code_test(db, candidate, source_channel_id=source.id))
+
+    assert deep_calls == [("anthropic_official", "third_party_demo", 5)]
+    assert deep["upstream_integrity"]["classification"] == "signature_chain_verified"
+    assert standard["upstream_integrity"]["classification"] == "insufficient_evidence"
 
 
 def test_auto_protocol_falls_back_to_openai_compatible(monkeypatch) -> None:
@@ -9643,6 +10242,42 @@ def test_claude_code_evidence_redacts_probe_diagnostics_before_persisting() -> N
 
     assert "sk-persist-secret" not in serialized
     assert "[REDACTED]" in serialized
+
+
+def test_claude_code_evidence_redacts_upstream_integrity_signatures_before_persisting() -> None:
+    from app.services import create_claude_code_evidence
+
+    reset_database()
+    secret_signature = "sig_" + "z" * 160
+    result_payload = {
+        "ok": True,
+        "score": 100,
+        "risk_level": "low",
+        "summary": "ok",
+        "probes": [],
+        "sections": [],
+        "upstream_integrity": {
+            "classification": "signature_chain_verified",
+            "probe_matrix": [{"key": "candidate_to_official_signature", "signature": secret_signature}],
+        },
+    }
+    with SessionLocal() as db:
+        evidence = create_claude_code_evidence(
+            db,
+            channel_label="redaction",
+            base_url="https://relay.example",
+            model_name="claude-sonnet-4-6",
+            provider_type="third_party_anthropic",
+            request_protocol="anthropic_messages",
+            source_channel_id="anthropic_official",
+            image_url=None,
+            include_expensive_context=False,
+            result_payload=result_payload,
+        )
+        stored = db.get(ClaudeCodeEvidence, evidence.id)
+        serialized = json.dumps(stored.result_payload, ensure_ascii=False)
+
+    assert secret_signature not in serialized
 
 
 def test_new_api_sync_preview_filters_claude_channels(monkeypatch) -> None:

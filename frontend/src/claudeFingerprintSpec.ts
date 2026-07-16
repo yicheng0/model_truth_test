@@ -14,6 +14,30 @@ export type ClaudeChannelDifference = {
   conclusion: string;
 };
 
+export type ClaudeAccessPath = {
+  key: 'anthropic_endpoint_configured' | 'claude_code_gateway_like' | 'translated_gateway' | 'transparent_unresolved';
+  title: string;
+  description: string;
+  evidence: string;
+};
+
+export type UpstreamIntegrityClassification =
+  | 'signature_chain_verified'
+  | 'mixed_routing_suspected'
+  | 'protocol_reconstruction_suspected'
+  | 'model_swap_suspected'
+  | 'insufficient_evidence'
+  | 'operationally_inconclusive';
+
+export const UPSTREAM_INTEGRITY_META: Record<UpstreamIntegrityClassification, { label: string; color: string; description: string }> = {
+  signature_chain_verified: { label: 'Signature 链路已验证', color: 'green', description: '双向 signature 与篡改对照通过；证明 Claude signature 链路，不等于官方直连。' },
+  mixed_routing_suspected: { label: '疑似混合路由', color: 'red', description: '重复采样出现关联硬协议特征切换或 signature 验证间歇变化。' },
+  protocol_reconstruction_suspected: { label: '疑似协议重建', color: 'orange', description: '多个独立参数、错误或 SSE 边界持续偏离官方基线。' },
+  model_swap_suspected: { label: '疑似换模或严重降级', color: 'red', description: 'Signature 不可验证，并伴随至少两类独立硬异常。' },
+  insufficient_evidence: { label: '证据不足', color: 'default', description: '缺少可比官方基线、模型不兼容或仅有网关兼容证据。' },
+  operationally_inconclusive: { label: '运营异常，无法判定', color: 'gold', description: '本轮仅获得认证、配额、限流、超时或服务端错误。' },
+};
+
 export const CLAUDE_EVIDENCE_TIERS: ClaudeEvidenceTier[] = [
   {
     key: 'provenance',
@@ -73,5 +97,32 @@ export const CLAUDE_CHANNEL_DIFFERENCES: ClaudeChannelDifference[] = [
     expected: '可能自报 Claude，也可能伪造 msg_/toolu_，但多层协议边界、工具、上下文、能力和重复性通常难以长期同时贴合参考带。',
     redFlags: 'OpenAI/Gemini shape、硬参数不执行、能力持续低于官方带、跨请求串线，以及明确泄露其他模型身份。',
     conclusion: '需要多项独立异常和重复采样后，才使用“疑似换模”或“likely non-Claude”口径。',
+  },
+];
+
+export const CLAUDE_ACCESS_PATHS: ClaudeAccessPath[] = [
+  {
+    key: 'anthropic_endpoint_configured',
+    title: '已配置 Anthropic 官方端点',
+    description: '目标为 api.anthropic.com；这只确认端点配置，仍需用账号账单和 request id 回查来源。',
+    evidence: '官方域名、组织侧 request id、账单与控制面记录。',
+  },
+  {
+    key: 'claude_code_gateway_like',
+    title: 'Claude Code 网关兼容链路',
+    description: '自定义 Base URL 接受 Claude Code 客户端契约；说明网关兼容，不等于官方直连。',
+    evidence: 'x-claude-code-*、attribution block、/v1/models、count_tokens、beta/body 配对和中转响应头。',
+  },
+  {
+    key: 'translated_gateway',
+    title: '协议翻译网关',
+    description: '发现 OpenAI/Gemini shape、fallback、SSE 重建或模型字段改写等协议翻译痕迹。',
+    evidence: '协议族、错误 envelope、message/tool id、stream lifecycle 和模型名差异。',
+  },
+  {
+    key: 'transparent_unresolved',
+    title: '透明转发，来源无法解析',
+    description: '只看响应无法区分官方上游、OAuth/API 透明转发与无改写代理；不得据此标成官方直连。',
+    evidence: '普通 Messages 响应一致，但缺少可回查的来源或网关控制面证据。',
   },
 ];

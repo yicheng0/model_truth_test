@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
-from .redaction import redact_channel_auth_config, redact_secrets
+from .redaction import redact_channel_auth_config, redact_secrets, redact_signatures
 
 
 TIME_OF_DAY_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -485,6 +485,8 @@ class ClaudeCodeTestCreate(BaseModel):
     source_channel_id: str | None = None
     image_url: str | None = Field(default=None, max_length=1000)
     include_expensive_context: bool = False
+    probe_depth: Literal["standard", "deep"] = "standard"
+    repeat_count: Literal[3, 5] = 3
 
 
 class ClaudeCodeEphemeralTestCreate(ClaudeCodeTestCreate):
@@ -560,6 +562,12 @@ class ClaudeCodeTestRead(BaseModel):
     classification_status: str | None = None
     classification_label: str | None = None
     classification_reason: str | None = None
+    access_path_assessment: str | None = None
+    access_path_label: str | None = None
+    access_path_reason: str | None = None
+    access_path_caveat: str | None = None
+    access_path_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    upstream_integrity: dict[str, Any] = Field(default_factory=dict)
     capability_flags: dict[str, Any] = Field(default_factory=dict)
     claude_score: float | None = None
     claude_code_score: float | None = None
@@ -567,6 +575,10 @@ class ClaudeCodeTestRead(BaseModel):
     request_normalization_notes: list[str] = Field(default_factory=list)
     probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
     sections: list[ClaudeCodeSectionRead] = Field(default_factory=list)
+
+    @field_serializer("upstream_integrity")
+    def serialize_upstream_integrity(self, value: Any) -> Any:
+        return redact_signatures(redact_secrets(value))
 
 
 class ClaudeCodeEvidenceRead(BaseModel):

@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
-from .redaction import merge_redacted_config, redact_secrets, redact_text
+from .redaction import merge_redacted_config, redact_secrets, redact_signatures, redact_text
 from .scheduled_probe import (
     OPERATIONAL_FAILURE_LABELS,
     PROVIDER_QUOTA_EXHAUSTED_LABEL,
@@ -4584,6 +4584,42 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "scoring_rules": {"raw_response_type_required": "message", "provider_message_id_prefix_any": ["msg_", "msg_bdrk_", "msg_vrtx_"]},
         },
         {
+            "key": "claude_code_headers",
+            "title": "Claude Code 客户端请求头",
+            "category": "relay_compatibility",
+            "severity": "reference",
+            "prompt": "只输出 CC-HEADERS-731，不要输出其他内容。",
+            "request_params": {
+                "max_tokens": 48,
+                "request_headers": {
+                    "x-claude-code-session-id": "ccprobe-session-731",
+                    "anthropic-beta": "prompt-caching-2024-07-31",
+                },
+            },
+            "scoring_rules": {"required_exact": "CC-HEADERS-731"},
+        },
+        {
+            "key": "claude_code_attribution",
+            "title": "Claude Code attribution system block",
+            "category": "relay_compatibility",
+            "severity": "reference",
+            "prompt": "只输出 CC-ATTRIBUTION-731，不要输出其他内容。",
+            "request_params": {
+                "max_tokens": 48,
+                "system_content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are Claude Code, Anthropic's official CLI for Claude. "
+                            "Client version: 2.1.181. Conversation fingerprint: ccprobe-attribution-731."
+                        ),
+                    },
+                    {"type": "text", "text": "Only output CC-ATTRIBUTION-731."},
+                ],
+            },
+            "scoring_rules": {"required_exact": "CC-ATTRIBUTION-731"},
+        },
+        {
             "key": "stream_lifecycle",
             "title": "Anthropic SSE 生命周期",
             "category": "protocol",
@@ -4928,12 +4964,18 @@ async def create_claude_code_test(
     source_channel_id: str | None = None,
     image_url: str | None = None,
     include_expensive_context: bool = False,
+    probe_depth: str = "standard",
+    repeat_count: int = 3,
     credentials_override: dict[str, Any] | None = None,
     persist_results: bool = True,
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     if not channel.enabled:
         raise ValueError("Channel is disabled")
+    if probe_depth not in {"standard", "deep"}:
+        raise ValueError("probe_depth must be standard or deep")
+    if repeat_count not in {3, 5}:
+        raise ValueError("repeat_count must be 3 or 5")
     configs = _claude_code_probe_configs(image_url, include_expensive_context)
     probes: list[dict[str, Any]] = []
 
@@ -4947,7 +4989,7 @@ async def create_claude_code_test(
                 "current_section": current_probe.get("section") if current_probe else None,
                 "probes": [dict(item) for item in probes],
                 "sections": _claude_code_sections(probes),
-                "total_count": len(configs) + 1,
+                "total_count": len(configs) + 3,
             }
         )
 
@@ -4987,12 +5029,36 @@ async def create_claude_code_test(
     probes.append(await _run_claude_code_signature_interop_probe(db, channel, source_channel_id, credentials_override=credentials_override))
     await emit(probes[-1])
     probes = [_claude_code_normalize_optional_probe(probe) for probe in probes]
+    gateway_probes = await _run_claude_code_gateway_endpoint_probes(channel, credentials_override=credentials_override)
+    for gateway_probe in gateway_probes:
+        probes.append(gateway_probe)
+        await emit(gateway_probe)
     score = _claude_code_score(probes)
     claude_code_score = _claude_code_link_score(probes)
     risk_level = _claude_code_risk_level(score, probes)
     classification = _claude_code_classification(probes, score, claude_code_score)
     protocol_profile = next((str(probe.get("protocol_profile")) for probe in probes if probe.get("protocol_profile")), PROTOCOL_PROFILE_UNKNOWN)
     normalization_notes = sorted({str(note) for probe in probes for note in (probe.get("request_normalization_notes") or []) if str(note)})
+    access_path = _claude_code_access_path_assessment(
+        str((credentials_override or {}).get("base_url") or channel.base_url or ""),
+        probes,
+    )
+    upstream_integrity = _claude_upstream_integrity_assessment(
+        [],
+        baseline_configured=bool(source_channel_id),
+        models_comparable=False,
+        gateway_evidence=[str(probe.get("key")) for probe in probes if _claude_probe_section(probe) == "fingerprint" and probe.get("status") == "pass"],
+    )
+    if probe_depth == "deep" and source_channel_id:
+        source = db.get(Channel, source_channel_id)
+        if not source:
+            raise ValueError("Source channel not found")
+        upstream_integrity = await _run_claude_upstream_integrity_probes(
+            source,
+            channel,
+            candidate_credentials=credentials_override,
+            repeat_count=repeat_count,
+        )
     return {
         "ok": classification["classification_status"] in {"claude", "aws_resource", "claude_code"} and risk_level in {"low", "medium"},
         "score": score,
@@ -5003,6 +5069,8 @@ async def create_claude_code_test(
         "protocol_profile": protocol_profile,
         "request_normalization_notes": normalization_notes,
         **classification,
+        **access_path,
+        "upstream_integrity": upstream_integrity,
         "probes": probes,
         "sections": _claude_code_sections(probes),
     }
@@ -5058,6 +5126,128 @@ async def _run_claude_code_model_probe(
     db.refresh(run)
     db.refresh(result)
     return _claude_code_probe_payload(config, result, normalized)
+
+
+async def _run_claude_code_gateway_endpoint_probes(
+    channel: Channel,
+    *,
+    credentials_override: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    credentials = credentials_override or _merged_channel_credentials(channel, {})
+    api_key = str(credentials.get("api_key") or "")
+    if not api_key:
+        return []
+    base_url = _anthropic_api_base_url(str(credentials.get("base_url") or channel.base_url or ""))
+    model = str(credentials.get("model") or channel.model_name or "")
+    common_headers = {
+        "content-type": "application/json",
+        "anthropic-version": str(credentials.get("anthropic_version") or "2023-06-01"),
+        "x-api-key": api_key,
+        "authorization": f"Bearer {api_key}",
+        "x-claude-code-session-id": "ccprobe-endpoint-731",
+    }
+    timeout = httpx.Timeout(connect=10, read=30, write=10, pool=10)
+    probes: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
+        endpoint_specs = [
+            (
+                "gateway_count_tokens",
+                "Claude Code count_tokens 端点",
+                "POST",
+                f"{base_url}/v1/messages/count_tokens",
+                common_headers,
+                {"model": model, "messages": [{"role": "user", "content": "CC token count probe"}]},
+            ),
+            (
+                "gateway_model_discovery",
+                "Claude Code 网关模型发现",
+                "GET",
+                f"{base_url}/v1/models?limit=1000",
+                {"x-api-key": api_key, "authorization": f"Bearer {api_key}"},
+                None,
+            ),
+        ]
+        for key, title, method, url, headers, body in endpoint_specs:
+            started = time.perf_counter()
+            status_code: int | None = None
+            response_header_names: list[str] = []
+            error_detail: str | None = None
+            response_summary: dict[str, Any] = {}
+            try:
+                response = await client.request(method, url, headers=headers, json=body)
+                status_code = response.status_code
+                response_header_names = _safe_response_header_names(response.headers)
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                if key == "gateway_count_tokens" and isinstance(payload, dict):
+                    response_summary = {"input_tokens": payload.get("input_tokens")} if payload.get("input_tokens") is not None else {}
+                elif key == "gateway_model_discovery" and isinstance(payload, dict):
+                    models = payload.get("data") if isinstance(payload.get("data"), list) else []
+                    response_summary = {
+                        "model_count": len(models),
+                        "model_ids": [str(item.get("id")) for item in models[:20] if isinstance(item, dict) and item.get("id")],
+                    }
+                if response.status_code >= 400:
+                    error_detail = _strip_runtime_probe_values(
+                        _response_error_detail(response),
+                        api_key,
+                        str(common_headers["x-claude-code-session-id"]),
+                    )[:1000] or f"HTTP {response.status_code}"
+            except Exception as exc:
+                error_detail = _strip_runtime_probe_values(
+                    str(exc),
+                    api_key,
+                    str(common_headers["x-claude-code-session-id"]),
+                )[:1000]
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            schema_valid = (
+                isinstance(response_summary.get("input_tokens"), int)
+                and response_summary["input_tokens"] >= 0
+                if key == "gateway_count_tokens"
+                else bool(response_summary.get("model_count"))
+            )
+            supported = status_code is not None and 200 <= status_code < 300 and schema_valid
+            status = "pass" if supported else "skipped" if status_code in {404, 405, 501} else "warning"
+            reason = (
+                "端点可用，符合 Claude Code 可选网关契约。"
+                if supported
+                else "端点返回成功状态，但响应 schema 不符合 Claude Code 网关契约。"
+                if status_code is not None and 200 <= status_code < 300
+                else "端点未实现；Claude Code 会降级为本地估算或内置模型列表。"
+                if status == "skipped"
+                else error_detail or "端点探测未获得稳定响应。"
+            )
+            probes.append(
+                {
+                    "key": key,
+                    "title": title,
+                    "category": "relay_compatibility",
+                    "section": "fingerprint",
+                    "status": status,
+                    "severity": "reference",
+                    "score": 100.0 if supported else 0.0,
+                    "labels": [] if supported else [f"{key}_not_supported"],
+                    "reason": reason,
+                    "label_explanations": [],
+                    "latency_ms": latency_ms,
+                    "http_status": status_code,
+                    "error_detail": error_detail,
+                    "request_snapshot": {
+                        "method": method,
+                        "path": url.removeprefix(base_url),
+                        "request_header_names": sorted(name for name in headers if name not in {"authorization", "x-api-key"}),
+                    },
+                    "raw_evidence": {
+                        "response_header_names": response_header_names,
+                        **response_summary,
+                    },
+                    "evidence_excerpt": reason,
+                    "input_preview": None,
+                }
+            )
+    return probes
 
 
 async def _run_claude_code_repeatability_probe(
@@ -5220,6 +5410,7 @@ def _claude_code_request_snapshot(config: dict[str, Any], normalized: dict[str, 
         "output_config": raw_request.get("output_config", request_params.get("output_config")),
         "tools": raw_request.get("tools", request_params.get("tools")),
         "stop_sequences": raw_request.get("stop_sequences", request_params.get("stop_sequences")),
+        "request_header_names": raw_request.get("_request_header_names") or [],
     }
     return redact_secrets({key: value for key, value in snapshot.items() if value is not None})
 
@@ -5255,6 +5446,8 @@ def _claude_code_raw_evidence(normalized: dict[str, Any]) -> dict[str, Any]:
             "provider_endpoint": normalized.get("provider_endpoint"),
             "protocol_profile": normalized.get("protocol_profile"),
             "stream_events": [str(item) for item in normalized.get("stream_events") or []],
+            "request_header_names": (normalized.get("raw_request") or {}).get("_request_header_names") or [],
+            "response_header_names": ((raw_response or {}).get("_response_metadata") or {}).get("header_names") or [] if isinstance(raw_response, dict) else [],
         }
     )
 
@@ -5872,6 +6065,795 @@ def _claude_code_capability_flags(probes: list[dict[str, Any]], claude_score: fl
     }
 
 
+def _claude_code_access_path_assessment(base_url: str | None, probes: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized_url = (base_url or "").strip().lower().rstrip("/")
+    caveat = "response-only probes cannot distinguish a transparent forwarder from the same Anthropic upstream."
+    evidence: list[dict[str, Any]] = []
+    for probe in probes:
+        if probe.get("key") not in {
+            "claude_code_headers",
+            "claude_code_attribution",
+            "gateway_count_tokens",
+            "gateway_model_discovery",
+            "response_schema",
+        }:
+            continue
+        evidence.append(
+            {
+                "key": probe.get("key"),
+                "status": probe.get("status"),
+                "http_status": probe.get("http_status"),
+                "labels": probe.get("labels") or [],
+                "reason": probe.get("reason"),
+                "raw_evidence": probe.get("raw_evidence") or {},
+            }
+        )
+
+    if normalized_url in {"https://api.anthropic.com", "https://api.anthropic.com/v1", "https://api.anthropic.com/v1/messages"}:
+        assessment = "anthropic_endpoint_configured"
+        label = "已配置 Anthropic 官方端点"
+        reason = "请求目标为 api.anthropic.com；这只确认端点配置，来源仍需结合 Anthropic 账号账单与 request id 回查。"
+    else:
+        labels = {str(label) for probe in probes for label in (probe.get("labels") or [])}
+        has_translation = bool(labels.intersection({"openai_shape_response", "openai_protocol_fallback", "message_id_openai_family"}))
+        if has_translation:
+            assessment = "translated_gateway"
+            label = "协议翻译网关"
+            reason = "检测到 OpenAI shape、协议 fallback 或其他 Anthropic Messages 重建痕迹。"
+        else:
+            by_key = {str(probe.get("key")): probe for probe in probes}
+            header_raw = by_key.get("claude_code_headers", {}).get("raw_evidence") or {}
+            header_evidence = header_raw.get("session_header_sent") is True or "x-claude-code-session-id" in (header_raw.get("request_header_names") or [])
+            attribution_evidence = bool((by_key.get("claude_code_attribution", {}).get("raw_evidence") or {}).get("attribution_behavior"))
+            endpoint_evidence = any(
+                by_key.get(key, {}).get("status") == "pass"
+                for key in ("gateway_count_tokens", "gateway_model_discovery")
+            )
+            if endpoint_evidence and (header_evidence or attribution_evidence):
+                assessment = "claude_code_gateway_like"
+                label = "Claude Code 网关兼容链路"
+                reason = "自定义 Base URL 接受多项 Claude Code 客户端契约；这证明网关兼容性，不证明上游来源。"
+            else:
+                assessment = "transparent_unresolved"
+                label = "透明转发，来源无法解析"
+                reason = "自定义 Base URL 的普通 Messages 响应可与官方上游完全一致，现有响应证据不足以判定直连、OAuth 转发或透明代理。"
+    return {
+        "access_path_assessment": assessment,
+        "access_path_label": label,
+        "access_path_reason": reason,
+        "access_path_caveat": caveat,
+        "access_path_evidence": evidence,
+    }
+
+
+UPSTREAM_INTEGRITY_LIMITATIONS = [
+    "透明转发可以完整保留 Claude 响应；响应探针无法单独证明官方直连。",
+    "Anthropic API Key、Claude.ai OAuth 与无改写代理需要账单、request-id 回查或云审计才能最终区分。",
+    "Claude Code 请求头、attribution、模型发现和可选 count_tokens 端点只属于网关兼容证据。",
+]
+
+
+def _claude_upstream_integrity_assessment(
+    probe_matrix: list[dict[str, Any]],
+    *,
+    baseline_configured: bool,
+    models_comparable: bool,
+    gateway_evidence: list[str] | None = None,
+) -> dict[str, Any]:
+    rows = [redact_secrets(dict(row)) for row in probe_matrix]
+    labels: set[str] = set()
+    total_operational = sum(_safe_int(row.get("operational_failure_count")) for row in rows)
+    protocol_mismatches = sum(_safe_int(row.get("protocol_mismatch_count")) for row in rows)
+    usage_outliers = sum(_safe_int(row.get("usage_outlier_count")) for row in rows)
+    signature_unverifiable = any(bool(row.get("signature_unverifiable")) for row in rows)
+    fingerprint_mixed = any(
+        _safe_int(row.get("fingerprint_variant_count")) >= 2
+        and _safe_int(row.get("correlated_change_count")) >= 2
+        for row in rows
+    )
+    signature_intermittent = any(
+        row.get("key") == "candidate_to_official_signature"
+        and bool(row.get("control_valid"))
+        and 0 < _safe_int(row.get("positive_pass_count")) < _safe_int(row.get("repeat_count"))
+        for row in rows
+    )
+
+    if usage_outliers >= 3:
+        labels.add("tokenizer_or_usage_rewrite_suspected")
+
+    classification = "insufficient_evidence"
+    confidence = "low"
+    reason = "缺少可评分的官方基线证据；网关兼容性不能证明上游来源。"
+    if baseline_configured and not models_comparable:
+        reason = "官方基线与候选模型族或 thinking 协议不可比，未对失败作换模解释。"
+    elif baseline_configured and models_comparable and (fingerprint_mixed or signature_intermittent):
+        classification = "mixed_routing_suspected"
+        confidence = "high" if fingerprint_mixed and signature_intermittent else "medium"
+        if fingerprint_mixed and signature_intermittent:
+            confidence = "high"
+        reason = "重复采样出现关联硬协议特征切换或 signature 验证间歇变化，疑似混合路由。"
+        labels.add("mixed_routing_suspected")
+    elif baseline_configured and models_comparable and signature_unverifiable and (
+        (protocol_mismatches >= 2 and usage_outliers >= 3)
+        or sum([protocol_mismatches >= 2, usage_outliers >= 3, any(bool(row.get("quality_regression")) for row in rows)]) >= 2
+    ):
+        classification = "model_swap_suspected"
+        confidence = "high"
+        reason = "signature 无法由基线验证，并伴随至少两类独立硬异常，存在换模或严重降级风险。"
+        labels.add("suspected_model_swap")
+    elif baseline_configured and models_comparable and protocol_mismatches >= 2:
+        classification = "protocol_reconstruction_suspected"
+        confidence = "medium" if protocol_mismatches == 2 else "high"
+        reason = "多个独立参数或协议边界持续偏离官方基线，疑似中间层重建或改写协议。"
+        labels.add("protocol_reconstruction_suspected")
+    elif baseline_configured and models_comparable and total_operational > 0 and not any(
+        _safe_int(row.get("protocol_mismatch_count")) > 0
+        or _safe_int(row.get("usage_outlier_count")) > 0
+        or bool(row.get("signature_unverifiable"))
+        or (_safe_int(row.get("fingerprint_variant_count")) >= 2 and _safe_int(row.get("correlated_change_count")) >= 2)
+        for row in rows
+    ):
+        classification = "operationally_inconclusive"
+        confidence = "low"
+        reason = "本轮仅获得认证、配额、限流、超时或服务端错误，未进入上游真实性评分。"
+    elif baseline_configured and models_comparable:
+        by_key = {str(row.get("key")): row for row in rows}
+        control = by_key.get("official_signature_control", {})
+        outbound = by_key.get("official_to_candidate_signature", {})
+        inbound = by_key.get("candidate_to_official_signature", {})
+        repeat_count = _safe_int(inbound.get("repeat_count"))
+        blocking_hard_failure = any(
+            str(row.get("status")) == "fail"
+            and str(row.get("key")) in {"thinking_tool_loop", "parameter_error_matrix", "sse_lifecycle", "usage_tokenizer_matrix"}
+            for row in rows
+        )
+        verified = (
+            repeat_count in {3, 5}
+            and _safe_int(control.get("positive_pass_count")) == repeat_count
+            and _safe_int(control.get("tamper_rejected_count")) == repeat_count
+            and _safe_int(outbound.get("positive_pass_count")) == repeat_count
+            and _safe_int(inbound.get("positive_pass_count")) == repeat_count
+            and _safe_int(inbound.get("tamper_rejected_count")) == repeat_count
+            and not blocking_hard_failure
+        )
+        if verified:
+            classification = "signature_chain_verified"
+            confidence = "high"
+            reason = "双向 thinking signature 与篡改对照均通过，Claude signature 链路已由官方基线验证。"
+        else:
+            reason = "已配置可比基线，但本轮证据不足以验证完整 signature 链路或形成异常结论。"
+
+    return {
+        "classification": classification,
+        "confidence": confidence,
+        "official_origin_confirmed": False,
+        "reason": reason,
+        "labels": sorted(labels),
+        "probe_matrix": rows,
+        "gateway_evidence": sorted(set(gateway_evidence or [])),
+        "limitations": list(UPSTREAM_INTEGRITY_LIMITATIONS),
+    }
+
+
+def _claude_models_comparable(source_model: str | None, candidate_model: str | None) -> bool:
+    source = str(source_model or "").strip().lower()
+    candidate = str(candidate_model or "").strip().lower()
+    if not source.startswith("claude-") or not candidate.startswith("claude-"):
+        return False
+    return source == candidate and claude_protocol_profile_for_model(source) == claude_protocol_profile_for_model(candidate)
+
+
+def _thinking_blocks(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
+        return []
+    return [dict(block) for block in payload["content"] if isinstance(block, dict) and block.get("type") == "thinking" and block.get("signature")]
+
+
+def _tampered_thinking_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tampered = [dict(block) for block in blocks]
+    for block in tampered:
+        signature = str(block.get("signature") or "")
+        if signature:
+            block["signature"] = f"{signature[:-1]}{'0' if signature[-1] != '0' else '1'}-tampered"
+            break
+    return tampered
+
+
+def _signature_rejected(meta: dict[str, Any]) -> bool:
+    status = _safe_int(meta.get("http_status"))
+    text = _lower_text(str(meta.get("error") or ""))
+    return 400 <= status < 500 and ("signature" in text or "thinking" in text or "invalid" in text)
+
+
+def _integrity_operational_failure(meta: dict[str, Any]) -> bool:
+    status = meta.get("http_status")
+    if status is None:
+        return True
+    numeric = _safe_int(status)
+    return numeric in {401, 403, 429} or numeric >= 500
+
+
+def _integrity_continuation_body(model: str, blocks: list[dict[str, Any]], prompt: str = SIGNATURE_TEST_PROMPT_B) -> dict[str, Any]:
+    body, _, _ = _signature_thinking_request_body(
+        model,
+        [
+            {"role": "user", "content": SIGNATURE_TEST_PROMPT_A},
+            {"role": "assistant", "content": blocks},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return body
+
+
+def _integrity_route_fingerprint(payload: dict[str, Any], meta: dict[str, Any], probe_key: str = "default") -> dict[str, Any]:
+    response_meta = payload.get("_response_metadata") if isinstance(payload.get("_response_metadata"), dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    return {
+        "probe_key": probe_key,
+        "message_id_family": classify_claude_message_id(str(payload.get("id") or "")),
+        "model": str(payload.get("model") or ""),
+        "signature_present": bool(_thinking_blocks(payload)),
+        "error_type": str((payload.get("error") or {}).get("type") or "") if isinstance(payload.get("error"), dict) else "",
+        "usage_keys": sorted(str(key) for key in usage),
+        "response_header_names": sorted(str(name) for name in response_meta.get("header_names") or []),
+        "http_status": meta.get("http_status"),
+    }
+
+
+def _route_fingerprint_variants(fingerprints: list[dict[str, Any]]) -> tuple[int, int]:
+    stable_fingerprints = [
+        item
+        for item in fingerprints
+        if item.get("http_status") is not None
+        and _safe_int(item.get("http_status")) not in {401, 403, 429}
+        and _safe_int(item.get("http_status")) < 500
+    ]
+    if not stable_fingerprints:
+        return 0, 0
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in stable_fingerprints:
+        grouped[str(item.get("probe_key") or "default")].append(item)
+    variant_count = max(
+        len({json.dumps(item, sort_keys=True, ensure_ascii=True) for item in items})
+        for items in grouped.values()
+    )
+    correlated_change_count = 0
+    fields = ("message_id_family", "model", "signature_present", "error_type", "usage_keys", "response_header_names", "http_status")
+    for field in fields:
+        if any(len({json.dumps(item.get(field), sort_keys=True, ensure_ascii=True) for item in items}) > 1 for items in grouped.values()):
+            correlated_change_count += 1
+    return variant_count, correlated_change_count
+
+
+def _anthropic_stream_evidence(raw: str) -> dict[str, Any]:
+    events = _iter_sse_json_events(raw)
+    event_sequence: list[str] = []
+    delta_types: list[str] = []
+    delta_records: list[dict[str, Any]] = []
+    usage_keys: set[str] = set()
+    tool_json_parts: dict[int, str] = defaultdict(str)
+    block_types: dict[int, str] = {}
+    for event in events:
+        event_type = str(event.get("type") or "chunk")
+        event_sequence.append(event_type)
+        index = event.get("index")
+        if event_type == "content_block_start" and isinstance(index, int) and isinstance(event.get("content_block"), dict):
+            block_types[index] = str(event["content_block"].get("type") or "")
+        delta = event.get("delta") if isinstance(event.get("delta"), dict) else None
+        if event_type == "content_block_delta" and delta:
+            delta_type = str(delta.get("type") or "unknown_delta")
+            delta_types.append(delta_type)
+            delta_records.append({"index": index, "type": delta_type})
+            if delta_type == "input_json_delta" and isinstance(index, int):
+                tool_json_parts[index] += str(delta.get("partial_json") or "")
+        if event_type == "message_delta" and isinstance(event.get("usage"), dict):
+            usage_keys.update(str(key) for key in event["usage"])
+
+    thinking_signature_order_valid = True
+    for index, block_type in block_types.items():
+        if block_type != "thinking":
+            continue
+        ordered = [record["type"] for record in delta_records if record.get("index") == index]
+        if "thinking_delta" in ordered or "signature_delta" in ordered:
+            thinking_signature_order_valid = (
+                "thinking_delta" in ordered
+                and "signature_delta" in ordered
+                and ordered.index("thinking_delta") < ordered.index("signature_delta")
+            )
+            if not thinking_signature_order_valid:
+                break
+    tool_json_valid = True
+    for value in tool_json_parts.values():
+        try:
+            json.loads(value)
+        except (TypeError, ValueError):
+            tool_json_valid = False
+            break
+    return {
+        "event_sequence": event_sequence,
+        "delta_types": delta_types,
+        "delta_records": delta_records,
+        "message_delta_usage_keys": sorted(usage_keys),
+        "thinking_signature_order_valid": thinking_signature_order_valid,
+        "tool_json_valid": tool_json_valid,
+        "tool_block_count": sum(1 for value in block_types.values() if value == "tool_use"),
+        "ping_count": event_sequence.count("ping"),
+        "error_count": sum(1 for event in event_sequence if event in {"error", "message_error"}),
+    }
+
+
+async def _integrity_signature_matrix(
+    source_endpoint: str,
+    source_api_key: str,
+    source_model: str,
+    candidate_endpoint: str,
+    candidate_api_key: str,
+    candidate_model: str,
+    repeat_count: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    counts = {
+        "official_signature_control": {"positive": 0, "tamper": 0, "operational": 0},
+        "official_to_candidate_signature": {"positive": 0, "tamper": 0, "operational": 0},
+        "candidate_to_official_signature": {"positive": 0, "tamper": 0, "operational": 0},
+    }
+    candidate_fingerprints: list[dict[str, Any]] = []
+    candidate_generations: list[dict[str, Any]] = []
+
+    for _ in range(repeat_count):
+        source_body, _, _ = _signature_thinking_request_body(source_model, [{"role": "user", "content": SIGNATURE_TEST_PROMPT_A}])
+        source_payload, source_meta = await _signature_messages_call(source_endpoint, source_api_key, source_body)
+        source_blocks = _thinking_blocks(source_payload)
+        if not source_meta.get("ok") or not source_blocks:
+            counts["official_signature_control"]["operational"] += int(_integrity_operational_failure(source_meta))
+        else:
+            source_continue, source_continue_meta = await _signature_messages_call(
+                source_endpoint,
+                source_api_key,
+                _integrity_continuation_body(source_model, source_blocks),
+            )
+            if source_continue_meta.get("ok"):
+                counts["official_signature_control"]["positive"] += 1
+            elif _integrity_operational_failure(source_continue_meta):
+                counts["official_signature_control"]["operational"] += 1
+            _, source_tamper_meta = await _signature_messages_call(
+                source_endpoint,
+                source_api_key,
+                _integrity_continuation_body(source_model, _tampered_thinking_blocks(source_blocks)),
+            )
+            if _signature_rejected(source_tamper_meta):
+                counts["official_signature_control"]["tamper"] += 1
+            elif _integrity_operational_failure(source_tamper_meta):
+                counts["official_signature_control"]["operational"] += 1
+            _, outbound_meta = await _signature_messages_call(
+                candidate_endpoint,
+                candidate_api_key,
+                _integrity_continuation_body(candidate_model, source_blocks),
+            )
+            if outbound_meta.get("ok"):
+                counts["official_to_candidate_signature"]["positive"] += 1
+            elif _integrity_operational_failure(outbound_meta):
+                counts["official_to_candidate_signature"]["operational"] += 1
+
+        candidate_body, _, _ = _signature_thinking_request_body(candidate_model, [{"role": "user", "content": SIGNATURE_TEST_PROMPT_A}])
+        candidate_payload, candidate_meta = await _signature_messages_call(candidate_endpoint, candidate_api_key, candidate_body)
+        candidate_fingerprints.append(_integrity_route_fingerprint(candidate_payload, candidate_meta, "signature_generation"))
+        candidate_generations.append({"payload": candidate_payload, "meta": candidate_meta})
+        candidate_blocks = _thinking_blocks(candidate_payload)
+        if not candidate_meta.get("ok") or not candidate_blocks:
+            counts["candidate_to_official_signature"]["operational"] += int(_integrity_operational_failure(candidate_meta))
+            continue
+        _, inbound_meta = await _signature_messages_call(
+            source_endpoint,
+            source_api_key,
+            _integrity_continuation_body(source_model, candidate_blocks),
+        )
+        if inbound_meta.get("ok"):
+            counts["candidate_to_official_signature"]["positive"] += 1
+        elif _integrity_operational_failure(inbound_meta):
+            counts["candidate_to_official_signature"]["operational"] += 1
+        _, tamper_meta = await _signature_messages_call(
+            source_endpoint,
+            source_api_key,
+            _integrity_continuation_body(source_model, _tampered_thinking_blocks(candidate_blocks)),
+        )
+        if _signature_rejected(tamper_meta):
+            counts["candidate_to_official_signature"]["tamper"] += 1
+        elif _integrity_operational_failure(tamper_meta):
+            counts["candidate_to_official_signature"]["operational"] += 1
+
+    titles = {
+        "official_signature_control": "官方 signature 正向与篡改控制",
+        "official_to_candidate_signature": "官方 signature -> 候选续接",
+        "candidate_to_official_signature": "候选 signature -> 官方反向验证",
+    }
+    rows = []
+    for key, values in counts.items():
+        expected_tamper = repeat_count if key != "official_to_candidate_signature" else 0
+        positive_ok = values["positive"] == repeat_count
+        tamper_ok = not expected_tamper or values["tamper"] == repeat_count
+        rows.append(
+            {
+                "key": key,
+                "title": titles[key],
+                "direction": key.replace("_signature_control", "_to_official").replace("_signature", ""),
+                "status": "pass" if positive_ok and tamper_ok else "warning" if values["operational"] else "fail",
+                "repeat_count": repeat_count,
+                "positive_pass_count": values["positive"],
+                "tamper_rejected_count": values["tamper"],
+                "operational_failure_count": values["operational"],
+                "control_valid": counts["official_signature_control"]["positive"] == repeat_count and counts["official_signature_control"]["tamper"] == repeat_count,
+                "signature_unverifiable": key == "candidate_to_official_signature" and values["positive"] == 0 and values["operational"] == 0,
+                "evidence_refs": [f"{key}:{index + 1}" for index in range(repeat_count)],
+            }
+        )
+    return rows, candidate_fingerprints, candidate_generations
+
+
+async def _integrity_tool_loop_probe(
+    source_endpoint: str,
+    source_api_key: str,
+    source_model: str,
+    candidate_endpoint: str,
+    candidate_api_key: str,
+    candidate_model: str,
+    repeat_count: int,
+) -> dict[str, Any]:
+    positive = tamper = operational = structure_failures = 0
+    tools = [{"name": "cc_integrity_lookup", "description": "Return a fixed marker", "input_schema": {"type": "object", "properties": {"marker": {"type": "string"}}, "required": ["marker"]}}]
+    for _ in range(repeat_count):
+        body, _, _ = _signature_thinking_request_body(candidate_model, [{"role": "user", "content": "Use cc_integrity_lookup with marker CC-INTEGRITY-731."}])
+        body["tools"] = tools
+        payload, meta = await _signature_messages_call(candidate_endpoint, candidate_api_key, body)
+        if not meta.get("ok"):
+            operational += int(_integrity_operational_failure(meta))
+            continue
+        content = payload.get("content") if isinstance(payload.get("content"), list) else []
+        blocks = _thinking_blocks(payload)
+        tool_blocks = [block for block in content if isinstance(block, dict) and block.get("type") == "tool_use"]
+        valid_tool = bool(tool_blocks) and all(str(block.get("id") or "").startswith("toolu_") and block.get("name") and isinstance(block.get("input"), dict) for block in tool_blocks)
+        if not blocks or not valid_tool:
+            structure_failures += 1
+            continue
+        assistant_content = [dict(block) for block in content]
+        tool_results = [{"type": "tool_result", "tool_use_id": str(block.get("id")), "content": "CC-INTEGRITY-RESULT-731"} for block in tool_blocks]
+        continue_body, _, _ = _signature_thinking_request_body(
+            source_model,
+            [
+                {"role": "user", "content": "Use cc_integrity_lookup with marker CC-INTEGRITY-731."},
+                {"role": "assistant", "content": assistant_content},
+                {"role": "user", "content": tool_results},
+            ],
+        )
+        continue_body["tools"] = tools
+        _, continue_meta = await _signature_messages_call(source_endpoint, source_api_key, continue_body)
+        if continue_meta.get("ok"):
+            positive += 1
+        elif _integrity_operational_failure(continue_meta):
+            operational += 1
+        tampered_content = [dict(block) for block in assistant_content]
+        tampered_thinking = _tampered_thinking_blocks([block for block in tampered_content if block.get("type") == "thinking"])
+        tampered_iter = iter(tampered_thinking)
+        tampered_content = [next(tampered_iter) if block.get("type") == "thinking" else block for block in tampered_content]
+        tamper_body = dict(continue_body)
+        tamper_body["messages"] = [continue_body["messages"][0], {"role": "assistant", "content": tampered_content}, continue_body["messages"][2]]
+        _, tamper_meta = await _signature_messages_call(source_endpoint, source_api_key, tamper_body)
+        tamper += int(_signature_rejected(tamper_meta))
+    not_applicable = structure_failures == repeat_count and operational == 0
+    return {
+        "key": "thinking_tool_loop",
+        "title": "Thinking + Tool Use 跨轮连续性",
+        "status": "not_applicable" if not_applicable else "pass" if positive == repeat_count and tamper == repeat_count else "warning" if operational else "fail",
+        "repeat_count": repeat_count,
+        "positive_pass_count": positive,
+        "tamper_rejected_count": tamper,
+        "operational_failure_count": operational,
+        "structure_failure_count": structure_failures,
+        "evidence_refs": [f"thinking_tool_loop:{index + 1}" for index in range(repeat_count)],
+    }
+
+
+def _integrity_response_shape(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    return {
+        "ok": bool(meta.get("ok")),
+        "http_status": meta.get("http_status"),
+        "error_type": str(error.get("type") or ""),
+        "error_path": str(error.get("param") or error.get("path") or ""),
+        "stop_reason": str(payload.get("stop_reason") or ""),
+        "request_id_present": bool(meta.get("request_id") or request_id_from_payload(payload)),
+        "usage_keys": sorted(str(key) for key in usage),
+        "message_id_family": classify_claude_message_id(str(payload.get("id") or "")),
+        "model": str(payload.get("model") or ""),
+    }
+
+
+def _integrity_shapes_match(source: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    return all(
+        source.get(key) == candidate.get(key)
+        for key in ("ok", "http_status", "error_type", "stop_reason")
+    )
+
+
+async def _integrity_parameter_matrix(
+    source_endpoint: str,
+    source_api_key: str,
+    source_model: str,
+    candidate_endpoint: str,
+    candidate_api_key: str,
+    candidate_model: str,
+    repeat_count: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    source_profile = claude_protocol_profile_for_model(source_model)
+    cases: list[tuple[str, dict[str, Any]]] = [
+        ("max_tokens_one", {"max_tokens": 1, "messages": [{"role": "user", "content": "Write ten words."}]}),
+        ("stop_sequence", {"max_tokens": 32, "stop_sequences": ["<CCSTOP>"], "messages": [{"role": "user", "content": "Output A<CCSTOP>B exactly."}]}),
+        ("invalid_max_tokens_type", {"max_tokens": "invalid_probe", "messages": [{"role": "user", "content": "OK"}]}),
+        ("unknown_top_level", {"max_tokens": 16, "cc_unknown_integrity_field": True, "messages": [{"role": "user", "content": "OK"}]}),
+    ]
+    thinking_conflict, _, _ = _signature_thinking_request_body(source_model, [{"role": "user", "content": "Call the tool."}])
+    thinking_conflict.update(
+        {
+            "tools": [{"name": "cc_probe", "description": "probe", "input_schema": {"type": "object", "properties": {}}}],
+            "tool_choice": {"type": "any"},
+        }
+    )
+    cases.append(("thinking_forced_tool_conflict", thinking_conflict))
+    if source_profile == PROTOCOL_PROFILE_ADAPTIVE_THINKING:
+        boundary = {"max_tokens": 64, "thinking": {"type": "adaptive"}, "temperature": 0, "top_p": 0.5, "top_k": 5, "messages": [{"role": "user", "content": "OK"}]}
+    else:
+        boundary = {"max_tokens": 2048, "thinking": {"type": "enabled", "budget_tokens": 1024}, "temperature": 0, "top_p": 0.5, "top_k": 5, "messages": [{"role": "user", "content": "OK"}]}
+    cases.append(("thinking_sampling_boundary", boundary))
+
+    mismatch_keys: set[str] = set()
+    operational = 0
+    details: list[dict[str, Any]] = []
+    fingerprints: list[dict[str, Any]] = []
+    for attempt in range(repeat_count):
+        for key, template in cases:
+            source_body = {**template, "model": source_model}
+            candidate_body = {**template, "model": candidate_model}
+            source_payload, source_meta = await _signature_messages_call(source_endpoint, source_api_key, source_body)
+            candidate_payload, candidate_meta = await _signature_messages_call(candidate_endpoint, candidate_api_key, candidate_body)
+            source_shape = _integrity_response_shape(source_payload, source_meta)
+            candidate_shape = _integrity_response_shape(candidate_payload, candidate_meta)
+            fingerprints.append(_integrity_route_fingerprint(candidate_payload, candidate_meta, key))
+            if _integrity_operational_failure(source_meta) or _integrity_operational_failure(candidate_meta):
+                operational += 1
+                status = "operational"
+            elif _integrity_shapes_match(source_shape, candidate_shape):
+                status = "match"
+            else:
+                mismatch_keys.add(key)
+                status = "mismatch"
+            details.append({"key": key, "attempt": attempt + 1, "status": status, "source": source_shape, "candidate": candidate_shape})
+    return {
+        "key": "parameter_error_matrix",
+        "title": "参数与错误边界差分",
+        "status": "pass" if not mismatch_keys and not operational else "warning",
+        "repeat_count": repeat_count,
+        "protocol_mismatch_count": len(mismatch_keys),
+        "operational_failure_count": operational,
+        "case_count": len(cases),
+        "cases": details,
+        "evidence_refs": sorted(mismatch_keys) or ["parameter_error_matrix:matched"],
+    }, fingerprints
+
+
+async def _integrity_stream_probe(
+    source_endpoint: str,
+    source_api_key: str,
+    source_model: str,
+    candidate_endpoint: str,
+    candidate_api_key: str,
+    candidate_model: str,
+    repeat_count: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    mismatches = operational = 0
+    details: list[dict[str, Any]] = []
+    fingerprints: list[dict[str, Any]] = []
+    required = ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+    for attempt in range(repeat_count):
+        source_body, _, _ = _signature_thinking_request_body(source_model, [{"role": "user", "content": "Reply OK."}], stream=True)
+        candidate_body, _, _ = _signature_thinking_request_body(candidate_model, [{"role": "user", "content": "Reply OK."}], stream=True)
+        source_payload, source_meta = await _signature_messages_call(source_endpoint, source_api_key, source_body)
+        candidate_payload, candidate_meta = await _signature_messages_call(candidate_endpoint, candidate_api_key, candidate_body)
+        fingerprints.append(_integrity_route_fingerprint(candidate_payload, candidate_meta, "thinking_stream"))
+        source_evidence = source_payload.get("stream_evidence") if isinstance(source_payload.get("stream_evidence"), dict) else {
+            "event_sequence": source_payload.get("stream_events") or [],
+            "thinking_signature_order_valid": True,
+            "tool_json_valid": True,
+        }
+        candidate_evidence = candidate_payload.get("stream_evidence") if isinstance(candidate_payload.get("stream_evidence"), dict) else {
+            "event_sequence": candidate_payload.get("stream_events") or [],
+            "thinking_signature_order_valid": True,
+            "tool_json_valid": True,
+        }
+        if _integrity_operational_failure(source_meta) or _integrity_operational_failure(candidate_meta):
+            operational += 1
+            status = "operational"
+        else:
+            source_events = [event for event in source_evidence.get("event_sequence") or [] if event != "ping"]
+            candidate_events = [event for event in candidate_evidence.get("event_sequence") or [] if event != "ping"]
+            valid = (
+                all(event in candidate_events for event in required)
+                and source_events == candidate_events
+                and bool(candidate_evidence.get("thinking_signature_order_valid"))
+                and bool(candidate_evidence.get("tool_json_valid"))
+            )
+            status = "match" if valid else "mismatch"
+            mismatches += int(not valid)
+        details.append({"attempt": attempt + 1, "status": status, "source": source_evidence, "candidate": candidate_evidence})
+    return {
+        "key": "sse_lifecycle",
+        "title": "SSE 原始生命周期差分",
+        "status": "pass" if not mismatches and not operational else "warning",
+        "repeat_count": repeat_count,
+        "protocol_mismatch_count": 1 if mismatches > repeat_count // 2 else 0,
+        "mismatch_attempt_count": mismatches,
+        "operational_failure_count": operational,
+        "attempts": details,
+        "evidence_refs": [f"sse_lifecycle:{index + 1}" for index in range(repeat_count)],
+    }, fingerprints
+
+
+async def _integrity_usage_matrix(
+    source_endpoint: str,
+    source_api_key: str,
+    source_model: str,
+    candidate_endpoint: str,
+    candidate_api_key: str,
+    candidate_model: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    inputs = [
+        ("zh_en", "中文 English 混合 tokenizer probe: 春天 river 731."),
+        ("unicode", "Unicode: café naïve 🚀 αβγ 中文标点，。！？"),
+        ("code", "def f(x: int) -> int:\n    return x * 17 + 731"),
+        ("digits", "01234567890123456789012345678901234567890123456789"),
+        ("json", '{"alpha":[1,2,3],"nested":{"marker":"CC-731","ok":true}}'),
+    ]
+    outliers = operational = 0
+    details: list[dict[str, Any]] = []
+    fingerprints: list[dict[str, Any]] = []
+    for key, prompt in inputs:
+        source_body = {"model": source_model, "max_tokens": 8, "temperature": 0, "messages": [{"role": "user", "content": prompt}]}
+        candidate_body = {"model": candidate_model, "max_tokens": 8, "temperature": 0, "messages": [{"role": "user", "content": prompt}]}
+        source_payload, source_meta = await _signature_messages_call(source_endpoint, source_api_key, source_body)
+        candidate_payload, candidate_meta = await _signature_messages_call(candidate_endpoint, candidate_api_key, candidate_body)
+        fingerprints.append(_integrity_route_fingerprint(candidate_payload, candidate_meta, key))
+        source_usage = source_payload.get("usage") if isinstance(source_payload.get("usage"), dict) else {}
+        candidate_usage = candidate_payload.get("usage") if isinstance(candidate_payload.get("usage"), dict) else {}
+        source_input = _safe_int(source_usage.get("input_tokens"))
+        candidate_input = _safe_int(candidate_usage.get("input_tokens"))
+        ratio = round(candidate_input / source_input, 3) if source_input else None
+        cache_keys = sorted(key for key in candidate_usage if "cache" in str(key))
+        cache_values_valid = all(_safe_int(candidate_usage.get(key)) >= 0 for key in cache_keys)
+        is_outlier = ratio is not None and (ratio < 0.75 or ratio > 1.25)
+        if _integrity_operational_failure(source_meta) or _integrity_operational_failure(candidate_meta):
+            operational += 1
+            status = "operational"
+        else:
+            outliers += int(is_outlier or not cache_values_valid)
+            status = "outlier" if is_outlier or not cache_values_valid else "match"
+        details.append({
+            "key": key,
+            "status": status,
+            "source_input_tokens": source_input or None,
+            "candidate_input_tokens": candidate_input or None,
+            "input_token_ratio": ratio,
+            "source_usage_keys": sorted(str(item) for item in source_usage),
+            "candidate_usage_keys": sorted(str(item) for item in candidate_usage),
+            "candidate_cache_keys": cache_keys,
+            "cache_values_valid": cache_values_valid,
+        })
+    return {
+        "key": "usage_tokenizer_matrix",
+        "title": "Usage 与 Tokenizer 差分",
+        "status": "pass" if not outliers and not operational else "warning",
+        "repeat_count": 1,
+        "usage_outlier_count": outliers,
+        "operational_failure_count": operational,
+        "inputs": details,
+        "evidence_refs": [item["key"] for item in details if item["status"] == "outlier"] or ["usage_tokenizer_matrix:matched"],
+    }, fingerprints
+
+
+async def _run_claude_upstream_integrity_probes(
+    source: Channel,
+    candidate: Channel,
+    *,
+    source_credentials: dict[str, Any] | None = None,
+    candidate_credentials: dict[str, Any] | None = None,
+    repeat_count: int = 3,
+) -> dict[str, Any]:
+    if repeat_count not in {3, 5}:
+        raise ValueError("repeat_count must be 3 or 5")
+    source_credentials = source_credentials or _merged_channel_credentials(source, {})
+    candidate_credentials = candidate_credentials or _merged_channel_credentials(candidate, {})
+    _validate_signature_test_channel(source, source_credentials, "source")
+    _validate_signature_test_channel(candidate, candidate_credentials, "candidate")
+    source_model = _effective_model_name(source, source_credentials)
+    candidate_model = _effective_model_name(candidate, candidate_credentials)
+    comparable = _claude_models_comparable(source_model, candidate_model)
+    if not comparable:
+        return _claude_upstream_integrity_assessment([], baseline_configured=True, models_comparable=False)
+
+    source_endpoint = _anthropic_messages_url(source_credentials.get("base_url") or source.base_url)
+    candidate_endpoint = _anthropic_messages_url(candidate_credentials.get("base_url") or candidate.base_url)
+    source_key = str(source_credentials.get("api_key") or "")
+    candidate_key = str(candidate_credentials.get("api_key") or "")
+    rows, fingerprints, generations = await _integrity_signature_matrix(
+        source_endpoint,
+        source_key,
+        source_model,
+        candidate_endpoint,
+        candidate_key,
+        candidate_model,
+        repeat_count,
+    )
+    rows.append(
+        await _integrity_tool_loop_probe(
+            source_endpoint,
+            source_key,
+            source_model,
+            candidate_endpoint,
+            candidate_key,
+            candidate_model,
+            repeat_count,
+        )
+    )
+    parameter_row, _ = await _integrity_parameter_matrix(
+        source_endpoint,
+        source_key,
+        source_model,
+        candidate_endpoint,
+        candidate_key,
+        candidate_model,
+        repeat_count,
+    )
+    rows.append(parameter_row)
+    stream_row, _ = await _integrity_stream_probe(
+        source_endpoint,
+        source_key,
+        source_model,
+        candidate_endpoint,
+        candidate_key,
+        candidate_model,
+        repeat_count,
+    )
+    rows.append(stream_row)
+    usage_row, _ = await _integrity_usage_matrix(
+        source_endpoint,
+        source_key,
+        source_model,
+        candidate_endpoint,
+        candidate_key,
+        candidate_model,
+    )
+    rows.append(usage_row)
+    variant_count, correlated_change_count = _route_fingerprint_variants(fingerprints)
+    rows.append(
+        {
+            "key": "route_fingerprint",
+            "title": "重复采样路由指纹",
+            "status": "warning" if variant_count >= 2 and correlated_change_count >= 2 else "pass",
+            "repeat_count": repeat_count,
+            "fingerprint_variant_count": variant_count,
+            "correlated_change_count": correlated_change_count,
+            "fingerprints": fingerprints,
+            "evidence_refs": [f"route_fingerprint:{index + 1}" for index in range(len(fingerprints))],
+        }
+    )
+    payload = _claude_upstream_integrity_assessment(rows, baseline_configured=True, models_comparable=True)
+    payload["source_channel_id"] = source.id
+    payload["candidate_channel_id"] = candidate.id
+    payload["source_model"] = source_model
+    payload["candidate_model"] = candidate_model
+    payload["repeat_count"] = repeat_count
+    payload["generation_count"] = len(generations)
+    return redact_secrets(payload)
+
+
 def _claude_code_classification(probes: list[dict[str, Any]], claude_score: float, claude_code_score: float) -> dict[str, Any]:
     flags = _claude_code_capability_flags(probes, claude_score, claude_code_score)
     labels = {str(label) for probe in probes for label in (probe.get("labels") or [])}
@@ -6009,7 +6991,7 @@ def create_claude_code_evidence(
     include_expensive_context: bool,
     result_payload: dict[str, Any],
 ) -> ClaudeCodeEvidence:
-    safe_payload = redact_secrets(result_payload)
+    safe_payload = redact_signatures(redact_secrets(result_payload))
     evidence = ClaudeCodeEvidence(
         id=new_id("cce"),
         channel_label=channel_label,
@@ -8684,7 +9666,7 @@ async def invoke_channel(channel: Channel, case: TestCase, attempt: int, credent
 
 
 def build_raw_request(channel: Channel, case: TestCase) -> dict[str, Any]:
-    params = case.request_params or {}
+    params = dict(case.request_params or {})
     message_content = params.get("message_content")
     system_content = params.get("system_content")
     user_content: Any = message_content if isinstance(message_content, list) else case.prompt
@@ -8967,6 +9949,39 @@ def _anthropic_messages_url(base_url: str | None) -> str:
     return f"{normalized}/v1/messages"
 
 
+def _anthropic_api_base_url(base_url: str | None) -> str:
+    normalized = (base_url or "https://api.anthropic.com").rstrip("/")
+    if normalized.endswith("/v1/messages"):
+        return normalized[: -len("/v1/messages")]
+    if normalized.endswith("/messages"):
+        normalized = normalized[: -len("/messages")]
+    if normalized.endswith("/v1"):
+        return normalized[: -len("/v1")]
+    return normalized
+
+
+def _safe_response_header_names(headers: Any) -> list[str]:
+    if not headers:
+        return []
+    names = []
+    for name in headers.keys():
+        lowered = str(name).lower()
+        if lowered.startswith(("x-", "anthropic-", "cf-")) or lowered in {"server", "via", "content-type"}:
+            names.append(lowered)
+    return sorted(set(names))
+
+
+def _strip_runtime_probe_values(value: Any, *runtime_values: str) -> Any:
+    redacted = redact_secrets(value)
+    if not runtime_values:
+        return redacted
+    text = str(redacted)
+    for runtime_value in runtime_values:
+        if runtime_value:
+            text = text.replace(runtime_value, "[REDACTED]")
+    return text
+
+
 def _openai_chat_completions_url(base_url: str | None) -> str:
     normalized = (base_url or "").rstrip("/")
     if normalized.endswith("/chat/completions"):
@@ -9244,11 +10259,15 @@ def attach_response_metadata(payload: Any, response: httpx.Response) -> Any:
     if not isinstance(payload, dict):
         return payload
     request_id = request_id_from_headers(getattr(response, "headers", None))
-    if not request_id:
+    header_names = _safe_response_header_names(getattr(response, "headers", None))
+    if not request_id and not header_names:
         return payload
     metadata = payload.get("_response_metadata") if isinstance(payload.get("_response_metadata"), dict) else {}
     metadata = dict(metadata)
-    metadata["request_id"] = request_id
+    if request_id:
+        metadata["request_id"] = request_id
+    if header_names:
+        metadata["header_names"] = header_names
     payload["_response_metadata"] = metadata
     return payload
 
@@ -9393,6 +10412,18 @@ async def _anthropic_compatible_call(channel: Channel, raw_request: dict[str, An
         headers["x-api-key"] = api_key
         headers["authorization"] = f"Bearer {api_key}"
     params = raw_request["params"]
+    request_headers = params.get("request_headers")
+    allowed_probe_headers = {"anthropic-beta", "x-claude-code-session-id", "x-claude-code-agent-id", "x-claude-code-parent-agent-id"}
+    forwarded_header_names: list[str] = []
+    if isinstance(request_headers, dict):
+        for name, value in request_headers.items():
+            lowered = str(name).strip().lower()
+            if lowered not in allowed_probe_headers or not isinstance(value, str) or not value.strip():
+                continue
+            headers[lowered] = value.strip()
+            forwarded_header_names.append(lowered)
+    raw_request["_request_header_names"] = sorted(set(forwarded_header_names))
+    params.pop("request_headers", None)
     body = {
         "model": credentials.get("model") or channel.model_name,
         "system": raw_request.get("system"),
@@ -9964,6 +10995,7 @@ def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
             payload = dict(payload)
             payload["stream_events"] = events
             payload["raw_stream_excerpt"] = raw[:2000]
+            payload["stream_evidence"] = _anthropic_stream_evidence(raw)
             return payload
         if payload_type == "message_start" and isinstance(payload.get("message"), dict):
             started_message = payload["message"]
@@ -10009,6 +11041,7 @@ def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
         message["content"] = [content_blocks[index] for index in sorted(content_blocks)]
     message["stream_events"] = events
     message["raw_stream_excerpt"] = raw[:2000]
+    message["stream_evidence"] = _anthropic_stream_evidence(raw)
     return message
 
 
@@ -10269,6 +11302,7 @@ def _remove_probe_only_params(body: dict[str, Any]) -> None:
         "body_overrides",
         "message_content",
         "system_content",
+        "request_headers",
     ]:
         body.pop(key, None)
     for key, value in list(body.items()):
