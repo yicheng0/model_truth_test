@@ -7,6 +7,9 @@ describe('claudeCodeDiagnostics', () => {
     expect(labelDescription('openai_shape_response')).toContain('Chat Completions');
     expect(labelText('unknown_label')).toBe('unknown_label');
     expect(labelDescription('json_missing:checks')).toContain('checks');
+    expect(labelDescription('upstream_error_rewrapped')).toContain('错误 envelope');
+    expect(labelDescription('stream_buffered_by_gateway')).toContain('首事件');
+    expect(labelDescription('gateway_model_alias_capability_mismatch')).toContain('alias');
   });
 
   it('prioritizes high-risk probe diagnosis labels', () => {

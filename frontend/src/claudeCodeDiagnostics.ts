@@ -222,6 +222,21 @@ const LABELS: Record<string, LabelInfo> = {
     description: '上游返回了同类拒绝，但错误文案和官方参考不完全一致，通常作为轻微代理痕迹处理。',
     priority: 30,
   },
+  upstream_error_rewrapped: {
+    text: '上游错误被重包',
+    description: '候选网关没有保留 Anthropic 原生错误 envelope，可能破坏 Claude Code 按错误类型和文案执行的自动恢复。',
+    priority: 72,
+  },
+  stream_buffered_by_gateway: {
+    text: 'SSE 被网关缓冲',
+    description: 'SSE 事件结构存在，但首事件几乎到总请求结束才到达，说明网关可能先聚合完整响应再转发。',
+    priority: 68,
+  },
+  gateway_model_alias_capability_mismatch: {
+    text: '模型 alias 能力错配',
+    description: '网关模型 alias 的 adaptive thinking、effort 或工具能力与返回模型/官方基线不一致。',
+    priority: 70,
+  },
   latency_outlier: {
     text: '延迟异常',
     description: '请求延迟明显偏高，可能是中转链路、排队或上游不稳定。',

@@ -150,6 +150,7 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
   const integrity = result.upstream_integrity;
   if (!integrity?.classification) return null;
   const gateway = integrity.gateway_fingerprint;
+  const gatewayContract = integrity.gateway_contract;
   const meta = UPSTREAM_INTEGRITY_META[integrity.classification as UpstreamIntegrityClassification] ?? {
     label: integrity.classification,
     color: 'default',
@@ -181,6 +182,22 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
                 <Typography.Text type="secondary">
                   控制面：{gateway.control_plane_families?.join('、') || '未发现'}；边缘/代理：{gateway.edge_or_proxy_families?.join('、') || '未发现'}；云封装：{gateway.cloud_provider_families?.join('、') || '未发现'}
                 </Typography.Text>
+              </Space>
+            )}
+          />
+        ) : null}
+        {gatewayContract ? (
+          <Alert
+            type={gatewayContract.status === 'warning' ? 'warning' : gatewayContract.status === 'pass' ? 'success' : 'info'}
+            showIcon
+            message="Claude Code 网关契约（不作为官方来源证据）"
+            description={(
+              <Space direction="vertical" size={4}>
+                <Typography.Text>{gatewayContract.interpretation || '评估请求字段、原生错误和 SSE 实时转发是否保持 Claude Code 契约。'}</Typography.Text>
+                <Typography.Text type="secondary">
+                  Attribution：{gatewayContract.attribution_observation === 'sent_unverified' ? '客户端已发送，上游保持情况未验证' : '未观察到'}；Usage 粒度：{gatewayContract.usage_scope || 'single_request'}
+                </Typography.Text>
+                {gatewayContract.labels?.length ? <ProbeLabelTags labels={gatewayContract.labels} /> : null}
               </Space>
             )}
           />

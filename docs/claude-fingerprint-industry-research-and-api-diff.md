@@ -78,6 +78,15 @@
 - `confidence`: `low | medium | high`。
 - `official_origin_confirmed`: 当前固定为 `false`。
 - `probe_matrix`、`limitations` 和 `gateway_fingerprint`。
+- `gateway_contract`：独立汇总 Claude Code headers、attribution 可观察边界、原生错误 envelope、SSE 实时转发、模型 alias 能力与 usage 粒度。该对象固定 `official_origin_confirmed=false`，异常只解释网关契约风险，不改变官方来源结论。
+
+`gateway_contract.labels` 当前包括：
+
+- `upstream_error_rewrapped`：候选没有保留 Anthropic 原生错误 envelope，可能破坏 Claude Code 自动恢复。
+- `stream_buffered_by_gateway`：SSE 生命周期存在，但首事件接近总请求结束才到达，疑似完整缓冲后转发。
+- `gateway_model_alias_capability_mismatch`：模型 alias 的 adaptive thinking、effort 或返回模型与官方基线不一致。
+
+Attribution 只能记录为 `sent_unverified`：客户端已按首个独立 system block 发送，但仅靠响应无法确认网关是否原样转发。Usage/Tokenizer 深度探针固定标记 `usage_scope=single_request`，不得与 Claude Code 整个 agent run 的聚合 usage 或 `total_cost_usd` 直接比较。
 
 认证失败、403、429、余额/配额、超时和 5xx 只进入运营异常；模型不可比、缺少官方基线或 thinking 不支持时不强行判换模。透明转发无法仅靠 API 响应区分 API Key、Claude.ai OAuth 和无改写代理。
 

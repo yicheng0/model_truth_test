@@ -699,6 +699,19 @@ export type ClaudeCodeTestResult = {
       official_origin_confirmed?: boolean;
       interpretation?: string;
     } | null;
+    gateway_contract?: {
+      status?: 'pass' | 'warning' | 'insufficient_evidence' | string;
+      labels?: string[];
+      checks?: Array<{
+        key?: string;
+        status?: string;
+      }>;
+      evidence_refs?: string[];
+      attribution_observation?: 'sent_unverified' | 'not_observed' | string;
+      usage_scope?: string;
+      official_origin_confirmed?: boolean;
+      interpretation?: string;
+    } | null;
   } | null;
   capability_flags?: {
     is_claude_like?: boolean;
