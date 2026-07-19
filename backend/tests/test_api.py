@@ -8147,6 +8147,31 @@ def test_gateway_fingerprint_redacts_header_names_to_safe_families() -> None:
     assert result["header_names"] == ["via", "x-apipro-route", "x-oneapi-cache"]
 
 
+def test_gateway_fingerprint_does_not_treat_server_header_as_proxy() -> None:
+    from app.services import _claude_gateway_fingerprint
+
+    result = _claude_gateway_fingerprint(
+        [{"key": "response_schema", "raw_evidence": {"response_header_names": ["server", "content-type"]}}]
+    )
+
+    assert result["edge_or_proxy_families"] == []
+    assert result["interpretation"].startswith("未检测到")
+
+
+def test_gateway_fingerprint_combines_deep_and_standard_probe_headers() -> None:
+    from app.services import _claude_gateway_fingerprint
+
+    result = _claude_gateway_fingerprint(
+        [
+            {"key": "route_fingerprint", "fingerprints": [{"response_header_names": ["x-oneapi-cache"]}]},
+            {"key": "response_schema", "raw_evidence": {"response_header_names": ["x-apipro-route"]}},
+        ]
+    )
+
+    assert result["control_plane_families"] == ["apipro", "oneapi"]
+    assert result["evidence_refs"] == ["response_schema", "route_fingerprint"]
+
+
 def test_claude_code_result_exposes_gateway_fingerprint_separately(monkeypatch) -> None:
     from app.models import Channel
     from app.services import create_claude_code_test

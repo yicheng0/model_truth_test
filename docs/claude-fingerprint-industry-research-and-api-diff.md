@@ -52,7 +52,7 @@
 - `X-Apipro-*` → APIPro 类控制面迹象。
 - `X-Oneapi-*` → OneAPI/New API 类控制面迹象。
 - `X-New-Api-*` / `X-NewAPI-*` → New API 类控制面迹象。
-- `Via`、`X-Envoy-*`、`X-Forwarded-*`、`Server` → 代理/服务网格迹象。
+- `Via`、`X-Envoy-*`、`X-Forwarded-*` → 代理/服务网格迹象；通用 `Server` 头只记录名称，不单独触发代理判定。
 - `CF-Ray`、`CF-Cache-Status` → Cloudflare 边缘迹象。
 - `X-Amzn-*`、`X-Ms-*`、`X-Goog-*` → 云适配器或云边缘迹象；不能仅凭头名断言具体上游。
 

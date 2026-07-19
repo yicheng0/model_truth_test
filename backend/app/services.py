@@ -5060,7 +5060,9 @@ async def create_claude_code_test(
             candidate_credentials=credentials_override,
             repeat_count=repeat_count,
         )
-        upstream_integrity["gateway_fingerprint"] = _claude_gateway_fingerprint(probes)
+        upstream_integrity["gateway_fingerprint"] = _claude_gateway_fingerprint(
+            [*(upstream_integrity.get("probe_matrix") or []), *probes]
+        )
     return {
         "ok": classification["classification_status"] in {"claude", "aws_resource", "claude_code"} and risk_level in {"low", "medium"},
         "score": score,
@@ -6270,7 +6272,7 @@ def _claude_gateway_fingerprint(probe_matrix: list[dict[str, Any]]) -> dict[str,
         "aws": lambda name: name.startswith("x-amzn-"),
         "azure": lambda name: name.startswith("x-ms-"),
         "google_cloud": lambda name: name.startswith("x-goog-"),
-        "proxy": lambda name: name in {"via", "server", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"}
+        "proxy": lambda name: name in {"via", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"}
         or name.startswith("x-envoy-"),
     }
     families = sorted(family for family, matcher in recognized.items() if any(matcher(name) for name in header_names))
