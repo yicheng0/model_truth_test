@@ -10,6 +10,32 @@ type ClaudeCodeDiagnosticProbe = {
   detail?: string | null;
 };
 
+type ClaudeFingerprintResultLike = {
+  classification_status?: string | null;
+  classification_label?: string | null;
+  classification_reason?: string | null;
+  risk_level?: string | null;
+  upstream_integrity?: {
+    classification?: string | null;
+    confidence?: string | null;
+    official_origin_confirmed?: boolean;
+    reason?: string | null;
+    gateway_contract?: {
+      status?: string | null;
+      labels?: string[] | null;
+      interpretation?: string | null;
+    } | null;
+  } | null;
+};
+
+export type ClaudeFingerprintVerdict = {
+  key: 'protocol' | 'gateway_contract' | 'official_origin';
+  title: string;
+  status: 'pass' | 'warning' | 'fail' | 'insufficient_evidence';
+  label: string;
+  detail: string;
+};
+
 type LabelInfo = {
   text: string;
   description: string;
@@ -290,6 +316,78 @@ export function labelDescription(label: string): string {
 export function labelTooltip(label: string): string {
   const description = labelDescription(label);
   return description === label ? label : `${label}：${description}`;
+}
+
+export function claudeFingerprintAlertLevel(result: ClaudeFingerprintResultLike): 'success' | 'warning' | 'error' {
+  if (result.classification_status === 'non_claude') return 'error';
+  const integrity = result.upstream_integrity;
+  if (
+    integrity?.gateway_contract?.status === 'warning'
+    || ['mixed_routing_suspected', 'protocol_reconstruction_suspected', 'model_swap_suspected'].includes(String(integrity?.classification ?? ''))
+    || result.classification_status === 'anomaly'
+    || result.risk_level === 'high'
+  ) return 'warning';
+  if (['claude', 'aws_resource', 'claude_code'].includes(String(result.classification_status ?? ''))) return 'success';
+  if (result.risk_level === 'low' || result.risk_level === 'medium') return 'success';
+  return 'error';
+}
+
+export function claudeFingerprintVerdicts(result: ClaudeFingerprintResultLike): ClaudeFingerprintVerdict[] {
+  const classification = String(result.classification_status ?? 'unknown');
+  const protocolPass = ['claude', 'aws_resource', 'claude_code'].includes(classification);
+  const protocolFail = classification === 'non_claude';
+  const protocolStatus = protocolPass ? 'pass' : protocolFail ? 'fail' : 'warning';
+  const protocolLabel = result.classification_label
+    || (protocolPass ? 'Claude 协议一致' : protocolFail ? '协议明显不符' : '协议证据不明确');
+
+  const contract = result.upstream_integrity?.gateway_contract;
+  const contractStatus = contract?.status === 'warning'
+    ? 'warning'
+    : contract?.status === 'pass'
+      ? 'pass'
+      : 'insufficient_evidence';
+  const contractLabels = (contract?.labels ?? []).map(labelText);
+  const contractLabel = contractStatus === 'warning'
+    ? '检测到网关改写'
+    : contractStatus === 'pass'
+      ? '未发现契约异常'
+      : '深度证据不足';
+  const contractDetail = [contract?.interpretation, contractLabels.length ? `异常：${contractLabels.join('、')}` : '']
+    .filter(Boolean)
+    .join(' ')
+    || '需要使用深度模式并配置可比的 Anthropic 官方基线，才能检测错误重包、SSE 缓冲和模型 alias 能力错配。';
+
+  const originConfirmed = result.upstream_integrity?.official_origin_confirmed === true;
+  const signatureVerified = result.upstream_integrity?.classification === 'signature_chain_verified';
+  const originDetail = originConfirmed
+    ? '已通过控制面证据确认官方来源。'
+    : signatureVerified
+      ? 'Thinking signature 链路与官方基线一致，但透明转发仍可能完整保留这些证据。'
+      : 'API 响应只能验证兼容性；官方直连仍需账单、request-id 回查或云审计。';
+
+  return [
+    {
+      key: 'protocol',
+      title: '模型 / 协议一致性',
+      status: protocolStatus,
+      label: protocolLabel,
+      detail: result.classification_reason || '根据 Messages 结构、usage、工具调用、流式事件和行为探针综合判断。',
+    },
+    {
+      key: 'gateway_contract',
+      title: '网关契约完整性',
+      status: contractStatus,
+      label: contractLabel,
+      detail: contractDetail,
+    },
+    {
+      key: 'official_origin',
+      title: '官方来源可确认性',
+      status: originConfirmed ? 'pass' : 'insufficient_evidence',
+      label: originConfirmed ? '官方来源已确认' : '官方来源未确认',
+      detail: originDetail,
+    },
+  ];
 }
 
 export function topRiskLabels(probes: ClaudeCodeDiagnosticProbe[], limit = 6): string[] {

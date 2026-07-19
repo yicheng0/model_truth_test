@@ -2054,6 +2054,33 @@ textarea:focus-visible,
   gap: 16px;
 }
 
+.claude-verdict-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.claude-verdict-card {
+  border-top: 3px solid #94a3b8;
+}
+
+.claude-verdict-pass {
+  border-top-color: #16a34a;
+}
+
+.claude-verdict-warning {
+  border-top-color: #ea580c;
+}
+
+.claude-verdict-fail {
+  border-top-color: #dc2626;
+}
+
+.claude-verdict-card-head {
+  width: 100%;
+  justify-content: space-between;
+}
+
 .claude-section-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(220px, 1fr));
@@ -2161,6 +2188,10 @@ textarea:focus-visible,
 
 @media (max-width: 900px) {
   .claude-spec-tier-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .claude-verdict-grid {
     grid-template-columns: 1fr;
   }
 }

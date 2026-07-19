@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { labelDescription, labelText, probeDiagnosis, topRiskLabels } from './claudeCodeDiagnostics';
+import {
+  claudeFingerprintAlertLevel,
+  claudeFingerprintVerdicts,
+  labelDescription,
+  labelText,
+  probeDiagnosis,
+  topRiskLabels,
+} from './claudeCodeDiagnostics';
 
 describe('claudeCodeDiagnostics', () => {
   it('translates known labels and keeps unknown labels readable', () => {
@@ -73,5 +80,43 @@ describe('claudeCodeDiagnostics', () => {
     expect(labelDescription('web_search_evidence_missing')).toContain('无法证明真实联网');
     expect(labelDescription('identity_uncertain')).toContain('未明确');
     expect(labelDescription('identity_mismatch')).toContain('其他厂商');
+  });
+
+  it('surfaces protocol, gateway contract, and origin as separate top-level verdicts', () => {
+    const verdicts = claudeFingerprintVerdicts({
+      classification_status: 'claude',
+      classification_label: 'Claude 资源',
+      upstream_integrity: {
+        classification: 'protocol_reconstruction_suspected',
+        confidence: 'high',
+        official_origin_confirmed: false,
+        gateway_contract: {
+          status: 'warning',
+          labels: ['upstream_error_rewrapped', 'stream_buffered_by_gateway'],
+          interpretation: '检测到 Claude Code 网关契约改写或实时性异常。',
+        },
+      },
+    });
+
+    expect(verdicts.map((item) => item.key)).toEqual(['protocol', 'gateway_contract', 'official_origin']);
+    expect(verdicts[0]).toMatchObject({ status: 'pass', label: 'Claude 资源' });
+    expect(verdicts[1]).toMatchObject({ status: 'warning', label: '检测到网关改写' });
+    expect(verdicts[1].detail).toContain('上游错误被重包');
+    expect(verdicts[2]).toMatchObject({ status: 'insufficient_evidence', label: '官方来源未确认' });
+  });
+
+  it('raises the primary result alert when a Claude-compatible channel has gateway warnings', () => {
+    expect(
+      claudeFingerprintAlertLevel({
+        classification_status: 'claude_code',
+        risk_level: 'low',
+        upstream_integrity: {
+          classification: 'insufficient_evidence',
+          confidence: 'low',
+          official_origin_confirmed: false,
+          gateway_contract: { status: 'warning' },
+        },
+      }),
+    ).toBe('warning');
   });
 });
