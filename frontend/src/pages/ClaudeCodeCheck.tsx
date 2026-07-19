@@ -149,6 +149,7 @@ function accessPathColor(status?: string | null) {
 function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
   const integrity = result.upstream_integrity;
   if (!integrity?.classification) return null;
+  const gateway = integrity.gateway_fingerprint;
   const meta = UPSTREAM_INTEGRITY_META[integrity.classification as UpstreamIntegrityClassification] ?? {
     label: integrity.classification,
     color: 'default',
@@ -169,6 +170,21 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
           <Descriptions.Item label="重复次数">{integrity.repeat_count ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="官方基线">{integrity.source_channel_id ?? '未配置或未执行'}</Descriptions.Item>
         </Descriptions>
+        {gateway ? (
+          <Alert
+            type="info"
+            showIcon
+            message="网关/控制面指纹（不作为官方来源证据）"
+            description={(
+              <Space direction="vertical" size={4}>
+                <Typography.Text>{gateway.interpretation || '仅记录响应头族与边缘痕迹，不提升官方来源等级。'}</Typography.Text>
+                <Typography.Text type="secondary">
+                  控制面：{gateway.control_plane_families?.join('、') || '未发现'}；边缘/代理：{gateway.edge_or_proxy_families?.join('、') || '未发现'}；云封装：{gateway.cloud_provider_families?.join('、') || '未发现'}
+                </Typography.Text>
+              </Space>
+            )}
+          />
+        ) : null}
         <Table<Record<string, unknown>>
           rowKey={(item) => String(item.key)}
           size="small"

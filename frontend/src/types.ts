@@ -690,6 +690,15 @@ export type ClaudeCodeTestResult = {
     source_model?: string | null;
     candidate_model?: string | null;
     repeat_count?: number | null;
+    gateway_fingerprint?: {
+      control_plane_families?: string[];
+      edge_or_proxy_families?: string[];
+      cloud_provider_families?: string[];
+      header_names?: string[];
+      evidence_refs?: string[];
+      official_origin_confirmed?: boolean;
+      interpretation?: string;
+    } | null;
   } | null;
   capability_flags?: {
     is_claude_like?: boolean;
