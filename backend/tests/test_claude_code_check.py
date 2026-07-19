@@ -39,6 +39,21 @@ def test_claude_code_status_handles_missing_command(monkeypatch) -> None:
     assert "not found" in payload["error"]
 
 
+def test_claude_code_status_survives_auth_status_failure(monkeypatch) -> None:
+    monkeypatch.setattr(claude_code_check, "_resolve_command", lambda _command: "C:/fake/claude.cmd")
+
+    def fake_process(args, timeout_seconds):  # noqa: ANN001
+        if "auth" in args:
+            raise TimeoutError("auth status timed out")
+        return ProcessResult(0, "2.1.150 (Claude Code)\n", "")
+
+    monkeypatch.setattr(claude_code_check, "_run_process_sync", fake_process)
+    payload = claude_code_check.claude_code_status()
+
+    assert payload["available"] is True
+    assert payload["auth_evidence"]["classification"] == "auth_status_unavailable"
+
+
 def test_claude_code_check_success(monkeypatch) -> None:
     monkeypatch.setattr(claude_code_check, "_resolve_command", lambda _command: "C:/fake/claude.cmd")
 

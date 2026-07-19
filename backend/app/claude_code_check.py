@@ -55,7 +55,10 @@ def claude_code_status() -> dict[str, Any]:
         }
 
     version = (result.stdout or result.stderr).strip().splitlines()[0] if (result.stdout or result.stderr).strip() else None
-    auth_result = _run_process_sync(_claude_invocation(["auth", "status", "--json"], command_path), timeout_seconds=10)
+    try:
+        auth_result = _run_process_sync(_claude_invocation(["auth", "status", "--json"], command_path), timeout_seconds=10)
+    except Exception as exc:  # noqa: BLE001 - auth status is optional diagnostics.
+        auth_result = ProcessResult(1, "", str(exc))
     return {
         "installed": True,
         "available": result.returncode == 0,
