@@ -21,6 +21,7 @@ Claude Code 不是一个“参数名不同的 `/v1/messages` 客户端”，而�
 - Claude Code 的 `result.stop_reason` 和 `terminal_reason` 是**agent run 终止语义**；不能直接等同于单次 API Message 的 `stop_reason`。
 - Claude Code 的聚合 `usage`、`modelUsage`、`total_cost_usd` 覆盖多轮和多模型调用；官方 API `usage` 只对应单次 Message 请求，且 API 本身不返回 `total_cost_usd`。
 - Claude Code 发出的请求仍使用 Anthropic Messages 格式，但增加会话/agent 请求头、attribution system block，以及随版本演进的 beta header 与字段组合。
+- 资源来源必须另行判定：`claude auth status --json` 的本机 `oauth_token` / `firstParty` 只确认本机 CLI 登录状态；远程 `/v1/messages` 的 signature、attribution 和 gateway endpoint 不能证明该 OAuth 被远程渠道使用。当前沙箱能力检查使用 `--bare`，按 Claude Code 规则不读取 OAuth/keychain，因此“本机 OAuth 状态”和“本次 CLI 运行使用的认证”必须分别记录。
 - Claude Code 网关必须把 `anthropic-version`、`anthropic-beta` 和 Anthropic 格式 body 当作开放集合转发。固定 allowlist、改写 system 数组、重包错误或缓冲 SSE 都会造成可观测差异。
 - `x-claude-code-session-id`、attribution、`/v1/models` 或 `count_tokens` 成功只证明 Claude Code 契约兼容，**不能单独证明 Anthropic 官方直连**。
 

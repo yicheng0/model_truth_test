@@ -15,6 +15,10 @@ type ClaudeFingerprintResultLike = {
   classification_label?: string | null;
   classification_reason?: string | null;
   risk_level?: string | null;
+  capability_flags?: {
+    is_claude_code_like?: boolean;
+    claude_code_gateway_compatible?: boolean;
+  } | null;
   upstream_integrity?: {
     classification?: string | null;
     confidence?: string | null;
@@ -25,6 +29,12 @@ type ClaudeFingerprintResultLike = {
       labels?: string[] | null;
       interpretation?: string | null;
     } | null;
+  } | null;
+  resource_identity?: {
+    classification?: string | null;
+    reason?: string | null;
+    claude_code_oauth_confirmed?: boolean;
+    confidence?: string | null;
   } | null;
 };
 
@@ -150,12 +160,12 @@ const LABELS: Record<string, LabelInfo> = {
   },
   thinking_signature_missing: {
     text: 'Signature 缺失',
-    description: 'Thinking block 没有 signature，Claude Code thinking 链路可信度不足。',
+    description: 'Thinking block 没有 signature，Claude thinking 协议连续性不足；这不是 Claude Code 资源来源证据。',
     priority: 88,
   },
   signature_interop_failed: {
     text: 'Signature 链路不可验证',
-    description: 'Relay 无法复用 source 生成的 thinking signature，说明 ClaudeCode/原生 thinking 链路不可验证；不应单独等同于非 Claude。',
+    description: 'Relay 无法复用 source 生成的 thinking signature，说明原生 thinking 链路不可验证；不应单独等同于非 Claude 或 Claude Code 来源。',
     priority: 90,
   },
   thinking_adaptive_not_supported: {
@@ -240,7 +250,7 @@ const LABELS: Record<string, LabelInfo> = {
   },
   signature_not_supported: {
     text: 'Signature 不支持',
-    description: '当前链路不支持或未透传 Thinking Signature，说明 ClaudeCode 链路不可验证。',
+    description: '当前链路不支持或未透传 Thinking Signature，说明 Claude thinking 协议连续性不可验证，不代表 Claude Code 资源来源。',
     priority: 46,
   },
   provider_error_variant: {
@@ -359,6 +369,8 @@ export function claudeFingerprintVerdicts(result: ClaudeFingerprintResultLike): 
 
   const originConfirmed = result.upstream_integrity?.official_origin_confirmed === true;
   const signatureVerified = result.upstream_integrity?.classification === 'signature_chain_verified';
+  const resource = result.resource_identity;
+  const resourceDetail = `${resource?.reason || ''} ${resource?.claude_code_oauth_confirmed ? '本机 CLI OAuth 已确认，但仍需确认本次请求是否使用该会话。' : '远程响应和网关契约不能确认 Claude Code OAuth 资源。'}`.trim();
   const originDetail = originConfirmed
     ? '已通过控制面证据确认官方来源。'
     : signatureVerified
@@ -385,7 +397,7 @@ export function claudeFingerprintVerdicts(result: ClaudeFingerprintResultLike): 
       title: '官方来源可确认性',
       status: originConfirmed ? 'pass' : 'insufficient_evidence',
       label: originConfirmed ? '官方来源已确认' : '官方来源未确认',
-      detail: originDetail,
+      detail: `${originDetail} ${resourceDetail}`,
     },
   ];
 }

@@ -55,6 +55,10 @@ def claude_code_status() -> dict[str, Any]:
         }
 
     version = (result.stdout or result.stderr).strip().splitlines()[0] if (result.stdout or result.stderr).strip() else None
+    try:
+        auth_result = _run_process_sync(_claude_invocation(["auth", "status", "--json"], command_path), timeout_seconds=10)
+    except Exception as exc:  # noqa: BLE001 - auth status is optional diagnostics.
+        auth_result = ProcessResult(1, "", str(exc))
     return {
         "installed": True,
         "available": result.returncode == 0,
@@ -62,6 +66,7 @@ def claude_code_status() -> dict[str, Any]:
         "command_path": command_path,
         "version": version,
         "error": _excerpt(result.stderr) if result.returncode != 0 else None,
+        "auth_evidence": _parse_auth_status(auth_result),
     }
 
 
@@ -92,6 +97,7 @@ async def run_claude_code_check_with_progress(
     stderr_excerpt = ""
     command = _configured_command()
     command_path = _resolve_command(command)
+    auth_evidence = _parse_auth_status(ProcessResult(127, "", "Claude Code command unavailable"))
 
     async def emit(current_key: str | None = None) -> None:
         if progress_callback is None:
@@ -108,7 +114,7 @@ async def run_claude_code_check_with_progress(
     if not command_path:
         checks.append(_check("cli_available", "Claude Code CLI 可用", "fail", 0, f"{command!r} was not found on PATH"))
         await emit("cli_available")
-        return _result_payload(started, monotonic_started, None, command, None, checks, "", "")
+        return _result_payload(started, monotonic_started, None, command, None, checks, "", "", auth_evidence)
 
     await emit("cli_available")
     version_result = await _run_process(_claude_invocation(["--version"], command_path), timeout_seconds=10)
@@ -124,7 +130,10 @@ async def run_claude_code_check_with_progress(
     )
     await emit("cli_available")
     if version_result.returncode != 0:
-        return _result_payload(started, monotonic_started, command_path, command, version, checks, version_result.stdout, version_result.stderr)
+        return _result_payload(started, monotonic_started, command_path, command, version, checks, version_result.stdout, version_result.stderr, auth_evidence)
+
+    auth_result = await _run_process(_claude_invocation(["auth", "status", "--json"], command_path), timeout_seconds=10)
+    auth_evidence = _parse_auth_status(auth_result)
 
     with tempfile.TemporaryDirectory(prefix="claude_code_probe_") as workspace:
         workspace_path = Path(workspace)
@@ -261,7 +270,7 @@ async def run_claude_code_check_with_progress(
         )
         await emit("sandbox_boundary")
 
-    return _result_payload(started, monotonic_started, command_path, command, version, checks, stdout_excerpt, stderr_excerpt)
+    return _result_payload(started, monotonic_started, command_path, command, version, checks, stdout_excerpt, stderr_excerpt, auth_evidence)
 
 
 def _configured_command() -> str:
@@ -376,6 +385,7 @@ def _result_payload(
     checks: list[dict[str, Any]],
     stdout: str,
     stderr: str,
+    auth_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     finished = datetime.now(timezone.utc)
     score = sum(int(check.get("score") or 0) for check in checks if check.get("key") != "fixture_sanity")
@@ -395,6 +405,42 @@ def _result_payload(
         "checks": checks,
         "stdout_excerpt": _excerpt(stdout),
         "stderr_excerpt": _excerpt(stderr),
+        "auth_evidence": auth_evidence,
+        "execution_auth_context": {
+            "bare_mode": True,
+            "oauth_used_by_probe": False,
+            "reason": "Claude Code --bare 不读取 OAuth/keychain；沙箱能力运行与本地登录状态是两类独立证据。",
+        },
+    }
+
+
+def _parse_auth_status(result: ProcessResult) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if result.returncode == 0:
+        try:
+            parsed = json.loads(result.stdout)
+            payload = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            payload = {}
+    logged_in = payload.get("loggedIn") is True
+    auth_method = str(payload.get("authMethod") or "") or None
+    api_provider = str(payload.get("apiProvider") or "") or None
+    if logged_in and auth_method == "oauth_token" and api_provider == "firstParty":
+        classification, confidence = "claude_code_oauth_confirmed", "high"
+    elif logged_in and auth_method in {"api_key", "apiKey"}:
+        classification, confidence = "claude_api_key_cli_auth", "high"
+    elif logged_in:
+        classification, confidence = "cli_auth_method_other", "medium"
+    else:
+        classification, confidence = "auth_status_unavailable", "low"
+    return {
+        "classification": classification,
+        "confidence": confidence,
+        "evidence_source": "local_cli_auth_status",
+        "logged_in": logged_in,
+        "auth_method": auth_method,
+        "api_provider": api_provider,
+        "limitations": ["本地 CLI 登录状态不能证明任意远程 Base URL 使用同一认证。"],
     }
 
 

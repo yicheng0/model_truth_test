@@ -105,6 +105,23 @@ describe('claudeCodeDiagnostics', () => {
     expect(verdicts[2]).toMatchObject({ status: 'insufficient_evidence', label: '官方来源未确认' });
   });
 
+  it('does not treat legacy Claude Code status as OAuth resource evidence', () => {
+    const verdicts = claudeFingerprintVerdicts({
+      classification_status: 'claude_code',
+      classification_label: 'ClaudeCode 链路',
+      capability_flags: { is_claude_code_like: true, claude_code_gateway_compatible: false },
+      resource_identity: {
+        classification: 'insufficient_evidence',
+        confidence: 'low',
+        claude_code_oauth_confirmed: false,
+        reason: '仅有远程响应证据',
+      },
+    });
+
+    expect(verdicts.find((item) => item.key === 'official_origin')?.status).toBe('insufficient_evidence');
+    expect(verdicts.some((item) => item.detail.includes('OAuth'))).toBe(true);
+  });
+
   it('raises the primary result alert when a Claude-compatible channel has gateway warnings', () => {
     expect(
       claudeFingerprintAlertLevel({

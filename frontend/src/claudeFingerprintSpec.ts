@@ -29,6 +29,14 @@ export type UpstreamIntegrityClassification =
   | 'insufficient_evidence'
   | 'operationally_inconclusive';
 
+export const CLAUDE_RESOURCE_IDENTITY_META: Record<string, { label: string; color: string; description: string }> = {
+  anthropic_api_key_configured: { label: 'Anthropic API Key 已配置', color: 'green', description: '调用方把 API Key 发送到 api.anthropic.com；仍需账单或 request-id 回查确认账号归属。' },
+  gateway_credential_configured: { label: '网关凭据已配置', color: 'purple', description: '自定义网关接受凭据；远端是 API Key、OAuth、云凭据还是代理仍未解析。' },
+  cloud_provider_credentials: { label: '云提供商凭据已配置', color: 'blue', description: '调用方配置指向云提供商；具体模型和账号来源需云审计确认。' },
+  claude_code_oauth_confirmed: { label: '本机 Claude Code OAuth 已确认', color: 'green', description: '仅表示本机 CLI auth status 的登录状态，不代表远程渠道使用该 OAuth。' },
+  insufficient_evidence: { label: '资源来源证据不足', color: 'default', description: '响应和网关兼容证据不能独立确认 Claude Code OAuth 或 API 账号来源。' },
+};
+
 export const UPSTREAM_INTEGRITY_META: Record<UpstreamIntegrityClassification, { label: string; color: string; description: string }> = {
   signature_chain_verified: { label: 'Signature 链路已验证', color: 'green', description: '双向 signature 与篡改对照通过；证明 Claude signature 链路，不等于官方直连。' },
   mixed_routing_suspected: { label: '疑似混合路由', color: 'red', description: '重复采样出现关联硬协议特征切换或 signature 验证间歇变化。' },

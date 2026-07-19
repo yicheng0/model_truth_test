@@ -5043,6 +5043,17 @@ async def create_claude_code_test(
         str((credentials_override or {}).get("base_url") or channel.base_url or ""),
         probes,
     )
+    resource_identity = _claude_resource_identity_assessment(
+        str((credentials_override or {}).get("base_url") or channel.base_url or ""),
+        {
+            "credential_kind": "cloud_provider"
+            if _request_protocol(channel, credentials_override or _merged_channel_credentials(channel, {})) in {REQUEST_PROTOCOL_AWS_BEDROCK, REQUEST_PROTOCOL_GEMINI}
+            else "api_key"
+            if bool((credentials_override or _merged_channel_credentials(channel, {})).get("api_key"))
+            else "unknown",
+        },
+        probes,
+    )
     upstream_integrity = _claude_upstream_integrity_assessment(
         [],
         baseline_configured=bool(source_channel_id),
@@ -5077,6 +5088,7 @@ async def create_claude_code_test(
         "request_normalization_notes": normalization_notes,
         **classification,
         **access_path,
+        "resource_identity": resource_identity,
         "upstream_integrity": upstream_integrity,
         "probes": probes,
         "sections": _claude_code_sections(probes),
@@ -6073,11 +6085,64 @@ def _claude_code_capability_flags(probes: list[dict[str, Any]], claude_score: fl
     multimodal_probes = [probe for probe in probes if _claude_probe_section(probe) == "multimodal"]
     signature_supported = any(probe.get("status") == "pass" for probe in signature_probes)
     multimodal_supported = any(probe.get("status") == "pass" for probe in multimodal_probes)
+    by_key = {str(probe.get("key") or ""): probe for probe in probes}
+    endpoint_supported = any(by_key.get(key, {}).get("status") == "pass" for key in ("gateway_count_tokens", "gateway_model_discovery"))
+    header_raw = by_key.get("claude_code_headers", {}).get("raw_evidence") or {}
+    headers_sent = "x-claude-code-session-id" in {str(item).lower() for item in header_raw.get("request_header_names") or []}
+    gateway_compatible = claude_score >= 75 and endpoint_supported and headers_sent
     return {
         "is_claude_like": claude_score >= 75,
-        "is_claude_code_like": claude_score >= 75 and signature_supported and claude_code_score >= 70,
+        "is_claude_code_like": False,
+        "claude_code_gateway_compatible": gateway_compatible,
         "signature_supported": signature_supported,
         "multimodal_supported": multimodal_supported,
+    }
+
+
+def _claude_resource_identity_assessment(
+    base_url: str | None,
+    connection_metadata: dict[str, Any] | None,
+    probe_matrix: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_url = (base_url or "").strip().lower().rstrip("/")
+    metadata = connection_metadata or {}
+    credential_kind = str(metadata.get("credential_kind") or "unknown")
+    official_endpoint = normalized_url in {
+        "https://api.anthropic.com",
+        "https://api.anthropic.com/v1",
+        "https://api.anthropic.com/v1/messages",
+    }
+    classification = "insufficient_evidence"
+    confidence = "low"
+    upstream_authentication = "unresolved"
+    reason = "远程响应不包含可独立验证的认证来源证据。"
+    if credential_kind == "cloud_provider":
+        classification = "cloud_provider_credentials"
+        confidence = "medium"
+        upstream_authentication = "cloud_provider"
+        reason = "调用方配置显示使用云提供商凭据；具体资源归属仍需云审计确认。"
+    elif official_endpoint and credential_kind == "api_key":
+        classification = "anthropic_api_key_configured"
+        confidence = "medium"
+        upstream_authentication = "anthropic_api_key"
+        reason = "调用方把显式 API Key 发送到 Anthropic 官方端点；账号归属仍需 Anthropic 账单或 request-id 回查。"
+    elif not official_endpoint and credential_kind == "api_key":
+        classification = "gateway_credential_configured"
+        confidence = "medium"
+        reason = "调用方提供的是自定义网关凭据；网关转发使用 API Key、OAuth 或云凭据无法从响应确认。"
+    return {
+        "classification": classification,
+        "confidence": confidence,
+        "evidence_source": "caller_configuration" if credential_kind != "unknown" else "response_only",
+        "credential_kind": credential_kind,
+        "upstream_authentication": upstream_authentication,
+        "claude_code_oauth_confirmed": False,
+        "reason": reason,
+        "evidence_refs": [str(row.get("key")) for row in probe_matrix if row.get("key") in {"response_schema", "gateway_model_discovery"}],
+        "limitations": [
+            "Thinking signature、Claude Code headers、attribution 和模型发现不证明 Claude Code OAuth 资源来源。",
+            "自定义网关后的 API Key、OAuth、云凭据和透明代理必须通过网关日志、账单或 request-id 回查确认。",
+        ],
     }
 
 
@@ -7079,10 +7144,10 @@ def _claude_code_classification(probes: list[dict[str, Any]], claude_score: floa
     has_aws_shape = any(mid.startswith("msg_bdrk_") for mid in message_ids)
     core_failures = [probe for probe in probes if _claude_probe_section(probe) in CLAUDE_CORE_SECTIONS and probe.get("severity") == "core" and probe.get("status") == "fail"]
 
-    if flags["is_claude_code_like"]:
-        status = "claude_code"
-        label = "ClaudeCode 链路"
-        reason = "Claude 基础指纹通过，且 Thinking Signature / 互通专项证据可用。"
+    if flags["claude_code_gateway_compatible"]:
+        status = "claude"
+        label = "Claude 资源（Claude Code 网关兼容）"
+        reason = "Claude 基础指纹通过，且检测到 Claude Code 网关契约兼容；这不证明资源来自 Claude Code OAuth。"
     elif flags["is_claude_like"] and has_aws_shape:
         status = "aws_resource"
         label = "Claude 官方云资源"
@@ -7100,7 +7165,7 @@ def _claude_code_classification(probes: list[dict[str, Any]], claude_score: floa
         label = "来源特征不明确"
         reason = "Claude 基础指纹证据不足，需要结合原始请求响应复核。"
 
-    if core_failures and status in {"claude", "aws_resource", "claude_code"}:
+    if core_failures and status in {"claude", "aws_resource"}:
         reason = f"{reason} 仍有基础探针异常：" + "、".join(str(probe.get("title")) for probe in core_failures[:3])
     return {
         "classification_status": status,
