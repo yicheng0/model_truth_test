@@ -5048,6 +5048,7 @@ async def create_claude_code_test(
         baseline_configured=bool(source_channel_id),
         models_comparable=False,
         gateway_evidence=[str(probe.get("key")) for probe in probes if _claude_probe_section(probe) == "fingerprint" and probe.get("status") == "pass"],
+        gateway_probe_matrix=probes,
     )
     if probe_depth == "deep" and source_channel_id:
         source = db.get(Channel, source_channel_id)
@@ -5059,6 +5060,7 @@ async def create_claude_code_test(
             candidate_credentials=credentials_override,
             repeat_count=repeat_count,
         )
+        upstream_integrity["gateway_fingerprint"] = _claude_gateway_fingerprint(probes)
     return {
         "ok": classification["classification_status"] in {"claude", "aws_resource", "claude_code"} and risk_level in {"low", "medium"},
         "score": score,
@@ -6139,8 +6141,10 @@ def _claude_upstream_integrity_assessment(
     baseline_configured: bool,
     models_comparable: bool,
     gateway_evidence: list[str] | None = None,
+    gateway_probe_matrix: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     rows = [redact_secrets(dict(row)) for row in probe_matrix]
+    gateway_fingerprint = _claude_gateway_fingerprint(rows + [dict(row) for row in (gateway_probe_matrix or [])])
     labels: set[str] = set()
     total_operational = sum(_safe_int(row.get("operational_failure_count")) for row in rows)
     protocol_mismatches = sum(_safe_int(row.get("protocol_mismatch_count")) for row in rows)
@@ -6231,7 +6235,60 @@ def _claude_upstream_integrity_assessment(
         "labels": sorted(labels),
         "probe_matrix": rows,
         "gateway_evidence": sorted(set(gateway_evidence or [])),
+        "gateway_fingerprint": gateway_fingerprint,
         "limitations": list(UPSTREAM_INTEGRITY_LIMITATIONS),
+    }
+
+
+def _claude_gateway_fingerprint(probe_matrix: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize gateway/control-plane header families without retaining values."""
+    header_names: set[str] = set()
+    evidence_refs: set[str] = set()
+
+    def collect(value: Any, evidence_key: str | None = None) -> None:
+        if isinstance(value, dict):
+            names = value.get("response_header_names")
+            if isinstance(names, list):
+                header_names.update(str(name).strip().lower() for name in names if str(name).strip())
+                if evidence_key:
+                    evidence_refs.add(evidence_key)
+            for key, item in value.items():
+                collect(item, evidence_key or (str(key) if key in {"key", "probe_key"} else None))
+        elif isinstance(value, list):
+            for item in value:
+                collect(item, evidence_key)
+
+    for row in probe_matrix:
+        key = str(row.get("key") or row.get("probe_key") or "probe")
+        collect(row, key)
+
+    recognized = {
+        "apipro": lambda name: name.startswith("x-apipro-"),
+        "oneapi": lambda name: name.startswith("x-oneapi-"),
+        "new_api": lambda name: name.startswith("x-new-api-") or name.startswith("x-newapi-"),
+        "cloudflare": lambda name: name in {"cf-ray", "cf-cache-status", "cf-connecting-ip"},
+        "aws": lambda name: name.startswith("x-amzn-"),
+        "azure": lambda name: name.startswith("x-ms-"),
+        "google_cloud": lambda name: name.startswith("x-goog-"),
+        "proxy": lambda name: name in {"via", "server", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"}
+        or name.startswith("x-envoy-"),
+    }
+    families = sorted(family for family, matcher in recognized.items() if any(matcher(name) for name in header_names))
+    control_plane = [family for family in families if family in {"apipro", "oneapi", "new_api"}]
+    edge_or_proxy = [family for family in families if family in {"cloudflare", "proxy"}]
+    cloud = [family for family in families if family in {"aws", "azure", "google_cloud"}]
+    return {
+        "control_plane_families": control_plane,
+        "edge_or_proxy_families": edge_or_proxy,
+        "cloud_provider_families": cloud,
+        "header_names": sorted(header_names),
+        "evidence_refs": sorted(evidence_refs),
+        "official_origin_confirmed": False,
+        "interpretation": (
+            "检测到网关/边缘控制面痕迹；这些痕迹不能证明上游模型或 Anthropic 官方直连。"
+            if families
+            else "未检测到已知网关头族；透明转发仍无法仅凭响应排除。"
+        ),
     }
 
 

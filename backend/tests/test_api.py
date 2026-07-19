@@ -8090,6 +8090,84 @@ def test_integrity_route_fingerprint_ignores_operational_samples() -> None:
     assert correlated == 0
 
 
+def test_gateway_fingerprint_aggregates_control_plane_headers_without_claiming_origin() -> None:
+    from app.services import _claude_gateway_fingerprint
+
+    result = _claude_gateway_fingerprint(
+        [
+            {
+                "key": "response_schema",
+                "status": "pass",
+                "raw_evidence": {"response_header_names": ["x-apipro-route", "x-oneapi-cache", "via"]},
+            },
+            {
+                "key": "gateway_model_discovery",
+                "status": "pass",
+                "raw_evidence": {"response_header_names": ["cf-ray", "x-request-id"]},
+            },
+        ]
+    )
+
+    assert result["control_plane_families"] == ["apipro", "oneapi"]
+    assert result["edge_or_proxy_families"] == ["cloudflare", "proxy"]
+    assert result["official_origin_confirmed"] is False
+    assert "gateway_model_discovery" in result["evidence_refs"]
+    assert result["header_names"] == ["cf-ray", "via", "x-apipro-route", "x-oneapi-cache", "x-request-id"]
+
+
+def test_gateway_fingerprint_ignores_auth_values_and_weak_headers() -> None:
+    from app.services import _claude_gateway_fingerprint
+
+    result = _claude_gateway_fingerprint(
+        [
+            {
+                "key": "response_schema",
+                "status": "pass",
+                "raw_evidence": {
+                    "headers": {"authorization": "Bearer sk-secret", "x-apipro-route": "secret-route"},
+                    "response_header_names": ["content-type", "request-id"],
+                },
+            }
+        ]
+    )
+
+    assert result["control_plane_families"] == []
+    assert result["header_names"] == ["content-type", "request-id"]
+    assert "sk-secret" not in json.dumps(result)
+    assert "secret-route" not in json.dumps(result)
+
+
+def test_gateway_fingerprint_redacts_header_names_to_safe_families() -> None:
+    from app.services import _claude_gateway_fingerprint
+
+    result = _claude_gateway_fingerprint(
+        [{"key": "response_schema", "raw_evidence": {"response_header_names": ["x-apipro-route", "x-oneapi-cache", "via"]}}]
+    )
+
+    assert result["header_names"] == ["via", "x-apipro-route", "x-oneapi-cache"]
+
+
+def test_claude_code_result_exposes_gateway_fingerprint_separately(monkeypatch) -> None:
+    from app.models import Channel
+    from app.services import create_claude_code_test
+
+    db = SessionLocal()
+    candidate = Channel(id="candidate_gateway_test", name="Gateway", provider_type="anthropic_compatible", role="candidate", base_url="https://relay.example/v1", model_name="claude-sonnet-4-6", enabled=True)
+    async def fake_model_probe(*args, **kwargs):
+        return {"key": "response_schema", "title": "schema", "section": "structure", "category": "protocol", "status": "pass", "severity": "core", "score": 100, "labels": [], "raw_evidence": {"response_header_names": ["x-apipro-route"]}}
+    async def fake_signature_probe(*args, **kwargs):
+        return {"key": "signature_interop", "title": "signature", "section": "signature", "category": "signature", "status": "skipped", "severity": "supporting", "score": 0, "labels": [], "raw_evidence": {}}
+    async def fake_gateway_probe(*args, **kwargs):
+        return [{"key": "gateway_model_discovery", "title": "models", "section": "fingerprint", "category": "relay_compatibility", "status": "pass", "severity": "reference", "score": 100, "labels": [], "raw_evidence": {"response_header_names": ["x-oneapi-cache"]}}]
+    monkeypatch.setattr("app.services._run_claude_code_model_probe", fake_model_probe)
+    monkeypatch.setattr("app.services._run_claude_code_signature_interop_probe", fake_signature_probe)
+    monkeypatch.setattr("app.services._run_claude_code_gateway_endpoint_probes", fake_gateway_probe)
+    payload = asyncio.run(create_claude_code_test(db, candidate, source_channel_id=None, persist_results=False))
+    assert payload["upstream_integrity"]["gateway_fingerprint"]["control_plane_families"] == ["apipro", "oneapi"]
+    assert payload["upstream_integrity"]["official_origin_confirmed"] is False
+    db.close()
+
+
 def test_deep_upstream_probe_runs_bidirectional_challenges_and_redacts(monkeypatch) -> None:
     from app.services import _run_claude_upstream_integrity_probes
 
