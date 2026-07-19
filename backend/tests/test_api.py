@@ -7696,7 +7696,7 @@ def test_claude_fingerprint_classifies_plain_claude_when_optional_capabilities_u
     assert "未要求支持 ClaudeCode" in _claude_code_summary("low", probes, classification)
 
 
-def test_claude_fingerprint_classifies_claude_code_when_signature_supported() -> None:
+def test_claude_fingerprint_keeps_signature_support_separate_from_claude_code_resource() -> None:
     from app.services import _claude_code_classification, _claude_code_score, _claude_code_link_score
 
     probes = [
@@ -7710,9 +7710,10 @@ def test_claude_fingerprint_classifies_claude_code_when_signature_supported() ->
     claude_code_score = _claude_code_link_score(probes)
     classification = _claude_code_classification(probes, claude_score, claude_code_score)
 
-    assert classification["classification_status"] == "claude_code"
+    assert classification["classification_status"] == "claude"
     assert classification["capability_flags"]["signature_supported"] is True
-    assert classification["capability_flags"]["is_claude_code_like"] is True
+    assert classification["capability_flags"]["is_claude_code_like"] is False
+    assert classification["capability_flags"]["claude_code_gateway_compatible"] is False
 
 
 def test_claude_fingerprint_classifies_openai_shape_as_non_claude() -> None:
@@ -7840,6 +7841,61 @@ def test_upstream_integrity_requires_baseline_and_ignores_gateway_compatibility(
     assert payload["official_origin_confirmed"] is False
     assert payload["probe_matrix"] == []
     assert "OAuth" in " ".join(payload["limitations"])
+
+
+def test_resource_identity_distinguishes_official_api_key_from_gateway_credentials() -> None:
+    from app.services import _claude_resource_identity_assessment
+
+    official = _claude_resource_identity_assessment(
+        "https://api.anthropic.com/v1",
+        {"credential_kind": "api_key"},
+        [],
+    )
+    gateway = _claude_resource_identity_assessment(
+        "https://relay.example/v1",
+        {"credential_kind": "api_key"},
+        [{"key": "gateway_model_discovery", "status": "pass"}],
+    )
+
+    assert official["classification"] == "anthropic_api_key_configured"
+    assert official["claude_code_oauth_confirmed"] is False
+    assert official["evidence_source"] == "caller_configuration"
+    assert gateway["classification"] == "gateway_credential_configured"
+    assert gateway["upstream_authentication"] == "unresolved"
+
+
+def test_resource_identity_never_uses_signature_or_gateway_contract_as_oauth_evidence() -> None:
+    from app.services import _claude_resource_identity_assessment
+
+    payload = _claude_resource_identity_assessment(
+        "https://relay.example/v1",
+        {},
+        [
+            {"key": "candidate_to_official_signature", "status": "pass", "positive_pass_count": 3},
+            {"key": "claude_code_headers", "status": "pass"},
+        ],
+    )
+
+    assert payload["classification"] == "insufficient_evidence"
+    assert payload["claude_code_oauth_confirmed"] is False
+    assert "signature" in " ".join(payload["limitations"]).lower()
+
+
+def test_signature_support_does_not_classify_resource_as_claude_code() -> None:
+    from app.services import _claude_code_classification, _claude_code_link_score, _claude_code_score
+
+    probes = [
+        {"key": "schema", "section": "structure", "severity": "core", "status": "pass", "score": 100},
+        {"key": "context", "section": "behavior", "severity": "core", "status": "pass", "score": 100},
+        {"key": "signature", "section": "signature", "severity": "supporting", "status": "pass", "score": 100},
+    ]
+    claude_score = _claude_code_score(probes)
+    gateway_score = _claude_code_link_score(probes)
+    classification = _claude_code_classification(probes, claude_score, gateway_score)
+
+    assert classification["classification_status"] == "claude"
+    assert classification["capability_flags"]["is_claude_code_like"] is False
+    assert classification["capability_flags"]["claude_code_gateway_compatible"] is False
 
 
 @pytest.mark.parametrize("repeat_count", [3, 5])

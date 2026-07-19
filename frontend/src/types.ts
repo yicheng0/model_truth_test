@@ -676,6 +676,17 @@ export type ClaudeCodeTestResult = {
     reason?: string | null;
     raw_evidence?: Record<string, unknown>;
   }>;
+  resource_identity?: {
+    classification?: 'anthropic_api_key_configured' | 'gateway_credential_configured' | 'cloud_provider_credentials' | 'insufficient_evidence' | string;
+    confidence?: 'low' | 'medium' | 'high' | string;
+    evidence_source?: 'caller_configuration' | 'response_only' | 'local_cli_auth_status' | string;
+    credential_kind?: string;
+    upstream_authentication?: string;
+    claude_code_oauth_confirmed?: boolean;
+    reason?: string | null;
+    evidence_refs?: string[];
+    limitations?: string[];
+  } | null;
   upstream_integrity?: {
     classification: 'signature_chain_verified' | 'mixed_routing_suspected' | 'protocol_reconstruction_suspected' | 'model_swap_suspected' | 'insufficient_evidence' | 'operationally_inconclusive' | string;
     confidence: 'low' | 'medium' | 'high' | string;
@@ -715,6 +726,7 @@ export type ClaudeCodeTestResult = {
   } | null;
   capability_flags?: {
     is_claude_like?: boolean;
+    claude_code_gateway_compatible?: boolean;
     is_claude_code_like?: boolean;
     signature_supported?: boolean;
     multimodal_supported?: boolean;
@@ -757,6 +769,7 @@ export type ClaudeCodeCheckStatus = {
   command_path?: string | null;
   version?: string | null;
   error?: string | null;
+  auth_evidence?: ClaudeCodeCheckResult['auth_evidence'];
 };
 
 export type ClaudeCodeCheckItem = {
@@ -781,6 +794,20 @@ export type ClaudeCodeCheckResult = {
   checks: ClaudeCodeCheckItem[];
   stdout_excerpt: string;
   stderr_excerpt: string;
+  auth_evidence?: {
+    classification?: string;
+    confidence?: string;
+    evidence_source?: string;
+    logged_in?: boolean;
+    auth_method?: string | null;
+    api_provider?: string | null;
+    limitations?: string[];
+  };
+  execution_auth_context?: {
+    bare_mode?: boolean;
+    oauth_used_by_probe?: boolean;
+    reason?: string;
+  };
 };
 
 export type ClaudeCodeJobCreate = {

@@ -381,6 +381,7 @@ class ClaudeCodeCheckStatusRead(BaseModel):
     command_path: str | None = None
     version: str | None = None
     error: str | None = None
+    auth_evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class ClaudeCodeCheckItemRead(BaseModel):
@@ -405,6 +406,12 @@ class ClaudeCodeCheckRead(BaseModel):
     checks: list[ClaudeCodeCheckItemRead]
     stdout_excerpt: str
     stderr_excerpt: str
+    auth_evidence: dict[str, Any] = Field(default_factory=dict)
+    execution_auth_context: dict[str, Any] = Field(default_factory=dict)
+
+    @field_serializer("auth_evidence", "execution_auth_context")
+    def serialize_cli_auth_evidence(self, value: Any) -> Any:
+        return redact_secrets(value)
 
 
 class ClaudeCodeJobCreateRead(BaseModel):
@@ -567,6 +574,7 @@ class ClaudeCodeTestRead(BaseModel):
     access_path_reason: str | None = None
     access_path_caveat: str | None = None
     access_path_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    resource_identity: dict[str, Any] = Field(default_factory=dict)
     upstream_integrity: dict[str, Any] = Field(default_factory=dict)
     capability_flags: dict[str, Any] = Field(default_factory=dict)
     claude_score: float | None = None
@@ -576,8 +584,8 @@ class ClaudeCodeTestRead(BaseModel):
     probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
     sections: list[ClaudeCodeSectionRead] = Field(default_factory=list)
 
-    @field_serializer("upstream_integrity")
-    def serialize_upstream_integrity(self, value: Any) -> Any:
+    @field_serializer("resource_identity", "upstream_integrity")
+    def serialize_identity_evidence(self, value: Any) -> Any:
         return redact_signatures(redact_secrets(value))
 
 

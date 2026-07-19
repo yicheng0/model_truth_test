@@ -6,10 +6,10 @@ import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { claudeFingerprintAlertLevel, claudeFingerprintVerdicts, labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
 import { groupClaudeFingerprintHistory, localDayRangeIso, probeDiagnosticText } from '../claudeFingerprintHistory';
-import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS, UPSTREAM_INTEGRITY_META, type UpstreamIntegrityClassification } from '../claudeFingerprintSpec';
+import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS, CLAUDE_RESOURCE_IDENTITY_META, UPSTREAM_INTEGRITY_META, type UpstreamIntegrityClassification } from '../claudeFingerprintSpec';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
-import type { ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
+import type { ClaudeCodeCheckStatus, ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
 
 type RelayFormValues = {
   channel_label?: string;
@@ -83,7 +83,7 @@ function FingerprintMethodologyPanel() {
                 ]}
               />
               <Typography.Text type="secondary">
-                当前页面的 Claude 得分衡量基础协议与行为一致性；ClaudeCode 得分衡量 Thinking Signature、兼容参数和链路能力；访问路径判定单独描述直连、网关或翻译痕迹。透明转发仍可能无法区分。
+                当前页面的 Claude 得分衡量模型与 Messages API 兼容性；Claude Code 网关兼容度衡量客户端契约，不代表 Claude Code OAuth 资源；访问路径、上游完整性和资源来源分别展示。透明转发仍可能无法区分。
               </Typography.Text>
             </Space>
           ),
@@ -147,6 +147,8 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
   if (!integrity?.classification) return null;
   const gateway = integrity.gateway_fingerprint;
   const gatewayContract = integrity.gateway_contract;
+  const resourceIdentity = result.resource_identity;
+  const resourceMeta = resourceIdentity?.classification ? CLAUDE_RESOURCE_IDENTITY_META[resourceIdentity.classification] : null;
   const meta = UPSTREAM_INTEGRITY_META[integrity.classification as UpstreamIntegrityClassification] ?? {
     label: integrity.classification,
     color: 'default',
@@ -156,6 +158,14 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
   return (
     <Card bordered={false} title="上游完整性（独立于兼容得分与访问路径）">
       <Space direction="vertical" size={12} className="full-width">
+        {resourceIdentity?.classification ? (
+          <Alert
+            type={resourceIdentity.classification === 'insufficient_evidence' ? 'info' : 'warning'}
+            showIcon
+            message={<Space wrap><span>{resourceMeta?.label || resourceIdentity.classification}</span><Tag color={resourceMeta?.color || 'default'}>置信度 {resourceIdentity.confidence || 'low'}</Tag><Tag>OAuth 未由远程探针确认</Tag></Space>}
+            description={resourceIdentity.reason || resourceMeta?.description}
+          />
+        ) : null}
         <Alert
           type={integrity.classification === 'signature_chain_verified' ? 'success' : integrity.classification === 'insufficient_evidence' ? 'info' : 'warning'}
           showIcon
@@ -222,7 +232,7 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
 }
 
 function claudeCodeLinkLabel(result: ClaudeCodeTestResult) {
-  if (result.capability_flags?.is_claude_code_like) return '通过';
+  if (result.capability_flags?.claude_code_gateway_compatible) return '网关兼容';
   if (result.capability_flags?.signature_supported) return '部分支持';
   return '未支持';
 }
@@ -563,12 +573,12 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
                 访问路径 {result.access_path_label ?? result.access_path_assessment}
               </Tag>
             ) : null}
-            <Tag color={result.capability_flags?.is_claude_code_like ? 'purple' : 'default'}>
-              ClaudeCode 链路 {claudeCodeLinkLabel(result)}
+            <Tag color={result.capability_flags?.claude_code_gateway_compatible ? 'purple' : 'default'}>
+              Claude Code 网关兼容 {claudeCodeLinkLabel(result)}
             </Tag>
             <Tag color={riskColor(result.risk_level)}>风险 {result.risk_level}</Tag>
             <Tag color={result.ok ? 'green' : 'red'}>Claude 得分 {result.claude_score ?? result.score}</Tag>
-            {typeof result.claude_code_score === 'number' ? <Tag>ClaudeCode 得分 {result.claude_code_score}</Tag> : null}
+            {typeof result.claude_code_score === 'number' ? <Tag>Claude Code 网关兼容度 {result.claude_code_score}</Tag> : null}
             {result.protocol_profile ? <Tag color="blue">协议 {result.protocol_profile}</Tag> : null}
           </Space>
         )}
@@ -598,7 +608,7 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
             />
             <Descriptions size="small" bordered column={{ xs: 1, md: 3 }}>
               <Descriptions.Item label="Claude 得分">模型与 Messages API 兼容性</Descriptions.Item>
-              <Descriptions.Item label="ClaudeCode 得分">Thinking / 工具 / 客户端能力</Descriptions.Item>
+              <Descriptions.Item label="Claude Code 网关兼容度">Thinking / 工具 / 客户端契约</Descriptions.Item>
               <Descriptions.Item label="访问路径">直连、网关、协议翻译或透明未决</Descriptions.Item>
             </Descriptions>
             <Table
@@ -758,6 +768,7 @@ export default function ClaudeCodeCheck() {
   const historyFilters = useMemo(() => localDayRangeIso(historyDateRange), [historyDateRange]);
 
   const sources = useQuery<ClaudeCodeSourceChannel[]>({ queryKey: ['claudeCodeSourceChannels'], queryFn: api.claudeCodeSourceChannels });
+  const cliStatus = useQuery<ClaudeCodeCheckStatus>({ queryKey: ['claudeCodeCheckStatus'], queryFn: api.claudeCodeCheckStatus, staleTime: 30_000 });
   const history = useQuery<ClaudeCodeHistoryItem[]>({
     queryKey: ['claudeCodeHistory', historyFilters.from, historyFilters.to],
     queryFn: () => api.claudeCodeHistory(historyFilters),
@@ -959,6 +970,23 @@ export default function ClaudeCodeCheck() {
       <div className="claude-page-layout">
         <main className="claude-main-pane">
           <Space direction="vertical" size={18} className="full-width">
+            {cliStatus.data?.auth_evidence?.classification ? (
+              <Alert
+                type="info"
+                showIcon
+                message="本机 Claude Code 认证观察（不代表远程渠道来源）"
+                description={(
+                  <Space direction="vertical" size={4}>
+                    <Typography.Text>
+                      {cliStatus.data.auth_evidence.classification} · {cliStatus.data.auth_evidence.auth_method || '认证方式未知'} · provider {cliStatus.data.auth_evidence.api_provider || '未知'}
+                    </Typography.Text>
+                    <Typography.Text type="secondary">
+                      本机 `auth status` 只能说明 CLI 登录状态；远程 Base URL 是否使用该 OAuth 仍需网关/账单/request-id 证据。当前沙箱 `--bare` 运行不会读取 OAuth/keychain。
+                    </Typography.Text>
+                  </Space>
+                )}
+              />
+            ) : null}
             <FingerprintMethodologyPanel />
             <Card title={<span className="card-title-with-icon"><ShieldCheck size={18} />接口配置</span>} bordered={false}>
               <Form
