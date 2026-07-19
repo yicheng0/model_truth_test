@@ -1,7 +1,7 @@
 # Claude Code 与 Claude 官方 API 参数及响应差异调研
 
-> 调研日期：2026-07-19  
-> 适用对象：Claude 渠道兼容性、Claude Code 网关兼容性、协议纯度与上游完整性检测  
+> 调研日期：2026-07-19
+> 适用对象：Claude 渠道兼容性、Claude Code 网关兼容性、协议纯度与上游完整性检测
 > 事实来源：以 Anthropic 官方 Claude Code 文档和 Claude Platform API 文档为主；本文不把规划文档或第三方网关实现当作官方协议事实。
 
 ## 1. 结论摘要
