@@ -4,7 +4,7 @@ import { Alert, Badge, Button, Card, Checkbox, Collapse, DatePicker, Description
 import dayjs, { type Dayjs } from 'dayjs';
 import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
+import { claudeFingerprintAlertLevel, claudeFingerprintVerdicts, labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
 import { groupClaudeFingerprintHistory, localDayRangeIso, probeDiagnosticText } from '../claudeFingerprintHistory';
 import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS, UPSTREAM_INTEGRITY_META, type UpstreamIntegrityClassification } from '../claudeFingerprintSpec';
 import { formatChannelDisplayName } from '../channelCredentials';
@@ -123,11 +123,7 @@ function riskColor(value?: string) {
 }
 
 function relayAlertType(result: ClaudeCodeTestResult): 'success' | 'warning' | 'error' {
-  if (['claude', 'aws_resource', 'claude_code'].includes(String(result.classification_status ?? ''))) return 'success';
-  if (result.classification_status === 'anomaly') return 'warning';
-  if (result.risk_level === 'low' || result.risk_level === 'medium') return 'success';
-  if (result.risk_level === 'high') return 'warning';
-  return 'error';
+  return claudeFingerprintAlertLevel(result);
 }
 
 function classificationColor(status?: string | null) {
@@ -150,6 +146,7 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
   const integrity = result.upstream_integrity;
   if (!integrity?.classification) return null;
   const gateway = integrity.gateway_fingerprint;
+  const gatewayContract = integrity.gateway_contract;
   const meta = UPSTREAM_INTEGRITY_META[integrity.classification as UpstreamIntegrityClassification] ?? {
     label: integrity.classification,
     color: 'default',
@@ -181,6 +178,22 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
                 <Typography.Text type="secondary">
                   控制面：{gateway.control_plane_families?.join('、') || '未发现'}；边缘/代理：{gateway.edge_or_proxy_families?.join('、') || '未发现'}；云封装：{gateway.cloud_provider_families?.join('、') || '未发现'}
                 </Typography.Text>
+              </Space>
+            )}
+          />
+        ) : null}
+        {gatewayContract ? (
+          <Alert
+            type={gatewayContract.status === 'warning' ? 'warning' : gatewayContract.status === 'pass' ? 'success' : 'info'}
+            showIcon
+            message="Claude Code 网关契约（不作为官方来源证据）"
+            description={(
+              <Space direction="vertical" size={4}>
+                <Typography.Text>{gatewayContract.interpretation || '评估请求字段、原生错误和 SSE 实时转发是否保持 Claude Code 契约。'}</Typography.Text>
+                <Typography.Text type="secondary">
+                  Attribution：{gatewayContract.attribution_observation === 'sent_unverified' ? '客户端已发送，上游保持情况未验证' : '未观察到'}；Usage 粒度：{gatewayContract.usage_scope || 'single_request'}
+                </Typography.Text>
+                {gatewayContract.labels?.length ? <ProbeLabelTags labels={gatewayContract.labels} /> : null}
               </Space>
             )}
           />
@@ -525,6 +538,7 @@ function MultimodalProbeTable({ probes, currentKey }: { probes: MultimodalProbe[
 function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; meta?: ClaudeCodeHistoryDetail | null }) {
   const allCounts = probeCounts(result.probes ?? []);
   const riskLabels = topRiskLabels(result.probes ?? []);
+  const verdicts = claudeFingerprintVerdicts(result);
   return (
     <Space direction="vertical" size={18} className="full-width">
       {meta ? (
@@ -560,6 +574,19 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
         )}
         description={result.classification_reason ? `${result.summary} · ${result.classification_reason}` : result.summary}
       />
+      <div className="claude-verdict-grid" data-testid="claude-fingerprint-verdicts">
+        {verdicts.map((verdict) => (
+          <Card key={verdict.key} bordered={false} className={`claude-verdict-card claude-verdict-${verdict.status}`}>
+            <Space direction="vertical" size={8} className="full-width">
+              <Space wrap className="claude-verdict-card-head">
+                <Typography.Text strong>{verdict.title}</Typography.Text>
+                <Tag color={statusColor(verdict.status)}>{verdict.label}</Tag>
+              </Space>
+              <Typography.Text type="secondary">{verdict.detail}</Typography.Text>
+            </Space>
+          </Card>
+        ))}
+      </div>
       {result.access_path_assessment ? (
         <Card bordered={false} title="访问路径判定（独立于 Claude 得分）">
           <Space direction="vertical" size={12} className="full-width">

@@ -5063,6 +5063,9 @@ async def create_claude_code_test(
         upstream_integrity["gateway_fingerprint"] = _claude_gateway_fingerprint(
             [*(upstream_integrity.get("probe_matrix") or []), *probes]
         )
+        upstream_integrity["gateway_contract"] = _claude_gateway_contract_assessment(
+            [*(upstream_integrity.get("probe_matrix") or []), *probes]
+        )
     return {
         "ok": classification["classification_status"] in {"claude", "aws_resource", "claude_code"} and risk_level in {"low", "medium"},
         "score": score,
@@ -5403,6 +5406,13 @@ def _claude_code_probe_payload(
 def _claude_code_request_snapshot(config: dict[str, Any], normalized: dict[str, Any]) -> dict[str, Any]:
     raw_request = normalized.get("raw_request") if isinstance(normalized.get("raw_request"), dict) else {}
     request_params = config.get("request_params") if isinstance(config.get("request_params"), dict) else {}
+    system_content = raw_request.get("system")
+    if not isinstance(system_content, list):
+        system_content = request_params.get("system_content")
+    system_blocks = system_content if isinstance(system_content, list) else []
+    first_system_text = ""
+    if system_blocks and isinstance(system_blocks[0], dict):
+        first_system_text = str(system_blocks[0].get("text") or "")
     snapshot = {
         "prompt": config.get("prompt"),
         "system_prompt": config.get("system_prompt"),
@@ -5415,6 +5425,8 @@ def _claude_code_request_snapshot(config: dict[str, Any], normalized: dict[str, 
         "tools": raw_request.get("tools", request_params.get("tools")),
         "stop_sequences": raw_request.get("stop_sequences", request_params.get("stop_sequences")),
         "request_header_names": raw_request.get("_request_header_names") or [],
+        "system_block_count": len(system_blocks),
+        "attribution_first": bool(system_blocks) and "claude code" in first_system_text.lower(),
     }
     return redact_secrets({key: value for key, value in snapshot.items() if value is not None})
 
@@ -6146,7 +6158,9 @@ def _claude_upstream_integrity_assessment(
     gateway_probe_matrix: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     rows = [redact_secrets(dict(row)) for row in probe_matrix]
-    gateway_fingerprint = _claude_gateway_fingerprint(rows + [dict(row) for row in (gateway_probe_matrix or [])])
+    combined_gateway_rows = rows + [dict(row) for row in (gateway_probe_matrix or [])]
+    gateway_fingerprint = _claude_gateway_fingerprint(combined_gateway_rows)
+    gateway_contract = _claude_gateway_contract_assessment(combined_gateway_rows)
     labels: set[str] = set()
     total_operational = sum(_safe_int(row.get("operational_failure_count")) for row in rows)
     protocol_mismatches = sum(_safe_int(row.get("protocol_mismatch_count")) for row in rows)
@@ -6238,6 +6252,7 @@ def _claude_upstream_integrity_assessment(
         "probe_matrix": rows,
         "gateway_evidence": sorted(set(gateway_evidence or [])),
         "gateway_fingerprint": gateway_fingerprint,
+        "gateway_contract": gateway_contract,
         "limitations": list(UPSTREAM_INTEGRITY_LIMITATIONS),
     }
 
@@ -6291,6 +6306,79 @@ def _claude_gateway_fingerprint(probe_matrix: list[dict[str, Any]]) -> dict[str,
             if families
             else "未检测到已知网关头族；透明转发仍无法仅凭响应排除。"
         ),
+    }
+
+
+def _claude_gateway_contract_assessment(probe_matrix: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize Claude Code gateway contract preservation without claiming origin."""
+    rows = [redact_secrets(dict(row)) for row in probe_matrix]
+    by_key = {str(row.get("key") or ""): row for row in rows}
+    labels: set[str] = set()
+    evidence_refs: set[str] = set()
+    checks: list[dict[str, Any]] = []
+
+    parameter_row = by_key.get("parameter_error_matrix", {})
+    error_rewrapped = _safe_int(parameter_row.get("error_envelope_mismatch_count")) > 0
+    alias_mismatch = _safe_int(parameter_row.get("alias_capability_mismatch_count")) > 0
+    if error_rewrapped:
+        labels.add("upstream_error_rewrapped")
+        evidence_refs.add("parameter_error_matrix")
+    if alias_mismatch:
+        labels.add("gateway_model_alias_capability_mismatch")
+        evidence_refs.add("parameter_error_matrix")
+    checks.extend(
+        [
+            {"key": "error_passthrough", "status": "warning" if error_rewrapped else "pass"},
+            {"key": "model_alias_capability", "status": "warning" if alias_mismatch else "pass"},
+        ]
+    )
+
+    stream_row = by_key.get("sse_lifecycle", {})
+    stream_buffered = _safe_int(stream_row.get("stream_buffered_count")) > 0
+    if stream_buffered:
+        labels.add("stream_buffered_by_gateway")
+        evidence_refs.add("sse_lifecycle")
+    checks.append({"key": "stream_realtime", "status": "warning" if stream_buffered else "pass"})
+
+    header_row = by_key.get("claude_code_headers", {})
+    header_raw = header_row.get("raw_evidence") if isinstance(header_row.get("raw_evidence"), dict) else {}
+    request_header_names = {str(name).lower() for name in header_raw.get("request_header_names") or []}
+    headers_observed = {"anthropic-beta", "x-claude-code-session-id"}.issubset(request_header_names)
+    checks.append({"key": "claude_code_headers", "status": "pass" if headers_observed else "insufficient_evidence"})
+    if headers_observed:
+        evidence_refs.add("claude_code_headers")
+
+    attribution_row = by_key.get("claude_code_attribution", {})
+    attribution_snapshot = attribution_row.get("request_snapshot") if isinstance(attribution_row.get("request_snapshot"), dict) else {}
+    attribution_sent = attribution_snapshot.get("attribution_first") is True and _safe_int(attribution_snapshot.get("system_block_count")) >= 1
+    attribution_observation = "sent_unverified" if attribution_sent else "not_observed"
+    checks.append({"key": "attribution", "status": "sent_unverified" if attribution_sent else "insufficient_evidence"})
+    if attribution_sent:
+        evidence_refs.add("claude_code_attribution")
+
+    usage_row = by_key.get("usage_tokenizer_matrix", {})
+    usage_scope = str(usage_row.get("usage_scope") or "single_request")
+    checks.append({"key": "usage_scope", "status": usage_scope})
+
+    if labels:
+        status = "warning"
+        interpretation = "检测到 Claude Code 网关契约改写或实时性异常；这属于兼容风险，不证明具体上游来源。"
+    elif headers_observed or attribution_sent or any(key in by_key for key in ("parameter_error_matrix", "sse_lifecycle")):
+        status = "pass"
+        interpretation = "本轮未发现已覆盖的 Claude Code 网关契约异常；契约兼容不证明 Anthropic 官方直连。"
+    else:
+        status = "insufficient_evidence"
+        interpretation = "缺少可评分的 Claude Code 网关契约证据，无法判断字段、错误和流式转发质量。"
+
+    return {
+        "status": status,
+        "labels": sorted(labels),
+        "checks": checks,
+        "evidence_refs": sorted(evidence_refs),
+        "attribution_observation": attribution_observation,
+        "usage_scope": usage_scope,
+        "official_origin_confirmed": False,
+        "interpretation": interpretation,
     }
 
 
@@ -6614,11 +6702,37 @@ async def _integrity_tool_loop_probe(
 def _integrity_response_shape(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
     error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    error_text = " ".join(
+        str(value or "")
+        for value in (
+            error.get("message"),
+            error.get("type"),
+            payload.get("message"),
+            payload.get("msg"),
+            payload.get("code"),
+        )
+    ).lower()
+    family_tokens = [
+        token
+        for token in (
+            "adaptive",
+            "thinking",
+            "output_config",
+            "effort",
+            "tool_choice",
+            "max_tokens",
+            "unknown",
+            "extra",
+        )
+        if token in error_text
+    ]
     return {
         "ok": bool(meta.get("ok")),
         "http_status": meta.get("http_status"),
         "error_type": str(error.get("type") or ""),
         "error_path": str(error.get("param") or error.get("path") or ""),
+        "error_message_family": sorted(family_tokens),
+        "error_envelope_native": payload.get("type") == "error" and isinstance(payload.get("error"), dict),
         "stop_reason": str(payload.get("stop_reason") or ""),
         "request_id_present": bool(meta.get("request_id") or request_id_from_payload(payload)),
         "usage_keys": sorted(str(key) for key in usage),
@@ -6630,7 +6744,15 @@ def _integrity_response_shape(payload: dict[str, Any], meta: dict[str, Any]) -> 
 def _integrity_shapes_match(source: dict[str, Any], candidate: dict[str, Any]) -> bool:
     return all(
         source.get(key) == candidate.get(key)
-        for key in ("ok", "http_status", "error_type", "stop_reason")
+        for key in (
+            "ok",
+            "http_status",
+            "error_type",
+            "error_message_family",
+            "error_envelope_native",
+            "stop_reason",
+            "model",
+        )
     )
 
 
@@ -6665,6 +6787,8 @@ async def _integrity_parameter_matrix(
     cases.append(("thinking_sampling_boundary", boundary))
 
     mismatch_keys: set[str] = set()
+    error_envelope_mismatch_keys: set[str] = set()
+    alias_capability_mismatch_keys: set[str] = set()
     operational = 0
     details: list[dict[str, Any]] = []
     fingerprints: list[dict[str, Any]] = []
@@ -6684,6 +6808,13 @@ async def _integrity_parameter_matrix(
                 status = "match"
             else:
                 mismatch_keys.add(key)
+                if source_shape.get("error_envelope_native") != candidate_shape.get("error_envelope_native"):
+                    error_envelope_mismatch_keys.add(key)
+                if key in {"thinking_forced_tool_conflict", "thinking_sampling_boundary"} and (
+                    candidate_shape.get("model") not in {"", candidate_model}
+                    or source_shape.get("error_message_family") != candidate_shape.get("error_message_family")
+                ):
+                    alias_capability_mismatch_keys.add(key)
                 status = "mismatch"
             details.append({"key": key, "attempt": attempt + 1, "status": status, "source": source_shape, "candidate": candidate_shape})
     return {
@@ -6692,6 +6823,8 @@ async def _integrity_parameter_matrix(
         "status": "pass" if not mismatch_keys and not operational else "warning",
         "repeat_count": repeat_count,
         "protocol_mismatch_count": len(mismatch_keys),
+        "error_envelope_mismatch_count": len(error_envelope_mismatch_keys),
+        "alias_capability_mismatch_count": len(alias_capability_mismatch_keys),
         "operational_failure_count": operational,
         "case_count": len(cases),
         "cases": details,
@@ -6708,7 +6841,7 @@ async def _integrity_stream_probe(
     candidate_model: str,
     repeat_count: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    mismatches = operational = 0
+    mismatches = operational = stream_buffered = 0
     details: list[dict[str, Any]] = []
     fingerprints: list[dict[str, Any]] = []
     required = ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
@@ -6742,14 +6875,38 @@ async def _integrity_stream_probe(
             )
             status = "match" if valid else "mismatch"
             mismatches += int(not valid)
-        details.append({"attempt": attempt + 1, "status": status, "source": source_evidence, "candidate": candidate_evidence})
+            source_total = _safe_int(source_meta.get("latency_ms"))
+            source_first = _safe_int(source_meta.get("first_event_ms"))
+            candidate_total = _safe_int(candidate_meta.get("latency_ms"))
+            candidate_first = _safe_int(candidate_meta.get("first_event_ms"))
+            buffered = (
+                candidate_total >= 500
+                and candidate_first >= int(candidate_total * 0.85)
+                and (source_first <= 0 or candidate_first >= max(source_first * 2, source_first + 300))
+            )
+            stream_buffered += int(buffered)
+            if buffered and status == "match":
+                status = "buffered"
+        details.append(
+            {
+                "attempt": attempt + 1,
+                "status": status,
+                "source": source_evidence,
+                "candidate": candidate_evidence,
+                "source_latency_ms": source_meta.get("latency_ms"),
+                "source_first_event_ms": source_meta.get("first_event_ms"),
+                "candidate_latency_ms": candidate_meta.get("latency_ms"),
+                "candidate_first_event_ms": candidate_meta.get("first_event_ms"),
+            }
+        )
     return {
         "key": "sse_lifecycle",
         "title": "SSE 原始生命周期差分",
-        "status": "pass" if not mismatches and not operational else "warning",
+        "status": "pass" if not mismatches and not operational and not stream_buffered else "warning",
         "repeat_count": repeat_count,
         "protocol_mismatch_count": 1 if mismatches > repeat_count // 2 else 0,
         "mismatch_attempt_count": mismatches,
+        "stream_buffered_count": stream_buffered,
         "operational_failure_count": operational,
         "attempts": details,
         "evidence_refs": [f"sse_lifecycle:{index + 1}" for index in range(repeat_count)],
@@ -6810,6 +6967,7 @@ async def _integrity_usage_matrix(
         "title": "Usage 与 Tokenizer 差分",
         "status": "pass" if not outliers and not operational else "warning",
         "repeat_count": 1,
+        "usage_scope": "single_request",
         "usage_outlier_count": outliers,
         "operational_failure_count": operational,
         "inputs": details,
@@ -10959,9 +11117,20 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
     }
     timeout = httpx.Timeout(connect=10, read=120, write=10, pool=10)
     started = time.perf_counter()
+    first_event_ms: int | None = None
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            response = await client.post(endpoint, headers=headers, json=payload)
+            if payload.get("stream") and hasattr(client, "stream"):
+                chunks: list[str] = []
+                async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
+                    async for chunk in response.aiter_text():
+                        if chunk and first_event_ms is None and "data:" in chunk:
+                            first_event_ms = int((time.perf_counter() - started) * 1000)
+                        chunks.append(chunk)
+                    raw_response_text = "".join(chunks)
+            else:
+                response = await client.post(endpoint, headers=headers, json=payload)
+                raw_response_text = response.text
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         error = redact_text(_message_from_exception(exc))[:1200]
@@ -10979,7 +11148,7 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
     latency_ms = int((time.perf_counter() - started) * 1000)
     request_id = request_id_from_headers(response.headers)
     if payload.get("stream"):
-        parsed = _parse_signature_stream_response(response.text)
+        parsed = _parse_signature_stream_response(raw_response_text)
     else:
         try:
             parsed = response.json()
@@ -11001,6 +11170,7 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
         "request_id": request_id or request_id_from_payload(parsed),
         "message_id": parsed.get("id") if isinstance(parsed, dict) else None,
         "latency_ms": latency_ms,
+        "first_event_ms": first_event_ms,
         "error": error,
         "excerpt": _signature_response_excerpt(parsed),
     }

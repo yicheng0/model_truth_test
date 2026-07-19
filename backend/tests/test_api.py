@@ -7042,6 +7042,26 @@ def test_claude_code_gateway_probe_configs_use_client_contract_without_secrets()
     assert "api_key" not in json.dumps(header_probe, ensure_ascii=False).lower()
 
 
+def test_claude_code_attribution_snapshot_records_position_without_prompt_text() -> None:
+    from app.services import _claude_code_request_snapshot
+
+    config = {
+        "key": "claude_code_attribution",
+        "prompt": "probe",
+        "request_params": {
+            "system_content": [
+                {"type": "text", "text": "You are Claude Code. fingerprint=secret-marker"},
+                {"type": "text", "text": "Only output OK"},
+            ]
+        },
+    }
+    snapshot = _claude_code_request_snapshot(config, {"raw_request": {}})
+
+    assert snapshot["system_block_count"] == 2
+    assert snapshot["attribution_first"] is True
+    assert "secret-marker" not in json.dumps(snapshot)
+
+
 def test_anthropic_request_forwards_only_safe_probe_headers(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -8172,6 +8192,266 @@ def test_gateway_fingerprint_combines_deep_and_standard_probe_headers() -> None:
     assert result["evidence_refs"] == ["response_schema", "route_fingerprint"]
 
 
+def test_gateway_contract_assessment_classifies_contract_anomalies() -> None:
+    from app.services import _claude_gateway_contract_assessment
+
+    result = _claude_gateway_contract_assessment(
+        [
+            {
+                "key": "claude_code_headers",
+                "status": "pass",
+                "raw_evidence": {
+                    "request_header_names": ["anthropic-beta", "x-claude-code-session-id"],
+                },
+            },
+            {
+                "key": "claude_code_attribution",
+                "status": "pass",
+                "request_snapshot": {"system_block_count": 2, "attribution_first": True},
+            },
+            {
+                "key": "parameter_error_matrix",
+                "error_envelope_mismatch_count": 2,
+                "alias_capability_mismatch_count": 1,
+            },
+            {"key": "sse_lifecycle", "stream_buffered_count": 2},
+            {"key": "usage_tokenizer_matrix", "usage_scope": "single_request"},
+        ]
+    )
+
+    assert result["status"] == "warning"
+    assert result["official_origin_confirmed"] is False
+    assert result["labels"] == [
+        "gateway_model_alias_capability_mismatch",
+        "stream_buffered_by_gateway",
+        "upstream_error_rewrapped",
+    ]
+    assert result["attribution_observation"] == "sent_unverified"
+    assert result["usage_scope"] == "single_request"
+
+
+def test_gateway_contract_assessment_reports_clean_contract_without_origin_claim() -> None:
+    from app.services import _claude_gateway_contract_assessment
+
+    result = _claude_gateway_contract_assessment(
+        [
+            {
+                "key": "claude_code_headers",
+                "status": "pass",
+                "raw_evidence": {
+                    "request_header_names": ["anthropic-beta", "x-claude-code-session-id"],
+                },
+            },
+            {
+                "key": "claude_code_attribution",
+                "status": "pass",
+                "request_snapshot": {"system_block_count": 2, "attribution_first": True},
+            },
+            {
+                "key": "parameter_error_matrix",
+                "error_envelope_mismatch_count": 0,
+                "alias_capability_mismatch_count": 0,
+            },
+            {"key": "sse_lifecycle", "stream_buffered_count": 0},
+        ]
+    )
+
+    assert result["status"] == "pass"
+    assert result["labels"] == []
+    assert result["official_origin_confirmed"] is False
+    assert "不证明" in result["interpretation"]
+
+
+def test_integrity_response_shape_records_native_error_envelope_and_family() -> None:
+    from app.services import _integrity_response_shape
+
+    native = _integrity_response_shape(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "thinking adaptive is not supported",
+                "param": "thinking.type",
+            },
+            "request_id": "req_01native",
+        },
+        {"ok": False, "http_status": 400, "request_id": "req_01native"},
+    )
+    wrapped = _integrity_response_shape(
+        {"code": "bad_request", "msg": "thinking adaptive is not supported"},
+        {"ok": False, "http_status": 400},
+    )
+
+    assert native["error_envelope_native"] is True
+    assert native["error_message_family"] == ["adaptive", "thinking"]
+    assert native["error_path"] == "thinking.type"
+    assert wrapped["error_envelope_native"] is False
+    assert wrapped["error_message_family"] == ["adaptive", "thinking"]
+
+
+def test_integrity_shapes_match_rejects_error_rewrap_and_model_mismatch() -> None:
+    from app.services import _integrity_shapes_match
+
+    source = {
+        "ok": False,
+        "http_status": 400,
+        "error_type": "invalid_request_error",
+        "error_message_family": ["adaptive", "thinking"],
+        "error_envelope_native": True,
+        "stop_reason": "",
+        "model": "claude-opus-4-8",
+    }
+    wrapped = {
+        **source,
+        "error_type": "",
+        "error_envelope_native": False,
+    }
+    wrong_model = {
+        **source,
+        "model": "claude-sonnet-4-5",
+    }
+
+    assert _integrity_shapes_match(source, dict(source)) is True
+    assert _integrity_shapes_match(source, wrapped) is False
+    assert _integrity_shapes_match(source, wrong_model) is False
+
+
+def test_integrity_parameter_matrix_counts_error_rewrap_and_alias_mismatch(monkeypatch) -> None:
+    from app.services import _integrity_parameter_matrix
+
+    async def fake_call(endpoint, api_key, payload):  # noqa: ANN001, ARG001
+        is_source = "source" in endpoint
+        if payload.get("thinking"):
+            if is_source:
+                return {
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": "thinking adaptive is not supported"},
+                }, {"ok": False, "http_status": 400}
+            return {
+                "code": "bad_request",
+                "msg": "thinking adaptive is not supported",
+                "model": "claude-sonnet-4-5",
+            }, {"ok": False, "http_status": 400}
+        return {
+            "type": "message",
+            "id": "msg_01shape",
+            "model": payload["model"],
+            "content": [{"type": "text", "text": "OK"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }, {"ok": True, "http_status": 200}
+
+    monkeypatch.setattr("app.services._signature_messages_call", fake_call)
+    row, _ = asyncio.run(
+        _integrity_parameter_matrix(
+            "https://source.example/v1/messages",
+            "source-key",
+            "claude-opus-4-8",
+            "https://candidate.example/v1/messages",
+            "candidate-key",
+            "claude-opus-4-8",
+            3,
+        )
+    )
+
+    assert row["error_envelope_mismatch_count"] == 2
+    assert row["alias_capability_mismatch_count"] == 2
+
+
+def test_integrity_stream_probe_counts_candidate_buffering(monkeypatch) -> None:
+    from app.services import _integrity_stream_probe
+
+    async def fake_call(endpoint, api_key, payload):  # noqa: ANN001, ARG001
+        candidate = "candidate" in endpoint
+        return {
+            "type": "message",
+            "id": "msg_01stream",
+            "model": payload["model"],
+            "content": [{"type": "text", "text": "OK"}],
+            "stop_reason": "end_turn",
+            "stream_evidence": {
+                "event_sequence": [
+                    "message_start",
+                    "content_block_start",
+                    "content_block_delta",
+                    "content_block_stop",
+                    "message_delta",
+                    "message_stop",
+                ],
+                "thinking_signature_order_valid": True,
+                "tool_json_valid": True,
+            },
+        }, {
+            "ok": True,
+            "http_status": 200,
+            "latency_ms": 1000 if candidate else 900,
+            "first_event_ms": 940 if candidate else 120,
+        }
+
+    monkeypatch.setattr("app.services._signature_messages_call", fake_call)
+    row, _ = asyncio.run(
+        _integrity_stream_probe(
+            "https://source.example/v1/messages",
+            "source-key",
+            "claude-opus-4-8",
+            "https://candidate.example/v1/messages",
+            "candidate-key",
+            "claude-opus-4-8",
+            3,
+        )
+    )
+
+    assert row["stream_buffered_count"] == 3
+    assert row["protocol_mismatch_count"] == 0
+    assert row["status"] == "warning"
+
+
+def test_signature_messages_call_stream_records_first_event_timing(monkeypatch) -> None:
+    from app.services import _signature_messages_call
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"request-id": "req_01stream"}
+
+        async def aiter_text(self):
+            yield 'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_01stream","type":"message","content":[]}}\n\n'
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def stream(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return FakeStreamContext()
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    payload, meta = asyncio.run(
+        _signature_messages_call(
+            "https://candidate.example/v1/messages",
+            "sk-secret",
+            {"model": "claude-opus-4-8", "max_tokens": 64, "messages": [], "stream": True},
+        )
+    )
+
+    assert meta["ok"] is True
+    assert isinstance(meta["first_event_ms"], int)
+    assert meta["first_event_ms"] <= meta["latency_ms"]
+    assert payload["stream_evidence"]["event_sequence"] == ["message_start", "message_stop"]
+
+
 def test_claude_code_result_exposes_gateway_fingerprint_separately(monkeypatch) -> None:
     from app.models import Channel
     from app.services import create_claude_code_test
@@ -8189,6 +8469,7 @@ def test_claude_code_result_exposes_gateway_fingerprint_separately(monkeypatch) 
     monkeypatch.setattr("app.services._run_claude_code_gateway_endpoint_probes", fake_gateway_probe)
     payload = asyncio.run(create_claude_code_test(db, candidate, source_channel_id=None, persist_results=False))
     assert payload["upstream_integrity"]["gateway_fingerprint"]["control_plane_families"] == ["apipro", "oneapi"]
+    assert payload["upstream_integrity"]["gateway_contract"]["official_origin_confirmed"] is False
     assert payload["upstream_integrity"]["official_origin_confirmed"] is False
     db.close()
 
