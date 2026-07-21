@@ -8989,7 +8989,13 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
             if not report_needs_alert(report, labels, scheduled):
                 continue
             dedupe_key = alert_dedupe_key(report, labels, scheduled)
-            if scheduled and _recent_open_alert_exists(db, scheduled, report.channel_id, dedupe_key):
+            if scheduled and _recent_open_alert_exists(
+                db,
+                scheduled,
+                report.channel_id,
+                dedupe_key,
+                one_shot=_is_channel_unavailable_evidence(report.evidence or {}),
+            ):
                 continue
             existing = db.scalar(select(ChannelAlert).where(ChannelAlert.report_id == report.id))
             if existing:
@@ -9055,19 +9061,38 @@ def report_needs_alert(report: Report, labels: list[str] | None = None, schedule
 def alert_dedupe_key(report: Report, labels: list[str], scheduled: ScheduledChannelTest | None = None) -> str:
     evidence = report.evidence if isinstance(report.evidence, dict) else {}
     summary = alert_evidence_summary_for_evidence(evidence)
-    locator = (
-        summary.get("model_request_result_id")
-        or summary.get("model_request_message_id")
-        or summary.get("model_request_request_id")
-        or summary.get("signature_relay_message_id")
-        or summary.get("signature_source_message_id")
-        or summary.get("signature_relay_request_id")
-        or summary.get("signature_source_request_id")
-    )
+    locator = None
+    if not _is_channel_unavailable_evidence(evidence):
+        locator = (
+            summary.get("model_request_result_id")
+            or summary.get("model_request_message_id")
+            or summary.get("model_request_request_id")
+            or summary.get("signature_relay_message_id")
+            or summary.get("signature_source_message_id")
+            or summary.get("signature_relay_request_id")
+            or summary.get("signature_source_request_id")
+        )
     label_part = ",".join(sorted(set(labels))) or report.grade
     kind = f"{label_part}|{locator}" if locator else label_part
     raw = f"{scheduled.id if scheduled else '-'}|{report.channel_id}|{kind}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def _is_channel_unavailable_evidence(evidence: dict[str, Any]) -> bool:
+    text_parts: list[str] = []
+    model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    for item in [model_request, *[entry for entry in model_requests if isinstance(entry, dict)], signature]:
+        text_parts.extend(str(item.get(field) or "") for field in ("error", "reason", "raw_error"))
+    text = " ".join(text_parts)
+    return bool(
+        re.search(
+            r"no available channel|暂无可用通道|资源池暂无可用|operation not allowed(?: for this channel)?|model (?:is )?not available",
+            text,
+            re.IGNORECASE,
+        )
+    )
 
 
 def alert_evidence_summary_for_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -9088,20 +9113,27 @@ def alert_evidence_summary_for_evidence(evidence: dict[str, Any]) -> dict[str, A
     }
 
 
-def _recent_open_alert_exists(db: Session, scheduled: ScheduledChannelTest, channel_id: str, dedupe_key: str | None = None) -> bool:
-    if scheduled.quiet_minutes <= 0:
+def _recent_open_alert_exists(
+    db: Session,
+    scheduled: ScheduledChannelTest,
+    channel_id: str,
+    dedupe_key: str | None = None,
+    *,
+    one_shot: bool = False,
+) -> bool:
+    if scheduled.quiet_minutes <= 0 and not one_shot:
         return False
-    since = datetime.now(timezone.utc) - timedelta(minutes=scheduled.quiet_minutes)
     stmt = (
         select(ChannelAlert.id)
         .where(
             ChannelAlert.scheduled_test_id == scheduled.id,
             ChannelAlert.channel_id == channel_id,
-            ChannelAlert.status == "pending_review",
-            ChannelAlert.created_at >= since,
         )
         .limit(1)
     )
+    if not one_shot:
+        since = datetime.now(timezone.utc) - timedelta(minutes=scheduled.quiet_minutes)
+        stmt = stmt.where(ChannelAlert.status == "pending_review", ChannelAlert.created_at >= since)
     if dedupe_key:
         stmt = stmt.where(ChannelAlert.dedupe_key == dedupe_key)
     return bool(db.scalar(stmt))

@@ -3108,6 +3108,44 @@ def test_scheduled_alert_quiet_window_skips_duplicate_pending_alert(monkeypatch)
     assert alerts[0]["run_id"] == first_run_id
 
 
+def test_scheduled_unavailable_channel_alert_is_only_created_once(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample", quiet_minutes=0)
+
+    run_ids = [
+        create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"]),
+        create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"]),
+    ]
+    with SessionLocal() as db:
+        reports = list(db.scalars(select(Report).where(Report.run_id.in_(run_ids)).order_by(Report.run_id)).all())
+        assert len(reports) == 2
+        for index, report in enumerate(reports, start=1):
+            report.evidence = {
+                "labels": ["signature_interop_failed"],
+                "signature_interop": {
+                    "status": "fail",
+                    "reason": "relay 请求失败",
+                    "raw_error": "ValidationException: Operation not allowed for this channel",
+                    "error_http_status": 400,
+                    "error_stage": "relay",
+                    "relay_message_id": f"msg_bdrk_unavailable_{index}",
+                    "relay_request_id": f"request-unavailable-{index}",
+                },
+            }
+        db.commit()
+
+    asyncio.run(create_alerts_for_run(SessionLocal, run_ids[0], schedule["id"]))
+    asyncio.run(create_alerts_for_run(SessionLocal, run_ids[1], schedule["id"]))
+
+    with SessionLocal() as db:
+        alerts = list(db.scalars(select(ChannelAlert).where(ChannelAlert.scheduled_test_id == schedule["id"])).all())
+
+    assert len(alerts) == 1
+    assert alerts[0].run_id == run_ids[0]
+
+
 def test_scheduled_channel_test_retries_failed_runs(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     sleep_calls: list[int] = []
