@@ -26,6 +26,9 @@ export type PatrolModelRequestEvidence = {
 export type PatrolSignatureEvidence = {
   status?: string | null;
   reason?: string | null;
+  rawError?: string | null;
+  errorHttpStatus?: number | null;
+  errorStage?: string | null;
   createdAt?: string | null;
   completedAt?: string | null;
   sourceChannelId?: string | null;
@@ -43,6 +46,24 @@ export type PatrolSignatureEvidence = {
   relayRequestId?: string | null;
   relayMessageChannelType?: string | null;
   signaturePrefixes: string[];
+  requestLogs: PatrolSignatureRequestLog[];
+};
+
+export type PatrolSignatureRequestLog = {
+  stage?: string | null;
+  name?: string | null;
+  status?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  endpoint?: string | null;
+  httpStatus?: number | null;
+  latencyMs?: number | null;
+  messageId?: string | null;
+  requestId?: string | null;
+  responseHeaderRequestId?: string | null;
+  error?: string | null;
+  requestExcerpt?: string | null;
+  responseExcerpt?: string | null;
 };
 
 export type PatrolEvidence = {
@@ -196,6 +217,9 @@ function normalizeSignature(item: Record<string, unknown> | null): PatrolSignatu
   return {
     status: asNullableString(item.status),
     reason: asNullableString(item.reason),
+    rawError: asNullableString(item.raw_error),
+    errorHttpStatus: asNullableNumber(item.error_http_status),
+    errorStage: asNullableString(item.error_stage),
     createdAt: asNullableString(item.created_at),
     completedAt: asNullableString(item.completed_at),
     sourceChannelId: asNullableString(item.source_channel_id),
@@ -213,6 +237,30 @@ function normalizeSignature(item: Record<string, unknown> | null): PatrolSignatu
     relayRequestId: asNullableString(item.relay_request_id),
     relayMessageChannelType: asNullableString(item.relay_message_channel_type),
     signaturePrefixes: asStringArray(item.signature_prefixes),
+    requestLogs: Array.isArray(item.request_logs)
+      ? item.request_logs.map(normalizeSignatureRequestLog).filter((entry): entry is PatrolSignatureRequestLog => Boolean(entry))
+      : [],
+  };
+}
+
+function normalizeSignatureRequestLog(value: unknown): PatrolSignatureRequestLog | null {
+  const item = asRecord(value);
+  if (!item) return null;
+  return {
+    stage: asNullableString(item.stage),
+    name: asNullableString(item.name),
+    status: asNullableString(item.status),
+    startedAt: asNullableString(item.started_at),
+    completedAt: asNullableString(item.completed_at),
+    endpoint: asNullableString(item.endpoint),
+    httpStatus: asNullableNumber(item.http_status),
+    latencyMs: asNullableNumber(item.latency_ms),
+    messageId: asNullableString(item.message_id),
+    requestId: asNullableString(item.request_id),
+    responseHeaderRequestId: asNullableString(item.response_header_request_id),
+    error: asNullableString(item.error),
+    requestExcerpt: asNullableString(item.request_excerpt),
+    responseExcerpt: asNullableString(item.response_excerpt),
   };
 }
 
@@ -240,6 +288,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asNullableString(value: unknown): string | null {
   return typeof value === 'string' && value ? value : null;
+}
+
+function asNullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function asStringArray(value: unknown): string[] {

@@ -5554,6 +5554,7 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
             if calls == 1:
                 return httpx.Response(
                     200,
+                    headers={"x-request-id": "req_source_123"},
                     json={
                         "id": "msg_01source",
                         "type": "message",
@@ -5564,6 +5565,7 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
                 )
             return httpx.Response(
                 400,
+                headers={"request-id": "req_relay_header_123"},
                 json={"type": "error", "error": {"message": "Invalid `signature` in `thinking` block", "request_id": "req_123"}},
                 request=request,
             )
@@ -5610,6 +5612,48 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
     assert "signature 不兼容" in payload["reason"]
     assert "req_123" in payload["relay_raw_excerpt"]
     assert payload["source_message_channel_type"] == "Anthropic"
+    assert payload["source_request_id"] == "req_source_123"
+    assert payload["relay_request_id"] == "req_123"
+    assert payload["error_http_status"] == 400
+    assert payload["error_stage"] == "relay"
+    assert payload["raw_error"]
+    assert payload["request_logs"] == [
+        {
+            "stage": "source",
+            "name": "步骤 A：请求 Source thinking",
+            "status": "ok",
+            "started_at": payload["request_logs"][0]["started_at"],
+            "completed_at": payload["request_logs"][0]["completed_at"],
+            "endpoint": "https://source.example/v1/messages",
+            "http_status": 200,
+            "latency_ms": payload["request_logs"][0]["latency_ms"],
+            "message_id": "msg_01source",
+            "request_id": "req_source_123",
+            "response_header_request_id": "req_source_123",
+            "error": None,
+            "request_excerpt": payload["request_logs"][0]["request_excerpt"],
+            "response_excerpt": payload["request_logs"][0]["response_excerpt"],
+        },
+        {
+            "stage": "relay",
+            "name": "步骤 B：发送 Relay 复用请求",
+            "status": "fail",
+            "started_at": payload["request_logs"][1]["started_at"],
+            "completed_at": payload["request_logs"][1]["completed_at"],
+            "endpoint": "https://relay.example/v1/messages",
+            "http_status": 400,
+            "latency_ms": payload["request_logs"][1]["latency_ms"],
+            "message_id": None,
+            "request_id": "req_123",
+            "response_header_request_id": "req_relay_header_123",
+            "error": payload["request_logs"][1]["error"],
+            "request_excerpt": payload["request_logs"][1]["request_excerpt"],
+            "response_excerpt": payload["request_logs"][1]["response_excerpt"],
+        },
+    ]
+    assert "Invalid `signature`" in payload["request_logs"][1]["error"]
+    assert "req_123" in payload["request_logs"][1]["response_excerpt"]
+    assert "x-api-key" not in payload["request_logs"][0]["request_excerpt"].lower()
     assert payload["steps"][-1]["status"] == "fail"
     assert "signature 不兼容" in payload["steps"][-1]["detail"]
 

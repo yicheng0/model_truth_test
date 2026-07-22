@@ -8330,6 +8330,7 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "request_normalization_notes": result.get("request_normalization_notes") or [],
         "fallback_note": result.get("fallback_note") or SIGNATURE_FALLBACK_NOTE,
         "steps": result.get("steps") or [],
+        "request_logs": result.get("request_logs") or [],
     }
 
 
@@ -9144,6 +9145,9 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
             "signature_interop": {
                 "status": signature.get("status"),
                 "reason": signature.get("reason"),
+                "raw_error": signature.get("raw_error"),
+                "error_http_status": signature.get("error_http_status"),
+                "error_stage": signature.get("error_stage"),
                 "source_channel_id": signature.get("source_channel_id"),
                 "source_channel_name": signature.get("source_channel_name"),
                 "source_channel_provider_type": signature.get("source_channel_provider_type"),
@@ -9162,6 +9166,7 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
                 "source_protocol_profile": signature.get("source_protocol_profile"),
                 "relay_protocol_profile": signature.get("relay_protocol_profile"),
                 "request_normalization_notes": signature.get("request_normalization_notes") or [],
+                "request_logs": signature.get("request_logs") or [],
             },
             "labels": labels,
             "label_explanations": label_explanations,
@@ -11143,6 +11148,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             source_meta,
             success_detail="Source 请求成功",
             fail_detail="Source 请求失败",
+            request_payload=source_payload,
         )
         steps.append(
             {
@@ -11187,6 +11193,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         source_meta,
         success_detail=f"Source 返回 message id：{source_meta.get('message_id') or '-'}",
         fail_detail="Source 请求失败",
+        request_payload=source_payload,
     )
     source_content = response_a.get("content") if isinstance(response_a, dict) else None
     if not isinstance(source_content, list):
@@ -11311,6 +11318,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             relay_meta,
             success_detail="Relay 请求成功",
             fail_detail=reason,
+            request_payload=relay_payload,
         )
         steps.append({"name": "最终判定", "status": "fail", "detail": reason, "excerpt": None})
         return _signature_interop_result(
@@ -11349,6 +11357,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         relay_meta,
         success_detail=f"Relay 返回 {response_b.get('type') or 'unknown'}，message id：{response_b.get('id') or '-'}",
         fail_detail=reason,
+        request_payload=relay_payload,
     )
     steps.append({"name": "最终判定", "status": "ok" if ok else "fail", "detail": reason, "excerpt": None})
     return _signature_interop_result(
@@ -11484,10 +11493,14 @@ def _signature_interop_error_result(source: Channel, relay: Channel, stream: boo
         "relay_message_channel_type": "未知",
         "relay_request_id": None,
         "relay_raw_excerpt": redact_text(error),
+        "raw_error": redact_text(error),
+        "error_http_status": None,
+        "error_stage": "setup",
         "source_protocol_profile": claude_protocol_profile_for_model(source.model_name),
         "relay_protocol_profile": claude_protocol_profile_for_model(relay.model_name),
         "request_normalization_notes": [],
         "fallback_note": SIGNATURE_FALLBACK_NOTE,
+        "request_logs": [],
         "steps": [
             {
                 "name": "Thinking Signature 互通检测",
@@ -11513,7 +11526,20 @@ def _signature_response_excerpt(payload: Any) -> str:
     return str(payload or "")[:1200]
 
 
-def _signature_step_from_meta(name: str, meta: dict[str, Any], *, success_detail: str, fail_detail: str) -> dict[str, Any]:
+def _signature_log_payload(payload: Any) -> str:
+    if isinstance(payload, dict):
+        return json.dumps(_redact_signature_payload(payload), ensure_ascii=False)[:20000]
+    return redact_text(str(payload or ""))[:20000]
+
+
+def _signature_step_from_meta(
+    name: str,
+    meta: dict[str, Any],
+    *,
+    success_detail: str,
+    fail_detail: str,
+    request_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     ok = bool(meta.get("ok"))
     return {
         "name": name,
@@ -11523,9 +11549,14 @@ def _signature_step_from_meta(name: str, meta: dict[str, Any], *, success_detail
         "endpoint": meta.get("endpoint"),
         "http_status": meta.get("http_status"),
         "request_id": meta.get("request_id"),
+        "response_body_request_id": meta.get("response_body_request_id"),
+        "response_header_request_id": meta.get("response_header_request_id"),
         "message_id": meta.get("message_id"),
         "latency_ms": meta.get("latency_ms"),
         "error": meta.get("error"),
+        "started_at": meta.get("started_at"),
+        "completed_at": meta.get("completed_at"),
+        "request_excerpt": _signature_log_payload(request_payload) if request_payload else None,
     }
 
 
@@ -11539,6 +11570,7 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
     }
     timeout = httpx.Timeout(connect=10, read=120, write=10, pool=10)
     started = time.perf_counter()
+    started_at = datetime.now(timezone.utc).isoformat()
     first_event_ms: int | None = None
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -11558,6 +11590,8 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
         error = redact_text(_message_from_exception(exc))[:1200]
         return {"error": error}, {
             "ok": False,
+            "started_at": started_at,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
             "endpoint": endpoint,
             "http_status": None,
             "request_id": None,
@@ -11568,7 +11602,7 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
         }
 
     latency_ms = int((time.perf_counter() - started) * 1000)
-    request_id = request_id_from_headers(response.headers)
+    response_header_request_id = request_id_from_headers(response.headers)
     if payload.get("stream"):
         parsed = _parse_signature_stream_response(raw_response_text)
     else:
@@ -11585,11 +11619,16 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
     error = payload_error if payload_error else (None if ok else _response_error_detail(response) or str(parsed.get("error") or "HTTP request failed"))
     if error:
         error = redact_text(str(error))[:1200]
+    payload_request_id = request_id_from_payload(parsed)
     meta = {
         "ok": ok,
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
         "endpoint": endpoint,
         "http_status": response.status_code,
-        "request_id": request_id or request_id_from_payload(parsed),
+        "request_id": response_header_request_id or payload_request_id,
+        "response_body_request_id": payload_request_id,
+        "response_header_request_id": response_header_request_id,
         "message_id": parsed.get("id") if isinstance(parsed, dict) else None,
         "latency_ms": latency_ms,
         "first_event_ms": first_event_ms,
@@ -11719,6 +11758,37 @@ def _signature_interop_result(
     relay_raw_excerpt = json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:3000]
     source_message_id = response_a.get("id")
     relay_message_id = response_b.get("id")
+    request_logs = []
+    for stage, name in (("source", "步骤 A：请求 Source thinking"), ("relay", "步骤 B：发送 Relay 复用请求")):
+        step = next(
+            (
+                item
+                for item in steps
+                if item.get("name") == name
+                and any(item.get(field) is not None for field in ("http_status", "error", "message_id", "request_id", "latency_ms"))
+            ),
+            None,
+        )
+        if step:
+            response = response_a if stage == "source" else response_b
+            request_logs.append(
+                {
+                    "stage": stage,
+                    "name": name,
+                    "status": step.get("status"),
+                    "started_at": step.get("started_at"),
+                    "completed_at": step.get("completed_at"),
+                    "endpoint": step.get("endpoint"),
+                    "http_status": step.get("http_status"),
+                    "latency_ms": step.get("latency_ms"),
+                    "message_id": step.get("message_id"),
+                    "request_id": step.get("response_body_request_id") or step.get("request_id"),
+                    "response_header_request_id": step.get("response_header_request_id"),
+                    "error": step.get("error"),
+                    "request_excerpt": step.get("request_excerpt"),
+                    "response_excerpt": _signature_log_payload(response),
+                }
+            )
     return {
         "ok": ok,
         "status": "pass" if ok else "fail",
@@ -11742,6 +11812,7 @@ def _signature_interop_result(
         "relay_message_channel_type": classify_claude_message_id(relay_message_id),
         "relay_request_id": request_id_from_payload(response_b),
         "relay_raw_excerpt": relay_raw_excerpt,
+        "request_logs": request_logs,
         "source_protocol_profile": source_protocol_profile,
         "relay_protocol_profile": relay_protocol_profile,
         "request_normalization_notes": sorted({str(note) for note in (request_normalization_notes or []) if str(note)}),

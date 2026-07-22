@@ -256,6 +256,23 @@ class SignatureInteropStepRead(BaseModel):
     error: str | None = None
 
 
+class SignatureInteropRequestLogRead(BaseModel):
+    stage: str
+    name: str
+    status: str
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    endpoint: str | None = None
+    http_status: int | None = None
+    latency_ms: int | None = None
+    message_id: str | None = None
+    request_id: str | None = None
+    response_header_request_id: str | None = None
+    error: str | None = None
+    request_excerpt: str | None = None
+    response_excerpt: str | None = None
+
+
 class SignatureInteropTestRead(BaseModel):
     ok: bool
     status: str
@@ -279,11 +296,15 @@ class SignatureInteropTestRead(BaseModel):
     relay_message_channel_type: str
     relay_request_id: str | None = None
     relay_raw_excerpt: str
+    raw_error: str | None = None
+    error_http_status: int | None = None
+    error_stage: str | None = None
     source_protocol_profile: str | None = None
     relay_protocol_profile: str | None = None
     request_normalization_notes: list[str] = Field(default_factory=list)
     fallback_note: str
     steps: list[SignatureInteropStepRead]
+    request_logs: list[SignatureInteropRequestLogRead] = Field(default_factory=list)
 
 
 class ModelRequestTestCreate(BaseModel):

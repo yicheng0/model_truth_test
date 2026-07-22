@@ -7,7 +7,7 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTool
 import { api, getErrorMessage } from '../api';
 import { accountTypeLabel, formatChannelDisplayName } from '../channelCredentials';
 import { providerTypeLabel, roleColor } from '../channelTaxonomy';
-import { extractPatrolEvidence, formatPatrolChannel, type PatrolEvidence, type PatrolModelRequestEvidence } from '../runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, type PatrolEvidence, type PatrolModelRequestEvidence, type PatrolSignatureRequestLog } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
 import { isComboManualProbeRun, manualProbeSummaryRows } from './runDetailManualProbe';
@@ -157,6 +157,34 @@ function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
   );
 }
 
+function SignatureRequestLogDetail({ item }: { item: PatrolSignatureRequestLog }) {
+  return (
+    <div className="patrol-probe-detail">
+      <div className="patrol-probe-meta-grid">
+        <div><span>时间</span><Typography.Text>{formatDateTime(item.completedAt ?? item.startedAt)}</Typography.Text></div>
+        <div><span>HTTP 状态</span><Typography.Text code>{item.httpStatus ?? '-'}</Typography.Text></div>
+        <div><span>Message ID</span><SignatureIdText value={item.messageId} /></div>
+        <div><span>Request ID</span><SignatureIdText value={item.requestId} /></div>
+        <div><span>响应头 Request ID</span><SignatureIdText value={item.responseHeaderRequestId} /></div>
+        <div><span>耗时</span><Typography.Text>{item.latencyMs === null || item.latencyMs === undefined ? '-' : `${item.latencyMs} ms`}</Typography.Text></div>
+        <div className="full"><span>Endpoint</span><Typography.Text copyable={item.endpoint ? { text: item.endpoint } : false}>{item.endpoint || '-'}</Typography.Text></div>
+      </div>
+      <div className="patrol-probe-detail-row">
+        <span>错误</span>
+        <Typography.Text type={item.error ? 'danger' : undefined}>{item.error || '-'}</Typography.Text>
+      </div>
+      <div className="patrol-probe-detail-row full">
+        <span>脱敏请求体</span>
+        <pre className="patrol-probe-response">{item.requestExcerpt || '-'}</pre>
+      </div>
+      <div className="patrol-probe-detail-row full">
+        <span>脱敏原始响应</span>
+        <pre className="patrol-probe-response">{item.responseExcerpt || '-'}</pre>
+      </div>
+    </div>
+  );
+}
+
 type PatrolFocus = {
   reportId: string | null;
   resultId: string | null;
@@ -196,15 +224,28 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
     return <Empty description="暂无巡检证据" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
   }
   const signature = evidence.signature;
+  const signatureRequestLogs = signature?.requestLogs ?? [];
+  const visibleModelRequests = evidence.modelRequests.filter((item) => (
+    item.resultId || item.messageId || item.requestId || item.providerEndpoint || item.error
+    || item.responseText || item.rawResponseText || item.labels.length
+  ));
   const classificationText = evidence.classificationLabel || (evidence.classificationStatus === 'aws_resource' ? 'AWS 资源' : evidence.classificationStatus === 'claude' ? 'Claude 资源' : '');
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div className="channel-pair-grid">
-        <div className="monitor-stat-card"><span>真实请求探针</span><strong>{evidence.modelRequests.length}</strong></div>
+        <div className="monitor-stat-card"><span>真实请求探针</span><strong>{visibleModelRequests.length}</strong></div>
         <div className="monitor-stat-card"><span>Signature</span><strong><Tag color={evidenceStatusColor(signature?.status)}>{signature?.status ?? '待确认'}</Tag></strong></div>
       </div>
       {classificationText ? <Typography.Text type="secondary">判定：{classificationText}{evidence.classificationReason ? `，${evidence.classificationReason}` : ''}</Typography.Text> : null}
+      {signature?.status === 'fail' ? (
+        <Alert
+          type="error"
+          showIcon
+          message={`Signature 失败${signature.errorStage ? ` · ${signature.errorStage}` : ''}${signature.errorHttpStatus ? ` · HTTP ${signature.errorHttpStatus}` : ''}`}
+          description={signature.rawError || signature.reason || '未记录具体错误'}
+        />
+      ) : null}
       {evidence.aiJudge ? (
         <Alert
           type={evidence.aiJudge.classification_status === 'anomaly' ? 'warning' : 'info'}
@@ -213,13 +254,13 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
           description={`裁判：${evidence.aiJudge.judge_channel_name ?? evidence.aiJudge.judge_channel_id ?? (evidence.aiJudge.fallback ? '本地兜底' : '-')}；置信度：${typeof evidence.aiJudge.confidence === 'number' ? Math.round(evidence.aiJudge.confidence * 100) + '%' : '-'}；${evidence.aiJudge.reason ?? ''}`}
         />
       ) : null}
-      {evidence.modelRequests[0] ? (
+      {visibleModelRequests[0] ? (
         <Typography.Text type="secondary">
-          Message ID：{evidence.modelRequests[0].messageId ?? '-'} · Request ID：{evidence.modelRequests[0].requestId ?? '-'}
+          Message ID：{visibleModelRequests[0].messageId ?? '-'} · Request ID：{visibleModelRequests[0].requestId ?? '-'}
         </Typography.Text>
       ) : null}
       {evidence.detectedProviderHint ? <Typography.Paragraph className="report-summary-text">{evidence.detectedProviderHint}</Typography.Paragraph> : null}
-      <div ref={probeContainerRef}>
+      {visibleModelRequests.length ? <div ref={probeContainerRef}>
       <Table
         className="patrol-probe-table"
         rowClassName={(item) => {
@@ -227,7 +268,7 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
           return rowKey === highlightedProbeKey ? 'patrol-focused-row' : '';
         }}
         rowKey={(item) => item.key ?? item.title ?? item.resultId ?? item.messageId ?? 'model-request'}
-        dataSource={evidence.modelRequests}
+        dataSource={visibleModelRequests}
         pagination={false}
         scroll={{ x: 980 }}
         expandable={{
@@ -253,7 +294,7 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
           },
         ]}
       />
-      </div>
+      </div> : null}
       {signature ? (
         <div
           ref={signaturePanelRef}
@@ -283,6 +324,28 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
         <Typography.Text type="secondary">Signature 前缀：{signature.signaturePrefixes.join(', ')}</Typography.Text>
       ) : null}
       {signature?.reason ? <Typography.Text>{signature.reason}</Typography.Text> : null}
+      {signatureRequestLogs.length ? (
+        <div className="patrol-signature-logs">
+          <Typography.Title level={5}>Signature 请求日志</Typography.Title>
+          <Table
+            rowKey={(item, index) => `${item.stage ?? 'request'}:${item.startedAt ?? index}`}
+            dataSource={signatureRequestLogs}
+            pagination={false}
+            size="small"
+            expandable={{ expandedRowRender: (item) => <SignatureRequestLogDetail item={item} />, rowExpandable: () => true }}
+            columns={[
+              { title: '阶段', width: 100, render: (_, item) => item.stage === 'source' ? 'Source' : item.stage === 'relay' ? 'Relay' : item.stage ?? '-' },
+              { title: '状态', width: 90, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '成功' : '失败'}</Tag> },
+              { title: '时间', width: 180, render: (_, item) => formatDateTime(item.completedAt ?? item.startedAt) },
+              { title: 'HTTP', width: 90, render: (_, item) => item.httpStatus ?? '-' },
+              { title: 'Message ID', width: 210, render: (_, item) => <SignatureIdText value={item.messageId} /> },
+              { title: 'Request ID', width: 210, render: (_, item) => <SignatureIdText value={item.requestId} /> },
+              { title: '错误', render: (_, item) => <Typography.Text type={item.error ? 'danger' : undefined}>{compactPatrolText(item.error)}</Typography.Text> },
+            ]}
+            scroll={{ x: 1080 }}
+          />
+        </div>
+      ) : null}
       {evidence.labels.length ? (
         <Space wrap>{evidence.labels.map((label) => <Tag key={label} color={label === 'patrol_probe_passed' ? 'green' : 'red'}>{evidence.labelExplanations[label] ?? label}</Tag>)}</Space>
       ) : null}

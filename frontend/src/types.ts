@@ -185,6 +185,9 @@ export interface TopEvidenceItem {
 export interface SignatureInteropEvidence {
   status?: 'pass' | 'fail' | 'skipped' | string;
   reason?: string | null;
+  raw_error?: string | null;
+  error_http_status?: number | null;
+  error_stage?: string | null;
   source_channel_id?: string | null;
   source_channel_name?: string | null;
   source_channel_account_type?: string | null;
@@ -200,8 +203,26 @@ export interface SignatureInteropEvidence {
   relay_request_id?: string | null;
   relay_message_channel_type?: string | null;
   signature_prefixes?: string[];
+  request_logs?: SignatureInteropRequestLog[];
   created_at?: string | null;
   completed_at?: string | null;
+}
+
+export interface SignatureInteropRequestLog {
+  stage?: string | null;
+  name?: string | null;
+  status?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  endpoint?: string | null;
+  http_status?: number | null;
+  latency_ms?: number | null;
+  message_id?: string | null;
+  request_id?: string | null;
+  response_header_request_id?: string | null;
+  error?: string | null;
+  request_excerpt?: string | null;
+  response_excerpt?: string | null;
 }
 
 export interface ReportEvidence {
@@ -321,6 +342,10 @@ export type SignatureInteropResult = {
   relay_message_channel_type: string;
   relay_request_id?: string | null;
   relay_raw_excerpt: string;
+  raw_error?: string | null;
+  error_http_status?: number | null;
+  error_stage?: string | null;
+  request_logs?: SignatureInteropRequestLog[];
   source_protocol_profile?: string | null;
   relay_protocol_profile?: string | null;
   request_normalization_notes?: string[];
@@ -1525,6 +1550,9 @@ export type ScheduledChannelTest = {
     signature_interop?: {
       status?: 'pass' | 'fail' | 'skipped' | string;
       reason?: string | null;
+      raw_error?: string | null;
+      error_http_status?: number | null;
+      error_stage?: string | null;
       source_channel_id?: string | null;
       source_channel_name?: string | null;
       relay_channel_id?: string | null;
@@ -1534,6 +1562,7 @@ export type ScheduledChannelTest = {
       relay_message_id?: string | null;
       relay_message_channel_type?: string | null;
       signature_prefixes?: string[];
+      request_logs?: SignatureInteropRequestLog[];
     };
     labels?: string[];
     label_explanations?: Array<{ label: string; description: string }>;

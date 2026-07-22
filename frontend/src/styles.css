@@ -654,6 +654,10 @@ textarea:focus-visible,
   gap: 4px;
 }
 
+.patrol-probe-meta-grid .full {
+  grid-column: 1 / -1;
+}
+
 .patrol-probe-meta-grid span,
 .patrol-probe-detail-row > span {
   color: var(--text-muted);
@@ -685,6 +689,15 @@ textarea:focus-visible,
 
 .patrol-signature-summary .ant-typography {
   overflow-wrap: anywhere;
+}
+
+.patrol-signature-logs {
+  display: grid;
+  gap: 8px;
+}
+
+.patrol-signature-logs h5.ant-typography {
+  margin: 0;
 }
 
 .highlight-table-row > td {

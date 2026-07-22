@@ -90,6 +90,9 @@ describe('runs utilities', () => {
             signature_interop: {
               status: 'fail',
               reason: 'relay 未接受 signature',
+              raw_error: 'Invalid signature request_id=req_relay',
+              error_http_status: 400,
+              error_stage: 'relay',
               created_at: '2026-05-16T01:02:04Z',
               completed_at: '2026-05-16T01:02:05Z',
               source_channel_id: 'source_1',
@@ -103,6 +106,36 @@ describe('runs utilities', () => {
               relay_request_id: 'req_relay',
               relay_message_channel_type: 'Claude/Anthropic',
               signature_prefixes: ['sig-abc'],
+              request_logs: [
+                {
+                  stage: 'source',
+                  name: '步骤 A：请求 Source thinking',
+                  status: 'ok',
+                  started_at: '2026-05-16T01:02:04Z',
+                  completed_at: '2026-05-16T01:02:04Z',
+                  endpoint: 'https://source.example/v1/messages',
+                  http_status: 200,
+                  latency_ms: 120,
+                  message_id: 'msg_source',
+                  request_id: 'req_source',
+                  request_excerpt: '{"model":"claude"}',
+                  response_excerpt: '{"id":"msg_source"}',
+                },
+                {
+                  stage: 'relay',
+                  name: '步骤 B：发送 Relay 复用请求',
+                  status: 'fail',
+                  started_at: '2026-05-16T01:02:04Z',
+                  completed_at: '2026-05-16T01:02:05Z',
+                  endpoint: 'https://relay.example/v1/messages',
+                  http_status: 400,
+                  latency_ms: 350,
+                  request_id: 'req_relay',
+                  error: 'Invalid signature',
+                  request_excerpt: '{"messages":[]}',
+                  response_excerpt: '{"error":"Invalid signature"}',
+                },
+              ],
             },
           },
         },
@@ -141,6 +174,18 @@ describe('runs utilities', () => {
       relayMessageId: 'msg_relay',
       relayRequestId: 'req_relay',
       signaturePrefixes: ['sig-abc'],
+      rawError: 'Invalid signature request_id=req_relay',
+      errorHttpStatus: 400,
+      errorStage: 'relay',
+    });
+    expect(evidence?.signature?.requestLogs).toHaveLength(2);
+    expect(evidence?.signature?.requestLogs[1]).toMatchObject({
+      stage: 'relay',
+      status: 'fail',
+      httpStatus: 400,
+      requestId: 'req_relay',
+      error: 'Invalid signature',
+      responseExcerpt: '{"error":"Invalid signature"}',
     });
   });
 

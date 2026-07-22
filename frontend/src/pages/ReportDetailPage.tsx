@@ -261,8 +261,37 @@ export default function ReportDetailPage() {
                   <div><span>Relay Message ID</span><strong>{compactId(signatureInterop.relay_message_id)}</strong></div>
                   <div><span>Relay Request ID</span><strong>{compactId(signatureInterop.relay_request_id)}</strong></div>
                   <div><span>Signature 前缀</span><strong>{arrayValue(signatureInterop.signature_prefixes).join(', ') || '-'}</strong></div>
+                  <div><span>失败阶段</span><strong>{stringValue(signatureInterop.error_stage)}</strong></div>
+                  <div><span>HTTP 状态</span><strong>{String(signatureInterop.error_http_status ?? '-')}</strong></div>
                 </div>
                 {signatureInterop.reason ? <Typography.Text type="secondary">{String(signatureInterop.reason)}</Typography.Text> : null}
+                {signatureInterop.raw_error ? <Alert type="error" showIcon message="原始错误" description={String(signatureInterop.raw_error)} /> : null}
+                {arrayValue(signatureInterop.request_logs).length ? (
+                  <Table
+                    rowKey={(row, index) => String(row.stage ?? row.started_at ?? index)}
+                    dataSource={arrayValue(signatureInterop.request_logs) as Array<Record<string, unknown>>}
+                    pagination={false}
+                    size="small"
+                    expandable={{
+                      expandedRowRender: (row) => (
+                        <div className="patrol-probe-detail">
+                          <div className="patrol-probe-detail-row full"><span>脱敏请求体</span><pre className="patrol-probe-response">{stringValue(row.request_excerpt)}</pre></div>
+                          <div className="patrol-probe-detail-row full"><span>脱敏原始响应</span><pre className="patrol-probe-response">{stringValue(row.response_excerpt)}</pre></div>
+                        </div>
+                      ),
+                    }}
+                    columns={[
+                      { title: '阶段', width: 100, render: (_, row) => stringValue(row.stage) },
+                      { title: '状态', width: 90, render: (_, row) => <Tag color={row.status === 'ok' ? 'green' : 'red'}>{row.status === 'ok' ? '成功' : '失败'}</Tag> },
+                      { title: '时间', width: 180, render: (_, row) => formatDateTime(String(row.completed_at ?? row.started_at ?? '')) },
+                      { title: 'HTTP', width: 90, render: (_, row) => String(row.http_status ?? '-') },
+                      { title: 'Message ID', width: 190, render: (_, row) => compactId(row.message_id) },
+                      { title: 'Request ID', width: 190, render: (_, row) => compactId(row.request_id) },
+                      { title: '错误', render: (_, row) => stringValue(row.error) },
+                    ]}
+                    scroll={{ x: 950 }}
+                  />
+                ) : null}
               </div>
             ) : null}
             {isArenaReport ? (
