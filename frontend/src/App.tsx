@@ -25,6 +25,7 @@ const ReportDetailPage = lazy(() => import('./pages/ReportDetailPage'));
 const ComparePage = lazy(() => import('./pages/ComparePage'));
 const ResourceLogManagement = lazy(() => import('./pages/ResourceLogManagement'));
 const Probes = lazy(() => import('./pages/Probes'));
+const QuickCheck = lazy(() => import('./pages/QuickCheck'));
 
 const { Content, Sider } = Layout;
 const SIDEBAR_COLLAPSED_KEY = 'apipro.sidebar.collapsed';
@@ -67,6 +68,13 @@ const navItems = [
 
 function Shell() {
   const location = useLocation();
+  if (location.pathname === '/check') {
+    return (
+      <Suspense fallback={<div className="route-loading">加载中...</div>}>
+        <QuickCheck />
+      </Suspense>
+    );
+  }
   const selected = `/${location.pathname.split('/')[1] || ''}`;
   const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
 

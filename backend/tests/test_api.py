@@ -7074,9 +7074,10 @@ def test_claude_code_gateway_probe_configs_use_client_contract_without_secrets()
     attribution_probe = configs["claude_code_attribution"]
 
     assert header_probe["request_params"]["request_headers"]["x-claude-code-session-id"].startswith("ccprobe-")
-    assert "anthropic-beta" in header_probe["request_params"]["request_headers"]
+    assert "claude-code-20250219" in header_probe["request_params"]["request_headers"]["anthropic-beta"]
     assert attribution_probe["request_params"]["system_content"][0]["type"] == "text"
-    assert "Claude Code" in attribution_probe["request_params"]["system_content"][0]["text"]
+    assert attribution_probe["request_params"]["system_content"][0]["text"].startswith("x-anthropic-billing-header: cc_version=")
+    assert "Claude Agent SDK" in attribution_probe["request_params"]["system_content"][1]["text"]
     assert "api_key" not in json.dumps(header_probe, ensure_ascii=False).lower()
 
 
@@ -7223,7 +7224,7 @@ def test_gateway_endpoint_probes_validate_schema_and_strip_runtime_values(monkey
     assert [probe["status"] for probe in probes] == ["warning", "warning"]
     assert all(probe["score"] == 0 for probe in probes)
     assert captured_headers[1]["x-api-key"] == opaque_key
-    assert captured_headers[1]["authorization"] == f"Bearer {opaque_key}"
+    assert "authorization" not in captured_headers[1]
     serialized = json.dumps(probes)
     assert opaque_key not in serialized
     assert session_value not in serialized
@@ -7752,6 +7753,28 @@ def test_claude_fingerprint_keeps_signature_support_separate_from_claude_code_re
     assert classification["capability_flags"]["signature_supported"] is True
     assert classification["capability_flags"]["is_claude_code_like"] is False
     assert classification["capability_flags"]["claude_code_gateway_compatible"] is False
+
+
+def test_claude_code_gateway_compatibility_uses_current_cli_contract_without_session_header() -> None:
+    from app.services import _claude_code_capability_flags
+
+    probes = [
+        {
+            "key": "claude_code_headers",
+            "status": "pass",
+            "raw_evidence": {"request_header_names": ["anthropic-beta"]},
+        },
+        {
+            "key": "claude_code_attribution",
+            "status": "pass",
+            "request_snapshot": {"system_block_count": 3, "attribution_first": True},
+        },
+        {"key": "gateway_model_discovery", "status": "pass"},
+    ]
+
+    flags = _claude_code_capability_flags(probes, claude_score=90, claude_code_score=0)
+
+    assert flags["claude_code_gateway_compatible"] is True
 
 
 def test_claude_fingerprint_classifies_openai_shape_as_non_claude() -> None:
@@ -8354,6 +8377,30 @@ def test_gateway_contract_assessment_reports_clean_contract_without_origin_claim
     assert result["labels"] == []
     assert result["official_origin_confirmed"] is False
     assert "不证明" in result["interpretation"]
+
+
+def test_gateway_contract_accepts_version_specific_cli_evidence_without_session_header() -> None:
+    from app.services import _claude_gateway_contract_assessment
+
+    result = _claude_gateway_contract_assessment(
+        [
+            {
+                "key": "claude_code_headers",
+                "status": "pass",
+                "raw_evidence": {"request_header_names": ["anthropic-beta"]},
+            },
+            {
+                "key": "claude_code_attribution",
+                "status": "pass",
+                "request_snapshot": {"system_block_count": 3, "attribution_first": True},
+            },
+            {"key": "gateway_model_discovery", "status": "pass"},
+        ]
+    )
+
+    assert result["status"] == "pass"
+    header_check = next(item for item in result["checks"] if item["key"] == "claude_code_headers")
+    assert header_check["status"] == "partial_version_specific"
 
 
 def test_integrity_response_shape_records_native_error_envelope_and_family() -> None:

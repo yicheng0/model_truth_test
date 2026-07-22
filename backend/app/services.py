@@ -4593,7 +4593,7 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
                 "max_tokens": 48,
                 "request_headers": {
                     "x-claude-code-session-id": "ccprobe-session-731",
-                    "anthropic-beta": "prompt-caching-2024-07-31",
+                    "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24",
                 },
             },
             "scoring_rules": {"required_exact": "CC-HEADERS-731"},
@@ -4609,11 +4609,9 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
                 "system_content": [
                     {
                         "type": "text",
-                        "text": (
-                            "You are Claude Code, Anthropic's official CLI for Claude. "
-                            "Client version: 2.1.181. Conversation fingerprint: ccprobe-attribution-731."
-                        ),
+                        "text": "x-anthropic-billing-header: cc_version=2.1.84.probe; cc_entrypoint=sdk-cli; cch=00000;",
                     },
+                    {"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."},
                     {"type": "text", "text": "Only output CC-ATTRIBUTION-731."},
                 ],
             },
@@ -5182,7 +5180,7 @@ async def _run_claude_code_gateway_endpoint_probes(
                 "Claude Code 网关模型发现",
                 "GET",
                 f"{base_url}/v1/models?limit=1000",
-                {"x-api-key": api_key, "authorization": f"Bearer {api_key}"},
+                {"x-api-key": api_key},
                 None,
             ),
         ]
@@ -6088,8 +6086,11 @@ def _claude_code_capability_flags(probes: list[dict[str, Any]], claude_score: fl
     by_key = {str(probe.get("key") or ""): probe for probe in probes}
     endpoint_supported = any(by_key.get(key, {}).get("status") == "pass" for key in ("gateway_count_tokens", "gateway_model_discovery"))
     header_raw = by_key.get("claude_code_headers", {}).get("raw_evidence") or {}
-    headers_sent = "x-claude-code-session-id" in {str(item).lower() for item in header_raw.get("request_header_names") or []}
-    gateway_compatible = claude_score >= 75 and endpoint_supported and headers_sent
+    request_header_names = {str(item).lower() for item in header_raw.get("request_header_names") or []}
+    beta_header_sent = "anthropic-beta" in request_header_names
+    attribution_snapshot = by_key.get("claude_code_attribution", {}).get("request_snapshot") or {}
+    attribution_sent = attribution_snapshot.get("attribution_first") is True
+    gateway_compatible = claude_score >= 75 and endpoint_supported and beta_header_sent and attribution_sent
     return {
         "is_claude_like": claude_score >= 75,
         "is_claude_code_like": False,
@@ -6408,9 +6409,12 @@ def _claude_gateway_contract_assessment(probe_matrix: list[dict[str, Any]]) -> d
     header_row = by_key.get("claude_code_headers", {})
     header_raw = header_row.get("raw_evidence") if isinstance(header_row.get("raw_evidence"), dict) else {}
     request_header_names = {str(name).lower() for name in header_raw.get("request_header_names") or []}
-    headers_observed = {"anthropic-beta", "x-claude-code-session-id"}.issubset(request_header_names)
-    checks.append({"key": "claude_code_headers", "status": "pass" if headers_observed else "insufficient_evidence"})
-    if headers_observed:
+    beta_observed = "anthropic-beta" in request_header_names
+    session_header_observed = "x-claude-code-session-id" in request_header_names
+    headers_observed = beta_observed and session_header_observed
+    header_status = "pass" if headers_observed else "partial_version_specific" if beta_observed else "insufficient_evidence"
+    checks.append({"key": "claude_code_headers", "status": header_status})
+    if beta_observed:
         evidence_refs.add("claude_code_headers")
 
     attribution_row = by_key.get("claude_code_attribution", {})
@@ -6428,7 +6432,7 @@ def _claude_gateway_contract_assessment(probe_matrix: list[dict[str, Any]]) -> d
     if labels:
         status = "warning"
         interpretation = "检测到 Claude Code 网关契约改写或实时性异常；这属于兼容风险，不证明具体上游来源。"
-    elif headers_observed or attribution_sent or any(key in by_key for key in ("parameter_error_matrix", "sse_lifecycle")):
+    elif beta_observed or attribution_sent or any(key in by_key for key in ("parameter_error_matrix", "sse_lifecycle", "gateway_model_discovery")):
         status = "pass"
         interpretation = "本轮未发现已覆盖的 Claude Code 网关契约异常；契约兼容不证明 Anthropic 官方直连。"
     else:

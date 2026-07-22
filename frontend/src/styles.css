@@ -3872,3 +3872,218 @@ textarea:focus-visible,
     padding: 10px 12px 12px !important;
   }
 }
+.quick-check-page {
+  min-height: 100vh;
+  padding: 0 24px 72px;
+  color: #171a17;
+  background: #f7f9f7;
+}
+
+.quick-check-topbar {
+  width: min(1120px, 100%);
+  height: 64px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #e3e8e3;
+}
+
+.quick-check-topbar > span,
+.quick-check-card-head .ant-typography {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.quick-check-hero {
+  width: min(1120px, 100%);
+  margin: 0 auto;
+  padding: 72px 0 36px;
+}
+
+.quick-check-hero .ant-typography.ant-typography {
+  margin-bottom: 8px;
+}
+
+.quick-check-hero h1.ant-typography {
+  max-width: 780px;
+  margin-top: 10px;
+  font-size: 52px;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+
+.quick-check-hero p.ant-typography {
+  max-width: 720px;
+  font-size: 17px;
+  color: #687068;
+}
+
+.quick-check-eyebrow {
+  color: #177a49;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.quick-check-config,
+.quick-check-result-card,
+.quick-check-progress,
+.quick-check-history,
+.quick-check-footnote {
+  width: min(1120px, 100%);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.quick-check-config,
+.quick-check-result-card,
+.quick-check-progress {
+  border: 1px solid #dfe5df;
+  border-radius: 8px;
+  box-shadow: 0 14px 36px rgba(25, 42, 31, 0.06);
+}
+
+.quick-check-config .ant-card-body,
+.quick-check-result-card .ant-card-body {
+  padding: 30px 32px;
+}
+
+.quick-check-card-head,
+.quick-check-actions,
+.quick-check-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.quick-check-card-head {
+  margin-bottom: 22px;
+}
+
+.quick-check-card-head h3.ant-typography {
+  margin: 0;
+}
+
+.quick-check-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(180px, 0.6fr) minmax(0, 1.2fr);
+  gap: 12px;
+}
+
+.quick-check-actions .ant-btn {
+  min-width: 176px;
+  height: 48px;
+  background: #087f4e;
+  border-color: #087f4e;
+}
+
+.quick-check-progress {
+  margin-top: 16px;
+}
+
+.quick-check-progress .ant-card-body {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+}
+
+.quick-check-result-head {
+  align-items: flex-start;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #e5e9e5;
+}
+
+.quick-check-result-head h2.ant-typography {
+  margin: 6px 0;
+}
+
+.quick-score {
+  min-width: 120px;
+  text-align: right;
+  color: #0a7046;
+}
+
+.quick-score strong {
+  font-size: 48px;
+}
+
+.quick-check-row {
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid #edf0ed;
+}
+
+.quick-check-icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #667066;
+  background: #edf0ed;
+}
+
+.quick-check-row.success .quick-check-icon { color: #087f4e; background: #e7f7ef; }
+.quick-check-row.error .quick-check-icon { color: #c73737; background: #fdecec; }
+.quick-check-row.warning .quick-check-icon { color: #a65d00; background: #fff3df; }
+
+.quick-check-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.quick-check-copy .ant-typography {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-evidence {
+  max-height: 420px;
+  overflow: auto;
+  padding: 16px;
+  border-radius: 6px;
+  color: #d9eee1;
+  background: #17221b;
+}
+
+.quick-check-history {
+  margin-top: 28px;
+}
+
+.quick-history-row {
+  min-height: 50px;
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid #e3e8e3;
+}
+
+.quick-check-footnote {
+  display: block;
+  margin-top: 28px;
+  color: #7a827a;
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .quick-check-page { padding: 0 14px 48px; }
+  .quick-check-hero { padding: 44px 0 24px; }
+  .quick-check-hero h1.ant-typography { font-size: 36px; }
+  .quick-check-fields { grid-template-columns: 1fr; gap: 0; }
+  .quick-check-card-head, .quick-check-actions, .quick-check-result-head { align-items: stretch; flex-direction: column; }
+  .quick-check-actions .ant-btn { width: 100%; }
+  .quick-score { text-align: left; }
+  .quick-check-copy .ant-typography { white-space: normal; }
+  .quick-history-row { grid-template-columns: 1fr auto; padding: 10px 0; }
+  .quick-history-row .ant-typography { grid-column: 1 / -1; grid-row: 2; }
+}

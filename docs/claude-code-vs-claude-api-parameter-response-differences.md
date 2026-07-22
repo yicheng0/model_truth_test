@@ -1,6 +1,6 @@
 # Claude Code 与 Claude 官方 API 参数及响应差异调研
 
-> 调研日期：2026-07-19
+> 调研日期：2026-07-19；2026-07-21 使用 Claude Code 2.1.84 重新抓包校准
 > 适用对象：Claude 渠道兼容性、Claude Code 网关兼容性、协议纯度与上游完整性检测
 > 事实来源：以 Anthropic 官方 Claude Code 文档和 Claude Platform API 文档为主；本文不把规划文档或第三方网关实现当作官方协议事实。
 
@@ -24,6 +24,46 @@ Claude Code 不是一个“参数名不同的 `/v1/messages` 客户端”，而�
 - 资源来源必须另行判定：`claude auth status --json` 的本机 `oauth_token` / `firstParty` 只确认本机 CLI 登录状态；远程 `/v1/messages` 的 signature、attribution 和 gateway endpoint 不能证明该 OAuth 被远程渠道使用。当前沙箱能力检查使用 `--bare`，按 Claude Code 规则不读取 OAuth/keychain，因此“本机 OAuth 状态”和“本次 CLI 运行使用的认证”必须分别记录。
 - Claude Code 网关必须把 `anthropic-version`、`anthropic-beta` 和 Anthropic 格式 body 当作开放集合转发。固定 allowlist、改写 system 数组、重包错误或缓冲 SSE 都会造成可观测差异。
 - `x-claude-code-session-id`、attribution、`/v1/models` 或 `count_tokens` 成功只证明 Claude Code 契约兼容，**不能单独证明 Anthropic 官方直连**。
+
+### 1.1 Claude Code 2.1.84 本地抓包结果
+
+本次将隔离配置目录下的 Claude Code 2.1.84 指向本地 Anthropic-format mock endpoint，使用假 API key，未发送任何真实凭证或业务内容。捕获到的推理请求为：
+
+```text
+HEAD /
+POST /v1/messages?beta=true
+```
+
+推理请求的重要字段：
+
+```json
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 32000,
+  "stream": true,
+  "thinking": {"type": "adaptive"},
+  "output_config": {"effort": "medium"},
+  "context_management": {},
+  "metadata": {"user_id": "包含 device/session 标识的 JSON 字符串"},
+  "system": [
+    {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.84..."},
+    {"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.", "cache_control": {"type": "ephemeral"}},
+    {"type": "text", "text": "调用者提供的 system prompt", "cache_control": {"type": "ephemeral"}}
+  ]
+}
+```
+
+默认工具模式发送 22 个 Claude Code 工具 schema；`--tools ''` 时仍保留同一套 Messages body 框架，但 `tools` 为空数组。捕获到的 beta header 为：
+
+```text
+claude-code-20250219,
+interleaved-thinking-2025-05-14,
+context-management-2025-06-27,
+prompt-caching-scope-2026-01-05,
+effort-2025-11-24
+```
+
+这次 2.1.84 自定义 Base URL 抓包没有出现 `x-claude-code-session-id`。官方网关协议仍把该头列为 Claude Code 会话归因字段，因此检测器应把它作为**版本和运行模式相关的增强证据**，不能作为所有版本的硬性必要条件。
 
 ## 2. 比较边界
 
@@ -66,7 +106,7 @@ CLI 的主要参数族包括：
 
 - 推理：`POST /v1/messages?beta=true`，网关按 path 匹配，不要要求完整 URL 完全相等。
 - token 计数：`POST /v1/messages/count_tokens`，可选；缺失时 Claude Code 本地估算上下文占用。
-- 模型发现：启用 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 后请求 `GET /v1/models?limit=1000`。
+- 模型发现：请求 `GET /v1/models?limit=1000`，失败时静默退回缓存或内置模型列表；发现请求只发送一种 credential header，API key/helper 路径使用 `x-api-key`。
 - 启动流量：可能出现可拒绝的 `HEAD /` 连通性探针。
 - 响应必须实时传递 SSE；把完整响应缓存完再转发会卡住客户端。
 
@@ -199,7 +239,7 @@ anthropic-beta: ...   # 使用 beta 能力时
 
 ### 5.3 Claude Code attribution system block
 
-Claude Code 会在 system prompt 最前面加一个短 attribution block，包含客户端版本和会话指纹。
+Claude Code 会在 system prompt 最前面加一个短 attribution block。2.1.84 实抓格式以 `x-anthropic-billing-header: cc_version=...; cc_entrypoint=sdk-cli; cch=...;` 开头，后面还有独立的 Claude Agent SDK system block。不要继续用旧的自然语言 `You are Claude Code... Client version...` 模拟该字段。
 
 - `api.anthropic.com` 只会在它保持为**第一个、独立、未修改的 system block**时剥离该 block，因此不影响一方 prompt cache。
 - 网关若在前面插入 system block、重排数组、把 system 数组合并为字符串，剥离就会失效。
