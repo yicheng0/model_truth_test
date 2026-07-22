@@ -16,6 +16,19 @@
 - 前端任务页按运行状态自动轮询，完成后停止刷新
 - 自动规则评分、异常标签、候选渠道报告
 - Markdown 报告下载
+- 渠道健康画像：样本置信度、过期判定、运行/性能/协议/质量四维评分、Gold/官方云参考带、状态原因和趋势下钻
+
+## 渠道健康画像
+
+接口保持为 `GET /api/channels/{channel_id}/health-profile?days=1|7|30`。响应保留原有成功率、P95、趋势和最近失败字段，并新增：
+
+- `confidence`：样本数、独立 run 数、模块覆盖、新鲜度和置信度原因。
+- `dimensions`：availability、performance、protocol、quality 四个独立维度。
+- `reference_band`：候选与 Anthropic Gold / official cloud 的延迟、TTFT 和相似度参考区间。
+- `status_reasons`：最多五条可解释原因，包含维度、触发值、阈值、影响和标签。
+- `latest_config_change_at`：最近渠道配置变更时间，用于解释指标突变。
+
+状态包括 `healthy`、`watch`、`degraded`、`critical`、`insufficient_data` 和 `stale`。单次成功不会被解释为健康证明；样本不足或官方参考不足时不会输出来源真实性结论。健康画像是证据化风险摘要，不代表“100% 真 Claude”或绝对真实性认证。
 
 ## Docker Compose
 

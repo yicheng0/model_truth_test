@@ -17,6 +17,7 @@ import {
 } from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
+import { formatHealthReason, healthDimensionColor, healthDimensionLabel, healthStatusColor, healthStatusLabel } from '../channelHealthProfile';
 import type { Channel, ChannelCreate, ChannelDeleteResult, ChannelHealthProfile, ChannelHealthRecentFailure } from '../types';
 
 type ChannelFormValues = {
@@ -68,10 +69,7 @@ function msText(value?: number | null) {
 }
 
 function healthStatusTag(status?: string | null) {
-  if (status === 'ok') return <Tag color="green">健康</Tag>;
-  if (status === 'degraded') return <Tag color="red">需关注</Tag>;
-  if (status === 'insufficient_data') return <Tag color="default">样本不足</Tag>;
-  return <Tag>{status || '-'}</Tag>;
+  return <Tag color={healthStatusColor(status)}>{status ? healthStatusLabel(status) : '-'}</Tag>;
 }
 
 function topEntries(value: Record<string, number>, limit = 8) {
@@ -91,6 +89,8 @@ const failureColumns: ColumnsType<ChannelHealthRecentFailure> = [
 
 function ChannelHealthProfilePanel({ profile }: { profile: ChannelHealthProfile }) {
   const labelData = topEntries(profile.label_distribution).map(([label, count]) => ({ label, count }));
+  const referenceBand = profile.reference_band as Record<string, any> | undefined;
+  const referenceStatus = referenceBand?.status;
   return (
     <Space direction="vertical" size={16} className="full-width">
       {profile.status === 'insufficient_data' ? (
@@ -98,10 +98,25 @@ function ChannelHealthProfilePanel({ profile }: { profile: ChannelHealthProfile 
       ) : null}
       <Row gutter={[12, 12]}>
         <Col xs={12} md={6}><Card size="small"><Statistic title="健康状态" valueRender={() => healthStatusTag(profile.status)} /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title="置信度" value={`${profile.confidence.level} (${profile.confidence.score.toFixed(0)})`} /></Card></Col>
         <Col xs={12} md={6}><Card size="small"><Statistic title="成功率" value={percentText(profile.success_rate)} /></Card></Col>
         <Col xs={12} md={6}><Card size="small"><Statistic title="P95 延迟" value={msText(profile.p95_latency_ms)} /></Card></Col>
         <Col xs={12} md={6}><Card size="small"><Statistic title="最近失败" value={profile.recent_failures[0]?.error_type || '-'} /></Card></Col>
       </Row>
+      <Row gutter={[12, 12]}>
+        {Object.entries(profile.dimensions ?? {}).map(([key, dimension]) => (
+          <Col xs={24} md={6} key={key}><Card size="small" title={<Space><span style={{ color: healthDimensionColor(key) }}>●</span>{healthDimensionLabel(key)}</Space>}><Statistic value={dimension.score.toFixed(1)} suffix="/100" /><Typography.Text type="secondary">{dimension.reasons?.map(formatHealthReason).join('、') || '无异常'}</Typography.Text></Card></Col>
+        ))}
+      </Row>
+      <Card size="small" title="参考带">
+        <Space wrap>
+          <Tag color={referenceStatus === 'ready' ? 'green' : 'default'}>状态：{referenceStatus === 'ready' ? '可用' : '参考不足'}</Tag>
+          <span>候选 P95：{msText(referenceBand?.p95_latency_ms?.candidate)}</span>
+          <span>参考上界：{msText(referenceBand?.p95_latency_ms?.upper)}</span>
+          <span>Gold 相似度：{percentText(referenceBand?.gold_similarity?.candidate)}</span>
+        </Space>
+      </Card>
+      {profile.status_reasons?.length ? <Card size="small" title="状态原因"><Space direction="vertical" size={4}>{profile.status_reasons.map((reason, index) => <Typography.Text key={`${reason.code}-${index}`}><Tag color="orange">{healthDimensionLabel(reason.dimension)}</Tag>{formatHealthReason(reason.code)}{reason.impact ? `：${reason.impact}` : ''}</Typography.Text>)}</Space></Card> : null}
       <Row gutter={[12, 12]}>
         <Col xs={24} lg={14}>
           <Card size="small" title="最近趋势">
@@ -115,7 +130,10 @@ function ChannelHealthProfilePanel({ profile }: { profile: ChannelHealthProfile 
                   <ChartTooltip />
                   <Line yAxisId="left" type="monotone" dataKey="result_count" name="结果数" stroke="#2563eb" />
                   <Line yAxisId="left" type="monotone" dataKey="failure_count" name="失败数" stroke="#dc2626" />
+                  <Line yAxisId="right" type="monotone" dataKey="success_rate" name="成功率 %" stroke="#52c41a" />
                   <Line yAxisId="right" type="monotone" dataKey="avg_latency_ms" name="平均延迟 ms" stroke="#16a34a" />
+                  <Line yAxisId="right" type="monotone" dataKey="p95_latency_ms" name="成功 P95 ms" stroke="#fa8c16" />
+                  <Line yAxisId="right" type="monotone" dataKey="avg_ttft_ms" name="平均 TTFT ms" stroke="#722ed1" />
                 </LineChart>
               </ResponsiveContainer>
             </div>

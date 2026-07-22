@@ -77,6 +77,10 @@ def _missing_channel_alert_columns(existing_columns: set[str]) -> list:
         "reviewer_name": String(100),
         "review_note": Text(),
         "reviewed_at": DateTime(timezone=True),
+        "first_seen_at": DateTime(timezone=True),
+        "last_seen_at": DateTime(timezone=True),
+        "consecutive_windows": Integer(),
+        "resolved_at": DateTime(timezone=True),
     }
     return [
         _column_for_alert_repair(name, type_)
@@ -88,6 +92,8 @@ def _missing_channel_alert_columns(existing_columns: set[str]) -> list:
 def _column_for_alert_repair(name: str, type_) -> object:  # noqa: ANN001
     if name == "notification_attempt_count":
         return Column(name, type_, nullable=False, server_default=text("0"))
+    if name == "consecutive_windows":
+        return Column(name, type_, nullable=False, server_default=text("1"))
     return Column(name, type_, nullable=True)
 
 

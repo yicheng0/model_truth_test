@@ -32,6 +32,9 @@ export type ChannelHealthTrendPoint = {
   success_count: number;
   failure_count: number;
   avg_latency_ms?: number | null;
+  success_rate?: number | null;
+  p95_latency_ms?: number | null;
+  avg_ttft_ms?: number | null;
 };
 
 export type ChannelHealthRecentFailure = {
@@ -61,7 +64,7 @@ export type ChannelHealthProbeSummary = {
 export type ChannelHealthProfile = {
   channel: Channel;
   days: number;
-  status: 'ok' | 'degraded' | 'insufficient_data' | string;
+  status: 'ok' | 'healthy' | 'watch' | 'degraded' | 'critical' | 'insufficient_data' | 'stale' | string;
   total_runs: number;
   total_results: number;
   success_count: number;
@@ -94,6 +97,31 @@ export type ChannelHealthProfile = {
     job_status_counts: Record<string, number>;
     attempt_status_counts: Record<string, number>;
   };
+  confidence: {
+    level: 'low' | 'medium' | 'high' | string;
+    score: number;
+    sample_count: number;
+    independent_run_count: number;
+    module_coverage: number;
+    freshness_hours?: number | null;
+    reasons: string[];
+  };
+  dimensions: Record<string, {
+    score: number;
+    status: string;
+    reasons: string[];
+    details: Record<string, number | string | null | undefined>;
+  }>;
+  reference_band?: Record<string, unknown>;
+  status_reasons: Array<{
+    dimension: string;
+    code: string;
+    value?: number | string | null;
+    threshold?: number | string | null;
+    impact: string;
+    labels: string[];
+  }>;
+  latest_config_change_at?: string | null;
   trend: ChannelHealthTrendPoint[];
   recent_failures: ChannelHealthRecentFailure[];
 };

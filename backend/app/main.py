@@ -1631,6 +1631,8 @@ def review_alert(alert_id: str, data: ChannelAlertReviewUpdate, db: Session = De
     alert.reviewer_name = data.reviewer_name
     alert.review_note = data.review_note
     alert.reviewed_at = datetime.now(timezone.utc)
+    if data.status == "resolved":
+        alert.resolved_at = alert.reviewed_at
     db.commit()
     db.refresh(alert)
     return channel_alert_read(db, alert)

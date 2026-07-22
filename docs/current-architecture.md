@@ -2,6 +2,24 @@
 
 本文档记录当前代码已经实现的自动巡检链路，作为企业级改造前的基线。本文只描述现状，不代表最终企业级目标。
 
+## 渠道健康画像数据链路
+
+入口为 `GET /api/channels/{channel_id}/health-profile?days=1|7|30`。聚合过程只加载时间窗内的 Result、Comparison、巡检任务与告警；当窗口内无结果时，仅额外读取该渠道最近一条历史 Result 用于 stale 判定。
+
+```text
+Result + Comparison + ChannelAlert + PatrolJob + AuditLog
+  -> 样本置信度 / stale
+  -> availability / performance / protocol / quality
+  -> Gold / official cloud reference band
+  -> 连续窗口防抖与状态原因
+  -> ChannelHealthProfile API
+  -> Channels 健康画像面板
+```
+
+性能 P50/P95/P99、TTFT 和吞吐只使用成功请求，失败请求只进入 availability。普通异常连续两个半窗口才降级；严重协议异常或最新连续三次失败立即 critical。官方参考缺失时返回 `baseline_inconclusive`，不降低候选自身运行健康。画像结论是风险和置信度摘要，不修改已有报告评分、等级或真实性判断。
+
+查询使用 `results(channel_id, created_at)` 与 `channel_alerts(channel_id, created_at)` 复合索引。`AuditLog(target_type=channel, target_id=...)` 提供最近配置变更时间，帮助定位配置与指标突变的相关性。
+
 ## 1. 运行模式
 
 系统有两类检测入口：
