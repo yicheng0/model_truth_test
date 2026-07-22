@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelGroup, ChannelGroupMember, Comparison, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest
+from ..models import AuditLog, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelGroup, ChannelGroupMember, Comparison, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase
 from ..redaction import merge_redacted_config, redact_secrets, redact_text
 from ..seed_utils import ensure_seed_data_when_empty
 from ..schemas import (
@@ -426,6 +426,49 @@ def _result_failed(result: Result) -> bool:
     return bool(normalized.get("error") or (status_code is not None and status_code >= 400) or "request_failed" in (result.labels or []) or (result.score <= 0 and result.labels))
 
 
+def _result_failure_kind(result: Result | dict[str, Any]) -> str | None:
+    """Classify a result for health dimensions without changing its base score."""
+    if isinstance(result, dict):
+        normalized = result.get("normalized_response") if isinstance(result.get("normalized_response"), dict) else {}
+        metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+        labels = result.get("labels") if isinstance(result.get("labels"), list) else []
+        score = result.get("score")
+    else:
+        normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+        metrics = result.metrics if isinstance(result.metrics, dict) else {}
+        labels = result.labels if isinstance(result.labels, list) else []
+        score = result.score
+
+    label_set = {str(label) for label in labels if label}
+    status_code = metrics.get("status_code") or metrics.get("http_status")
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    if normalized.get("error") or "request_failed" in label_set or (status_code is not None and status_code >= 400):
+        return "request_failed"
+
+    protocol_labels = {
+        "protocol_mismatch",
+        "model_name_mismatch",
+        "usage_missing",
+        "streaming_event_missing",
+        "tool_use_invalid",
+        "max_tokens_not_enforced",
+        "stop_reason_openai_style",
+    }
+    if label_set & protocol_labels:
+        return "protocol_failure"
+
+    if "quality_regression" in label_set or "suspected_model_swap" in label_set or (isinstance(score, (int, float)) and score < 65):
+        return "quality_regression"
+
+    operational_labels = {"latency_outlier", "ttft_outlier", "suspected_cache", "context_loss"}
+    if label_set & operational_labels:
+        return "operational_anomaly"
+    return None
+
+
 def _signature_payload(result: Result) -> dict[str, Any] | None:
     payload = _signature_interop_signature_from_result(result)
     return payload if isinstance(payload, dict) else None
@@ -437,6 +480,238 @@ def _channel_health_status(total_results: int, failure_rate: float | None, pendi
     if (failure_rate or 0) >= 30 or pending_alerts > 0:
         return "degraded"
     return "ok"
+
+
+def _health_confidence(db: Session, results: list[Result], days: int, latest_historical_result: Result | None = None) -> dict[str, Any]:
+    sample_count = len(results)
+    independent_run_count = len({result.run_id for result in results})
+    case_ids = {result.test_case_id for result in results if result.test_case_id}
+    modules = set(db.scalars(select(TestCase.module).where(TestCase.id.in_(case_ids))).all()) if case_ids else set()
+    module_coverage = min(1.0, len(modules) / 4) if modules else 0.0
+    latest = results[0].created_at if results else (latest_historical_result.created_at if latest_historical_result else None)
+    now = datetime.now(timezone.utc)
+    if latest and latest.tzinfo is None:
+        latest = latest.replace(tzinfo=timezone.utc)
+    freshness_hours = round(max(0.0, (now - latest).total_seconds() / 3600), 2) if latest else None
+    reasons: list[str] = []
+    if sample_count < 10:
+        reasons.append("sample_count_low")
+    if independent_run_count < 2:
+        reasons.append("independent_runs_low")
+    if module_coverage < 0.5:
+        reasons.append("module_coverage_low")
+    stale_after_hours = max(24.0, days * 24.0 * 2)
+    if freshness_hours is None or freshness_hours > stale_after_hours:
+        reasons.append("data_stale")
+
+    sample_factor = min(1.0, sample_count / 30)
+    run_factor = min(1.0, independent_run_count / 3)
+    coverage_factor = min(1.0, module_coverage)
+    freshness_factor = 0.0 if freshness_hours is None else max(0.0, min(1.0, 1 - freshness_hours / stale_after_hours))
+    score = round((sample_factor * 0.35 + run_factor * 0.25 + coverage_factor * 0.2 + freshness_factor * 0.2) * 100, 2)
+    if sample_count >= 30 and independent_run_count >= 3 and module_coverage >= 0.75 and not (freshness_hours is None or freshness_hours > stale_after_hours):
+        level = "high"
+    elif sample_count >= 10 and independent_run_count >= 2 and module_coverage >= 0.5 and not (freshness_hours is None or freshness_hours > stale_after_hours):
+        level = "medium"
+    else:
+        level = "low"
+    return {
+        "level": level,
+        "score": score,
+        "sample_count": sample_count,
+        "independent_run_count": independent_run_count,
+        "module_coverage": round(module_coverage, 4),
+        "freshness_hours": freshness_hours,
+        "reasons": reasons,
+    }
+
+
+def _dimension_status(score: float, *, inconclusive: bool = False) -> str:
+    if inconclusive:
+        return "inconclusive"
+    if score >= 90:
+        return "healthy"
+    if score >= 75:
+        return "watch"
+    if score >= 50:
+        return "degraded"
+    return "critical"
+
+
+def _health_dimensions(db: Session, channel_id: str, results: list[Result]) -> dict[str, Any]:
+    failures = [result for result in results if _result_failed(result)]
+    success_results = [result for result in results if not _result_failed(result)]
+    success_rate = (len(success_results) / len(results) * 100) if results else 0.0
+    request_failures = [result for result in failures if _result_failure_kind(result) == "request_failed"]
+    availability_score = max(0.0, min(100.0, success_rate - (len(request_failures) / len(results) * 30 if results else 0)))
+    availability_reasons: list[str] = []
+    if request_failures:
+        availability_reasons.append("request_failures_present")
+    availability = {
+        "score": round(availability_score, 2),
+        "status": _dimension_status(availability_score, inconclusive=not results),
+        "reasons": availability_reasons,
+        "details": {"success_rate": round(success_rate, 2), "failure_count": len(failures), "request_failure_count": len(request_failures)},
+    }
+
+    successful_latencies = [_metric_number(result, "latency_ms") for result in success_results]
+    successful_ttfts = [_metric_number(result, "ttft_ms") or _metric_number(result, "first_token_ms") for result in success_results]
+    successful_tps = [_metric_number(result, "tokens_per_second") for result in success_results]
+    latency_p95 = _percentile(successful_latencies, 95)
+    latency_p50 = _percentile(successful_latencies, 50)
+    latency_p99 = _percentile(successful_latencies, 99)
+    ttft_p95 = _percentile(successful_ttfts, 95)
+    tps_p50 = _percentile(successful_tps, 50)
+    performance_score = 100.0
+    performance_reasons: list[str] = []
+    if latency_p95 is not None and latency_p95 > 2500:
+        performance_score -= min(45.0, (latency_p95 - 2500) / 50)
+        performance_reasons.append("latency_p95_high")
+    if ttft_p95 is not None and ttft_p95 > 1500:
+        performance_score -= min(35.0, (ttft_p95 - 1500) / 40)
+        performance_reasons.append("ttft_p95_high")
+    if tps_p50 is not None and tps_p50 < 5:
+        performance_score -= 20
+        performance_reasons.append("throughput_low")
+    performance = {
+        "score": round(max(0.0, performance_score), 2),
+        "status": _dimension_status(performance_score, inconclusive=not successful_latencies),
+        "reasons": performance_reasons,
+        "details": {"p50_latency_ms": latency_p50, "p95_latency_ms": latency_p95, "p99_latency_ms": latency_p99, "p95_ttft_ms": ttft_p95, "p50_tokens_per_second": tps_p50, "successful_sample_count": len(success_results)},
+    }
+
+    protocol_labels = {"protocol_mismatch", "model_name_mismatch", "usage_missing", "streaming_event_missing", "tool_use_invalid", "max_tokens_not_enforced", "stop_reason_openai_style"}
+    protocol_issues = [label for result in results for label in (result.labels or []) if label in protocol_labels]
+    protocol_score = max(0.0, 100.0 - len(protocol_issues) / len(results) * 100) if results else 0.0
+    protocol = {
+        "score": round(protocol_score, 2),
+        "status": _dimension_status(protocol_score, inconclusive=not results),
+        "reasons": sorted(set(protocol_issues)),
+        "details": {"issue_count": len(protocol_issues), "issue_rate": round(len(protocol_issues) / len(results) * 100, 2) if results else 0.0},
+    }
+
+    comparisons = list(db.scalars(select(Comparison).where(Comparison.candidate_channel_id == channel_id, Comparison.run_id.in_({result.run_id for result in results}))).all()) if results else []
+    gold_similarity = _avg([comparison.gold_similarity for comparison in comparisons])
+    cloud_similarity = _avg([comparison.official_cloud_similarity for comparison in comparisons])
+    quality_score = gold_similarity if gold_similarity is not None else (_avg([result.score for result in results]) if results else None)
+    quality_reasons: list[str] = []
+    if quality_score is not None and quality_score < 80:
+        quality_reasons.append("quality_regression")
+    quality = {
+        "score": round(quality_score if quality_score is not None else 0.0, 2),
+        "status": _dimension_status(quality_score or 0.0, inconclusive=quality_score is None),
+        "reasons": quality_reasons,
+        "details": {"gold_similarity": gold_similarity, "official_cloud_similarity": cloud_similarity, "comparison_count": len(comparisons)},
+    }
+    return {"availability": availability, "performance": performance, "protocol": protocol, "quality": quality}
+
+
+def _reference_metric(candidate: float | None, values: list[float | None]) -> dict[str, Any]:
+    clean = [value for value in values if value is not None]
+    lower = _percentile(clean, 5) if clean else None
+    upper = _percentile(clean, 95) if clean else None
+    deviation = None
+    if candidate is not None and clean:
+        if candidate < (lower or candidate):
+            deviation = round((candidate - (lower or candidate)) / max(abs(lower or 1), 1), 4)
+        elif candidate > (upper or candidate):
+            deviation = round((candidate - (upper or candidate)) / max(abs(upper or 1), 1), 4)
+        else:
+            deviation = 0.0
+    return {"candidate": candidate, "lower": lower, "upper": upper, "deviation_ratio": deviation}
+
+
+def _health_reference_band(db: Session, channel_id: str, results: list[Result]) -> dict[str, Any]:
+    if not results:
+        return {"status": "baseline_inconclusive", "p95_latency_ms": {}, "ttft_ms": {}, "gold_similarity": {}, "official_cloud_similarity": {}}
+    run_ids = {result.run_id for result in results}
+    candidate_latencies = [_metric_number(result, "latency_ms") for result in results if not _result_failed(result)]
+    candidate_ttfts = [_metric_number(result, "ttft_ms") or _metric_number(result, "first_token_ms") for result in results if not _result_failed(result)]
+    candidate_comparisons = list(db.scalars(select(Comparison).where(Comparison.candidate_channel_id == channel_id, Comparison.run_id.in_(run_ids))).all())
+    candidate_channel = db.get(Channel, channel_id)
+    all_channels = list(db.scalars(select(Channel).where(Channel.role.in_(["gold", "official_cloud"]))).all())
+    if candidate_channel and candidate_channel.model_name:
+        matching = [channel for channel in all_channels if not channel.model_name or channel.model_name == candidate_channel.model_name]
+        all_channels = matching or all_channels
+    if not all_channels:
+        return {"status": "baseline_inconclusive", "p95_latency_ms": _reference_metric(_percentile(candidate_latencies, 95), []), "ttft_ms": _reference_metric(_percentile(candidate_ttfts, 95), []), "gold_similarity": _reference_metric(_avg([item.gold_similarity for item in candidate_comparisons]), []), "official_cloud_similarity": _reference_metric(_avg([item.official_cloud_similarity for item in candidate_comparisons]), [])}
+    candidate_runs = list(db.scalars(select(Run).where(Run.id.in_({result.run_id for result in results}))).all())
+    suite_ids = {run.suite_id for run in candidate_runs}
+    case_ids = {result.test_case_id for result in results}
+    reference_results = list(
+        db.scalars(
+            select(Result)
+            .join(Run, Run.id == Result.run_id)
+            .where(
+                Result.channel_id.in_([channel.id for channel in all_channels]),
+                Result.test_case_id.in_(case_ids),
+                Run.suite_id.in_(suite_ids),
+                Result.created_at >= min(result.created_at for result in results),
+            )
+        ).all()
+    )
+    gold_results = [result for result in reference_results if next((channel.role for channel in all_channels if channel.id == result.channel_id), None) == "gold"]
+    cloud_results = [result for result in reference_results if next((channel.role for channel in all_channels if channel.id == result.channel_id), None) == "official_cloud"]
+    gold_comparisons = [item for item in candidate_comparisons if item.gold_similarity > 0]
+    cloud_comparisons = [item for item in candidate_comparisons if item.official_cloud_similarity > 0]
+    reference_failure_rate = len([result for result in reference_results if _result_failed(result)]) / len(reference_results) if reference_results else 0.0
+    status = "baseline_unhealthy" if reference_results and reference_failure_rate >= 0.30 else "ready" if gold_results or cloud_results or gold_comparisons or cloud_comparisons else "baseline_inconclusive"
+    return {
+        "status": status,
+        "p95_latency_ms": _reference_metric(_percentile(candidate_latencies, 95), [_metric_number(item, "latency_ms") for item in gold_results + cloud_results]),
+        "ttft_ms": _reference_metric(_percentile(candidate_ttfts, 95), [_metric_number(item, "ttft_ms") or _metric_number(item, "first_token_ms") for item in gold_results + cloud_results]),
+        "gold_similarity": _reference_metric(_avg([item.gold_similarity for item in candidate_comparisons]), [item.gold_similarity for item in gold_comparisons]),
+        "official_cloud_similarity": _reference_metric(_avg([item.official_cloud_similarity for item in candidate_comparisons]), [item.official_cloud_similarity for item in cloud_comparisons]),
+    }
+
+
+def _health_status_reasons(dimensions: dict[str, Any], reference_band: dict[str, Any], pending_alerts: int) -> list[dict[str, Any]]:
+    reasons: list[dict[str, Any]] = []
+    for dimension, payload in dimensions.items():
+        for code in payload.get("reasons", []):
+            details = payload.get("details") or {}
+            value = details.get("p95_latency_ms") if code == "latency_p95_high" else details.get("p95_ttft_ms") if code == "ttft_p95_high" else details.get("success_rate")
+            threshold = 2500 if code == "latency_p95_high" else 1500 if code == "ttft_p95_high" else None
+            reasons.append({"dimension": dimension, "code": code, "value": value, "threshold": threshold, "impact": "影响健康画像评分，需要结合样本和参考带复核。", "labels": [code]})
+    if reference_band.get("status") != "ready":
+        reasons.append({"dimension": "protocol", "code": reference_band.get("status", "baseline_inconclusive"), "value": None, "threshold": None, "impact": "官方参考样本不足，来源一致性暂不下结论。", "labels": [reference_band.get("status", "baseline_inconclusive")]})
+    if pending_alerts:
+        reasons.append({"dimension": "availability", "code": "pending_alerts", "value": pending_alerts, "threshold": 0, "impact": "存在待复审告警。", "labels": ["pending_alerts"]})
+    return reasons[:5]
+
+
+def _health_window_state(results: list[Result], days: int) -> dict[str, Any]:
+    """Evaluate adjacent half-windows so transient spikes do not downgrade a channel."""
+    if not results:
+        return {"current_issue": False, "previous_issue": False, "current_healthy": False, "previous_healthy": False, "severe": False}
+    now = datetime.now(timezone.utc)
+    midpoint = now - timedelta(days=max(days / 2, 0.5))
+    current = [result for result in results if (result.created_at or now).replace(tzinfo=timezone.utc) >= midpoint]
+    previous = [result for result in results if (result.created_at or now).replace(tzinfo=timezone.utc) < midpoint]
+
+    def issue(items: list[Result]) -> bool:
+        if not items:
+            return False
+        failures = [item for item in items if _result_failed(item)]
+        return len(failures) / len(items) >= 0.30
+
+    severe_labels = {"protocol_mismatch", "streaming_event_missing", "tool_use_invalid", "model_name_mismatch"}
+    severe = any(severe_labels.intersection(set(result.labels or [])) for result in results)
+    ordered = sorted(results, key=lambda item: item.created_at or now, reverse=True)
+    consecutive_failures = 0
+    for result in ordered:
+        if _result_failed(result):
+            consecutive_failures += 1
+        else:
+            break
+    return {
+        "current_issue": issue(current),
+        "previous_issue": issue(previous),
+        "current_healthy": bool(current) and not issue(current),
+        "previous_healthy": bool(previous) and not issue(previous),
+        "severe": severe or consecutive_failures >= 3,
+        "consecutive_failures": consecutive_failures,
+    }
 
 
 @router.get("/api/channels/{channel_id}/health-profile", response_model=ChannelHealthProfileRead)
@@ -455,6 +730,14 @@ def channel_health_profile(channel_id: str, days: int = 7, db: Session = Depends
             .order_by(Result.created_at.desc(), Result.id.desc())
         ).all()
     )
+    latest_historical_result = None
+    if not results:
+        latest_historical_result = db.scalar(
+            select(Result)
+            .where(Result.channel_id == channel_id)
+            .order_by(Result.created_at.desc(), Result.id.desc())
+            .limit(1)
+        )
     run_ids = {result.run_id for result in results}
     linked_runs = list(
         db.scalars(
@@ -494,6 +777,9 @@ def channel_health_profile(channel_id: str, days: int = 7, db: Session = Depends
                 "success_count": len(day_results) - len(day_failures),
                 "failure_count": len(day_failures),
                 "avg_latency_ms": _avg([_metric_number(result, "latency_ms") for result in day_results]),
+                "success_rate": _pct(len(day_results) - len(day_failures), len(day_results)),
+                "p95_latency_ms": _percentile([_metric_number(result, "latency_ms") for result in day_results if not _result_failed(result)], 95),
+                "avg_ttft_ms": _avg([_metric_number(result, "ttft_ms") or _metric_number(result, "first_token_ms") for result in day_results if not _result_failed(result)]),
             }
         )
 
@@ -571,10 +857,37 @@ def channel_health_profile(channel_id: str, days: int = 7, db: Session = Depends
         )
 
     failure_rate = _pct(len(failures), len(results))
+    confidence = _health_confidence(db, results, days, latest_historical_result)
+    dimensions = _health_dimensions(db, channel_id, results)
+    reference_band = _health_reference_band(db, channel_id, results)
+    status_reasons = _health_status_reasons(dimensions, reference_band, int(patrol_summary["pending_alert_count"]))
+    status = _channel_health_status(len(results), failure_rate, int(patrol_summary["pending_alert_count"]))
+    if confidence["reasons"] and ("data_stale" in confidence["reasons"]):
+        status = "stale" if (results or latest_historical_result) else "insufficient_data"
+    elif len(results) < 10:
+        status = "insufficient_data"
+    window_state = _health_window_state(results, days)
+    if status != "stale" and window_state["severe"]:
+        status = "critical"
+        status_reasons.insert(0, {"dimension": "protocol", "code": "critical_consecutive_failure" if window_state["consecutive_failures"] >= 3 else "critical_protocol_anomaly", "value": window_state["consecutive_failures"], "threshold": 3, "impact": "严重协议异常或连续失败，立即升级。", "labels": ["critical"]})
+    elif status not in {"stale", "insufficient_data"} and window_state["current_issue"] and window_state["previous_issue"]:
+        status = "degraded"
+        status_reasons.insert(0, {"dimension": "availability", "code": "degraded_two_windows", "value": 2, "threshold": 2, "impact": "普通异常已连续两个窗口出现。", "labels": ["window_debounce"]})
+    elif status not in {"stale", "insufficient_data"} and (window_state["current_issue"] or window_state["previous_issue"] or status == "degraded"):
+        status = "watch"
+        status_reasons.insert(0, {"dimension": "availability", "code": "watch_single_window", "value": 1, "threshold": 2, "impact": "异常尚未连续两个窗口，进入观察而非直接降级。", "labels": ["window_debounce"]})
+    elif status not in {"stale", "insufficient_data"} and window_state["current_healthy"] and window_state["previous_healthy"]:
+        status = "healthy" if confidence["level"] == "high" else "watch"
+        if any(alert.status == "resolved" for alert in alerts):
+            status_reasons.insert(0, {"dimension": "availability", "code": "recovered_two_windows", "value": 2, "threshold": 2, "impact": "连续两个窗口恢复正常。", "labels": ["resolved"]})
+    status_reasons = status_reasons[:5]
+    latest_config_change_at = db.scalar(
+        select(func.max(AuditLog.created_at)).where(AuditLog.target_type == "channel", AuditLog.target_id == channel_id)
+    )
     payload = {
         "channel": channel,
         "days": days,
-        "status": _channel_health_status(len(results), failure_rate, int(patrol_summary["pending_alert_count"])),
+        "status": status,
         "total_runs": len(run_ids),
         "total_results": len(results),
         "success_count": len(successes),
@@ -589,6 +902,11 @@ def channel_health_profile(channel_id: str, days: int = 7, db: Session = Depends
         "probe_summaries": probe_summaries,
         "signature_summary": signature_summary,
         "patrol_summary": patrol_summary,
+        "confidence": confidence,
+        "dimensions": dimensions,
+        "reference_band": reference_band,
+        "status_reasons": status_reasons,
+        "latest_config_change_at": latest_config_change_at,
         "trend": trend,
         "recent_failures": recent_failures,
     }

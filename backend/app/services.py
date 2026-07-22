@@ -9274,6 +9274,10 @@ def channel_alert_read(db: Session, alert: ChannelAlert) -> dict[str, Any]:
         "reviewer_name": alert.reviewer_name,
         "review_note": alert.review_note,
         "reviewed_at": alert.reviewed_at,
+        "first_seen_at": alert.first_seen_at,
+        "last_seen_at": alert.last_seen_at,
+        "consecutive_windows": int(alert.consecutive_windows or 1),
+        "resolved_at": alert.resolved_at,
         "created_at": alert.created_at,
         "updated_at": alert.updated_at,
     }
@@ -9317,8 +9321,25 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
         for report in reports:
             labels = report_labels(report)
             if not report_needs_alert(report, labels, scheduled):
+                _record_healthy_alert_window(db, report.channel_id, scheduled_id, report.created_at)
                 continue
             dedupe_key = alert_dedupe_key(report, labels, scheduled)
+            repeated = db.scalar(
+                select(ChannelAlert)
+                .where(
+                    ChannelAlert.channel_id == report.channel_id,
+                    ChannelAlert.dedupe_key == dedupe_key,
+                    ChannelAlert.status == "pending_review",
+                )
+                .order_by(ChannelAlert.created_at.desc())
+            )
+            if repeated:
+                repeated.last_seen_at = report.created_at or datetime.now(timezone.utc)
+                repeated.consecutive_windows = int(repeated.consecutive_windows or 1) + 1
+                db.commit()
+                db.refresh(repeated)
+                alerts.append(repeated)
+                continue
             if scheduled and _recent_open_alert_exists(
                 db,
                 scheduled,
@@ -9348,6 +9369,9 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
                 message=message,
                 dedupe_key=dedupe_key,
                 notification_status="pending",
+                first_seen_at=report.created_at or datetime.now(timezone.utc),
+                last_seen_at=report.created_at or datetime.now(timezone.utc),
+                consecutive_windows=1,
             )
             db.add(alert)
             db.commit()
@@ -9357,6 +9381,32 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
     for alert in alerts:
         await send_alert_notification(session_factory, alert.id)
     return alerts
+
+
+def _record_healthy_alert_window(db: Session, channel_id: str, scheduled_id: str | None, observed_at: datetime | None) -> None:
+    open_alerts = list(
+        db.scalars(
+            select(ChannelAlert).where(
+                ChannelAlert.channel_id == channel_id,
+                ChannelAlert.scheduled_test_id == scheduled_id,
+                ChannelAlert.status == "pending_review",
+            )
+        ).all()
+    )
+    now = datetime.now(timezone.utc)
+    for alert in open_alerts:
+        last_seen = _as_utc(alert.last_seen_at or alert.created_at or observed_at or now)
+        current_seen = _as_utc(observed_at or now)
+        if alert.review_note != "health_recovery_window_1":
+            alert.review_note = "health_recovery_window_1"
+            alert.last_seen_at = last_seen
+            continue
+        alert.status = "resolved"
+        alert.resolved_at = now
+        alert.review_note = "health_recovery_window_2"
+        alert.last_seen_at = max(last_seen, current_seen)
+    if open_alerts:
+        db.commit()
 
 
 def report_labels(report: Report) -> list[str]:
@@ -9390,20 +9440,13 @@ def report_needs_alert(report: Report, labels: list[str] | None = None, schedule
 
 def alert_dedupe_key(report: Report, labels: list[str], scheduled: ScheduledChannelTest | None = None) -> str:
     evidence = report.evidence if isinstance(report.evidence, dict) else {}
-    summary = alert_evidence_summary_for_evidence(evidence)
-    locator = None
-    if not _is_channel_unavailable_evidence(evidence):
-        locator = (
-            summary.get("model_request_result_id")
-            or summary.get("model_request_message_id")
-            or summary.get("model_request_request_id")
-            or summary.get("signature_relay_message_id")
-            or summary.get("signature_source_message_id")
-            or summary.get("signature_relay_request_id")
-            or summary.get("signature_source_request_id")
-        )
+    probe = "signature_interop" if evidence.get("signature_interop") else None
+    if not probe:
+        model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+        probe = model_request.get("key") or model_request.get("test_case_id")
+    probe = str(probe or "channel")
     label_part = ",".join(sorted(set(labels))) or report.grade
-    kind = f"{label_part}|{locator}" if locator else label_part
+    kind = f"{label_part}|{probe}"
     raw = f"{scheduled.id if scheduled else '-'}|{report.channel_id}|{kind}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 

@@ -162,6 +162,9 @@ class ChannelHealthTrendPointRead(BaseModel):
     success_count: int = 0
     failure_count: int = 0
     avg_latency_ms: float | None = None
+    success_rate: float | None = None
+    p95_latency_ms: float | None = None
+    avg_ttft_ms: float | None = None
 
 
 class ChannelHealthRecentFailureRead(BaseModel):
@@ -210,10 +213,51 @@ class ChannelHealthPatrolSummaryRead(BaseModel):
     attempt_status_counts: dict[str, int] = Field(default_factory=dict)
 
 
+class ChannelHealthConfidenceRead(BaseModel):
+    level: Literal["low", "medium", "high"] = "low"
+    score: float = 0.0
+    sample_count: int = 0
+    independent_run_count: int = 0
+    module_coverage: float = 0.0
+    freshness_hours: float | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ChannelHealthDimensionRead(BaseModel):
+    score: float = 0.0
+    status: Literal["healthy", "watch", "degraded", "critical", "inconclusive"] = "inconclusive"
+    reasons: list[str] = Field(default_factory=list)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChannelHealthReferenceMetricRead(BaseModel):
+    candidate: float | None = None
+    lower: float | None = None
+    upper: float | None = None
+    deviation_ratio: float | None = None
+
+
+class ChannelHealthReferenceBandRead(BaseModel):
+    status: Literal["ready", "baseline_unhealthy", "baseline_inconclusive"] = "baseline_inconclusive"
+    p95_latency_ms: ChannelHealthReferenceMetricRead = Field(default_factory=ChannelHealthReferenceMetricRead)
+    ttft_ms: ChannelHealthReferenceMetricRead = Field(default_factory=ChannelHealthReferenceMetricRead)
+    gold_similarity: ChannelHealthReferenceMetricRead = Field(default_factory=ChannelHealthReferenceMetricRead)
+    official_cloud_similarity: ChannelHealthReferenceMetricRead = Field(default_factory=ChannelHealthReferenceMetricRead)
+
+
+class ChannelHealthStatusReasonRead(BaseModel):
+    dimension: str
+    code: str
+    value: float | int | str | None = None
+    threshold: float | int | str | None = None
+    impact: str = ""
+    labels: list[str] = Field(default_factory=list)
+
+
 class ChannelHealthProfileRead(BaseModel):
     channel: ChannelRead
     days: int
-    status: Literal["ok", "degraded", "insufficient_data"]
+    status: Literal["ok", "healthy", "watch", "degraded", "critical", "insufficient_data", "stale"]
     total_runs: int = 0
     total_results: int = 0
     success_count: int = 0
@@ -228,10 +272,15 @@ class ChannelHealthProfileRead(BaseModel):
     probe_summaries: list[ChannelHealthProbeSummaryRead] = Field(default_factory=list)
     signature_summary: ChannelHealthSignatureSummaryRead = Field(default_factory=ChannelHealthSignatureSummaryRead)
     patrol_summary: ChannelHealthPatrolSummaryRead = Field(default_factory=ChannelHealthPatrolSummaryRead)
+    confidence: ChannelHealthConfidenceRead = Field(default_factory=ChannelHealthConfidenceRead)
+    dimensions: dict[str, ChannelHealthDimensionRead] = Field(default_factory=dict)
+    reference_band: ChannelHealthReferenceBandRead = Field(default_factory=ChannelHealthReferenceBandRead)
+    status_reasons: list[ChannelHealthStatusReasonRead] = Field(default_factory=list)
+    latest_config_change_at: datetime | None = None
     trend: list[ChannelHealthTrendPointRead] = Field(default_factory=list)
     recent_failures: list[ChannelHealthRecentFailureRead] = Field(default_factory=list)
 
-    @field_serializer("channel", "label_distribution", "error_type_distribution", "probe_summaries", "signature_summary", "patrol_summary", "trend", "recent_failures")
+    @field_serializer("channel", "label_distribution", "error_type_distribution", "probe_summaries", "signature_summary", "patrol_summary", "confidence", "dimensions", "reference_band", "status_reasons", "trend", "recent_failures")
     def serialize_health_payload(self, value: Any) -> Any:
         return redact_secrets(value)
 
@@ -1158,6 +1207,10 @@ class ChannelAlertRead(BaseModel):
     reviewer_name: str | None = None
     review_note: str | None = None
     reviewed_at: datetime | None = None
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    consecutive_windows: int = 1
+    resolved_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

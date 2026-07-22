@@ -37,6 +37,7 @@ from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
 from app.scheduled_probe import _probe_status_text, operational_failure_label
 from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.routers.channels import _result_failure_kind
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
 _backfill_spec = importlib.util.spec_from_file_location("scheduled_tests_backfill", _backfill_path)
@@ -159,6 +160,24 @@ def seed_test_channels(db) -> None:  # noqa: ANN001
     for channel in default_channel_templates():
         if not db.get(Channel, channel.id):
             create_channel(db, channel)
+
+
+def health_result_payload(*, status_code: int = 200, labels: list[str] | None = None, score: float = 90, error: str | None = None) -> dict:
+    """Build the normalized shape used by health-profile aggregation tests."""
+    return {
+        "metrics": {"status_code": status_code, "latency_ms": 100},
+        "normalized_response": {"error": error} if error else {},
+        "labels": labels or [],
+        "score": score,
+    }
+
+
+def test_health_failure_kind_separates_operational_protocol_and_quality_failures() -> None:
+    assert _result_failure_kind(health_result_payload(status_code=503, labels=["request_failed"])) == "request_failed"
+    assert _result_failure_kind(health_result_payload(labels=["protocol_mismatch"], score=0)) == "protocol_failure"
+    assert _result_failure_kind(health_result_payload(labels=["quality_regression"], score=40)) == "quality_regression"
+    assert _result_failure_kind(health_result_payload(labels=["latency_outlier"], score=90)) == "operational_anomaly"
+    assert _result_failure_kind(health_result_payload()) is None
 
 
 def create_ready_baseline(client: TestClient, name: str = "managed baseline") -> tuple[str, dict, dict]:
@@ -3232,6 +3251,28 @@ def test_scheduled_unavailable_channel_alert_is_only_created_once(monkeypatch) -
     assert alerts[0].run_id == run_ids[0]
 
 
+def test_scheduled_alert_recovery_requires_two_healthy_windows(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample", quiet_minutes=0)
+    bad_runs = [create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"]) for _ in range(2)]
+    healthy_runs = [create_report_for_schedule(schedule, grade="A", score=95, labels=[]) for _ in range(2)]
+    asyncio.run(create_alerts_for_run(SessionLocal, bad_runs[0], schedule["id"]))
+    asyncio.run(create_alerts_for_run(SessionLocal, bad_runs[1], schedule["id"]))
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.scheduled_test_id == schedule["id"]))
+        assert alert is not None and alert.consecutive_windows == 2
+    asyncio.run(create_alerts_for_run(SessionLocal, healthy_runs[0], schedule["id"]))
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.scheduled_test_id == schedule["id"]))
+        assert alert is not None and alert.status == "pending_review"
+    asyncio.run(create_alerts_for_run(SessionLocal, healthy_runs[1], schedule["id"]))
+    with SessionLocal() as db:
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.scheduled_test_id == schedule["id"]))
+        assert alert is not None and alert.status == "resolved" and alert.resolved_at is not None
+
+
 def test_scheduled_channel_test_retries_failed_runs(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     sleep_calls: list[int] = []
@@ -5157,6 +5198,188 @@ def test_channel_health_profile_returns_insufficient_data() -> None:
     assert payload["trend"]
 
 
+def test_channel_health_profile_contract_keeps_legacy_and_new_fields() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        create_channel(db, ChannelCreate(id="ch_health_contract", name="contract", provider_type="third_party_anthropic", role="candidate"))
+    with TestClient(app) as client:
+        payload = client.get("/api/channels/ch_health_contract/health-profile?days=7").json()
+    assert {"status", "total_runs", "total_results", "success_rate", "p95_latency_ms", "trend"}.issubset(payload)
+    assert {"confidence", "dimensions", "reference_band", "status_reasons", "latest_config_change_at"}.issubset(payload)
+    assert set(payload["dimensions"]) == {"availability", "performance", "protocol", "quality"}
+
+
+def test_channel_health_profile_redacts_channel_credentials() -> None:
+    reset_database()
+    secret = "health-profile-secret-value"
+    with SessionLocal() as db:
+        create_channel(db, ChannelCreate(id="ch_health_secret", name="secret", provider_type="third_party_anthropic", role="candidate", auth_config={"api_key": secret, "secret_ref": "env:HEALTH_PROFILE_SECRET"}))
+    with TestClient(app) as client:
+        text = client.get("/api/channels/ch_health_secret/health-profile?days=7").text
+    assert secret not in text
+    assert "HEALTH_PROFILE_SECRET" not in text
+    assert "[REDACTED]" in text
+
+
+def test_channel_health_profile_exposes_confidence_and_stale_state() -> None:
+    reset_database()
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="suite_health_confidence", name="health confidence suite"))
+        create_case(db, TestCaseCreate(id="case_confidence", suite_id="suite_health_confidence", module="protocol", title="confidence", prompt="ok"))
+        create_channel(db, ChannelCreate(id="ch_health_confidence", name="confidence", provider_type="third_party_anthropic", role="candidate"))
+        run = Run(id="run_health_confidence", suite_id="suite_health_confidence", name="confidence run", mode="manual_probe", status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1, created_at=now)
+        db.add(run)
+        db.add(RunChannel(id="rch_health_confidence", run_id=run.id, channel_id="ch_health_confidence", role_in_run="candidate"))
+        db.add(Result(id="res_health_confidence", run_id=run.id, test_case_id="case_confidence", channel_id="ch_health_confidence", attempt_index=1, normalized_response={}, raw_response={"type": "message"}, metrics={"status_code": 200, "latency_ms": 100}, score=90, labels=[], created_at=now))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/ch_health_confidence/health-profile?days=7")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "insufficient_data"
+    assert payload["confidence"]["level"] == "low"
+    assert payload["confidence"]["sample_count"] == 1
+    assert payload["confidence"]["independent_run_count"] == 1
+    assert payload["confidence"]["module_coverage"] > 0
+    assert payload["confidence"]["freshness_hours"] < 1
+
+
+def test_channel_health_profile_marks_old_results_stale() -> None:
+    reset_database()
+    old = datetime.now(timezone.utc) - timedelta(days=15)
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="suite_health_stale", name="health stale suite"))
+        create_case(db, TestCaseCreate(id="case_stale", suite_id="suite_health_stale", module="protocol", title="stale", prompt="ok"))
+        create_channel(db, ChannelCreate(id="ch_health_stale", name="stale", provider_type="third_party_anthropic", role="candidate"))
+        run = Run(id="run_health_stale", suite_id="suite_health_stale", name="stale run", mode="manual_probe", status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1, created_at=old)
+        db.add(run)
+        db.add(RunChannel(id="rch_health_stale", run_id=run.id, channel_id="ch_health_stale", role_in_run="candidate"))
+        db.add(Result(id="res_health_stale", run_id=run.id, test_case_id="case_stale", channel_id="ch_health_stale", attempt_index=1, normalized_response={}, raw_response={"type": "message"}, metrics={"status_code": 200, "latency_ms": 100}, score=90, labels=[], created_at=old))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/ch_health_stale/health-profile?days=7")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "stale"
+    assert "data_stale" in payload["confidence"]["reasons"]
+
+
+def test_channel_health_profile_exposes_latest_config_change() -> None:
+    reset_database()
+    now = datetime.now(timezone.utc)
+    changed_at = now - timedelta(hours=2)
+    with SessionLocal() as db:
+        create_channel(db, ChannelCreate(id="ch_health_audit", name="audit", provider_type="third_party_anthropic", role="candidate"))
+        db.add(AuditLog(id="audit_health_config", actor_id="tester", actor_name="tester", action="channel.update", target_type="channel", target_id="ch_health_audit", created_at=changed_at))
+        db.commit()
+    with TestClient(app) as client:
+        payload = client.get("/api/channels/ch_health_audit/health-profile?days=7").json()
+    assert payload["latest_config_change_at"] is not None
+
+
+def test_channel_health_profile_requires_two_windows_for_degraded_and_recovers() -> None:
+    reset_database()
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="suite_health_debounce", name="health debounce suite"))
+        create_case(db, TestCaseCreate(id="case_debounce", suite_id="suite_health_debounce", module="protocol", title="debounce", prompt="ok"))
+        create_channel(db, ChannelCreate(id="ch_health_debounce", name="debounce", provider_type="third_party_anthropic", role="candidate"))
+        run = Run(id="run_health_debounce", suite_id="suite_health_debounce", name="debounce", mode="manual_probe", status="completed", repeat_count=1, concurrency=1, total_jobs=20, completed_jobs=20, created_at=now)
+        db.add(run)
+        db.add(RunChannel(id="rch_health_debounce", run_id=run.id, channel_id="ch_health_debounce", role_in_run="candidate"))
+        for index in range(20):
+            created_at = now - timedelta(days=5 if index < 10 else 1)
+            failed = index % 2 == 0
+            db.add(Result(id=f"res_debounce_{index}", run_id=run.id, test_case_id="case_debounce", channel_id="ch_health_debounce", attempt_index=index + 1, normalized_response={"error": "upstream"} if failed else {}, raw_response={}, metrics={"status_code": 503 if failed else 200, "latency_ms": 100}, score=0 if failed else 90, labels=["request_failed"] if failed else [], created_at=created_at))
+        db.commit()
+    with TestClient(app) as client:
+        payload = client.get("/api/channels/ch_health_debounce/health-profile?days=7").json()
+    assert payload["status"] == "degraded"
+    assert any(reason["code"] == "degraded_two_windows" for reason in payload["status_reasons"]), payload["status_reasons"]
+
+
+def test_channel_health_profile_exposes_four_health_dimensions() -> None:
+    reset_database()
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="suite_health_dimensions", name="health dimensions suite"))
+        create_case(db, TestCaseCreate(id="case_dimension", suite_id="suite_health_dimensions", module="protocol", title="dimension", prompt="ok"))
+        create_channel(db, ChannelCreate(id="ch_health_dimensions", name="dimensions", provider_type="third_party_anthropic", role="candidate"))
+        run = Run(id="run_health_dimensions", suite_id="suite_health_dimensions", name="dimensions run", mode="manual_probe", status="completed", repeat_count=1, concurrency=1, total_jobs=2, completed_jobs=2, created_at=now)
+        db.add(run)
+        db.add(RunChannel(id="rch_health_dimensions", run_id=run.id, channel_id="ch_health_dimensions", role_in_run="candidate"))
+        db.add(Result(id="res_dimension_ok", run_id=run.id, test_case_id="case_dimension", channel_id="ch_health_dimensions", attempt_index=1, normalized_response={}, raw_response={"type": "message"}, metrics={"status_code": 200, "latency_ms": 100, "ttft_ms": 40, "tokens_per_second": 20}, score=90, labels=[], created_at=now))
+        db.add(Result(id="res_dimension_bad", run_id=run.id, test_case_id="case_dimension", channel_id="ch_health_dimensions", attempt_index=2, normalized_response={}, raw_response={"type": "message"}, metrics={"status_code": 502, "latency_ms": 5000, "ttft_ms": 3000, "tokens_per_second": 2}, score=40, labels=["protocol_mismatch", "quality_regression"], created_at=now))
+        db.add(Comparison(id="cmp_dimension", run_id=run.id, test_case_id="case_dimension", candidate_channel_id="ch_health_dimensions", gold_similarity=72, official_cloud_similarity=78, protocol_score=40, capability_score=70, final_score=65, labels=["protocol_mismatch"]))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/ch_health_dimensions/health-profile?days=7")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert set(payload["dimensions"]) == {"availability", "performance", "protocol", "quality"}
+    assert payload["dimensions"]["availability"]["score"] < 100
+    assert payload["dimensions"]["performance"]["details"]["p95_latency_ms"] == 100
+    assert payload["dimensions"]["performance"]["details"]["p99_latency_ms"] == 100
+    assert payload["dimensions"]["protocol"]["score"] < 100
+    assert payload["dimensions"]["quality"]["details"]["gold_similarity"] == 72
+    assert any(reason["code"] == "request_failures_present" for reason in payload["status_reasons"])
+
+
+def test_channel_health_profile_exposes_reference_band_without_penalizing_missing_baseline() -> None:
+    reset_database()
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="suite_health_reference", name="health reference suite"))
+        create_case(db, TestCaseCreate(id="case_reference", suite_id="suite_health_reference", module="capability", title="reference", prompt="ok"))
+        create_channel(db, ChannelCreate(id="ch_ref_candidate", name="candidate", provider_type="third_party_anthropic", role="candidate"))
+        create_channel(db, ChannelCreate(id="ch_ref_gold", name="gold", provider_type="anthropic", role="gold", is_reference=True))
+        create_channel(db, ChannelCreate(id="ch_ref_cloud", name="cloud", provider_type="aws_bedrock", role="official_cloud", is_reference=True))
+        for run_id, channel_id, latency, ttft in (("run_ref_candidate", "ch_ref_candidate", 1300, 300), ("run_ref_gold", "ch_ref_gold", 900, 180), ("run_ref_cloud", "ch_ref_cloud", 1000, 220)):
+            run = Run(id=run_id, suite_id="suite_health_reference", name=run_id, mode="manual_probe", status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1, created_at=now)
+            db.add(run)
+            db.add(RunChannel(id=f"rc_{run_id}", run_id=run_id, channel_id=channel_id, role_in_run="reference" if channel_id != "ch_ref_candidate" else "candidate"))
+            db.add(Result(id=f"res_{run_id}", run_id=run_id, test_case_id="case_reference", channel_id=channel_id, attempt_index=1, normalized_response={}, raw_response={"type": "message"}, metrics={"status_code": 200, "latency_ms": latency, "ttft_ms": ttft}, score=90, labels=[], created_at=now))
+        db.add(Comparison(id="cmp_ref", run_id="run_ref_candidate", test_case_id="case_reference", candidate_channel_id="ch_ref_candidate", gold_similarity=82, official_cloud_similarity=80, protocol_score=90, capability_score=82, final_score=82, labels=[]))
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/ch_ref_candidate/health-profile?days=7")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["reference_band"]["p95_latency_ms"]["candidate"] == 1300
+    assert payload["reference_band"]["p95_latency_ms"]["upper"] == 995
+    assert payload["reference_band"]["p95_latency_ms"]["deviation_ratio"] > 0
+    assert payload["reference_band"]["gold_similarity"]["candidate"] == 82
+    assert payload["reference_band"]["gold_similarity"]["lower"] is not None
+    assert isinstance(payload["status_reasons"], list)
+
+
+def test_channel_health_profile_marks_reference_inconclusive_when_no_official_samples() -> None:
+    reset_database()
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        create_suite(db, TestSuiteCreate(id="suite_health_reference_missing", name="health reference missing suite"))
+        create_case(db, TestCaseCreate(id="case_reference_missing", suite_id="suite_health_reference_missing", module="capability", title="reference missing", prompt="ok"))
+        create_channel(db, ChannelCreate(id="ch_ref_missing", name="missing", provider_type="third_party_anthropic", role="candidate"))
+        run = Run(id="run_ref_missing", suite_id="suite_health_reference_missing", name="missing", mode="manual_probe", status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1, created_at=now)
+        db.add(run)
+        db.add(RunChannel(id="rc_ref_missing", run_id=run.id, channel_id="ch_ref_missing", role_in_run="candidate"))
+        db.add(Result(id="res_ref_missing", run_id=run.id, test_case_id="case_reference_missing", channel_id="ch_ref_missing", attempt_index=1, normalized_response={}, raw_response={"type": "message"}, metrics={"status_code": 200, "latency_ms": 100}, score=90, labels=[], created_at=now))
+        db.commit()
+    with TestClient(app) as client:
+        payload = client.get("/api/channels/ch_ref_missing/health-profile?days=7").json()
+    assert payload["reference_band"]["status"] == "baseline_inconclusive"
+    assert payload["dimensions"]["availability"]["status"] == "inconclusive" or payload["dimensions"]["availability"]["status"] == "healthy"
+
+
 def test_channel_health_profile_aggregates_results_and_redacts() -> None:
     reset_database()
     now = datetime.now(timezone.utc)
@@ -5243,7 +5466,7 @@ def test_channel_health_profile_aggregates_results_and_redacts() -> None:
     payload = response.json()
     blob = json.dumps(payload, ensure_ascii=False)
     assert response.status_code == 200
-    assert payload["status"] == "degraded"
+    assert payload["status"] == "insufficient_data"
     assert payload["total_results"] == 2
     assert payload["success_count"] == 1
     assert payload["failure_count"] == 1
