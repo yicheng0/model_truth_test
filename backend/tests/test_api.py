@@ -31,7 +31,7 @@ from app import database as database_module
 from app.database import SessionLocal, engine, init_db
 from app.job_store import InMemoryJobStore
 from app.main import app, cors_origins
-from app.models import AuditLog, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
+from app.models import AuditLog, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelGroup, ChannelGroupMember, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase as TestCaseModel, TestSuite as TestSuiteModel
 from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseCreate, TestSuiteCreate
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
@@ -48,6 +48,92 @@ _backfill_spec.loader.exec_module(scheduled_tests_backfill)
 ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
 
 
+def test_channel_groups_crud_assignment_filter_and_safe_delete() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/channel-groups",
+            json={"key": "CC", "name": "Claude Code", "color": "#7c3aed", "sort_order": 10},
+        )
+        assert created.status_code == 200
+        group = created.json()
+        assert group["key"] == "cc"
+        assert group["channel_count"] == 0
+
+        duplicate = client.post("/api/channel-groups", json={"key": "cc", "name": "Duplicate"})
+        assert duplicate.status_code == 409
+
+        assigned = client.put(
+            "/api/channels/third_party_demo/groups",
+            json={"group_ids": [group["id"], group["id"]]},
+        )
+        assert assigned.status_code == 200
+        assert assigned.json()["groups"] == [
+            {"id": group["id"], "key": "cc", "name": "Claude Code", "color": "#7c3aed"}
+        ]
+
+        filtered = client.get(f"/api/channels?group_id={group['id']}")
+        assert filtered.status_code == 200
+        assert [channel["id"] for channel in filtered.json()] == ["third_party_demo"]
+
+        listed = client.get("/api/channel-groups")
+        assert listed.status_code == 200
+        assert listed.json()[0]["channel_count"] == 1
+        assert listed.json()[0]["enabled_channel_count"] == 1
+
+        deleted = client.delete(f"/api/channel-groups/{group['id']}")
+        assert deleted.status_code == 200
+        assert deleted.json() == {"deleted": True, "unlinked_channels": 1}
+
+        channel = client.get("/api/channels/third_party_demo")
+        assert channel.status_code == 200
+        assert channel.json()["groups"] == []
+
+
+def test_channel_create_and_update_accept_group_ids_without_breaking_legacy_payloads() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        group = client.post("/api/channel-groups", json={"key": "aws", "name": "AWS"}).json()
+        created = client.post(
+            "/api/channels",
+            json={
+                "id": "grouped_channel",
+                "name": "Grouped channel",
+                "provider_type": "aws_bedrock",
+                "group_ids": [group["id"]],
+            },
+        )
+        assert created.status_code == 200
+        assert [item["key"] for item in created.json()["groups"]] == ["aws"]
+
+        cleared = client.patch("/api/channels/grouped_channel", json={"group_ids": []})
+        assert cleared.status_code == 200
+        assert cleared.json()["groups"] == []
+
+        legacy = client.post(
+            "/api/channels",
+            json={"id": "legacy_channel", "name": "Legacy", "provider_type": "custom_provider"},
+        )
+        assert legacy.status_code == 200
+        assert legacy.json()["groups"] == []
+
+
+def test_channel_group_validates_key_and_unknown_membership() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        invalid = client.post("/api/channel-groups", json={"key": "bad key", "name": "Bad"})
+        assert invalid.status_code == 422
+
+        missing_group = client.put(
+            "/api/channels/third_party_demo/groups",
+            json={"group_ids": ["grp_missing"]},
+        )
+        assert missing_group.status_code == 404
+
+        missing_filter = client.get("/api/channels?group_id=grp_missing")
+        assert missing_filter.status_code == 404
+
+
 def reset_database() -> None:
     close_all_sessions()
     engine.dispose()
@@ -61,7 +147,7 @@ def reset_database() -> None:
                 sidecar.unlink()
     init_db()
     with SessionLocal() as db:
-        for model in [AuditLog, PatrolJobAttempt, PatrolJob, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, Channel, ChannelTaxonomySetting, FeishuBroadcastSetting]:
+        for model in [AuditLog, PatrolJobAttempt, PatrolJob, ChannelAlert, ScheduledChannelTest, Report, Comparison, BaselineResult, BaselineSnapshot, Result, RunChannel, Run, TestCaseModel, TestSuiteModel, ChannelGroupMember, Channel, ChannelGroup, ChannelTaxonomySetting, FeishuBroadcastSetting]:
             db.execute(delete(model))
         db.commit()
         db.expunge_all()

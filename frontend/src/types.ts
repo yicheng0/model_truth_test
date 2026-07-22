@@ -8,7 +8,36 @@ export type Channel = {
   auth_config?: ChannelAuthConfig;
   is_reference: boolean;
   enabled: boolean;
+  groups?: ChannelGroupSummary[];
 };
+
+export type ChannelGroupSummary = {
+  id: string;
+  key: string;
+  name: string;
+  color?: string | null;
+};
+
+export type ChannelGroup = ChannelGroupSummary & {
+  description?: string | null;
+  sort_order: number;
+  enabled: boolean;
+  channel_count: number;
+  enabled_channel_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ChannelGroupCreate = {
+  key: string;
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  sort_order?: number;
+  enabled?: boolean;
+};
+
+export type ChannelGroupUpdate = Partial<Omit<ChannelGroupCreate, 'key'>>;
 
 export type ChannelRole = string;
 
@@ -223,6 +252,7 @@ export type ChannelCreate = {
   auth_config?: ChannelAuthConfig | null;
   is_reference?: boolean;
   enabled?: boolean;
+  group_ids?: string[];
 };
 
 export type NewApiSyncRequest = {

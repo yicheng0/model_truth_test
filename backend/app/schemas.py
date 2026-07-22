@@ -10,6 +10,7 @@ from .redaction import redact_channel_auth_config, redact_secrets, redact_signat
 
 
 TIME_OF_DAY_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+CHANNEL_GROUP_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 PATROL_MODULES = {"signature_interop", "model_request_probes"}
 DEFAULT_PATROL_MODULES = ["signature_interop", "model_request_probes"]
@@ -58,6 +59,62 @@ def validate_run_window(start: str | None, end: str | None) -> tuple[str | None,
     return start, end
 
 
+class ChannelGroupSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    key: str
+    name: str
+    color: str | None = None
+
+
+class ChannelGroupCreate(BaseModel):
+    key: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+    color: str | None = Field(default=None, max_length=32)
+    sort_order: int = 1000
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def normalize_key_and_name(self) -> "ChannelGroupCreate":
+        self.key = self.key.strip().lower()
+        self.name = self.name.strip()
+        if not CHANNEL_GROUP_KEY_RE.fullmatch(self.key):
+            raise ValueError("group key must use lowercase letters, numbers, underscores, or hyphens")
+        if not self.name:
+            raise ValueError("group name cannot be empty")
+        return self
+
+
+class ChannelGroupUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+    color: str | None = Field(default=None, max_length=32)
+    sort_order: int | None = None
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_name(self) -> "ChannelGroupUpdate":
+        if self.name is not None:
+            self.name = self.name.strip()
+            if not self.name:
+                raise ValueError("group name cannot be empty")
+        return self
+
+
+class ChannelGroupRead(ChannelGroupCreate):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    channel_count: int = 0
+    enabled_channel_count: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ChannelGroupMembershipUpdate(BaseModel):
+    group_ids: list[str] = Field(default_factory=list)
+
+
 class ChannelBase(BaseModel):
     name: str
     provider_type: str = "custom_provider"
@@ -67,6 +124,7 @@ class ChannelBase(BaseModel):
     auth_config: dict[str, Any] = Field(default_factory=dict)
     is_reference: bool = False
     enabled: bool = True
+    group_ids: list[str] = Field(default_factory=list, exclude=True)
 
 
 class ChannelCreate(ChannelBase):
@@ -82,11 +140,13 @@ class ChannelUpdate(BaseModel):
     auth_config: dict[str, Any] | None = None
     is_reference: bool | None = None
     enabled: bool | None = None
+    group_ids: list[str] | None = None
 
 
 class ChannelRead(ChannelBase):
     model_config = ConfigDict(from_attributes=True)
     id: str
+    groups: list[ChannelGroupSummary] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

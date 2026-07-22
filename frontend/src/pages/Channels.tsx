@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import type { Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Col, Collapse, Empty, Form, Input, Modal, Popconfirm, Radio, Row, Select, Space, Statistic, Switch, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -17,7 +18,7 @@ import {
 } from '../channelCredentials';
 import { defaultModelOptions } from '../channelTaxonomy';
 import { formatDateTime } from '../time';
-import type { Channel, ChannelCreate, ChannelDeleteResult, ChannelHealthProfile, ChannelHealthRecentFailure } from '../types';
+import type { Channel, ChannelCreate, ChannelDeleteResult, ChannelGroup, ChannelHealthProfile, ChannelHealthRecentFailure } from '../types';
 
 type ChannelFormValues = {
   name: string;
@@ -28,6 +29,15 @@ type ChannelFormValues = {
   request_protocol?: string;
   is_reference?: boolean;
   enabled?: boolean;
+  group_ids?: string[];
+};
+
+type ChannelGroupFormValues = {
+  key: string;
+  name: string;
+  description?: string;
+  color?: string;
+  sort_order?: number;
 };
 
 function firstSelectValue(value?: string | string[]) {
@@ -162,14 +172,20 @@ const requestProtocolOptions = [
 export default function Channels() {
   const queryClient = useQueryClient();
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
+  const channelGroups = useQuery({ queryKey: ['channelGroups'], queryFn: api.channelGroups });
   const pendingAlerts = useQuery({ queryKey: ['alerts', 'pending_review'], queryFn: () => api.alerts('pending_review') });
   const taxonomy = useQuery({ queryKey: ['channelTaxonomy'], queryFn: api.channelTaxonomy });
   const [createForm] = Form.useForm<ChannelFormValues>();
   const [editForm] = Form.useForm<ChannelFormValues>();
+  const [groupForm] = Form.useForm<ChannelGroupFormValues>();
   const [editing, setEditing] = useState<Channel | null>(null);
   const [healthChannel, setHealthChannel] = useState<Channel | null>(null);
   const [healthDays, setHealthDays] = useState<1 | 7 | 30>(7);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [groupFilter, setGroupFilter] = useState<string | undefined>();
+  const [editingGroup, setEditingGroup] = useState<ChannelGroup | null>(null);
+  const [selectedChannelIds, setSelectedChannelIds] = useState<Key[]>([]);
+  const [bulkGroupIds, setBulkGroupIds] = useState<string[]>([]);
   const healthProfile = useQuery({
     queryKey: ['channelHealthProfile', healthChannel?.id, healthDays],
     queryFn: () => api.channelHealthProfile(healthChannel!.id, healthDays),
@@ -179,6 +195,7 @@ export default function Channels() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['channels'] }),
       queryClient.invalidateQueries({ queryKey: ['channelTaxonomy'] }),
+      queryClient.invalidateQueries({ queryKey: ['channelGroups'] }),
     ]);
   };
 
@@ -211,6 +228,38 @@ export default function Channels() {
       message.success('渠道已更新');
       setEditing(null);
       editForm.resetFields();
+      await invalidate();
+    },
+  });
+
+  const saveGroup = useMutation({
+    mutationFn: async (values: ChannelGroupFormValues) => {
+      const payload = { ...values, sort_order: values.sort_order ?? 1000, description: values.description?.trim() || null, color: values.color?.trim() || null };
+      return editingGroup ? api.updateChannelGroup(editingGroup.id, payload) : api.createChannelGroup(payload);
+    },
+    onSuccess: async () => {
+      message.success(editingGroup ? '分组已更新' : '分组已创建');
+      setEditingGroup(null);
+      groupForm.resetFields();
+      await invalidate();
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : '保存分组失败'),
+  });
+
+  const deleteGroup = useMutation({
+    mutationFn: api.deleteChannelGroup,
+    onSuccess: async () => {
+      message.success('分组已删除，渠道未删除');
+      setGroupFilter(undefined);
+      await invalidate();
+    },
+  });
+
+  const bulkSetGroups = useMutation({
+    mutationFn: async (groupIds: string[]) => Promise.all(selectedChannelIds.map((id) => api.replaceChannelGroups(String(id), groupIds))),
+    onSuccess: async () => {
+      message.success('渠道分组已批量更新');
+      setSelectedChannelIds([]);
       await invalidate();
     },
   });
@@ -284,6 +333,7 @@ export default function Channels() {
       request_protocol: channelRequestProtocol(channel),
       is_reference: channel.is_reference,
       enabled: channel.enabled,
+      group_ids: (channel.groups ?? []).map((group) => group.id),
     });
   }
 
@@ -304,6 +354,7 @@ export default function Channels() {
       model_name: modelName || null,
       base_url: values.base_url?.trim() || null,
       auth_config: buildChannelAuthConfig(values, existing?.auth_config),
+      group_ids: values.group_ids ?? [],
     };
   }
 
@@ -324,6 +375,11 @@ export default function Channels() {
     update.mutate({ id: channel.id, values: { is_reference } });
   }
 
+  const visibleChannels = useMemo(
+    () => (channels.data ?? []).filter((channel) => !groupFilter || (channel.groups ?? []).some((group) => group.id === groupFilter)),
+    [channels.data, groupFilter],
+  );
+
   return (
     <Space direction="vertical" size={24} className="page-stack">
       <div className="page-heading">
@@ -341,6 +397,28 @@ export default function Channels() {
         </Space>
       </div>
 
+      <Card title="渠道分组" bordered={false}>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} lg={10}>
+            <Form form={groupForm} layout="vertical" onFinish={(values) => saveGroup.mutate(values)} initialValues={{ sort_order: 1000 }}>
+              <Form.Item name="key" label="分组标识" rules={[{ required: true, message: '请输入分组标识' }]} extra="创建后保持稳定，例如 cc、aws、production。"><Input disabled={Boolean(editingGroup)} placeholder="cc" /></Form.Item>
+              <Form.Item name="name" label="分组名称" rules={[{ required: true, message: '请输入分组名称' }]}><Input placeholder="Claude Code" /></Form.Item>
+              <Row gutter={12}><Col span={12}><Form.Item name="color" label="标签颜色"><Input placeholder="#7c3aed" /></Form.Item></Col><Col span={12}><Form.Item name="sort_order" label="排序"><Input type="number" /></Form.Item></Col></Row>
+              <Form.Item name="description" label="说明"><Input.TextArea rows={2} /></Form.Item>
+              <Space><Button type="primary" htmlType="submit" loading={saveGroup.isPending}>{editingGroup ? '保存分组' : '创建分组'}</Button>{editingGroup ? <Button onClick={() => { setEditingGroup(null); groupForm.resetFields(); }}>取消编辑</Button> : null}</Space>
+            </Form>
+          </Col>
+          <Col xs={24} lg={14}>
+            <Table size="small" rowKey="id" loading={channelGroups.isLoading} pagination={false} dataSource={channelGroups.data ?? []} columns={[
+              { title: '分组', render: (_, group) => <Tag color={group.color || undefined}>{group.name}</Tag> },
+              { title: '标识', dataIndex: 'key' },
+              { title: '渠道', render: (_, group) => `${group.enabled_channel_count}/${group.channel_count}` },
+              { title: '操作', render: (_, group) => <Space><Button size="small" onClick={() => { setEditingGroup(group); groupForm.setFieldsValue({ key: group.key, name: group.name, description: group.description ?? '', color: group.color ?? '', sort_order: group.sort_order }); }}>编辑</Button><Popconfirm title="删除分组" description="只会解除渠道关联，不会删除渠道。" onConfirm={() => deleteGroup.mutate(group.id)}><Button size="small" danger>删除</Button></Popconfirm></Space> },
+            ]} />
+          </Col>
+        </Row>
+      </Card>
+
       <Card title="新增渠道" bordered={false}>
         <Form form={createForm} layout="vertical" onFinish={submitCreate}>
           <div className="form-grid">
@@ -349,6 +427,9 @@ export default function Channels() {
             </Form.Item>
             <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
               <Select size="large" options={accountTypeOptions} />
+            </Form.Item>
+            <Form.Item name="group_ids" label="渠道分组">
+              <Select size="large" mode="multiple" allowClear options={(channelGroups.data ?? []).filter((group) => group.enabled).map((group) => ({ value: group.id, label: group.name }))} placeholder="可选择 cc、aws 等分组" />
             </Form.Item>
           </div>
           <Collapse
@@ -386,10 +467,16 @@ export default function Channels() {
       </Card>
 
       <Card title="渠道列表" bordered={false}>
+        <Space wrap style={{ marginBottom: 16 }}>
+          <Select allowClear style={{ width: 220 }} placeholder="按分组筛选" value={groupFilter} onChange={setGroupFilter} options={(channelGroups.data ?? []).map((group) => ({ value: group.id, label: `${group.name} (${group.channel_count})` }))} />
+          <Select mode="multiple" allowClear style={{ minWidth: 260 }} placeholder="批量设置分组" value={bulkGroupIds} onChange={setBulkGroupIds} options={(channelGroups.data ?? []).map((group) => ({ value: group.id, label: group.name }))} />
+          <Button disabled={!selectedChannelIds.length} loading={bulkSetGroups.isPending} onClick={() => bulkSetGroups.mutate(bulkGroupIds)}>应用到已选 {selectedChannelIds.length} 个渠道</Button>
+        </Space>
         <Table
           rowKey="id"
           loading={channels.isLoading}
-          dataSource={channels.data ?? []}
+          dataSource={visibleChannels}
+          rowSelection={{ selectedRowKeys: selectedChannelIds, onChange: setSelectedChannelIds, preserveSelectedRowKeys: true }}
           pagination={{ pageSize: 8 }}
           columns={[
             {
@@ -416,6 +503,11 @@ export default function Channels() {
                   onChange={(checked) => toggleReference(channel, checked)}
                 />
               ),
+            },
+            {
+              title: '分组',
+              width: 180,
+              render: (_, channel) => (channel.groups ?? []).length ? <Space size={4} wrap>{(channel.groups ?? []).map((group) => <Tag key={group.id} color={group.color || undefined}>{group.name}</Tag>)}</Space> : <Tag>未分组</Tag>,
             },
             {
               title: '状态',
@@ -517,6 +609,9 @@ export default function Channels() {
           </Form.Item>
           <Form.Item name="account_type" label="账号类型" initialValue={defaultAccountType}>
             <Select options={accountTypeOptions} />
+          </Form.Item>
+          <Form.Item name="group_ids" label="渠道分组">
+            <Select mode="multiple" allowClear options={(channelGroups.data ?? []).map((group) => ({ value: group.id, label: group.name }))} />
           </Form.Item>
           <Collapse
             className="channel-advanced"

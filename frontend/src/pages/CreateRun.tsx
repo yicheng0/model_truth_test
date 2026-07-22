@@ -6,6 +6,7 @@ import { api } from '../api';
 import { isCandidateChannel, isReferenceChannel } from '../channelPresets';
 import { buildRuntimeCredentials } from '../channelCredentials';
 import { formatDateTime } from '../time';
+import { channelsForGroup, selectedOutsideGroupCount } from '../channelGroups';
 import type { BaselineSnapshot, Channel, RunCreate, TestScope, TestSuite } from '../types';
 import {
   ChannelMultiSelect,
@@ -51,8 +52,10 @@ export default function CreateRun() {
   const watchedCandidateChannelIds = Form.useWatch('candidate_channel_ids', form) ?? [];
   const suites = useQuery<TestSuite[]>({ queryKey: ['suites'], queryFn: api.suites });
   const channels = useQuery<Channel[]>({ queryKey: ['channels'], queryFn: api.channels });
+  const channelGroups = useQuery({ queryKey: ['channelGroups'], queryFn: api.channelGroups });
   const builtInSuite = useMemo(() => getDefaultSuite(suites.data), [suites.data]);
   const selectedSuiteId = watchedSuiteId ?? builtInSuite?.id;
+  const [channelGroupFilter, setChannelGroupFilter] = useState<string | undefined>();
   const baselines = useQuery<BaselineSnapshot[]>({
     queryKey: ['baselines', selectedSuiteId],
     queryFn: () => api.baselines(selectedSuiteId),
@@ -61,6 +64,9 @@ export default function CreateRun() {
 
   const referenceChannels = useMemo(() => (channels.data ?? []).filter(isReferenceChannel), [channels.data]);
   const candidateChannels = useMemo(() => (channels.data ?? []).filter(isCandidateChannel), [channels.data]);
+  const visibleReferenceChannels = useMemo(() => channelsForGroup(referenceChannels, channelGroupFilter), [referenceChannels, channelGroupFilter]);
+  const visibleCandidateChannels = useMemo(() => channelsForGroup(candidateChannels, channelGroupFilter), [candidateChannels, channelGroupFilter]);
+  const selectedOutsideGroup = selectedOutsideGroupCount(channels.data ?? [], selectedMode === 'baseline_build' ? watchedReferenceChannelIds : watchedCandidateChannelIds, channelGroupFilter);
   const readyBaselines = useMemo(() => (baselines.data ?? []).filter((baseline) => baseline.status === 'ready'), [baselines.data]);
   const credentialChannels = useMemo(() => {
     const selectedIds = selectedMode === 'baseline_build' ? watchedReferenceChannelIds : watchedCandidateChannelIds;
@@ -225,11 +231,22 @@ export default function CreateRun() {
               style={{ marginBottom: 16 }}
             />
           ) : null}
+          <Form.Item label="渠道分组筛选" extra={selectedOutsideGroup ? `已选渠道中有 ${selectedOutsideGroup} 个不在当前筛选内，提交时仍会保留。` : '只过滤候选项，不会清空已经选择的渠道。'}>
+            <Select
+              allowClear
+              size="large"
+              loading={channelGroups.isLoading}
+              value={channelGroupFilter}
+              onChange={setChannelGroupFilter}
+              placeholder="全部分组"
+              options={(channelGroups.data ?? []).filter((group) => group.enabled).map((group) => ({ value: group.id, label: `${group.name} (${group.channel_count})` }))}
+            />
+          </Form.Item>
           {selectedMode === 'baseline_build' ? (
             <Form.Item label="指纹源渠道" name="reference_channel_ids" rules={[atLeastOneChannelRule('请选择至少一个指纹源渠道')]}>
               <ChannelMultiSelect
                 loading={channels.isLoading}
-                channels={referenceChannels}
+                channels={visibleReferenceChannels}
                 placeholder="选择指纹源渠道"
                 tag={{ color: 'blue', label: '提取指纹' }}
                 showCredentialStatus
@@ -240,7 +257,7 @@ export default function CreateRun() {
             <Form.Item label="待测渠道" name="candidate_channel_ids" rules={[atLeastOneChannelRule('请选择至少一个待测渠道')]}>
               <ChannelMultiSelect
                 loading={channels.isLoading}
-                channels={candidateChannels}
+                channels={visibleCandidateChannels}
                 placeholder="选择待测渠道"
                 showCredentialStatus
                 notFoundContent="暂无待测渠道，请先在渠道管理中新增候选渠道。"

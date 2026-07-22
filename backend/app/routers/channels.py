@@ -8,16 +8,21 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, Comparison, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest
+from ..models import BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelGroup, ChannelGroupMember, Comparison, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest
 from ..redaction import merge_redacted_config, redact_secrets, redact_text
 from ..seed_utils import ensure_seed_data_when_empty
 from ..schemas import (
     CacheHitRateTestCreate,
     CacheHitRateTestRead,
     ChannelCreate,
+    ChannelGroupCreate,
+    ChannelGroupMembershipUpdate,
+    ChannelGroupRead,
+    ChannelGroupUpdate,
     ChannelHealthProfileRead,
     ChannelRead,
     ChannelUpdate,
@@ -47,6 +52,7 @@ from ..services import (
     create_signature_interop_test,
     fetch_channel_models,
     request_id_from_normalized,
+    replace_channel_groups,
     _metric_number,
     _pct,
     _percentile,
@@ -88,10 +94,89 @@ def run_read(db: Session, run: Run) -> RunRead:
     return payload
 
 
+def channel_group_read(db: Session, group: ChannelGroup) -> dict[str, object]:
+    channel_count = int(db.scalar(select(func.count()).select_from(ChannelGroupMember).where(ChannelGroupMember.group_id == group.id)) or 0)
+    enabled_channel_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(ChannelGroupMember)
+            .join(Channel, Channel.id == ChannelGroupMember.channel_id)
+            .where(ChannelGroupMember.group_id == group.id, Channel.enabled.is_(True))
+        )
+        or 0
+    )
+    return {
+        "id": group.id,
+        "key": group.key,
+        "name": group.name,
+        "description": group.description,
+        "color": group.color,
+        "sort_order": group.sort_order,
+        "enabled": group.enabled,
+        "channel_count": channel_count,
+        "enabled_channel_count": enabled_channel_count,
+        "created_at": group.created_at,
+        "updated_at": group.updated_at,
+    }
+
+
+@router.get("/api/channel-groups", response_model=list[ChannelGroupRead])
+def list_channel_groups(db: Session = Depends(get_db)) -> list[dict[str, object]]:
+    groups = db.scalars(select(ChannelGroup).order_by(ChannelGroup.sort_order, ChannelGroup.name, ChannelGroup.id)).all()
+    return [channel_group_read(db, group) for group in groups]
+
+
+@router.post("/api/channel-groups", response_model=ChannelGroupRead)
+def add_channel_group(data: ChannelGroupCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    import uuid
+
+    group = ChannelGroup(id=f"grp_{uuid.uuid4().hex[:12]}", **data.model_dump())
+    db.add(group)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Channel group key already exists") from exc
+    db.refresh(group)
+    return channel_group_read(db, group)
+
+
+@router.patch("/api/channel-groups/{group_id}", response_model=ChannelGroupRead)
+def update_channel_group(group_id: str, data: ChannelGroupUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    group = db.get(ChannelGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Channel group not found")
+    values = data.model_dump(exclude_unset=True)
+    if "name" in values:
+        values["name"] = values["name"].strip()
+    for key, value in values.items():
+        setattr(group, key, value)
+    db.commit()
+    db.refresh(group)
+    return channel_group_read(db, group)
+
+
+@router.delete("/api/channel-groups/{group_id}")
+def remove_channel_group(group_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    group = db.get(ChannelGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Channel group not found")
+    unlinked = int(db.scalar(select(func.count()).select_from(ChannelGroupMember).where(ChannelGroupMember.group_id == group_id)) or 0)
+    db.execute(delete(ChannelGroupMember).where(ChannelGroupMember.group_id == group_id))
+    db.delete(group)
+    db.commit()
+    return {"deleted": True, "unlinked_channels": unlinked}
+
+
 @router.get("/api/channels", response_model=list[ChannelRead])
-def list_channels(db: Session = Depends(get_db)) -> list[Channel]:
+def list_channels(group_id: str | None = None, db: Session = Depends(get_db)) -> list[Channel]:
     ensure_seed_data_when_empty(db, Channel)
-    return list(db.scalars(select(Channel).order_by(Channel.role, Channel.name)).all())
+    stmt = select(Channel).order_by(Channel.role, Channel.name)
+    if group_id:
+        if not db.get(ChannelGroup, group_id):
+            raise HTTPException(status_code=404, detail="Channel group not found")
+        stmt = stmt.join(ChannelGroupMember, ChannelGroupMember.channel_id == Channel.id).where(ChannelGroupMember.group_id == group_id)
+    return list(db.scalars(stmt).unique().all())
 
 
 @router.post("/api/channels", response_model=ChannelRead)
@@ -123,11 +208,28 @@ def update_channel(channel_id: str, data: ChannelUpdate, db: Session = Depends(g
             channel.auth_config_encrypted = _clean_auth_config(merge_redacted_config(channel.auth_config_encrypted, value))
         else:
             setattr(channel, key, value)
+    if data.group_ids is not None:
+        try:
+            replace_channel_groups(db, channel, data.group_ids, commit=False)
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
     if data.is_reference is not None and data.role is None:
         channel.role = "gold" if channel.is_reference else "candidate"
     db.commit()
     db.refresh(channel)
     return channel
+
+
+@router.put("/api/channels/{channel_id}/groups", response_model=ChannelRead)
+def set_channel_groups(channel_id: str, data: ChannelGroupMembershipUpdate, db: Session = Depends(get_db)) -> Channel:
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        return replace_channel_groups(db, channel, data.group_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def _count_for(db: Session, model: type, *criteria) -> int:  # noqa: ANN001
@@ -222,6 +324,7 @@ def _delete_channel_and_related_data(db: Session, channel: Channel) -> dict[str,
     if deletable_run_ids:
         stats["deleted_runs"] = _rowcount(db.execute(delete(Run).where(Run.id.in_(deletable_run_ids))))
 
+    db.execute(delete(ChannelGroupMember).where(ChannelGroupMember.channel_id == channel_id))
     db.delete(channel)
     return stats
 

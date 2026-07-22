@@ -24,6 +24,11 @@ class Channel(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    group_members: Mapped[list["ChannelGroupMember"]] = relationship(back_populates="channel", cascade="all, delete-orphan", lazy="selectin")
+
+    @property
+    def groups(self) -> list["ChannelGroup"]:
+        return sorted((member.group for member in self.group_members), key=lambda group: (group.sort_order, group.name, group.id))
 
     @property
     def auth_config(self) -> dict:
@@ -32,6 +37,30 @@ class Channel(Base):
     @auth_config.setter
     def auth_config(self, value: dict | None) -> None:
         self.auth_config_encrypted = value or None
+
+
+class ChannelGroup(Base):
+    __tablename__ = "channel_groups"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    color: Mapped[str | None] = mapped_column(String(32))
+    sort_order: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    members: Mapped[list["ChannelGroupMember"]] = relationship(back_populates="group", cascade="all, delete-orphan")
+
+
+class ChannelGroupMember(Base):
+    __tablename__ = "channel_group_members"
+
+    group_id: Mapped[str] = mapped_column(ForeignKey("channel_groups.id"), primary_key=True)
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id"), primary_key=True, index=True)
+    group: Mapped[ChannelGroup] = relationship(back_populates="members", lazy="joined")
+    channel: Mapped[Channel] = relationship(back_populates="group_members")
 
 
 class TestSuite(Base):

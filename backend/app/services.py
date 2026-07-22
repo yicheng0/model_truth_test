@@ -23,7 +23,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
+from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelGroup, ChannelGroupMember, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .redaction import merge_redacted_config, redact_secrets, redact_signatures, redact_text
 from .scheduled_probe import (
     OPERATIONAL_FAILURE_LABELS,
@@ -1374,6 +1374,8 @@ def create_channel(db: Session, data: ChannelCreate) -> Channel:
         existing.auth_config_encrypted = _clean_auth_config(merge_redacted_config(existing.auth_config_encrypted, data.auth_config))
         existing.is_reference = data.is_reference
         existing.enabled = data.enabled
+        if "group_ids" in data.model_fields_set:
+            replace_channel_groups(db, existing, data.group_ids, commit=False)
         db.commit()
         db.refresh(existing)
         return existing
@@ -1391,6 +1393,8 @@ def create_channel(db: Session, data: ChannelCreate) -> Channel:
     )
     db.add(channel)
     try:
+        db.flush()
+        replace_channel_groups(db, channel, data.group_ids, commit=False)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -1399,6 +1403,25 @@ def create_channel(db: Session, data: ChannelCreate) -> Channel:
             return existing
         raise
     db.refresh(channel)
+    return channel
+
+
+def replace_channel_groups(db: Session, channel: Channel, group_ids: list[str], *, commit: bool = True) -> Channel:
+    unique_ids = list(dict.fromkeys(group_ids))
+    groups = list(db.scalars(select(ChannelGroup).where(ChannelGroup.id.in_(unique_ids))).all()) if unique_ids else []
+    found_ids = {group.id for group in groups}
+    missing_ids = [group_id for group_id in unique_ids if group_id not in found_ids]
+    if missing_ids:
+        raise ValueError(f"Channel group not found: {', '.join(missing_ids)}")
+    db.execute(delete(ChannelGroupMember).where(ChannelGroupMember.channel_id == channel.id))
+    for group_id in unique_ids:
+        db.add(ChannelGroupMember(group_id=group_id, channel_id=channel.id))
+    if commit:
+        db.commit()
+        db.refresh(channel)
+    else:
+        db.flush()
+        db.expire(channel, ["group_members"])
     return channel
 
 
