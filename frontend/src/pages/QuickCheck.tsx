@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Collapse, Form, Input, Progress, Select, Space, Tag, Typography, message } from 'antd';
+import { AutoComplete, Button, Card, Collapse, Form, Input, Progress, Tag, Typography, message } from 'antd';
 import { ArrowLeft, Check, CircleAlert, LoaderCircle, LockKeyhole, Play, RotateCcw, ShieldCheck, X } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { buildLightweightChecks, sanitizeDetectionHistory, type LightweightCheck, type SafeDetectionHistory } from '../lightweightDetection';
@@ -103,6 +103,13 @@ export default function QuickCheck() {
     }
   }, [job.data, form, recordedJobId]);
 
+  useEffect(() => {
+    if (job.data?.status === 'failed') {
+      message.error(job.data.error || '检测任务失败，请核对接口地址、密钥和模型名称');
+      setJobId(null);
+    }
+  }, [job.data?.error, job.data?.status]);
+
   function submit(values: ClaudeCodeRelayTestCreate) { setResult(null); setJobId(null); setRecordedJobId(null); run.mutate(values); }
 
   return (
@@ -114,8 +121,8 @@ export default function QuickCheck() {
           <div className="quick-check-card-head"><Typography.Title level={3}>接口配置</Typography.Title><Typography.Text type="secondary"><LockKeyhole size={14} /> 密钥仅用于本次检测，不会写入历史</Typography.Text></div>
           <Form form={form} layout="vertical" initialValues={{ base_url: 'https://api.anthropic.com/v1', model_name: 'claude-sonnet-4-5' }} onFinish={submit}>
             <div className="quick-check-fields"><Form.Item name="base_url" label="API 接口地址" rules={[{ required: true, message: '请输入 API 地址' }, { type: 'url', message: '请输入完整 URL' }]}><Input autoComplete="off" placeholder="https://api.anthropic.com/v1" /></Form.Item><Form.Item name="channel_label" label="备注（可选）"><Input autoComplete="off" placeholder="例如：我的中转站" maxLength={100} /></Form.Item><Form.Item name="api_key" label="API Key" rules={[{ required: true, message: '请输入 API Key' }]}><Input.Password autoComplete="new-password" visibilityToggle={{ visible: showKey, onVisibleChange: setShowKey }} placeholder="sk-ant-..." /></Form.Item></div>
-            <Form.Item name="model_name" label="目标模型"><Select options={MODEL_OPTIONS} /></Form.Item>
-            <div className="quick-check-actions"><Typography.Text type="secondary">检测包含协议结构、消息标识、流式响应、工具调用和多轮稳定性。</Typography.Text><Button type="primary" size="large" htmlType="submit" icon={running ? <LoaderCircle className="spin" size={18} /> : <Play size={18} />} loading={running}>开始检测</Button></div>
+            <Form.Item name="model_name" label="目标模型"><AutoComplete options={MODEL_OPTIONS} filterOption={(input, option) => String(option?.value || '').toLowerCase().includes(input.toLowerCase())} placeholder="例如 claude-sonnet-4-5" /></Form.Item>
+            <div className="quick-check-actions"><Typography.Text type="secondary">检测包含协议结构、消息标识、流式响应、工具调用、上下文保持和重复稳定性。</Typography.Text><Button type="primary" size="large" htmlType="submit" icon={running ? <LoaderCircle className="spin" size={18} /> : <Play size={18} />} loading={running}>开始检测</Button></div>
           </Form>
         </Card>
       ) : <Card className="quick-check-result-card" bordered={false}><ResultChecklist result={result} /><Button icon={<RotateCcw size={16} />} onClick={() => { setResult(null); setJobId(null); }}>再次检测</Button></Card>}

@@ -4955,6 +4955,121 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
     return probes
 
 
+def _claude_fast_mode_sample(normalized: dict[str, Any]) -> dict[str, Any]:
+    raw_request = normalized.get("raw_request") if isinstance(normalized.get("raw_request"), dict) else {}
+    raw_response = normalized.get("raw_response") if isinstance(normalized.get("raw_response"), dict) else {}
+    usage = normalized.get("usage") if isinstance(normalized.get("usage"), dict) else {}
+    status_code = normalized.get("status_code")
+    error = str(normalized.get("error") or "").strip()
+    accepted = not error and (not isinstance(status_code, int) or status_code < 400)
+    request_header_names = sorted(str(item).lower() for item in raw_request.get("_request_header_names") or [])
+    speed = usage.get("speed") or raw_response.get("speed")
+    return redact_secrets(
+        {
+            "accepted": accepted,
+            "latency_ms": normalized.get("latency_ms"),
+            "first_token_ms": normalized.get("first_token_ms"),
+            "output_tokens": normalized.get("output_tokens") or usage.get("output_tokens"),
+            "model": normalized.get("provider_model") or raw_response.get("model") or raw_request.get("model"),
+            "speed": speed,
+            "service_tier": usage.get("service_tier"),
+            "beta_header_present": "anthropic-beta" in request_header_names,
+            "request_header_names": request_header_names,
+            "response_header_names": ((raw_response.get("_response_metadata") or {}).get("header_names") or []),
+            "message_id": normalized.get("provider_message_id"),
+            "request_id": request_id_from_normalized(normalized),
+            "request_protocol": normalized.get("request_protocol"),
+            "provider_endpoint": normalized.get("provider_endpoint"),
+            "http_status": status_code,
+            "error": error[:1000] or None,
+        }
+    )
+
+
+async def _run_claude_fast_mode_probe(
+    db: Session,
+    channel: Channel,
+    config: dict[str, Any],
+    *,
+    sample_count: int,
+    credentials_override: dict[str, Any] | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    enabled = config.get("enabled") is True
+    request_headers = config.get("request_headers") if isinstance(config.get("request_headers"), dict) else {}
+    body_overrides = config.get("body_overrides") if isinstance(config.get("body_overrides"), dict) else {}
+    config_supplied = bool(request_headers or body_overrides)
+    requested_model = str((credentials_override or {}).get("model") or channel.model_name or "")
+    provider_type = str(channel.provider_type or "")
+    if not enabled or not config_supplied:
+        return _claude_fast_mode_assessment(
+            [],
+            [],
+            requested_model=requested_model,
+            provider_type=provider_type,
+            enabled=enabled,
+            config_supplied=config_supplied,
+        )
+
+    credentials = credentials_override or _merged_channel_credentials(channel, {})
+    standard_samples: list[dict[str, Any]] = []
+    fast_samples: list[dict[str, Any]] = []
+    for pair_index in range(1, sample_count + 1):
+        prompt = f"只输出 CC-FAST-{pair_index:02d}，不要解释。"
+        standard_config = {
+            "key": f"fast_mode_standard_{pair_index}",
+            "title": f"Fast Mode Standard 对照 {pair_index}",
+            "prompt": prompt,
+            "request_params": {"max_tokens": 64, "stream": True, "temperature": 0},
+            "scoring_rules": {"required_exact": f"CC-FAST-{pair_index:02d}"},
+        }
+        fast_config = {
+            **standard_config,
+            "key": f"fast_mode_fast_{pair_index}",
+            "title": f"Fast Mode Fast 样本 {pair_index}",
+            "request_params": {
+                "max_tokens": 64,
+                "stream": True,
+                "temperature": 0,
+                "request_headers": dict(request_headers),
+                "body_overrides": dict(body_overrides),
+            },
+        }
+        for mode, probe_config, target in (
+            ("standard", standard_config, standard_samples),
+            ("fast", fast_config, fast_samples),
+        ):
+            case = _claude_code_case(db, probe_config, persist=False)
+            try:
+                normalized = await invoke_channel(channel, case, pair_index, credentials, use_mock=False)
+            except Exception as exc:
+                normalized = {
+                    "raw_request": {"model": requested_model, "_request_header_names": sorted(request_headers) if mode == "fast" else []},
+                    "raw_response": {},
+                    "provider_model": requested_model,
+                    "status_code": 500,
+                    "latency_ms": 0,
+                    "first_token_ms": 0,
+                    "output_tokens": 0,
+                    "error": str(exc),
+                }
+            target.append(_claude_fast_mode_sample(normalized))
+            if progress_callback is not None:
+                await progress_callback(len(standard_samples) + len(fast_samples), mode, pair_index)
+
+    assessment = _claude_fast_mode_assessment(
+        standard_samples,
+        fast_samples,
+        requested_model=requested_model,
+        provider_type=provider_type,
+        enabled=enabled,
+        config_supplied=config_supplied,
+    )
+    assessment["standard_evidence"] = standard_samples
+    assessment["fast_evidence"] = fast_samples
+    return redact_secrets(assessment)
+
+
 async def create_claude_code_test(
     db: Session,
     channel: Channel,
@@ -4964,6 +5079,7 @@ async def create_claude_code_test(
     include_expensive_context: bool = False,
     probe_depth: str = "standard",
     repeat_count: int = 3,
+    fast_mode_probe: dict[str, Any] | None = None,
     credentials_override: dict[str, Any] | None = None,
     persist_results: bool = True,
     progress_callback: Any | None = None,
@@ -4976,6 +5092,13 @@ async def create_claude_code_test(
         raise ValueError("repeat_count must be 3 or 5")
     configs = _claude_code_probe_configs(image_url, include_expensive_context)
     probes: list[dict[str, Any]] = []
+    fast_completed = 0
+    fast_probe_configured = bool(
+        isinstance(fast_mode_probe, dict)
+        and fast_mode_probe.get("enabled") is True
+        and (fast_mode_probe.get("request_headers") or fast_mode_probe.get("body_overrides"))
+    )
+    progress_total_count = len(configs) + 3 + (repeat_count * 2 if fast_probe_configured else 0)
 
     async def emit(current_probe: dict[str, Any] | None = None) -> None:
         if progress_callback is None:
@@ -4987,9 +5110,19 @@ async def create_claude_code_test(
                 "current_section": current_probe.get("section") if current_probe else None,
                 "probes": [dict(item) for item in probes],
                 "sections": _claude_code_sections(probes),
-                "total_count": len(configs) + 3,
+                "total_count": progress_total_count,
+                "fast_completed": fast_completed,
             }
         )
+
+    async def emit_fast_progress(completed: int, mode: str, index: int) -> None:
+        nonlocal fast_completed
+        fast_completed = completed
+        await emit({
+            "key": f"fast_mode_{mode}_{index}",
+            "title": f"Fast Mode {mode} 样本 {index}",
+            "section": "fingerprint",
+        })
 
     for config in configs:
         await emit(
@@ -5031,6 +5164,18 @@ async def create_claude_code_test(
     for gateway_probe in gateway_probes:
         probes.append(gateway_probe)
         await emit(gateway_probe)
+    fast_mode_assessment = await _run_claude_fast_mode_probe(
+        db,
+        channel,
+        fast_mode_probe or {},
+        sample_count=repeat_count,
+        credentials_override=credentials_override,
+        progress_callback=(
+            emit_fast_progress
+            if progress_callback is not None
+            else None
+        ),
+    )
     score = _claude_code_score(probes)
     claude_code_score = _claude_code_link_score(probes)
     risk_level = _claude_code_risk_level(score, probes)
@@ -5088,6 +5233,7 @@ async def create_claude_code_test(
         **access_path,
         "resource_identity": resource_identity,
         "upstream_integrity": upstream_integrity,
+        "fast_mode_assessment": fast_mode_assessment,
         "probes": probes,
         "sections": _claude_code_sections(probes),
     }
@@ -6097,6 +6243,158 @@ def _claude_code_capability_flags(probes: list[dict[str, Any]], claude_score: fl
         "claude_code_gateway_compatible": gateway_compatible,
         "signature_supported": signature_supported,
         "multimodal_supported": multimodal_supported,
+    }
+
+
+FAST_MODE_UNSUPPORTED_PROVIDER_TYPES = {
+    "aws_bedrock",
+    "azure_foundry",
+    "google_vertex",
+    "vertex_ai",
+    "claude_platform_aws",
+}
+
+
+def _fast_mode_metric(samples: list[dict[str, Any]], key: str, percentile: int) -> float | None:
+    return _percentile(
+        [float(sample[key]) if isinstance(sample.get(key), (int, float)) else None for sample in samples],
+        percentile,
+    )
+
+
+def _fast_mode_throughput(sample: dict[str, Any]) -> float | None:
+    latency_ms = sample.get("latency_ms")
+    output_tokens = sample.get("output_tokens")
+    if not isinstance(latency_ms, (int, float)) or latency_ms <= 0:
+        return None
+    if not isinstance(output_tokens, (int, float)) or output_tokens < 0:
+        return None
+    return float(output_tokens) * 1000 / float(latency_ms)
+
+
+def _improvement_ratio(standard_value: float | None, fast_value: float | None, *, higher_is_better: bool = False) -> float | None:
+    if standard_value is None or fast_value is None or standard_value <= 0:
+        return None
+    numerator = fast_value - standard_value if higher_is_better else standard_value - fast_value
+    return round(numerator / standard_value, 4)
+
+
+def _claude_fast_mode_assessment(
+    standard_samples: list[dict[str, Any]],
+    fast_samples: list[dict[str, Any]],
+    *,
+    requested_model: str,
+    provider_type: str,
+    enabled: bool,
+    config_supplied: bool,
+) -> dict[str, Any]:
+    standard_accepted = [sample for sample in standard_samples if sample.get("accepted") is True]
+    fast_accepted = [sample for sample in fast_samples if sample.get("accepted") is True]
+    requested_model_lower = requested_model.strip().lower()
+    provider_type_lower = provider_type.strip().lower()
+    supported_model = "opus-4-8" in requested_model_lower or "opus-4-7" in requested_model_lower
+    provider_expected_unsupported = provider_type_lower in FAST_MODE_UNSUPPORTED_PROVIDER_TYPES
+    beta_header_observed = any(sample.get("beta_header_present") is True for sample in fast_samples)
+    speed_values = {str(sample.get("speed") or "").lower() for sample in fast_accepted}
+    fallback_count = sum(1 for sample in fast_accepted if str(sample.get("speed") or "").lower() == "standard")
+
+    standard_ttft_p50 = _fast_mode_metric(standard_accepted, "first_token_ms", 50)
+    standard_ttft_p95 = _fast_mode_metric(standard_accepted, "first_token_ms", 95)
+    fast_ttft_p50 = _fast_mode_metric(fast_accepted, "first_token_ms", 50)
+    fast_ttft_p95 = _fast_mode_metric(fast_accepted, "first_token_ms", 95)
+    standard_latency_p50 = _fast_mode_metric(standard_accepted, "latency_ms", 50)
+    standard_latency_p95 = _fast_mode_metric(standard_accepted, "latency_ms", 95)
+    fast_latency_p50 = _fast_mode_metric(fast_accepted, "latency_ms", 50)
+    fast_latency_p95 = _fast_mode_metric(fast_accepted, "latency_ms", 95)
+    standard_throughput = _percentile([_fast_mode_throughput(sample) for sample in standard_accepted], 50)
+    fast_throughput = _percentile([_fast_mode_throughput(sample) for sample in fast_accepted], 50)
+    ttft_improvement = _improvement_ratio(standard_ttft_p50, fast_ttft_p50)
+    latency_improvement = _improvement_ratio(standard_latency_p50, fast_latency_p50)
+    throughput_improvement = _improvement_ratio(standard_throughput, fast_throughput, higher_is_better=True)
+
+    returned_models = {str(sample.get("model") or "") for sample in fast_accepted if sample.get("model")}
+    model_consistent = not returned_models or returned_models == {requested_model}
+    request_accepted = bool(fast_accepted)
+    anomaly_labels: list[str] = []
+    status = "fast_inconclusive"
+    confidence = "low"
+
+    if not enabled or not config_supplied:
+        anomaly_labels.append("fast_mode_evidence_insufficient")
+    elif not request_accepted:
+        if provider_expected_unsupported or not supported_model:
+            status = "fast_unsupported_expected"
+            confidence = "high" if len(fast_samples) >= 3 else "medium"
+            anomaly_labels.append("fast_mode_unsupported")
+        else:
+            status = "fast_unsupported_unexpected"
+            confidence = "medium" if len(fast_samples) >= 3 else "low"
+            anomaly_labels.append("fast_mode_request_rejected")
+    elif len(standard_accepted) < 3 or len(fast_accepted) < 3:
+        anomaly_labels.append("fast_mode_evidence_insufficient")
+    else:
+        performance_gain = (
+            (ttft_improvement is not None and ttft_improvement >= 0.2)
+            or (latency_improvement is not None and latency_improvement >= 0.2)
+            or (throughput_improvement is not None and throughput_improvement >= 0.25)
+        )
+        if not model_consistent:
+            anomaly_labels.append("fast_mode_model_switched")
+        if fallback_count:
+            anomaly_labels.append("fast_mode_standard_fallback")
+        if not performance_gain:
+            anomaly_labels.append("fast_mode_no_latency_gain")
+        if performance_gain and model_consistent and not fallback_count:
+            status = "fast_consistent"
+            confidence = "high" if "fast" in speed_values else "medium"
+        else:
+            status = "fast_downgrade_suspected"
+            confidence = "high" if fallback_count or not model_consistent else "medium"
+
+    conclusion_by_status = {
+        "fast_consistent": "Fast mode 行为与配对基线一致，性能改善具有重复性；远程证据仍不能确认官方来源。",
+        "fast_downgrade_suspected": "Fast 请求被接受，但性能、速度标记或模型一致性提示可能发生标准模式回退或参数降级。",
+        "fast_unsupported_expected": "当前模型或渠道属于官方预期不支持 Fast mode 的范围，不作为 Claude 真实性异常。",
+        "fast_unsupported_unexpected": "当前请求位于预期支持范围但被稳定拒绝，可能存在组织配置、余额或网关能力问题。",
+        "fast_inconclusive": "当前缺少足够的 Standard/Fast 配对样本或稳定启用配置，无法判断 Fast mode 是否实际生效。",
+    }
+    return {
+        "status": status,
+        "confidence": confidence,
+        "enabled": enabled,
+        "config_supplied": config_supplied,
+        "supported_model": supported_model,
+        "request_accepted": request_accepted,
+        "model_consistent": model_consistent,
+        "standard_samples": len(standard_samples),
+        "fast_samples": len(fast_samples),
+        "standard_accepted_samples": len(standard_accepted),
+        "fast_accepted_samples": len(fast_accepted),
+        "standard_ttft_p50_ms": standard_ttft_p50,
+        "standard_ttft_p95_ms": standard_ttft_p95,
+        "fast_ttft_p50_ms": fast_ttft_p50,
+        "fast_ttft_p95_ms": fast_ttft_p95,
+        "standard_latency_p50_ms": standard_latency_p50,
+        "standard_latency_p95_ms": standard_latency_p95,
+        "fast_latency_p50_ms": fast_latency_p50,
+        "fast_latency_p95_ms": fast_latency_p95,
+        "standard_tokens_per_second": standard_throughput,
+        "fast_tokens_per_second": fast_throughput,
+        "ttft_improvement_ratio": ttft_improvement,
+        "latency_improvement_ratio": latency_improvement,
+        "throughput_improvement_ratio": throughput_improvement,
+        "fallback_count": fallback_count,
+        "beta_header_observed": beta_header_observed,
+        "service_tiers_observed": sorted({str(sample.get("service_tier")) for sample in fast_accepted if sample.get("service_tier")}),
+        "speed_values_observed": sorted(value for value in speed_values if value),
+        "anomaly_labels": anomaly_labels,
+        "official_origin_confirmed": False,
+        "conclusion": conclusion_by_status[status],
+        "limitations": [
+            "Beta header presence is compatibility evidence only and does not prove Fast mode is active.",
+            "service_tier is a separate API service-level signal and is not equivalent to Claude Code Fast mode.",
+            "Latency and speed fields require repeated paired samples and do not prove Anthropic official origin.",
+        ],
     }
 
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   claudeFingerprintAlertLevel,
   claudeFingerprintVerdicts,
+  fastModeStatusMeta,
   labelDescription,
   labelText,
   probeDiagnosis,
@@ -135,5 +136,12 @@ describe('claudeCodeDiagnostics', () => {
         },
       }),
     ).toBe('warning');
+  });
+
+  it('maps Fast mode assessment statuses without claiming official origin', () => {
+    expect(fastModeStatusMeta('fast_consistent')).toMatchObject({ label: '行为高度一致', color: 'green' });
+    expect(fastModeStatusMeta('fast_downgrade_suspected')).toMatchObject({ label: '疑似降级', color: 'orange' });
+    expect(fastModeStatusMeta('fast_unsupported_expected').description).toContain('不作为 Claude 真伪异常');
+    expect(fastModeStatusMeta('fast_inconclusive').description).toContain('证据不足');
   });
 });

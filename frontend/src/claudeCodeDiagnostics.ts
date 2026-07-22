@@ -52,7 +52,73 @@ type LabelInfo = {
   priority: number;
 };
 
+export function fastModeStatusMeta(status?: string | null) {
+  const values: Record<string, { label: string; color: string; description: string }> = {
+    fast_consistent: {
+      label: '行为高度一致',
+      color: 'green',
+      description: 'Standard/Fast 配对样本显示可重复的性能改善，但不能单独证明官方来源。',
+    },
+    fast_supported_with_proxy_traces: {
+      label: '兼容但有代理痕迹',
+      color: 'blue',
+      description: 'Fast 行为可用，但存在网关或中间件证据。',
+    },
+    fast_downgrade_suspected: {
+      label: '疑似降级',
+      color: 'orange',
+      description: 'Fast 请求被接受，但未观察到稳定提速或出现标准模式回退。',
+    },
+    fast_unsupported_expected: {
+      label: '预期不支持',
+      color: 'default',
+      description: '当前模型或渠道属于官方预期不支持范围，不作为 Claude 真伪异常。',
+    },
+    fast_unsupported_unexpected: {
+      label: '非预期拒绝',
+      color: 'red',
+      description: '位于预期支持范围但请求被拒绝，需检查组织、余额或网关配置。',
+    },
+    fast_inconclusive: {
+      label: '证据不足',
+      color: 'default',
+      description: '证据不足：缺少有效的 Standard/Fast 配对配置或样本，暂不能判断。',
+    },
+  };
+  return values[status || ''] ?? { label: status || '未执行', color: 'default', description: 'Fast mode 探针未执行或没有可用结果。' };
+}
+
 const LABELS: Record<string, LabelInfo> = {
+  fast_mode_unsupported: {
+    text: 'Fast 预期不支持',
+    description: '当前模型或渠道不在官方 Fast mode 支持范围内，不作为 Claude 真实性异常。',
+    priority: 24,
+  },
+  fast_mode_request_rejected: {
+    text: 'Fast 请求被拒绝',
+    description: 'Fast 请求在预期支持范围内被拒绝，需要检查组织开关、usage credits 或网关透传。',
+    priority: 66,
+  },
+  fast_mode_no_latency_gain: {
+    text: 'Fast 未稳定提速',
+    description: '配对样本未观察到足够的 TTFT、总延迟或吞吐改善。',
+    priority: 64,
+  },
+  fast_mode_standard_fallback: {
+    text: '回退标准速度',
+    description: 'Fast 样本观察到 standard 速度标记，可能触发限流、余额不足或标准模式回退。',
+    priority: 68,
+  },
+  fast_mode_model_switched: {
+    text: 'Fast 模型切换',
+    description: 'Fast 样本返回模型与请求模型不一致，可能发生路由切换或模型改写。',
+    priority: 82,
+  },
+  fast_mode_evidence_insufficient: {
+    text: 'Fast 证据不足',
+    description: '没有足够的 Standard/Fast 配对样本或显式启用配置，暂不能判断。',
+    priority: 22,
+  },
   suspected_cache: {
     text: '疑似缓存复用',
     description: '两次不同 nonce 请求返回了重复内容，可能存在缓存命中、请求复用或中间层回放。',

@@ -7942,6 +7942,257 @@ def test_resource_identity_never_uses_signature_or_gateway_contract_as_oauth_evi
     assert "signature" in " ".join(payload["limitations"]).lower()
 
 
+def _fast_sample(
+    latency_ms: int,
+    first_token_ms: int,
+    output_tokens: int,
+    *,
+    model: str = "claude-opus-4-8",
+    speed: str | None = None,
+    accepted: bool = True,
+    beta_header_present: bool = False,
+) -> dict[str, object]:
+    return {
+        "accepted": accepted,
+        "latency_ms": latency_ms,
+        "first_token_ms": first_token_ms,
+        "output_tokens": output_tokens,
+        "model": model,
+        "speed": speed,
+        "service_tier": "standard",
+        "beta_header_present": beta_header_present,
+    }
+
+
+def test_fast_mode_assessment_confirms_repeated_speed_improvement() -> None:
+    from app.services import _claude_fast_mode_assessment
+
+    standard = [
+        _fast_sample(2000, 900, 100, speed="standard"),
+        _fast_sample(2200, 1000, 100, speed="standard"),
+        _fast_sample(2100, 950, 100, speed="standard"),
+    ]
+    fast = [
+        _fast_sample(1100, 420, 100, speed="fast", beta_header_present=True),
+        _fast_sample(1000, 400, 100, speed="fast", beta_header_present=True),
+        _fast_sample(1200, 450, 100, speed="fast", beta_header_present=True),
+    ]
+
+    result = _claude_fast_mode_assessment(
+        standard,
+        fast,
+        requested_model="claude-opus-4-8",
+        provider_type="anthropic",
+        enabled=True,
+        config_supplied=True,
+    )
+
+    assert result["status"] == "fast_consistent"
+    assert result["confidence"] == "high"
+    assert result["ttft_improvement_ratio"] > 0.5
+    assert result["throughput_improvement_ratio"] > 0.7
+    assert result["model_consistent"] is True
+    assert result["official_origin_confirmed"] is False
+
+
+def test_fast_mode_assessment_flags_accepted_request_without_gain() -> None:
+    from app.services import _claude_fast_mode_assessment
+
+    standard = [_fast_sample(2000, 900, 100) for _ in range(3)]
+    fast = [_fast_sample(1980, 880, 100, speed="standard") for _ in range(3)]
+
+    result = _claude_fast_mode_assessment(
+        standard,
+        fast,
+        requested_model="claude-opus-4-8",
+        provider_type="third_party_anthropic",
+        enabled=True,
+        config_supplied=True,
+    )
+
+    assert result["status"] == "fast_downgrade_suspected"
+    assert "fast_mode_no_latency_gain" in result["anomaly_labels"]
+    assert "fast_mode_standard_fallback" in result["anomaly_labels"]
+
+
+def test_fast_mode_assessment_treats_cloud_rejection_as_expected_unsupported() -> None:
+    from app.services import _claude_fast_mode_assessment
+
+    rejected = [
+        {**_fast_sample(100, 100, 0, accepted=False), "error": "Fast mode is not supported on Amazon Bedrock"}
+        for _ in range(3)
+    ]
+    result = _claude_fast_mode_assessment(
+        [_fast_sample(1800, 800, 100) for _ in range(3)],
+        rejected,
+        requested_model="claude-opus-4-8",
+        provider_type="aws_bedrock",
+        enabled=True,
+        config_supplied=True,
+    )
+
+    assert result["status"] == "fast_unsupported_expected"
+    assert result["request_accepted"] is False
+    assert result["anomaly_labels"] == ["fast_mode_unsupported"]
+
+
+def test_fast_mode_assessment_is_inconclusive_with_too_few_samples() -> None:
+    from app.services import _claude_fast_mode_assessment
+
+    result = _claude_fast_mode_assessment(
+        [_fast_sample(1800, 800, 100)],
+        [_fast_sample(900, 350, 100, speed="fast")],
+        requested_model="claude-opus-4-8",
+        provider_type="anthropic",
+        enabled=True,
+        config_supplied=True,
+    )
+
+    assert result["status"] == "fast_inconclusive"
+    assert "fast_mode_evidence_insufficient" in result["anomaly_labels"]
+
+
+def test_fast_mode_assessment_does_not_treat_beta_header_alone_as_fast_proof() -> None:
+    from app.services import _claude_fast_mode_assessment
+
+    standard = [_fast_sample(2000, 900, 100) for _ in range(3)]
+    fast = [_fast_sample(2000, 900, 100, beta_header_present=True) for _ in range(3)]
+
+    result = _claude_fast_mode_assessment(
+        standard,
+        fast,
+        requested_model="claude-opus-4-8",
+        provider_type="anthropic",
+        enabled=True,
+        config_supplied=True,
+    )
+
+    assert result["status"] != "fast_consistent"
+    assert result["beta_header_observed"] is True
+    assert "Beta header" in " ".join(result["limitations"])
+
+
+def test_fast_mode_probe_config_defaults_and_rejects_sensitive_headers() -> None:
+    from pydantic import ValidationError
+
+    from app.schemas import ClaudeFastModeProbeCreate, ClaudeCodeTestCreate
+
+    assert ClaudeCodeTestCreate().fast_mode_probe.enabled is False
+    configured = ClaudeFastModeProbeCreate(
+        enabled=True,
+        request_headers={"anthropic-beta": "captured-fast-capability"},
+        body_overrides={"speed": "fast"},
+    )
+    assert configured.enabled is True
+    assert configured.request_headers == {"anthropic-beta": "captured-fast-capability"}
+    with pytest.raises(ValidationError):
+        ClaudeFastModeProbeCreate(enabled=True, request_headers={"authorization": "Bearer secret"})
+    with pytest.raises(ValidationError):
+        ClaudeFastModeProbeCreate(enabled=True, request_headers={"x-api-key": "sk-secret"})
+    with pytest.raises(ValidationError):
+        ClaudeFastModeProbeCreate(enabled=True, request_headers={"api-key": "sk-secret"})
+    with pytest.raises(ValidationError):
+        ClaudeFastModeProbeCreate(enabled=True, request_headers={"x-custom-fast": "enabled"})
+    with pytest.raises(ValidationError):
+        ClaudeFastModeProbeCreate(enabled=True, body_overrides={"metadata": {"access_token": "secret"}})
+    with pytest.raises(ValidationError):
+        ClaudeFastModeProbeCreate(enabled=True, body_overrides={"metadata": {"token": "secret"}})
+    with pytest.raises(ValidationError):
+        ClaudeFastModeProbeCreate(enabled=True, body_overrides={"model": "claude-sonnet-4-5", "speed": "fast"})
+
+
+@pytest.mark.asyncio
+async def test_fast_mode_probe_runner_interleaves_modes_and_returns_redacted_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import services
+    from app.schemas import ClaudeFastModeProbeCreate
+
+    modes: list[str] = []
+    progress_counts: list[int] = []
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
+        is_fast = (case.request_params or {}).get("body_overrides", {}).get("speed") == "fast"
+        modes.append("fast" if is_fast else "standard")
+        latency = 900 if is_fast else 2000
+        ttft = 350 if is_fast else 900
+        speed = "fast" if is_fast else "standard"
+        return {
+            "raw_request": {
+                "model": channel.model_name,
+                "_request_header_names": ["anthropic-beta"] if is_fast else [],
+            },
+            "raw_response": {
+                "id": f"msg_{attempt}_{speed}",
+                "model": channel.model_name,
+                "usage": {"input_tokens": 10, "output_tokens": 100, "service_tier": "standard", "speed": speed},
+                "_response_metadata": {"header_names": ["request-id"]},
+            },
+            "usage": {"input_tokens": 10, "output_tokens": 100, "service_tier": "standard", "speed": speed},
+            "provider_model": channel.model_name,
+            "provider_message_id": f"msg_{attempt}_{speed}",
+            "latency_ms": latency,
+            "first_token_ms": ttft,
+            "status_code": 200,
+            "error": None,
+            "request_protocol": "anthropic_messages",
+            "provider_endpoint": "https://relay.example/v1/messages",
+        }
+
+    monkeypatch.setattr(services, "invoke_channel", fake_invoke)
+    channel = Channel(
+        id="fast_mode_probe",
+        name="Fast Mode Probe",
+        base_url="https://relay.example/v1",
+        model_name="claude-opus-4-8",
+        provider_type="third_party_anthropic",
+        role="candidate",
+        enabled=True,
+    )
+    config = ClaudeFastModeProbeCreate(
+        enabled=True,
+        request_headers={"anthropic-beta": "captured-fast-capability"},
+        body_overrides={"speed": "fast"},
+    )
+
+    async def record_progress(completed, _mode, _index):  # noqa: ANN001
+        progress_counts.append(completed)
+
+    with SessionLocal() as db:
+        result = await services._run_claude_fast_mode_probe(
+            db,
+            channel,
+            config.model_dump(),
+            sample_count=3,
+            credentials_override={"api_key": "sk-runtime-secret"},
+            progress_callback=record_progress,
+        )
+
+    assert modes == ["standard", "fast", "standard", "fast", "standard", "fast"]
+    assert progress_counts == [1, 2, 3, 4, 5, 6]
+    assert result["status"] == "fast_consistent"
+    assert len(result["standard_evidence"]) == 3
+    assert len(result["fast_evidence"]) == 3
+    assert result["fast_evidence"][0]["request_header_names"] == ["anthropic-beta"]
+    assert "sk-runtime-secret" not in json.dumps(result)
+
+
+def test_claude_code_result_schema_redacts_fast_mode_evidence() -> None:
+    from app.schemas import ClaudeCodeTestRead
+
+    payload = ClaudeCodeTestRead(
+        ok=True,
+        score=100,
+        risk_level="low",
+        summary="ok",
+        fast_mode_assessment={
+            "status": "fast_inconclusive",
+            "fast_evidence": [{"authorization": "Bearer sk-secret", "error": "token sk-secret"}],
+        },
+    ).model_dump_json()
+
+    assert "fast_inconclusive" in payload
+    assert "sk-secret" not in payload
+
+
 def test_signature_support_does_not_classify_resource_as_claude_code() -> None:
     from app.services import _claude_code_classification, _claude_code_link_score, _claude_code_score
 
@@ -10612,6 +10863,34 @@ def test_start_claude_code_relay_job_returns_job_id() -> None:
     payload = response.json()
     assert payload["job_id"]
     assert payload["status"] == "queued"
+
+
+def test_start_claude_code_relay_job_counts_fast_pair_requests(monkeypatch) -> None:
+    from app import main as main_module
+
+    reset_database()
+
+    async def fake_run_relay_job(*args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(main_module, "_run_relay_job", fake_run_relay_job)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/claude-code-test/jobs",
+            json={
+                "base_url": "https://relay.example/v1",
+                "api_key": "sk-test",
+                "model_name": "claude-opus-4-8",
+                "repeat_count": 3,
+                "fast_mode_probe": {"enabled": True, "body_overrides": {"speed": "fast"}},
+            },
+        )
+
+        assert response.status_code == 200
+        snapshot = client.get(f"/api/claude-code-test/jobs/{response.json()['job_id']}").json()
+
+    regular_probes, _ = main_module._initial_relay_job_state(False, None)
+    assert snapshot["total_count"] == len(regular_probes) + 6
 
 
 def test_get_missing_claude_code_relay_job_returns_404() -> None:

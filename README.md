@@ -129,6 +129,7 @@ npm run build
 - 深度模式需要可比的官方基线，重复执行双向 thinking signature、篡改对照、thinking + tool loop、参数/错误、SSE、usage/tokenizer 和路由指纹探针。`signature_chain_verified` 只表示 Claude signature 链路已由基线验证，不等于官方直连；API Key、Claude.ai OAuth 和透明转发仍需账单、request-id 或云审计确认。
 - Claude Code 与 Claude API 的资源来源独立展示：signature、tool、SSE、attribution、`/v1/models` 和 `count_tokens` 只计入模型/网关兼容证据，不再把官方 API 响应标成 Claude Code 资源。远程检测新增 `resource_identity`；本机 CLI 检测可读取脱敏的 `claude auth status --json`，但沙箱使用 `--bare` 时不会继承 OAuth/keychain，因此本机登录状态不能投射为远程渠道来源。
 - 运行时 API Key 只用于本次调用，不写入 Claude 指纹历史；请求快照和错误文本在返回及持久化前都会脱敏。
+- Fast Mode 专项检测默认关闭，只有显式填写当前可用的 Beta header 或 Body 覆盖并勾选配对探针后才执行 Standard/Fast 交错采样。结果单独写入 `fast_mode_assessment`，展示 TTFT、总延迟、吞吐、模型一致性、标准回退和异常标签，不计入 Claude 基础得分，也不把 `anthropic-beta`、`service_tier` 或单次低延迟当作官方来源证据。官方 Fast mode 配置可能演进，平台不会内置猜测字段；未提供配置时返回 `fast_inconclusive`。
 
 ## 自动巡检配置说明
 

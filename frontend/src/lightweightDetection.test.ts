@@ -21,8 +21,11 @@ describe('buildLightweightChecks', () => {
   it('maps detailed evidence into a stable lightweight checklist', () => {
     const checks = buildLightweightChecks(result([
       probe('basic_echo', 'pass'),
-      probe('response_body_shape', 'pass'),
-      probe('message_id_source', 'pass'),
+      probe('response_schema', 'pass'),
+      probe('usage_tokens', 'pass'),
+      probe('identity_direct', 'pass'),
+      probe('stream_lifecycle', 'pass'),
+      probe('context_ladder', 'pass'),
       probe('strict_json_schema', 'warning', 'JSON schema was rewritten'),
     ]));
 
@@ -32,6 +35,9 @@ describe('buildLightweightChecks', () => {
     ]);
     expect(checks.find((item) => item.key === 'structured_output')?.status).toBe('warning');
     expect(checks.find((item) => item.key === 'message_id')?.status).toBe('passed');
+    expect(checks.find((item) => item.key === 'protocol')?.probeKeys).toEqual(['response_schema', 'usage_tokens']);
+    expect(checks.find((item) => item.key === 'model_identity')?.status).toBe('passed');
+    expect(checks.find((item) => item.key === 'context')?.status).toBe('passed');
   });
 
   it('does not turn unsupported optional capabilities into authenticity failures', () => {
@@ -42,6 +48,17 @@ describe('buildLightweightChecks', () => {
 
     expect(checks.find((item) => item.key === 'thinking_signature')?.status).toBe('unavailable');
     expect(checks.every((item) => item.status !== 'failed')).toBe(true);
+  });
+
+  it('downgrades optional capability failures to warnings', () => {
+    const checks = buildLightweightChecks(result([
+      probe('thinking_signature', 'fail', '当前端点不支持 thinking'),
+      probe('image_base64', 'fail', '当前端点不支持图片'),
+      probe('document_input', 'fail', '当前端点不支持文档'),
+    ]));
+
+    expect(checks.find((item) => item.key === 'thinking_signature')?.status).toBe('warning');
+    expect(checks.find((item) => item.key === 'capability')?.status).toBe('warning');
   });
 });
 

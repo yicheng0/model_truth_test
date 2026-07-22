@@ -468,7 +468,7 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
 
         async def progress(update: dict[str, object]) -> None:
             probes = list(update.get("probes") or [])
-            completed = sum(1 for item in probes if str(item.get("status")) not in {"queued", "running"})
+            completed = sum(1 for item in probes if str(item.get("status")) not in {"queued", "running"}) + int(update.get("fast_completed") or 0)
             sections = _relay_job_sections(probes)
             current_key = update.get("current_key")
             current_title = update.get("current_title")
@@ -501,6 +501,7 @@ async def _run_relay_job(job_id: str, payload: ClaudeCodeEphemeralTestCreate, db
                 include_expensive_context=payload.include_expensive_context,
                 probe_depth=payload.probe_depth,
                 repeat_count=payload.repeat_count,
+                fast_mode_probe=payload.fast_mode_probe.model_dump(),
                 credentials_override={
                     "api_key": api_key,
                     "base_url": base_url,
@@ -894,6 +895,7 @@ async def channel_claude_code_test(channel_id: str, data: ClaudeCodeTestCreate, 
             include_expensive_context=data.include_expensive_context,
             probe_depth=data.probe_depth,
             repeat_count=data.repeat_count,
+            fast_mode_probe=data.fast_mode_probe.model_dump(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -933,6 +935,7 @@ async def ephemeral_claude_code_test(data: ClaudeCodeEphemeralTestCreate, db: Se
             include_expensive_context=data.include_expensive_context,
             probe_depth=data.probe_depth,
             repeat_count=data.repeat_count,
+            fast_mode_probe=data.fast_mode_probe.model_dump(),
             credentials_override={
                 "api_key": api_key,
                 "base_url": base_url,
@@ -962,6 +965,10 @@ async def start_ephemeral_claude_code_test_job(data: ClaudeCodeEphemeralTestCrea
 
     job_id = str(uuid.uuid4())
     probes, sections = _initial_relay_job_state(data.include_expensive_context, data.image_url)
+    fast_probe_configured = data.fast_mode_probe.enabled and bool(
+        data.fast_mode_probe.request_headers or data.fast_mode_probe.body_overrides
+    )
+    total_count = len(probes) + (data.repeat_count * 2 if fast_probe_configured else 0)
     async with CLAUDE_CODE_JOB_LOCK:
         now = datetime.now(timezone.utc)
         CLAUDE_CODE_JOB_STORE.set(job_id, {
@@ -975,7 +982,7 @@ async def start_ephemeral_claude_code_test_job(data: ClaudeCodeEphemeralTestCrea
             "current_title": None,
             "current_section": None,
             "completed_count": 0,
-            "total_count": len(probes),
+            "total_count": total_count,
             "percent": 0.0,
             "sections": sections,
             "probes": probes,

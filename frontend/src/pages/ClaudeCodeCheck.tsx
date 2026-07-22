@@ -4,12 +4,12 @@ import { Alert, Badge, Button, Card, Checkbox, Collapse, DatePicker, Description
 import dayjs, { type Dayjs } from 'dayjs';
 import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { claudeFingerprintAlertLevel, claudeFingerprintVerdicts, labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
+import { claudeFingerprintAlertLevel, claudeFingerprintVerdicts, fastModeStatusMeta, labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
 import { groupClaudeFingerprintHistory, localDayRangeIso, probeDiagnosticText } from '../claudeFingerprintHistory';
 import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS, CLAUDE_RESOURCE_IDENTITY_META, UPSTREAM_INTEGRITY_META, type UpstreamIntegrityClassification } from '../claudeFingerprintSpec';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
-import type { ClaudeCodeCheckStatus, ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult } from '../types';
+import type { ClaudeCodeCheckStatus, ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult, FastModeAssessment } from '../types';
 
 type RelayFormValues = {
   channel_label?: string;
@@ -23,6 +23,9 @@ type RelayFormValues = {
   include_expensive_context?: boolean;
   probe_depth?: 'standard' | 'deep';
   repeat_count?: 3 | 5;
+  fast_mode_enabled?: boolean;
+  fast_mode_beta?: string;
+  fast_mode_body?: string;
 };
 
 const SECTION_DESCRIPTIONS: Record<string, string> = {
@@ -226,6 +229,57 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
           ]}
         />
         {(integrity.limitations ?? []).map((item) => <Typography.Text key={item} type="secondary">• {item}</Typography.Text>)}
+      </Space>
+    </Card>
+  );
+}
+
+function metricValue(value?: number | null, suffix = ' ms') {
+  return typeof value === 'number' ? `${Math.round(value * 100) / 100}${suffix}` : '-';
+}
+
+function improvementValue(value?: number | null) {
+  return typeof value === 'number' ? `${Math.round(value * 1000) / 10}%` : '-';
+}
+
+function FastModePanel({ assessment }: { assessment?: FastModeAssessment | null }) {
+  if (!assessment?.status) return null;
+  const meta = fastModeStatusMeta(assessment.status);
+  return (
+    <Card bordered={false} title="Fast Mode 专项（独立于 Claude 得分与来源判定)" data-testid="fast-mode-assessment">
+      <Space direction="vertical" size={12} className="full-width">
+        <Alert
+          type={assessment.status === 'fast_consistent' ? 'success' : assessment.status.includes('unsupported_unexpected') ? 'error' : assessment.status.includes('suspected') ? 'warning' : 'info'}
+          showIcon
+          message={<Space wrap><span>{meta.label}</span><Tag color={meta.color}>置信度 {assessment.confidence}</Tag><Tag>官方来源未确认</Tag></Space>}
+          description={assessment.conclusion || meta.description}
+        />
+        <Descriptions size="small" bordered column={{ xs: 1, md: 4 }}>
+          <Descriptions.Item label="Standard/Fast 样本">{assessment.standard_samples ?? 0} / {assessment.fast_samples ?? 0}</Descriptions.Item>
+          <Descriptions.Item label="请求接受">{assessment.request_accepted ? '是' : '否'}</Descriptions.Item>
+          <Descriptions.Item label="模型一致">{assessment.model_consistent ? '是' : '否'}</Descriptions.Item>
+          <Descriptions.Item label="标准速度回退">{assessment.fallback_count ?? 0} 次</Descriptions.Item>
+          <Descriptions.Item label="TTFT P50">{metricValue(assessment.standard_ttft_p50_ms)} → {metricValue(assessment.fast_ttft_p50_ms)}</Descriptions.Item>
+          <Descriptions.Item label="总延迟 P50">{metricValue(assessment.standard_latency_p50_ms)} → {metricValue(assessment.fast_latency_p50_ms)}</Descriptions.Item>
+          <Descriptions.Item label="吞吐 P50">{metricValue(assessment.standard_tokens_per_second, ' tok/s')} → {metricValue(assessment.fast_tokens_per_second, ' tok/s')}</Descriptions.Item>
+          <Descriptions.Item label="TTFT / 吞吐改善">{improvementValue(assessment.ttft_improvement_ratio)} / {improvementValue(assessment.throughput_improvement_ratio)}</Descriptions.Item>
+        </Descriptions>
+        <Space wrap>
+          <Tag>Beta header {assessment.beta_header_observed ? '已观察' : '未观察'}</Tag>
+          {(assessment.service_tiers_observed ?? []).map((value) => <Tag key={`tier-${value}`}>service tier {value}</Tag>)}
+          {(assessment.speed_values_observed ?? []).map((value) => <Tag key={`speed-${value}`}>speed {value}</Tag>)}
+          {(assessment.anomaly_labels ?? []).map((label) => <Tag color="orange" key={label}>{labelText(label)}</Tag>)}
+        </Space>
+        <Typography.Text type="secondary">
+          Beta header、service_tier 和单次低延迟都不能单独证明 Fast mode；本模块只评估配对性能与兼容行为，也不证明 Anthropic 官方直连。
+        </Typography.Text>
+        {(assessment.standard_evidence?.length || assessment.fast_evidence?.length) ? (
+          <Collapse items={[{
+            key: 'fast-mode-evidence',
+            label: '展开脱敏配对证据',
+            children: <pre className="claude-probe-detail-pre">{JSON.stringify({ standard: assessment.standard_evidence, fast: assessment.fast_evidence }, null, 2)}</pre>,
+          }]} />
+        ) : null}
       </Space>
     </Card>
   );
@@ -627,6 +681,7 @@ function ClaudeCodeResultView({ result, meta }: { result: ClaudeCodeTestResult; 
         </Card>
       ) : null}
       <UpstreamIntegrityPanel result={result} />
+      <FastModePanel assessment={result.fast_mode_assessment} />
       {result.request_normalization_notes?.length ? (
         <Alert
           type="info"
@@ -845,6 +900,11 @@ export default function ClaudeCodeCheck() {
         include_expensive_context: Boolean(values.include_expensive_context),
         probe_depth: values.probe_depth || 'standard',
         repeat_count: values.repeat_count || 3,
+        fast_mode_probe: {
+          enabled: Boolean(values.fast_mode_enabled),
+          request_headers: values.fast_mode_beta?.trim() ? { 'anthropic-beta': values.fast_mode_beta.trim() } : {},
+          body_overrides: values.fast_mode_body?.trim() ? JSON.parse(values.fast_mode_body) as Record<string, unknown> : {},
+        },
       };
       return api.startClaudeCodeRelayTestJob(payload);
     },
@@ -992,7 +1052,7 @@ export default function ClaudeCodeCheck() {
               <Form
                 form={relayForm}
                 layout="vertical"
-                initialValues={{ provider_type: 'third_party_anthropic', request_protocol: 'auto', include_expensive_context: false, probe_depth: 'standard', repeat_count: 3 }}
+                initialValues={{ provider_type: 'third_party_anthropic', request_protocol: 'auto', include_expensive_context: false, probe_depth: 'standard', repeat_count: 3, fast_mode_enabled: false, fast_mode_body: '{}' }}
                 onFinish={submitRelay}
               >
                 <div className="signature-config-grid">
@@ -1038,10 +1098,36 @@ export default function ClaudeCodeCheck() {
                   <Form.Item name="repeat_count" label="深度探针重复次数" dependencies={['probe_depth']}>
                     <Select options={[{ value: 3, label: '3 次（默认）' }, { value: 5, label: '5 次（更强混路由采样）' }]} />
                   </Form.Item>
+                  <Form.Item name="fast_mode_beta" label="Fast mode Beta 名称（可选）">
+                    <Input placeholder="按当前官方配置或自有抓包填写；平台不内置猜测值" />
+                  </Form.Item>
+                  <Form.Item
+                    name="fast_mode_body"
+                    label="Fast mode Body 覆盖 JSON（可选）"
+                    rules={[{
+                      validator: async (_, value) => {
+                        if (!String(value || '').trim()) return;
+                        try {
+                          const parsed = JSON.parse(String(value));
+                          if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('not object');
+                          const protectedKeys = ['model', 'messages', 'system', 'max_tokens', 'stream'];
+                          const rejectedKeys = protectedKeys.filter((key) => key in parsed);
+                          if (rejectedKeys.length) throw new Error('protected fields');
+                        } catch {
+                          throw new Error('请输入 JSON 对象，且不能覆盖 model/messages/system/max_tokens/stream');
+                        }
+                      },
+                    }]}
+                  >
+                    <Input.TextArea autoSize={{ minRows: 2, maxRows: 5 }} placeholder='例如 {"speed":"fast"}，字段以当前官方文档或自有抓包为准' />
+                  </Form.Item>
                 </div>
                 <Space wrap>
                   <Form.Item name="include_expensive_context" valuePropName="checked" style={{ marginBottom: 0 }}>
                     <Checkbox>启用扩展上下文阶梯</Checkbox>
+                  </Form.Item>
+                  <Form.Item name="fast_mode_enabled" valuePropName="checked" style={{ marginBottom: 0 }}>
+                    <Checkbox>启用 Fast mode 配对探针（额外 6/10 次请求）</Checkbox>
                   </Form.Item>
                   <Button type="primary" htmlType="submit" icon={<Play size={16} />} loading={runRelayTest.isPending}>
                     开始 Claude 资源指纹检测
@@ -1049,6 +1135,7 @@ export default function ClaudeCodeCheck() {
                   <Typography.Text type="secondary">API Key 只随本次请求发送，后端不写入渠道配置。</Typography.Text>
                   <Typography.Text type="secondary">检测完成后会自动保存为右侧历史证据。</Typography.Text>
                   <Typography.Text type="secondary">深度模式为串行高请求量检测，需要 Signature Source；没有可比基线时会返回“证据不足”，不会误判失败。</Typography.Text>
+                  <Typography.Text type="secondary">Fast mode 未公开稳定请求字段；仅在显式提供 Beta 或 Body 配置时采样，结果不计入 Claude 真伪得分。</Typography.Text>
                 </Space>
               </Form>
             </Card>

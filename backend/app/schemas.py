@@ -488,12 +488,72 @@ class ClaudeCodeJobStatusRead(BaseModel):
     error: str | None = None
 
 
+class ClaudeFastModeProbeCreate(BaseModel):
+    enabled: bool = False
+    request_headers: dict[str, str] = Field(default_factory=dict)
+    body_overrides: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_request_overrides(self) -> "ClaudeFastModeProbeCreate":
+        sensitive_headers = {"authorization", "proxy-authorization", "x-api-key", "api-key", "apikey", "cookie", "set-cookie"}
+        allowed_headers = {
+            "anthropic-beta",
+            "x-claude-code-session-id",
+            "x-claude-code-agent-id",
+            "x-claude-code-parent-agent-id",
+        }
+        normalized_headers: dict[str, str] = {}
+        for name, value in self.request_headers.items():
+            normalized_name = str(name).strip().lower()
+            if normalized_name in sensitive_headers:
+                raise ValueError(f"sensitive Fast mode header is not allowed: {normalized_name}")
+            if not normalized_name or not str(value).strip():
+                raise ValueError("Fast mode request header names and values must not be blank")
+            if normalized_name not in allowed_headers:
+                raise ValueError(f"unsupported Fast mode header: {normalized_name}")
+            normalized_headers[normalized_name] = str(value).strip()
+        self.request_headers = normalized_headers
+        sensitive_body_keys = {
+            "api_key",
+            "api-key",
+            "apikey",
+            "authorization",
+            "auth_token",
+            "access_token",
+            "refresh_token",
+            "cookie",
+            "password",
+            "secret",
+            "token",
+        }
+        protected_body_keys = {"model", "messages", "system", "max_tokens", "stream"}
+        rejected_body_keys = sorted(
+            str(key).strip().lower()
+            for key in self.body_overrides
+            if str(key).strip().lower() in protected_body_keys
+        )
+        if rejected_body_keys:
+            raise ValueError(f"Fast mode body overrides cannot change paired request fields: {', '.join(rejected_body_keys)}")
+        stack: list[Any] = [self.body_overrides]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    if str(key).strip().lower() in sensitive_body_keys:
+                        raise ValueError(f"sensitive Fast mode body field is not allowed: {key}")
+                    stack.append(value)
+            elif isinstance(current, list):
+                stack.extend(current)
+        return self
+
+
 class ClaudeCodeTestCreate(BaseModel):
     source_channel_id: str | None = None
     image_url: str | None = Field(default=None, max_length=1000)
     include_expensive_context: bool = False
     probe_depth: Literal["standard", "deep"] = "standard"
     repeat_count: Literal[3, 5] = 3
+    fast_mode_probe: ClaudeFastModeProbeCreate = Field(default_factory=ClaudeFastModeProbeCreate)
 
 
 class ClaudeCodeEphemeralTestCreate(ClaudeCodeTestCreate):
@@ -576,6 +636,7 @@ class ClaudeCodeTestRead(BaseModel):
     access_path_evidence: list[dict[str, Any]] = Field(default_factory=list)
     resource_identity: dict[str, Any] = Field(default_factory=dict)
     upstream_integrity: dict[str, Any] = Field(default_factory=dict)
+    fast_mode_assessment: dict[str, Any] = Field(default_factory=dict)
     capability_flags: dict[str, Any] = Field(default_factory=dict)
     claude_score: float | None = None
     claude_code_score: float | None = None
@@ -584,7 +645,7 @@ class ClaudeCodeTestRead(BaseModel):
     probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
     sections: list[ClaudeCodeSectionRead] = Field(default_factory=list)
 
-    @field_serializer("resource_identity", "upstream_integrity")
+    @field_serializer("resource_identity", "upstream_integrity", "fast_mode_assessment")
     def serialize_identity_evidence(self, value: Any) -> Any:
         return redact_signatures(redact_secrets(value))
 

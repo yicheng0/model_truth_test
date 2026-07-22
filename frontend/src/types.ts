@@ -724,6 +724,7 @@ export type ClaudeCodeTestResult = {
       interpretation?: string;
     } | null;
   } | null;
+  fast_mode_assessment?: FastModeAssessment | null;
   capability_flags?: {
     is_claude_like?: boolean;
     claude_code_gateway_compatible?: boolean;
@@ -738,6 +739,43 @@ export type ClaudeCodeTestResult = {
   request_normalization_notes?: string[];
   probes: ClaudeCodeProbeResult[];
   sections: ClaudeCodeSection[];
+};
+
+export type FastModeAssessment = {
+  status: 'fast_consistent' | 'fast_supported_with_proxy_traces' | 'fast_downgrade_suspected' | 'fast_unsupported_expected' | 'fast_unsupported_unexpected' | 'fast_inconclusive' | string;
+  confidence: 'low' | 'medium' | 'high' | string;
+  enabled?: boolean;
+  config_supplied?: boolean;
+  supported_model?: boolean;
+  request_accepted?: boolean;
+  model_consistent?: boolean;
+  standard_samples?: number;
+  fast_samples?: number;
+  standard_accepted_samples?: number;
+  fast_accepted_samples?: number;
+  standard_ttft_p50_ms?: number | null;
+  standard_ttft_p95_ms?: number | null;
+  fast_ttft_p50_ms?: number | null;
+  fast_ttft_p95_ms?: number | null;
+  standard_latency_p50_ms?: number | null;
+  standard_latency_p95_ms?: number | null;
+  fast_latency_p50_ms?: number | null;
+  fast_latency_p95_ms?: number | null;
+  standard_tokens_per_second?: number | null;
+  fast_tokens_per_second?: number | null;
+  ttft_improvement_ratio?: number | null;
+  latency_improvement_ratio?: number | null;
+  throughput_improvement_ratio?: number | null;
+  fallback_count?: number;
+  beta_header_observed?: boolean;
+  service_tiers_observed?: string[];
+  speed_values_observed?: string[];
+  anomaly_labels?: string[];
+  official_origin_confirmed?: boolean;
+  conclusion?: string | null;
+  limitations?: string[];
+  standard_evidence?: Array<Record<string, unknown>>;
+  fast_evidence?: Array<Record<string, unknown>>;
 };
 
 export type ClaudeCodeSourceChannel = {
@@ -760,6 +798,11 @@ export type ClaudeCodeRelayTestCreate = {
   include_expensive_context?: boolean;
   probe_depth?: 'standard' | 'deep';
   repeat_count?: 3 | 5;
+  fast_mode_probe?: {
+    enabled?: boolean;
+    request_headers?: Record<string, string>;
+    body_overrides?: Record<string, unknown>;
+  };
 };
 
 export type ClaudeCodeCheckStatus = {
