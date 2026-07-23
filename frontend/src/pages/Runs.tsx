@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Empty, Popconfirm, Progress, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Empty, Popconfirm, Progress, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
 import { BarChart3, CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2, Trophy } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
 
@@ -521,7 +521,10 @@ export default function Runs() {
     () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
     [normalRuns, selectedNormalRowKeys],
   );
-  const deletableSelectedNormalRuns = selectedNormalRuns.filter((run) => run.status !== 'running');
+  const deletableSelectedNormalRuns = selectedNormalRuns.filter((run) => isTerminalRun(run.status));
+  const selectableNormalRunIds = useMemo(() => selectableRunIds(normalRuns), [normalRuns]);
+  const allNormalRunsSelected = selectableNormalRunIds.length > 0 && selectableNormalRunIds.every((id) => selectedNormalRowKeys.includes(id));
+  const someNormalRunsSelected = selectableNormalRunIds.some((id) => selectedNormalRowKeys.includes(id));
   const selectedPatrolRuns = useMemo(
     () => patrolRuns.filter((run) => selectedPatrolRowKeys.includes(run.id)),
     [patrolRuns, selectedPatrolRowKeys],
@@ -549,6 +552,10 @@ export default function Runs() {
       return;
     }
     deleteNormalRuns.mutate(deletableSelectedNormalRuns.map((run) => run.id));
+  }
+
+  function toggleSelectAllNormalRuns() {
+    setSelectedNormalRowKeys(allNormalRunsSelected ? [] : selectableNormalRunIds);
   }
 
   function deleteSelectedPatrolRuns() {
@@ -658,6 +665,14 @@ export default function Runs() {
           />
           ) : null}
         <Space wrap style={{ width: '100%', marginBottom: 16 }}>
+          <Checkbox
+            checked={allNormalRunsSelected}
+            indeterminate={!allNormalRunsSelected && someNormalRunsSelected}
+            disabled={!selectableNormalRunIds.length}
+            onChange={toggleSelectAllNormalRuns}
+          >
+            {allNormalRunsSelected ? '取消全选' : `全选可删除（${selectableNormalRunIds.length}）`}
+          </Checkbox>
           <Popconfirm
             title="删除已选检测任务"
             description={`将删除 ${deletableSelectedNormalRuns.length} 条已选任务及其结果、对比和报告。运行中任务会跳过。确定删除吗？`}
@@ -706,7 +721,7 @@ export default function Runs() {
                       return keys.filter((key) => !changedIds.has(String(key)));
                     });
                   },
-                  getCheckboxProps: (run) => ({ disabled: run.status === 'running' }),
+                  getCheckboxProps: (run) => ({ disabled: !isTerminalRun(run.status) }),
                   preserveSelectedRowKeys: true,
                 }}
                 scroll={{ x: 1160 }}

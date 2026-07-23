@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, splitRunsByPatrol } from './runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -19,6 +19,15 @@ function run(id: string, scheduledTestId?: string | null): Run {
 }
 
 describe('runs utilities', () => {
+  it('selects every deletable task while excluding running tasks', () => {
+    const completed = run('completed_1');
+    const failed = { ...run('failed_1'), status: 'failed' as const };
+    const pending = { ...run('pending_1'), status: 'pending' as const };
+    const running = { ...run('running_1'), status: 'running' as const };
+
+    expect(selectableRunIds([completed, failed, pending, running])).toEqual(['completed_1', 'failed_1']);
+  });
+
   it('splits scheduled patrol runs out of the normal task list', () => {
     const { normalRuns, patrolRuns } = splitRunsByPatrol([
       run('manual_1'),

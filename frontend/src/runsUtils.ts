@@ -96,6 +96,10 @@ export function splitRunsByPatrol(runs: Run[]) {
   };
 }
 
+export function selectableRunIds(runs: Run[]) {
+  return runs.filter((run) => run.status !== 'pending' && run.status !== 'running').map((run) => run.id);
+}
+
 export function extractPatrolEvidence(results: RunResults, preferredReportId?: string | null): PatrolEvidence | null {
   const preferredReport = preferredReportId ? results.reports.find((item) => item.id === preferredReportId) : undefined;
   const report = preferredReport ?? results.reports.find((item) => {
