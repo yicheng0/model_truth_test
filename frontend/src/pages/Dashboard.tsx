@@ -5,7 +5,6 @@ import {
   BarChart3,
   CalendarClock,
   Database,
-  GitCompare,
   Network,
   PlayCircle,
   Send,
@@ -51,8 +50,6 @@ const featureLinks = [
   { title: 'Signature 检测', description: '验证 thinking signature 跨渠道复用行为。', to: '/signature-interop', icon: ShieldCheck },
   { title: '自动巡检', description: '为候选渠道设置周期检测和告警。', to: '/scheduled-tests', icon: CalendarClock },
   { title: '新建任务', description: '创建真实性对比或指纹提取任务。', to: '/new-run', icon: PlayCircle },
-  { title: '性能诊断', description: '对渠道做延迟、TTFT、TPOT 和吞吐诊断。', to: '/new-performance', icon: BarChart3 },
-  { title: 'Arena 排名', description: '比较候选渠道胜率、题目分和样本分歧。', to: '/new-arena', icon: GitCompare },
 ];
 
 export default function Dashboard() {

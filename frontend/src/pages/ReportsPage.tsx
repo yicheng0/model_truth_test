@@ -27,8 +27,6 @@ const modeOptions: Array<{ value: RunMode | 'all'; label: string }> = [
   { value: 'all', label: '全部报告类型' },
   { value: 'candidate_eval', label: '真实性报告' },
   { value: 'full_comparison', label: '同步对比报告' },
-  { value: 'performance_benchmark', label: '性能诊断报告' },
-  { value: 'arena_comparison', label: 'Arena 排名报告' },
   { value: 'baseline_build', label: '渠道指纹报告' },
 ];
 
@@ -205,7 +203,7 @@ export default function ReportsPage() {
           <Typography.Text className="section-kicker">REPORT CENTER</Typography.Text>
           <Typography.Title level={2}>报告页</Typography.Title>
           <Typography.Paragraph>
-            汇总真实性、性能诊断和 Arena 排名报告。只有同一类型的 2-3 份报告可以进入横向分析。
+            汇总真实性对比和渠道指纹报告。同一类型的 2-3 份报告可以进入横向分析。
           </Typography.Paragraph>
         </div>
         <Button type="primary" icon={<GitCompare size={16} />} disabled={!canCompare} onClick={compareSelected}>
@@ -220,12 +218,11 @@ export default function ReportsPage() {
       <section className="metric-strip">
         <div><span>报告数</span><strong>{data.length}</strong></div>
         <div><span>真实性报告</span><strong>{data.filter((item) => item.mode === 'candidate_eval' || item.mode === 'full_comparison').length}</strong></div>
-        <div><span>性能诊断</span><strong>{data.filter((item) => item.mode === 'performance_benchmark').length}</strong></div>
-        <div><span>Arena 排名</span><strong>{data.filter((item) => item.mode === 'arena_comparison').length}</strong></div>
+        <div><span>渠道指纹</span><strong>{data.filter((item) => item.mode === 'baseline_build').length}</strong></div>
       </section>
 
       {selectedRowKeys.length >= 2 && selectedModes.length > 1 ? (
-        <Alert type="warning" showIcon message="已选择不同类型报告" description="真实性、性能诊断和 Arena 排名的指标含义不同，请只选择同一类型报告进行分析。" />
+        <Alert type="warning" showIcon message="已选择不同类型报告" description="真实性报告和渠道指纹报告的指标含义不同，请只选择同一类型报告进行分析。" />
       ) : null}
 
       <section className="metric-strip">
@@ -290,7 +287,7 @@ export default function ReportsPage() {
                 </Space>
               ),
             },
-            { title: '类型', dataIndex: 'mode', width: 150, render: (value: RunMode) => <Tag color={value === 'performance_benchmark' ? 'orange' : value === 'arena_comparison' ? 'purple' : 'blue'}>{modeLabel(value)}</Tag> },
+            { title: '类型', dataIndex: 'mode', width: 150, render: (value: RunMode) => <Tag color="blue">{modeLabel(value)}</Tag> },
             {
               title: '评级',
               dataIndex: 'grade',

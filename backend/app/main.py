@@ -32,7 +32,6 @@ from .schemas import (
     BaselineResultRead,
     BaselineSnapshotRead,
     BaselineSnapshotUpdate,
-    ArenaRunCreate,
     AuditLogRead,
     ChannelAlertRead,
     ChannelAlertReviewUpdate,
@@ -79,7 +78,6 @@ from .services import (
     _claude_code_section_for_category,
     build_comparisons,
     build_reports,
-    build_special_run_reports,
     build_run_summary,
     build_smart_patrol_report,
     channel_taxonomy_setting_read,
@@ -1093,7 +1091,6 @@ def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = 
         run = create_run(db, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    benchmark_config = data.benchmark_config.model_dump() if data.benchmark_config else None
     if data.use_mock:
         asyncio.run(
             execute_run(
@@ -1101,7 +1098,6 @@ def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = 
                 run.id,
                 data.runtime_credentials,
                 data.use_mock,
-                benchmark_config=benchmark_config,
             )
         )
     else:
@@ -1111,7 +1107,6 @@ def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = 
             run.id,
             data.runtime_credentials,
             data.use_mock,
-            benchmark_config=benchmark_config,
         )
     refreshed = db.get(Run, run.id) or run
     return run_read(db, refreshed)
@@ -1141,53 +1136,6 @@ def preview_run_sample_plan(data: SamplePlanCreate, db: Session = Depends(get_db
         return build_sample_plan(db, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/runs/arena", response_model=RunRead)
-def start_arena_run(data: ArenaRunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> RunRead:
-    channel_ids = {"candidate": data.candidate_channel_ids}
-    if data.judge_channel_id and not db.get(Channel, data.judge_channel_id):
-        raise HTTPException(status_code=404, detail="Judge channel not found")
-    try:
-        run = create_run(
-            db,
-            RunCreate(
-                name=data.name,
-                suite_id=data.suite_id,
-                channel_ids=channel_ids,
-                repeat_count=data.repeat_count,
-                concurrency=data.concurrency,
-                use_mock=data.use_mock,
-                mode="arena_comparison",
-                test_scope=data.test_scope,
-                runtime_credentials=data.runtime_credentials,
-                benchmark_config=None,
-            ),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    arena_config = {"judge_channel_id": data.judge_channel_id, "judge_mode": data.judge_mode, "judge_rubric": data.judge_rubric}
-    if data.use_mock:
-        asyncio.run(
-            execute_run(
-                SessionLocal,
-                run.id,
-                data.runtime_credentials,
-                data.use_mock,
-                arena_config=arena_config,
-            )
-        )
-    else:
-        background_tasks.add_task(
-            execute_run,
-            SessionLocal,
-            run.id,
-            data.runtime_credentials,
-            data.use_mock,
-            arena_config=arena_config,
-        )
-    refreshed = db.get(Run, run.id) or run
-    return run_read(db, refreshed)
 
 
 @app.get("/api/baselines", response_model=list[BaselineSnapshotRead])
@@ -1971,8 +1919,6 @@ def finalize_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.mode == "baseline_build":
         finalize_baseline_from_run(db, run_id)
-    elif run.mode in {"performance_benchmark", "arena_comparison"}:
-        build_special_run_reports(db, run_id)
     else:
         build_comparisons(db, run_id, run.baseline_snapshot_id)
         build_reports(db, run_id)

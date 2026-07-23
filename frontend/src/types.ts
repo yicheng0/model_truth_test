@@ -192,14 +192,6 @@ export interface MetricsPayload {
   tokens_per_second?: number;
 }
 
-export interface ArenaEvidence {
-  rank?: number;
-  win_rate?: number;
-  avg_case_score?: number;
-  pair_count?: number;
-  case_count?: number;
-}
-
 export interface TopEvidenceItem {
   test_case_id?: string;
   winner_channel_id?: string;
@@ -268,9 +260,6 @@ export interface ReportEvidence {
   detected_provider_hint?: string | null;
   dimension_scores?: Record<string, number | null | undefined>;
   scoring_dimensions?: Record<string, number | null | undefined>;
-  arena?: ArenaEvidence;
-  arena_matrix?: Array<Record<string, unknown>>;
-  judge_evidence?: Record<string, unknown>;
   top_evidence?: Array<TopEvidenceItem>;
   model_request?: Record<string, unknown>;
   model_requests?: Array<Record<string, unknown>>;
@@ -1128,15 +1117,6 @@ export type Run = {
   created_at?: string | null;
 };
 
-export type BenchmarkConfig = {
-  concurrency_steps?: number[];
-  duration_seconds?: number;
-  warmup_requests?: number;
-  target_qps?: number | null;
-  sla_p95_ms?: number | null;
-  max_error_rate?: number | null;
-};
-
 export type RunCreate = {
   name: string;
   suite_id: string;
@@ -1148,7 +1128,6 @@ export type RunCreate = {
   baseline_snapshot_id?: string;
   use_mock?: boolean;
   runtime_credentials?: Record<string, JsonObject>;
-  benchmark_config?: BenchmarkConfig | null;
 };
 
 export type BaselineBuildCreate = {
@@ -1222,7 +1201,7 @@ export type RunLogCleanupResult = {
   skipped_baseline_runs: number;
 };
 
-export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe' | 'performance_benchmark' | 'arena_comparison';
+export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe';
 export type TestScope = 'quick' | 'full' | 'scheduled_probe';
 export type ScheduledPatrolModule = 'signature_interop' | 'model_request_probes';
 export type ScheduledModelRequestProbeKey = 'thinking_temperature' | 'web_search' | 'thinking_adaptive_enabled';
@@ -1532,16 +1511,6 @@ export type RunSummary = {
   grade_distribution: Record<string, number>;
   label_distribution: Record<string, number>;
   performance_by_channel: ReportCompareMatrixRow[];
-  arena_rankings: Array<JsonObject & {
-    channel_id?: string;
-    score?: number | null;
-    win_rate?: number | null;
-    avg_case_score?: number | null;
-    wins?: number | null;
-    pair_count?: number | null;
-    case_count?: number | null;
-    labels?: string[] | null;
-  }>;
   top_evidence: Array<JsonObject & {
     test_case_id?: string;
     winner_channel_id?: string;

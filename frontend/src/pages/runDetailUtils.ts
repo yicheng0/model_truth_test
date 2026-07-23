@@ -52,34 +52,6 @@ export type ManualProbeRow = {
 
 export type PatrolProbeStatusItem = Pick<ManualProbeRow, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'>;
 
-export type ArenaRankingRow = {
-  key: string;
-  rank: number;
-  channelId: string;
-  name: string;
-  score: number;
-  winRate: number;
-  avgCaseScore: number;
-  wins: number;
-  pairCount: number;
-  caseCount: number;
-  labels: string[];
-};
-
-export type ArenaEvidenceRow = {
-  key: string;
-  testCaseId: string;
-  caseTitle: string;
-  winnerChannelId: string;
-  loserChannelId: string;
-  winnerName: string;
-  loserName: string;
-  winnerScore: number;
-  loserScore: number;
-  margin: number;
-  labels: string[];
-};
-
 export function latestResult(results?: DisplayResult[]) {
   if (!results?.length) return undefined;
   return [...results].sort((a, b) => {
@@ -167,8 +139,6 @@ export function labelDescription(label: string, report?: RunResults['reports'][n
 
 export function runModeLabel(mode?: RunMode | string) {
   if (mode === 'baseline_build') return '渠道指纹提取';
-  if (mode === 'performance_benchmark') return '性能诊断';
-  if (mode === 'arena_comparison') return 'Arena 排名';
   if (mode === 'manual_probe') return '模型请求探针';
   return '真实性对比';
 }

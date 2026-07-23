@@ -883,20 +883,6 @@ class TestCaseRead(TestCaseBase):
     created_at: datetime | None = None
 
 
-class BenchmarkConfig(BaseModel):
-    concurrency_steps: list[int] = Field(default_factory=lambda: [1], min_length=1)
-    duration_seconds: int = Field(default=0, ge=0, le=3600)
-    warmup_requests: int = Field(default=0, ge=0, le=1000)
-    target_qps: float | None = Field(default=None, gt=0, le=10000)
-    sla_p95_ms: int | None = Field(default=None, gt=0)
-    max_error_rate: float | None = Field(default=None, ge=0, le=100)
-
-
-class ArenaJudgeConfig(BaseModel):
-    judge_mode: str = "direct_score"
-    judge_rubric: str | None = None
-
-
 class TestSuiteBundle(BaseModel):
     suite: TestSuiteCreate
     cases: list[TestCaseCreate] = Field(default_factory=list)
@@ -956,7 +942,6 @@ class RunCreate(BaseModel):
     test_scope: str = "full"
     baseline_snapshot_id: str | None = None
     runtime_credentials: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    benchmark_config: BenchmarkConfig | None = None
 
 
 class SamplePlanCreate(BaseModel):
@@ -980,20 +965,6 @@ class SamplePlanRead(BaseModel):
     filters: dict[str, Any]
     cases: list[TestCaseRead]
     group_counts: dict[str, int] = Field(default_factory=dict)
-
-
-class ArenaRunCreate(BaseModel):
-    name: str
-    suite_id: str
-    candidate_channel_ids: list[str] = Field(min_length=2)
-    judge_channel_id: str | None = None
-    repeat_count: int = Field(default=1, ge=1, le=5)
-    concurrency: int = Field(default=1, ge=1, le=16)
-    use_mock: bool = True
-    test_scope: str = "quick"
-    runtime_credentials: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    judge_mode: str = "direct_score"
-    judge_rubric: str | None = None
 
 
 class RunRead(BaseModel):
@@ -1579,7 +1550,6 @@ class RunSummaryRead(BaseModel):
     grade_distribution: dict[str, int] = Field(default_factory=dict)
     label_distribution: dict[str, int] = Field(default_factory=dict)
     performance_by_channel: list[dict[str, Any]] = Field(default_factory=list)
-    arena_rankings: list[dict[str, Any]] = Field(default_factory=list)
     top_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 

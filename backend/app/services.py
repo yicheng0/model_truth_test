@@ -1177,7 +1177,6 @@ REMOVED_BUILT_IN_MODEL_OPTIONS = {
 REFERENCE_RUN_ROLES = {"reference", "gold", "official_cloud"}
 CANDIDATE_RUN_ROLES = {"candidate", "negative"}
 COMPARISON_RUN_MODES = {"full_comparison", "candidate_eval"}
-SPECIAL_REPORT_RUN_MODES = {"performance_benchmark", "arena_comparison"}
 
 
 def get_or_create_channel_taxonomy_setting(db: Session) -> ChannelTaxonomySetting:
@@ -2028,10 +2027,9 @@ def seed_demo_data(db: Session) -> None:
 def create_run(db: Session, data: RunCreate) -> Run:
     mode = data.mode or "full_comparison"
     test_scope = data.test_scope or "full"
-    benchmark_config = normalize_benchmark_config(data.benchmark_config.model_dump() if data.benchmark_config else None)
     if test_scope not in {"quick", "full"}:
         raise ValueError(f"Unsupported test scope: {test_scope}")
-    if mode not in {"full_comparison", "baseline_build", "candidate_eval", "performance_benchmark", "arena_comparison", MANUAL_PROBE_MODE}:
+    if mode not in {"full_comparison", "baseline_build", "candidate_eval", MANUAL_PROBE_MODE}:
         raise ValueError(f"Unsupported run mode: {mode}")
     if mode == "candidate_eval":
         if not data.baseline_snapshot_id:
@@ -2042,12 +2040,6 @@ def create_run(db: Session, data: RunCreate) -> Run:
     cases = cases_for_scope(db, data.suite_id, test_scope)
     repeat_count = max(1, data.repeat_count)
     concurrency = max(1, data.concurrency)
-    if mode == "performance_benchmark" and benchmark_config:
-        concurrency = max(benchmark_config["concurrency_steps"])
-        min_attempts = benchmark_config["warmup_requests"] + len(benchmark_config["concurrency_steps"])
-        if benchmark_config["duration_seconds"]:
-            min_attempts += max(1, benchmark_config["duration_seconds"] // 30)
-        repeat_count = max(repeat_count, min(20, max(1, min_attempts)))
     run = Run(
         id=new_id("run"),
         suite_id=data.suite_id,
@@ -2067,23 +2059,6 @@ def create_run(db: Session, data: RunCreate) -> Run:
     db.commit()
     db.refresh(run)
     return run
-
-
-def normalize_benchmark_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not config:
-        return None
-    steps = config.get("concurrency_steps") or [config.get("concurrency") or 1]
-    concurrency_steps = sorted({max(1, min(64, int(step))) for step in steps if str(step).strip()})
-    if not concurrency_steps:
-        concurrency_steps = [1]
-    return {
-        "concurrency_steps": concurrency_steps,
-        "duration_seconds": max(0, min(3600, int(config.get("duration_seconds") or 0))),
-        "warmup_requests": max(0, min(1000, int(config.get("warmup_requests") or 0))),
-        "target_qps": float(config["target_qps"]) if config.get("target_qps") else None,
-        "sla_p95_ms": int(config["sla_p95_ms"]) if config.get("sla_p95_ms") else None,
-        "max_error_rate": float(config["max_error_rate"]) if config.get("max_error_rate") is not None else None,
-    }
 
 
 def create_baseline_build(db: Session, data: BaselineBuildCreate) -> tuple[Run, BaselineSnapshot]:
@@ -2259,8 +2234,6 @@ def _filter_channel_ids_for_mode(channel_ids_by_role: dict[str, list[str]], mode
         "baseline_build": REFERENCE_RUN_ROLES,
         "candidate_eval": CANDIDATE_RUN_ROLES,
         "full_comparison": REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
-        "performance_benchmark": REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
-        "arena_comparison": REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
         MANUAL_PROBE_MODE: REFERENCE_RUN_ROLES | CANDIDATE_RUN_ROLES,
     }[mode]
     return {role: ids for role, ids in channel_ids_by_role.items() if role in allowed and ids}
@@ -7846,12 +7819,8 @@ async def execute_run(
     run_id: str,
     runtime_credentials: dict[str, dict[str, Any]] | None = None,
     use_mock: bool = True,
-    benchmark_config: dict[str, Any] | None = None,
-    arena_config: dict[str, Any] | None = None,
 ) -> None:
     runtime_credentials = runtime_credentials or {}
-    benchmark_config = normalize_benchmark_config(benchmark_config)
-    arena_config = arena_config or {}
     active_tasks: set[asyncio.Task[tuple[TestCase, Channel, int, dict[str, Any]]]] = set()
     with session_factory() as db:
         run = db.get(Run, run_id)
@@ -8030,8 +7999,6 @@ async def execute_run(
             elif run.mode in COMPARISON_RUN_MODES:
                 build_comparisons(db, run.id, run.baseline_snapshot_id)
                 build_reports(db, run.id)
-            elif run.mode in SPECIAL_REPORT_RUN_MODES:
-                build_special_run_reports(db, run.id, benchmark_config=benchmark_config, arena_config=arena_config)
             run.status = "completed"
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
@@ -12991,313 +12958,6 @@ def build_reports(db: Session, run_id: str) -> None:
     db.commit()
 
 
-def build_special_run_reports(db: Session, run_id: str, benchmark_config: dict[str, Any] | None = None, arena_config: dict[str, Any] | None = None) -> None:
-    run = db.get(Run, run_id)
-    if not run:
-        return
-    if run.mode == "performance_benchmark":
-        build_performance_reports(db, run_id, benchmark_config)
-    elif run.mode == "arena_comparison":
-        build_arena_reports(db, run_id, arena_config or {})
-
-
-def build_performance_reports(db: Session, run_id: str, benchmark_config: dict[str, Any] | None = None) -> None:
-    db.execute(delete(Report).where(Report.run_id == run_id))
-    channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
-    results = db.scalars(select(Result).where(Result.run_id == run_id)).all()
-    by_channel: dict[str, list[Result]] = defaultdict(list)
-    for result in results:
-        by_channel[result.channel_id].append(result)
-    for channel_id, items in by_channel.items():
-        channel = channels.get(channel_id)
-        if not channel:
-            continue
-        performance = performance_summary_for_results(items)
-        score = performance_score(performance)
-        labels = performance_labels(performance)
-        grade = capped_grade_from_score(score, labels)
-        evidence = {
-            "mode": "performance_benchmark",
-            "benchmark_config": benchmark_config or {},
-            "performance": performance,
-            "performance_distribution": performance_distribution(items),
-            "labels": labels,
-            "label_explanations": label_explanations(labels),
-            "top_evidence": performance_evidence(items),
-            "comparison_count": len(items),
-        }
-        safe_evidence = redact_secrets(evidence)
-        summary = f"诊断成功率 {performance.get('success_rate', 0):.1f}%，P95 延迟 {performance.get('p95_latency_ms') or '-'} ms。"
-        db.add(
-            Report(
-                id=new_id("rep"),
-                run_id=run_id,
-                channel_id=channel_id,
-                final_score=round(score, 2),
-                grade=grade,
-                summary=summary,
-                evidence=safe_evidence,
-                markdown=redact_text(special_report_markdown(channel, "性能诊断报告", score, grade, summary, safe_evidence)),
-            )
-        )
-    db.commit()
-
-
-def build_arena_reports(db: Session, run_id: str, arena_config: dict[str, Any] | None = None) -> None:
-    db.execute(delete(Report).where(Report.run_id == run_id))
-    channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
-    results = _arena_candidate_results(
-        db,
-        run_id,
-        list(db.scalars(select(Result).where(Result.run_id == run_id)).all()),
-    )
-    cases = {case.id: case for case in db.scalars(select(TestCase)).all()}
-    rankings = arena_rankings_for_results(results, cases)
-    matrix = arena_matrix_for_results(results, cases)
-    judge_evidence = arena_judge_evidence(results, cases, arena_config or {})
-    performance_by_channel = {item["channel_id"]: item for item in performance_by_channel_for_results(results, channels)}
-    for item in rankings:
-        channel = channels.get(item["channel_id"])
-        if not channel:
-            continue
-        labels = item.get("labels", [])
-        grade = capped_grade_from_score(item["score"], labels)
-        evidence = {
-            "mode": "arena_comparison",
-            "arena": item,
-            "arena_matrix": matrix,
-            "judge_evidence": judge_evidence.get(channel.id, {}),
-            "performance": performance_by_channel.get(channel.id, {}),
-            "labels": labels,
-            "label_explanations": label_explanations(labels),
-            "top_evidence": item.get("top_losses", []),
-            "comparison_count": item.get("case_count", 0),
-        }
-        safe_evidence = redact_secrets(evidence)
-        summary = f"Arena 胜率 {item['win_rate']:.1f}%，平均题目分 {item['avg_case_score']:.1f}。"
-        db.add(
-            Report(
-                id=new_id("rep"),
-                run_id=run_id,
-                channel_id=channel.id,
-                final_score=round(item["score"], 2),
-                grade=grade,
-                summary=summary,
-                evidence=safe_evidence,
-                markdown=redact_text(special_report_markdown(channel, "Arena 排名报告", item["score"], grade, summary, safe_evidence)),
-            )
-        )
-    db.commit()
-
-
-def _arena_candidate_channel_ids(db: Session, run_id: str) -> set[str]:
-    return set(
-        db.scalars(
-            select(RunChannel.channel_id).where(
-                RunChannel.run_id == run_id,
-                RunChannel.role_in_run == "candidate",
-            )
-        ).all()
-    )
-
-
-def _arena_candidate_results(db: Session, run_id: str, results: list[Result]) -> list[Result]:
-    candidate_ids = _arena_candidate_channel_ids(db, run_id)
-    if not candidate_ids:
-        return results
-    return [result for result in results if result.channel_id in candidate_ids]
-
-
-def performance_score(performance: dict[str, Any]) -> float:
-    score = 100.0
-    success_rate = float(performance.get("success_rate") or 0)
-    p95 = performance.get("p95_latency_ms")
-    ttft = performance.get("avg_ttft_ms")
-    if success_rate < 100:
-        score -= min(45, (100 - success_rate) * 1.5)
-    if isinstance(p95, (int, float)) and p95 > 5000:
-        score -= min(25, (p95 - 5000) / 400)
-    if isinstance(ttft, (int, float)) and ttft > 2500:
-        score -= min(15, (ttft - 2500) / 300)
-    return max(0.0, min(100.0, score))
-
-
-def performance_labels(performance: dict[str, Any]) -> list[str]:
-    labels: list[str] = []
-    if (performance.get("success_rate") or 0) < 95:
-        labels.append("performance_error_rate_high")
-    p95 = performance.get("p95_latency_ms")
-    if isinstance(p95, (int, float)) and p95 > 5000:
-        labels.append("latency_outlier")
-    ttft = performance.get("avg_ttft_ms")
-    if isinstance(ttft, (int, float)) and ttft > 2500:
-        labels.append("ttft_outlier")
-    return labels
-
-
-def performance_evidence(results: list[Result], limit: int = 5) -> list[dict[str, Any]]:
-    ranked = sorted(results, key=lambda result: (_metric_number(result, "latency_ms") or 0), reverse=True)
-    return [
-        {
-            "test_case_id": result.test_case_id,
-            "score": result.score,
-            "labels": result.labels or [],
-            "latency_ms": _metric_number(result, "latency_ms"),
-            "ttft_ms": _metric_number(result, "ttft_ms"),
-            "tokens_per_second": _metric_number(result, "tokens_per_second"),
-        }
-        for result in ranked[:limit]
-    ]
-
-
-def performance_distribution(results: list[Result]) -> dict[str, Any]:
-    latencies = [_metric_number(result, "latency_ms") for result in results]
-    ttfts = [_metric_number(result, "ttft_ms") for result in results]
-    tpots = [_metric_number(result, "tpot_ms") for result in results]
-    return {
-        "latency_ms": {
-            "p50": _percentile(latencies, 50),
-            "p95": _percentile(latencies, 95),
-            "p99": _percentile(latencies, 99),
-        },
-        "ttft_ms": {
-            "p50": _percentile(ttfts, 50),
-            "p95": _percentile(ttfts, 95),
-            "p99": _percentile(ttfts, 99),
-        },
-        "tpot_ms": {
-            "p50": _percentile(tpots, 50),
-            "p95": _percentile(tpots, 95),
-            "p99": _percentile(tpots, 99),
-        },
-        "error_types": _count_values([str((result.metrics or {}).get("error_type") or "none") for result in results if (result.normalized_response or {}).get("error")]),
-    }
-
-
-def arena_rankings_for_results(results: list[Result], cases: dict[str, TestCase]) -> list[dict[str, Any]]:
-    by_channel: dict[str, list[Result]] = defaultdict(list)
-    by_case: dict[str, list[Result]] = defaultdict(list)
-    for result in results:
-        by_channel[result.channel_id].append(result)
-        by_case[result.test_case_id].append(result)
-    wins_by_channel: dict[str, float] = defaultdict(float)
-    pair_count_by_channel: dict[str, int] = defaultdict(int)
-    top_losses_by_channel: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for case_id, case_results in by_case.items():
-        latest_by_channel: dict[str, Result] = {}
-        for result in sorted(case_results, key=lambda item: item.attempt_index):
-            latest_by_channel[result.channel_id] = result
-        values = list(latest_by_channel.values())
-        for left in values:
-            for right in values:
-                if left.channel_id >= right.channel_id:
-                    continue
-                left_score = _arena_case_score(left, cases.get(case_id))
-                right_score = _arena_case_score(right, cases.get(case_id))
-                if left_score == right_score:
-                    wins_by_channel[left.channel_id] += 0.5
-                    wins_by_channel[right.channel_id] += 0.5
-                elif left_score > right_score:
-                    wins_by_channel[left.channel_id] += 1
-                    top_losses_by_channel[right.channel_id].append(_arena_loss_evidence(right, left, case_id, left_score, right_score))
-                else:
-                    wins_by_channel[right.channel_id] += 1
-                    top_losses_by_channel[left.channel_id].append(_arena_loss_evidence(left, right, case_id, right_score, left_score))
-                pair_count_by_channel[left.channel_id] += 1
-                pair_count_by_channel[right.channel_id] += 1
-
-    rankings = []
-    for channel_id, channel_results in by_channel.items():
-        scores = [_arena_case_score(result, cases.get(result.test_case_id)) for result in channel_results]
-        pair_count = pair_count_by_channel[channel_id]
-        win_rate = _pct(wins_by_channel[channel_id], pair_count) or 0.0
-        avg_case_score = _avg(scores) or 0.0
-        score = (win_rate * 0.55) + (avg_case_score * 0.45)
-        labels = sorted({label for result in channel_results for label in (result.labels or [])})
-        rankings.append(
-            {
-                "channel_id": channel_id,
-                "score": round(score, 2),
-                "win_rate": round(win_rate, 2),
-                "wins": round(wins_by_channel[channel_id], 2),
-                "pair_count": pair_count,
-                "avg_case_score": round(avg_case_score, 2),
-                "case_count": len({result.test_case_id for result in channel_results}),
-                "labels": labels,
-                "top_losses": sorted(top_losses_by_channel[channel_id], key=lambda item: item["margin"], reverse=True)[:5],
-            }
-        )
-    return sorted(rankings, key=lambda item: item["score"], reverse=True)
-
-
-def arena_matrix_for_results(results: list[Result], cases: dict[str, TestCase]) -> list[dict[str, Any]]:
-    channel_ids = sorted({result.channel_id for result in results})
-    rankings = {item["channel_id"]: item for item in arena_rankings_for_results(results, cases)}
-    rows = []
-    for left in channel_ids:
-        row: dict[str, Any] = {"channel_id": left}
-        for right in channel_ids:
-            if left == right:
-                row[right] = None
-                continue
-            left_score = rankings.get(left, {}).get("score", 0)
-            right_score = rankings.get(right, {}).get("score", 0)
-            row[right] = round(left_score - right_score, 2)
-        rows.append(row)
-    return rows
-
-
-def arena_judge_evidence(results: list[Result], cases: dict[str, TestCase], arena_config: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    judge_channel_id = arena_config.get("judge_channel_id")
-    judge_mode = arena_config.get("judge_mode") or "direct_score"
-    rubric = arena_config.get("judge_rubric") or "Score answer quality, instruction following, safety, and protocol faithfulness."
-    by_channel: dict[str, list[Result]] = defaultdict(list)
-    for result in results:
-        by_channel[result.channel_id].append(result)
-    evidence: dict[str, dict[str, Any]] = {}
-    for channel_id, channel_results in by_channel.items():
-        case_scores = []
-        for result in channel_results:
-            case = cases.get(result.test_case_id)
-            case_scores.append({"test_case_id": result.test_case_id, "score": round(_arena_case_score(result, case), 2), "labels": result.labels or []})
-        avg_score = _avg([item["score"] for item in case_scores]) or 0.0
-        evidence[channel_id] = {
-            "judge_channel_id": judge_channel_id,
-            "judge_mode": judge_mode,
-            "rubric": rubric,
-            "automated": True,
-            "avg_judge_score": round(avg_score, 2),
-            "sample_count": len(case_scores),
-            "low_confidence_samples": sorted(case_scores, key=lambda item: item["score"])[:5],
-            "note": "Mock/local judge evidence uses deterministic scoring; live judge calls can reuse this evidence shape without storing credentials.",
-        }
-    return evidence
-
-
-def _arena_case_score(result: Result, case: TestCase | None) -> float:
-    response = result.normalized_response or {}
-    text = response.get("content_text") or ""
-    latency = _metric_number(result, "latency_ms") or 0
-    score = result.score * 0.85
-    if text:
-        score += min(10, len(text) / 160)
-    if latency > 5000:
-        score -= 5
-    return max(0.0, min(100.0, score * case_weight(case)))
-
-
-def _arena_loss_evidence(loser: Result, winner: Result, case_id: str, winner_score: float, loser_score: float) -> dict[str, Any]:
-    return {
-        "test_case_id": case_id,
-        "winner_channel_id": winner.channel_id,
-        "loser_channel_id": loser.channel_id,
-        "winner_score": round(winner_score, 2),
-        "loser_score": round(loser_score, 2),
-        "margin": round(winner_score - loser_score, 2),
-        "labels": loser.labels or [],
-    }
-
-
 def build_run_summary(db: Session, run_id: str) -> dict[str, Any]:
     run = db.get(Run, run_id)
     if not run:
@@ -13314,9 +12974,6 @@ def build_run_summary(db: Session, run_id: str) -> dict[str, Any]:
         for item in ((report.evidence or {}).get("top_evidence") or [])
         if isinstance(item, dict)
     ]
-    cases = {case.id: case for case in db.scalars(select(TestCase)).all()}
-    arena_results = _arena_candidate_results(db, run_id, list(results)) if run.mode == "arena_comparison" else []
-    performance_results = arena_results if run.mode == "arena_comparison" else results
     return {
         "run": run,
         "channel_count": len({result.channel_id for result in results}),
@@ -13332,8 +12989,7 @@ def build_run_summary(db: Session, run_id: str) -> dict[str, Any]:
         "p95_latency_ms": _percentile([_metric_number(result, "latency_ms") for result in results], 95),
         "grade_distribution": _count_values([report.grade for report in reports]),
         "label_distribution": _count_values(labels),
-        "performance_by_channel": performance_by_channel_for_results(performance_results, channels),
-        "arena_rankings": arena_rankings_for_results(arena_results, cases) if run.mode == "arena_comparison" else [],
+        "performance_by_channel": performance_by_channel_for_results(results, channels),
         "top_evidence": report_top_evidence[:8],
     }
 
@@ -13353,37 +13009,6 @@ def performance_by_channel_for_results(results: list[Result], channels: dict[str
             }
         )
     return sorted(rows, key=lambda item: (-(item.get("success_rate") or 0), item.get("p95_latency_ms") or 999999, item["channel_name"]))
-
-
-def special_report_markdown(channel: Channel, title: str, score: float, grade: str, summary: str, evidence: dict[str, Any]) -> str:
-    labels = ", ".join(evidence.get("labels") or []) or "未发现显著异常"
-    performance = evidence.get("performance") or {}
-    arena = evidence.get("arena") or {}
-    return f"""# {title}
-
-## 基本信息
-
-- 渠道：{channel.name}
-- 声称模型：{channel.model_name or "未配置"}
-- 评级：{grade}
-- 总分：{score:.1f} / 100
-- 结论：{summary}
-- 异常标签：{labels}
-
-## 性能指标
-
-- 成功率：{performance.get("success_rate", "-")}%
-- P95 延迟：{performance.get("p95_latency_ms", "-")} ms
-- 平均 TTFT：{performance.get("avg_ttft_ms", "-")} ms
-- 平均 TPOT：{performance.get("avg_tpot_ms", "-")} ms
-- 平均吞吐：{performance.get("avg_tokens_per_second", "-")} tokens/s
-
-## Arena 指标
-
-- 胜率：{arena.get("win_rate", "-")}%
-- 平均题目分：{arena.get("avg_case_score", "-")}
-- 对战样本数：{arena.get("pair_count", "-")}
-"""
 
 
 def list_report_summaries(db: Session) -> list[dict[str, Any]]:
@@ -13875,7 +13500,7 @@ LABEL_EXPLANATIONS = {
     "suspected_model_swap": "负样本或候选渠道表现出疑似模型替换特征。",
     "latency_outlier": "延迟明显偏高，可能存在中转链路或路由异常。",
     "ttft_outlier": "首 token 延迟明显偏高，用户首屏等待风险较高。",
-    "performance_error_rate_high": "性能诊断请求失败率偏高，渠道可用性或限流策略需要复核。",
+    "performance_error_rate_high": "请求失败率偏高，渠道可用性或限流策略需要复核。",
     "repeat_inconsistent": "同一题多次运行输出差异过大，存在稳定性或混路由风险。",
     "baseline_gold_missing": "当前题缺少 Anthropic 官方金标基线。",
     "baseline_cloud_missing": "当前题缺少官方云参考基线。",
@@ -14034,10 +13659,6 @@ def render_report_markdown(db: Session, report: Report) -> str:
     mode = str(evidence.get("mode") or run.mode or "").strip()
     if evidence.get("test_scope") == "scheduled_probe" or run.test_scope == "scheduled_probe" or mode == "scheduled_probe":
         return redact_text(scheduled_probe_markdown(channel, report.final_score, report.grade, summary, evidence))
-    if mode == "performance_benchmark" or run.mode == "performance_benchmark":
-        return redact_text(special_report_markdown(channel, "性能诊断报告", report.final_score, report.grade, summary, evidence))
-    if mode == "arena_comparison" or run.mode == "arena_comparison":
-        return redact_text(special_report_markdown(channel, "Arena 排名报告", report.final_score, report.grade, summary, evidence))
     if mode in {"candidate_eval", "full_comparison", MANUAL_PROBE_MODE} or any(key in evidence for key in ("avg_gold_similarity", "avg_official_cloud_similarity", "comparison_count", "dimension_scores")):
         normalized_evidence = _normalized_report_evidence(evidence)
         return redact_text(report_markdown(channel, report.final_score, report.grade, summary, normalized_evidence))
