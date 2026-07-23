@@ -1144,7 +1144,7 @@ coalsmoke and fumes of fried grease floated, turning.
 SIGNATURE_INVALID_ERROR = "Invalid `signature` in `thinking` block"
 SIGNATURE_TEST_PROMPT_A = "请用中文解释：为什么 0.1 + 0.2 不等于 0.3？请展示完整推理过程。"
 SIGNATURE_TEST_PROMPT_B = "好的，那 0.1 + 0.2 + 0.3 == 0.6 是否成立？"
-SIGNATURE_IDENTITY_PROMPT = "你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"
+SIGNATURE_IDENTITY_PROMPT = "Hi，请问你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"
 SIGNATURE_FALLBACK_NOTE = """企业级 API 渠道（AWS/Vertex/Anthropic）
 优先 AWS，风控饱和则以 Vertex/Anthropic 兜底
 都是 Anthropic 和企业云服务商合作

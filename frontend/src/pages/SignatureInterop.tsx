@@ -275,7 +275,10 @@ export default function SignatureInterop() {
                 <Select options={channelOptions} loading={channels.isLoading} placeholder="选择复用 signature 的渠道" />
               </Form.Item>
               <Form.Item label="请求模式">
-                <Tag color="blue">已默认启用流式</Tag>
+                <Space wrap>
+                  <Tag color="blue">已默认启用流式</Tag>
+                  <Tag color="purple">强制 Relay 身份探针：Hi + 你是谁</Tag>
+                </Space>
               </Form.Item>
             </div>
             <Space wrap>

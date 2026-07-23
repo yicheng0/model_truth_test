@@ -6107,7 +6107,7 @@ def test_signature_interop_kiro_identity_overrides_signature_success(monkeypatch
     assert payload["result"]["upstream_response_id"] == "msg_01identity"
     assert payload["result"]["upstream_request_id"] == "req_identity_header"
     assert calls[2]["json"]["messages"] == [
-        {"role": "user", "content": "你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"}
+        {"role": "user", "content": "Hi，请问你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"}
     ]
     assert [step["name"] for step in payload["steps"]][-2:] == ["Relay 身份验证", "最终判定"]
     assert payload["steps"][-2]["status"] == "fail"
