@@ -8975,6 +8975,19 @@ def channel_alert_matches_id_query(db: Session, alert: ChannelAlert, query: str)
     if _value_contains_query(run.name if run else None, normalized_query):
         return True
 
+    if alert.run_id:
+        indexed_id_match = db.scalar(
+            select(Result.id)
+            .where(
+                Result.run_id == alert.run_id,
+                (func.lower(Result.upstream_response_id).contains(normalized_query))
+                | (func.lower(Result.upstream_request_id).contains(normalized_query)),
+            )
+            .limit(1)
+        )
+        if indexed_id_match:
+            return True
+
     report = db.get(Report, alert.report_id)
     evidence = report.evidence if report and isinstance(report.evidence, dict) else {}
     if _json_contains_query(evidence, normalized_query):
@@ -8988,10 +9001,6 @@ def channel_alert_matches_id_query(db: Session, alert: ChannelAlert, query: str)
         results.extend(db.scalars(select(Result).where(Result.run_id == alert.run_id)).all())
     for result in results:
         if _value_contains_query(result.id, normalized_query):
-            return True
-        if _value_contains_query(result.upstream_response_id, normalized_query):
-            return True
-        if _value_contains_query(result.upstream_request_id, normalized_query):
             return True
         if _json_contains_query(result.raw_request, normalized_query):
             return True

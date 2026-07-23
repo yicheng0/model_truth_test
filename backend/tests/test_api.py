@@ -2717,6 +2717,37 @@ def test_scheduled_probe_classification_prioritizes_kiro_over_claude_and_aws_evi
     }
 
 
+def test_scheduled_probe_classification_prioritizes_explicit_non_claude_identity_over_pass_evidence() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {"key": "identity_self_report", "labels": ["identity_mismatch"], "score": 70, "response_text": "我是 ChatGPT，由 OpenAI 开发。"},
+            {"key": "thinking_temperature", "labels": ["provider_error_variant"], "error": "temperature may only be set to 1 when thinking is enabled"},
+        ],
+        signature_evidence={"ok": True},
+        labels=["identity_mismatch", "provider_error_variant"],
+        score=70,
+    )
+
+    assert result["status"] == "anomaly"
+    assert result["label"] == "身份自报不一致"
+    assert result["score"] <= 40
+
+
+def test_scheduled_probe_identity_failure_is_operational_even_when_parameter_probe_passes() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {"key": "identity_self_report", "labels": ["provider_temporarily_unavailable"], "score": 0, "error": "503 Service Unavailable", "status_code": 503},
+            {"key": "thinking_temperature", "labels": ["provider_error_variant"], "score": 100, "error": "temperature may only be set to 1 when thinking is enabled"},
+        ],
+        signature_evidence={"ok": True},
+        labels=["provider_temporarily_unavailable", "provider_error_variant"],
+        score=0,
+    )
+
+    assert result["status"] == "operational_issue"
+    assert result["label"] == "资源暂不可用"
+
+
 def test_scheduled_kiro_identity_leak_creates_critical_alert_with_identity_ids(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
 

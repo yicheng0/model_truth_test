@@ -400,6 +400,7 @@ export default function ReportDetailPage() {
             columns={[
               { title: '题目', dataIndex: 'test_case_id', width: 220 },
               { title: '上游响应 ID（Message ID）', width: 220, render: (_, result) => result.upstream_response_id ?? result.normalized_response?.provider_message_id ?? '-' },
+              { title: 'Request ID', width: 200, render: (_, result) => result.upstream_request_id ?? '-' },
               { title: 'model', width: 180, render: (_, result) => result.normalized_response?.provider_model ?? '-' },
               { title: 'stop_reason', width: 140, render: (_, result) => result.normalized_response?.stop_reason ?? '-' },
               { title: 'usage', width: 180, render: (_, result) => jsonText(result.normalized_response?.usage ?? result.raw_response?.usage) },

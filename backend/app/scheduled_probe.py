@@ -225,6 +225,32 @@ def scheduled_probe_classification(
             "reason": "身份探针响应明确泄漏 Kiro 身份，按路由混入高风险处理。",
             "score": 0,
         }
+    if "identity_mismatch" in label_set:
+        return {
+            "status": "anomaly",
+            "label": "身份自报不一致",
+            "reason": "身份探针明确自报为非 Claude/Anthropic 产品，作为身份异常证据进入复审。",
+            "score": min(normalized_score, 40),
+        }
+    identity_request = next((item for item in model_requests if str(item.get("key") or "") == "identity_self_report"), None)
+    identity_operational_label = operational_failure_label_for_item(identity_request) if identity_request else None
+    identity_failure_blockers = label_set.difference(OPERATIONAL_FAILURE_LABELS | {"provider_error_variant", "identity_uncertain"})
+    if identity_operational_label and not identity_failure_blockers:
+        if identity_operational_label == PROVIDER_QUOTA_EXHAUSTED_LABEL:
+            display_label = "额度不足"
+            reason = "本轮无法判定：固定身份请求因额度或余额不足失败，巡检证据不完整。"
+        elif identity_operational_label == PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL:
+            display_label = "资源暂不可用"
+            reason = "本轮无法判定：固定身份请求遇到上游资源暂不可用，巡检证据不完整。"
+        else:
+            display_label = "检测失败"
+            reason = "本轮无法判定：固定身份请求失败，巡检证据不完整。"
+        return {
+            "status": "operational_issue",
+            "label": display_label,
+            "reason": reason,
+            "score": 90,
+        }
     provider_hint = scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels)
     parameter_requests = [item for item in model_requests if str(item.get("key") or "") in EXPECTED_SCHEDULED_PROBE_KEYS]
     probe_count = len({str(item.get("key") or "") for item in parameter_requests if str(item.get("key") or "")}) or len(parameter_requests)
