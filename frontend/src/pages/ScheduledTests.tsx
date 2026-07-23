@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState, type Key, type MouseEvent as ReactMouseEvent } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Col, Collapse, DatePicker, Descriptions, Drawer, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Statistic, Switch, Table, Tabs, Tag, TimePicker, Tooltip, Typography, message } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -16,6 +16,7 @@ import {
   alertRangeToParams,
   alertSummaryCell,
   bulkDeleteMessage,
+  mergeTableRowSelection,
   matchesAlertResultFilter,
   paramValue,
   patrolGuideSteps,
@@ -27,7 +28,6 @@ import {
   runWindowText,
   scheduleStatusColor,
   setSearchParamValue,
-  toggleTableRowKey,
   type AlertResultFilter,
   type AlertTimeRange,
   type ScheduledTab,
@@ -585,22 +585,6 @@ export default function ScheduledTests() {
       return;
     }
     deleteAlerts.mutate(ids);
-  }
-
-  function selectionColumnClicked(event: ReactMouseEvent<HTMLElement>) {
-    return Boolean((event.target as HTMLElement | null)?.closest('td.ant-table-selection-column'));
-  }
-
-  function toggleAlertSelectionFromCell(alert: ChannelAlert, event: ReactMouseEvent<HTMLElement>) {
-    if (!selectionColumnClicked(event)) return;
-    event.stopPropagation();
-    setSelectedAlertRowKeys((keys) => toggleTableRowKey(keys, alert.id));
-  }
-
-  function toggleRecentAlertSelectionFromCell(alert: ChannelAlert, event: ReactMouseEvent<HTMLElement>) {
-    if (!selectionColumnClicked(event)) return;
-    event.stopPropagation();
-    setSelectedRecentAlertRowKeys((keys) => toggleTableRowKey(keys, alert.id));
   }
 
   function submitFeishu(values: FeishuBroadcastFormValues) {
@@ -1304,12 +1288,10 @@ export default function ScheduledTests() {
           locale={{ emptyText: alerts.isLoading || channels.isLoading ? '正在加载复审告警' : hasAlertFilters ? <Empty description="当前筛选条件下无告警" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : <Empty description="暂无复审告警" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
           rowSelection={{
             selectedRowKeys: selectedAlertRowKeys,
-            onChange: setSelectedAlertRowKeys,
+            onSelect: (alert, selected) => setSelectedAlertRowKeys((keys) => mergeTableRowSelection(keys, [alert.id], selected)),
+            onSelectAll: (selected, _selectedRows, changeRows) => setSelectedAlertRowKeys((keys) => mergeTableRowSelection(keys, changeRows.map((alert) => alert.id), selected)),
             preserveSelectedRowKeys: true,
           }}
-          onRow={(alert) => ({
-            onClickCapture: (event) => toggleAlertSelectionFromCell(alert, event),
-          })}
           rowClassName={(alert) => (alert.id === selectedAlertId ? 'highlight-table-row' : '')}
           pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
           scroll={{ x: 760 }}
@@ -1494,11 +1476,9 @@ export default function ScheduledTests() {
                       scroll={{ x: 520 }}
                       rowSelection={{
                         selectedRowKeys: selectedRecentAlertRowKeys,
-                        onChange: setSelectedRecentAlertRowKeys,
+                        onSelect: (alert, selected) => setSelectedRecentAlertRowKeys((keys) => mergeTableRowSelection(keys, [alert.id], selected)),
+                        onSelectAll: (selected, _selectedRows, changeRows) => setSelectedRecentAlertRowKeys((keys) => mergeTableRowSelection(keys, changeRows.map((alert) => alert.id), selected)),
                       }}
-                      onRow={(alert) => ({
-                        onClickCapture: (event) => toggleRecentAlertSelectionFromCell(alert, event),
-                      })}
                       columns={[
                         { title: '告警信息', render: (_, alert) => alertSummaryCell(alert, channelById.get(alert.channel_id)) },
                         {

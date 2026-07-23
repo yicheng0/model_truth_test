@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { probeClassificationColor, probeSummary, toggleTableRowKey } from './ScheduledTests.helpers';
+import { mergeTableRowSelection, probeClassificationColor, probeSummary } from './ScheduledTests.helpers';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ScheduledChannelTest } from '../types';
 
-describe('toggleTableRowKey', () => {
-  it('adds an unselected row key', () => {
-    expect(toggleTableRowKey(['alert_1'], 'alert_2')).toEqual(['alert_1', 'alert_2']);
+describe('mergeTableRowSelection', () => {
+  it('adds and removes rows without relying on captured checkbox clicks', () => {
+    expect(mergeTableRowSelection(['alert_1'], ['alert_2'], true)).toEqual(['alert_1', 'alert_2']);
+    expect(mergeTableRowSelection(['alert_1', 'alert_2'], ['alert_1'], false)).toEqual(['alert_2']);
   });
 
-  it('removes a selected row key using string comparison', () => {
-    expect(toggleTableRowKey(['1', 'alert_2'], '1')).toEqual(['alert_2']);
+  it('deduplicates page selections and preserves selections from other pages', () => {
+    expect(mergeTableRowSelection(['page_1', 'page_2'], ['page_2', 'page_3'], true)).toEqual(['page_1', 'page_2', 'page_3']);
+    expect(mergeTableRowSelection(['other_page', 'page_2', 'page_3'], ['page_2', 'page_3'], false)).toEqual(['other_page']);
   });
 });
 

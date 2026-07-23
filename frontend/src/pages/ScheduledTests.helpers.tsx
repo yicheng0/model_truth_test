@@ -176,10 +176,14 @@ export function setSearchParamValue(params: URLSearchParams, key: string, value?
   else params.delete(key);
 }
 
-export function toggleTableRowKey(keys: TableRowKey[], id: string) {
-  return keys.some((key) => String(key) === id)
-    ? keys.filter((key) => String(key) !== id)
-    : [...keys, id];
+export function mergeTableRowSelection(keys: TableRowKey[], changedIds: string[], selected: boolean) {
+  const changed = new Set(changedIds);
+  if (selected) {
+    const next = new Set(keys.map(String));
+    changed.forEach((id) => next.add(id));
+    return Array.from(next);
+  }
+  return keys.filter((key) => !changed.has(String(key)));
 }
 
 export function bulkDeleteMessage(entity: string, result: { deleted: number; missing: string[] }) {
