@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Empty, Popconfirm, Progress, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
+import { CalendarClock, CircleStop, Fingerprint, GitCompare, MonitorDot, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { buildChannelResultOverview, extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
-import type { Run } from '../types';
+import type { Report, Run } from '../types';
 
 type RunChannelGroup = {
   key: string;
@@ -22,6 +22,14 @@ function statusColor(status: Run['status']) {
   if (status === 'canceled') return 'default';
   return 'gold';
 }
+
+const gradeColor: Record<Report['grade'], string> = {
+  A: 'green',
+  B: 'blue',
+  C: 'gold',
+  D: 'orange',
+  E: 'red',
+};
 
 function canCancel(status: Run['status']) {
   return status === 'pending' || status === 'running';
@@ -460,6 +468,8 @@ export default function Runs() {
     queryFn: () => api.runs(),
     refetchInterval: (query) => (query.state.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
   });
+  const channels = useQuery({ queryKey: ['channels'], queryFn: () => api.channels() });
+  const reportSummaries = useQuery({ queryKey: ['reportSummaries'], queryFn: api.reportSummaries });
 
   const remove = useMutation({
     mutationFn: api.deleteRun,
@@ -522,6 +532,13 @@ export default function Runs() {
   }
 
   const { normalRuns, patrolRuns } = useMemo(() => splitRunsByPatrol(runs.data ?? []), [runs.data]);
+  const channelOverview = useMemo(
+    () => buildChannelResultOverview(channels.data ?? [], reportSummaries.data ?? [], runs.data ?? []),
+    [channels.data, reportSummaries.data, runs.data],
+  );
+  const testedChannelCount = channelOverview.filter((item) => item.latestReport).length;
+  const highRiskChannelCount = channelOverview.filter((item) => item.latestReport?.grade === 'D' || item.latestReport?.grade === 'E').length;
+  const pendingChannelCount = channelOverview.length - testedChannelCount;
   const normalRunGroups = useMemo(() => groupRunsByChannel(normalRuns), [normalRuns]);
   const selectedNormalRuns = useMemo(
     () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
@@ -632,6 +649,99 @@ export default function Runs() {
 
   return (
     <div className="page-stack">
+      <Card
+        className="channel-result-overview"
+        title={<span className="card-title-with-icon"><MonitorDot size={18} />渠道测试结果总览</span>}
+        extra={<Typography.Text type="secondary">按最新报告汇总</Typography.Text>}
+        bordered={false}
+      >
+        {channels.isError || reportSummaries.isError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="渠道结果总览加载失败"
+            description={getErrorMessage(channels.error ?? reportSummaries.error)}
+            action={<Button onClick={() => { void channels.refetch(); void reportSummaries.refetch(); }}>重试</Button>}
+            style={{ marginBottom: 16 }}
+          />
+        ) : null}
+        <section className="metric-strip channel-result-metrics">
+          <div><span>渠道总数</span><strong>{channelOverview.length}</strong></div>
+          <div><span>已有测试结果</span><strong>{testedChannelCount}</strong></div>
+          <div><span>待测试</span><strong>{pendingChannelCount}</strong></div>
+          <div><span>高风险 D/E</span><strong>{highRiskChannelCount}</strong></div>
+        </section>
+        <Table
+          rowKey="channelId"
+          size="small"
+          loading={channels.isLoading || reportSummaries.isLoading || runs.isLoading}
+          dataSource={channelOverview}
+          pagination={{ pageSize: 8, showSizeChanger: true, showTotal: (total) => `共 ${total} 个渠道` }}
+          locale={{ emptyText: <Empty description="暂无渠道，请先到渠道管理中添加" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+          scroll={{ x: 1080 }}
+          columns={[
+            {
+              title: '渠道',
+              width: 240,
+              render: (_, item) => (
+                <Space direction="vertical" size={2}>
+                  <Space size={6}>
+                    <Typography.Text strong>{item.channelName}</Typography.Text>
+                    <Tag color={item.enabled ? 'green' : 'default'}>{item.enabled ? '启用' : '停用'}</Tag>
+                  </Space>
+                  <Typography.Text type="secondary">{item.channelId} · {item.providerType}</Typography.Text>
+                </Space>
+              ),
+            },
+            {
+              title: '最新结果',
+              width: 150,
+              render: (_, item) => item.latestReport ? (
+                <Space size={6}>
+                  <Tag color={gradeColor[item.latestReport.grade]}>{item.latestReport.grade}</Tag>
+                  <Typography.Text strong>{item.latestReport.final_score.toFixed(1)}</Typography.Text>
+                </Space>
+              ) : <Tag>待测试</Tag>,
+            },
+            {
+              title: '判断',
+              width: 220,
+              render: (_, item) => item.latestReport ? (
+                <Typography.Text>{item.latestReport.summary || (item.latestReport.grade === 'A' ? '高度一致' : item.latestReport.grade === 'B' ? '总体可信' : item.latestReport.grade === 'C' ? '存在可疑差异' : '需要重点复审')}</Typography.Text>
+              ) : <Typography.Text type="secondary">尚无测试报告</Typography.Text>,
+            },
+            {
+              title: '异常标签',
+              width: 250,
+              render: (_, item) => item.latestReport?.labels.length ? (
+                <Space wrap size={[4, 2]}>{item.latestReport.labels.slice(0, 3).map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space>
+              ) : <Typography.Text type="secondary">-</Typography.Text>,
+            },
+            {
+              title: '最新任务状态',
+              width: 130,
+              render: (_, item) => item.latestRun ? statusTag(item.latestRun.status) : '-',
+            },
+            {
+              title: '测试时间',
+              width: 170,
+              render: (_, item) => formatDateTime(item.latestReport?.created_at ?? item.latestRun?.created_at),
+            },
+            {
+              title: '操作',
+              width: 150,
+              render: (_, item) => item.latestReport ? (
+                <Link to={`/reports/${item.latestReport.report_id}`} style={{ fontWeight: 600 }}>查看结果</Link>
+              ) : item.latestRun ? (
+                <Link to={`/runs/${item.latestRun.id}`} style={{ fontWeight: 600 }}>查看任务</Link>
+              ) : (
+                <Link to="/new-run?mode=compare" style={{ fontWeight: 600 }}>开始测试</Link>
+              ),
+            },
+          ]}
+        />
+      </Card>
+
       <Card
         title={<span style={{ fontSize: '18px', fontWeight: 600 }}>检测任务列表</span>}
         extra={

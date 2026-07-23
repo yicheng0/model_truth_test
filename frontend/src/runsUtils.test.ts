@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
-import type { Run, RunResults } from './types';
+import { buildChannelResultOverview, extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
   return {
@@ -19,6 +19,34 @@ function run(id: string, scheduledTestId?: string | null): Run {
 }
 
 describe('runs utilities', () => {
+  it('builds a latest-result overview for every channel', () => {
+    const channels: Channel[] = [
+      { id: 'ch_1', name: '渠道一', provider_type: 'anthropic', role: 'candidate', is_reference: false, enabled: true },
+      { id: 'ch_2', name: '渠道二', provider_type: 'anthropic', role: 'candidate', is_reference: false, enabled: false },
+    ];
+    const reports: ReportSummary[] = [
+      {
+        report_id: 'rep_old', run_id: 'run_old', run_name: '旧测试', mode: 'candidate_eval', channel_id: 'ch_1', channel_name: '渠道一',
+        channel_role: 'candidate', suite_id: 'suite_1', grade: 'C', final_score: 72, labels: ['style_drift'], dimension_scores: {},
+        performance: { success_count: 1, failure_count: 0, failure_rate: 0, slow_case_ids: [] }, created_at: '2026-07-22T08:00:00Z',
+      },
+      {
+        report_id: 'rep_new', run_id: 'run_new', run_name: '最新测试', mode: 'candidate_eval', channel_id: 'ch_1', channel_name: '渠道一',
+        channel_role: 'candidate', suite_id: 'suite_1', grade: 'A', final_score: 95, labels: [], dimension_scores: {},
+        performance: { success_count: 1, failure_count: 0, failure_rate: 0, slow_case_ids: [] }, created_at: '2026-07-23T08:00:00Z',
+      },
+    ];
+    const runs: Run[] = [
+      { ...run('run_new'), name: '最新测试', channels: [{ channel_id: 'ch_1', channel_name: '渠道一', role_in_run: 'candidate' }], created_at: '2026-07-23T07:59:00Z' },
+    ];
+
+    const overview = buildChannelResultOverview(channels, reports, runs);
+
+    expect(overview).toHaveLength(2);
+    expect(overview[0]).toMatchObject({ channelId: 'ch_1', latestReport: { report_id: 'rep_new', grade: 'A' }, latestRun: { id: 'run_new' } });
+    expect(overview[1]).toMatchObject({ channelId: 'ch_2', latestReport: null, latestRun: null });
+  });
+
   it('selects every deletable task while excluding running tasks', () => {
     const completed = run('completed_1');
     const failed = { ...run('failed_1'), status: 'failed' as const };
@@ -150,6 +178,8 @@ describe('runs utilities', () => {
                   http_status: 400,
                   latency_ms: 350,
                   request_id: 'req_relay',
+                  gateway_request_id: 'gateway_req_relay',
+                  upstream_request_id: 'upstream_req_relay',
                   error: 'Invalid signature',
                   request_excerpt: '{"messages":[]}',
                   response_excerpt: '{"error":"Invalid signature"}',
@@ -203,6 +233,8 @@ describe('runs utilities', () => {
       status: 'fail',
       httpStatus: 400,
       requestId: 'req_relay',
+      gatewayRequestId: 'gateway_req_relay',
+      upstreamRequestId: 'upstream_req_relay',
       error: 'Invalid signature',
       responseExcerpt: '{"error":"Invalid signature"}',
     });

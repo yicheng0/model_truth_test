@@ -1,4 +1,4 @@
-import type { Channel, PatrolAiJudgeEvidence, Result, Run, RunResults } from './types';
+import type { Channel, PatrolAiJudgeEvidence, ReportSummary, Result, Run, RunResults } from './types';
 import { formatChannelDisplayName } from './channelCredentials';
 
 export type PatrolModelRequestEvidence = {
@@ -60,6 +60,8 @@ export type PatrolSignatureRequestLog = {
   latencyMs?: number | null;
   messageId?: string | null;
   requestId?: string | null;
+  gatewayRequestId?: string | null;
+  upstreamRequestId?: string | null;
   responseHeaderRequestId?: string | null;
   error?: string | null;
   requestExcerpt?: string | null;
@@ -88,6 +90,53 @@ export type PatrolChannel = {
   account_type?: string | null;
   accountType?: string | null;
 };
+
+export type ChannelResultOverview = {
+  channelId: string;
+  channelName: string;
+  providerType: string;
+  role: string;
+  enabled: boolean;
+  latestReport: ReportSummary | null;
+  latestRun: Run | null;
+};
+
+export function buildChannelResultOverview(channels: Channel[], reports: ReportSummary[], runs: Run[]): ChannelResultOverview[] {
+  const latestReports = new Map<string, ReportSummary>();
+  for (const report of reports) {
+    const existing = latestReports.get(report.channel_id);
+    if (!existing || new Date(report.created_at ?? 0).getTime() > new Date(existing.created_at ?? 0).getTime()) {
+      latestReports.set(report.channel_id, report);
+    }
+  }
+
+  const latestRuns = new Map<string, Run>();
+  for (const run of runs) {
+    for (const channel of run.channels ?? []) {
+      if (!channel.channel_id) continue;
+      const existing = latestRuns.get(channel.channel_id);
+      if (!existing || new Date(run.created_at ?? 0).getTime() > new Date(existing.created_at ?? 0).getTime()) {
+        latestRuns.set(channel.channel_id, run);
+      }
+    }
+  }
+
+  return channels
+    .map((channel) => ({
+      channelId: channel.id,
+      channelName: channel.name,
+      providerType: channel.provider_type,
+      role: channel.role,
+      enabled: channel.enabled,
+      latestReport: latestReports.get(channel.id) ?? null,
+      latestRun: latestRuns.get(channel.id) ?? null,
+    }))
+    .sort((left, right) => {
+      const rightTime = new Date(right.latestReport?.created_at ?? right.latestRun?.created_at ?? 0).getTime();
+      const leftTime = new Date(left.latestReport?.created_at ?? left.latestRun?.created_at ?? 0).getTime();
+      return rightTime - leftTime || left.channelName.localeCompare(right.channelName, 'zh-CN');
+    });
+}
 
 export function splitRunsByPatrol(runs: Run[]) {
   return {
@@ -272,6 +321,8 @@ function normalizeSignatureRequestLog(value: unknown): PatrolSignatureRequestLog
     latencyMs: asNullableNumber(item.latency_ms),
     messageId: asNullableString(item.message_id),
     requestId: asNullableString(item.request_id),
+    gatewayRequestId: asNullableString(item.gateway_request_id),
+    upstreamRequestId: asNullableString(item.upstream_request_id),
     responseHeaderRequestId: asNullableString(item.response_header_request_id),
     error: asNullableString(item.error),
     requestExcerpt: asNullableString(item.request_excerpt),
