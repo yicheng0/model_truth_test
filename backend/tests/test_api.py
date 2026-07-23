@@ -36,7 +36,7 @@ from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseC
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
 from app.scheduled_probe import _probe_status_text, operational_failure_label
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, send_alert_notification, send_hourly_patrol_summary, smart_patrol_daily_text, suite_fingerprint
 from app.routers.channels import _result_failure_kind
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
@@ -1791,6 +1791,39 @@ def test_quick_run_uses_only_quick_cases() -> None:
     assert len(payload["results"]) == 24
 
 
+def test_removed_performance_and_arena_run_modes_are_unavailable() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        suite_id = client.get("/api/suites").json()[0]["id"]
+        performance_response = client.post(
+            "/api/runs",
+            json={
+                "name": "removed performance run",
+                "suite_id": suite_id,
+                "mode": "performance_benchmark",
+                "channel_ids": {"candidate": ["third_party_demo"]},
+                "repeat_count": 1,
+                "concurrency": 1,
+                "use_mock": True,
+            },
+        )
+        arena_response = client.post(
+            "/api/runs/arena",
+            json={
+                "name": "removed arena run",
+                "suite_id": suite_id,
+                "candidate_channel_ids": ["third_party_demo", "negative_sample"],
+                "repeat_count": 1,
+                "concurrency": 1,
+                "use_mock": True,
+            },
+        )
+
+    assert performance_response.status_code == 400
+    assert performance_response.json()["detail"] == "Unsupported run mode: performance_benchmark"
+    assert arena_response.status_code == 404
+
+
 def test_performance_benchmark_writes_evalscope_style_metrics_and_summary() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -2614,7 +2647,7 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
     assert "双探针" not in run_payload["name"]
     assert alerts
     assert alerts[0]["channel_id"] == "negative_sample"
-    assert alerts[0]["notification_status"] == "skipped"
+    assert alerts[0]["notification_status"] == "pending"
 
     with SessionLocal() as db:
         report = db.scalar(select(Report).where(Report.run_id == updated_schedule["last_run_id"], Report.channel_id == "negative_sample"))
@@ -4034,7 +4067,7 @@ def test_feishu_broadcast_setting_masks_secret_and_preserves_existing_secret() -
     assert preserved["secret_configured"] is True
 
 
-def test_alert_notification_marks_sent_when_feishu_post_succeeds(monkeypatch) -> None:
+def test_new_alert_waits_for_hourly_feishu_summary(monkeypatch) -> None:
     posted_payloads: list[tuple[str, dict]] = []
 
     async def fake_post_feishu_payload(webhook_url, payload):  # noqa: ANN001
@@ -4059,15 +4092,216 @@ def test_alert_notification_marks_sent_when_feishu_post_succeeds(monkeypatch) ->
     alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
 
     assert len(alerts) == 1
-    assert len(posted_payloads) == 1
-    assert posted_payloads[0][0].endswith("/test-token")
+    assert posted_payloads == []
     with SessionLocal() as db:
         alert = db.get(ChannelAlert, alerts[0].id)
         assert alert is not None
-        assert alert.notification_status == "sent"
-        assert alert.notification_error is None
-        assert alert.notification_attempt_count == 1
-        assert alert.notified_at is not None
+        assert alert.notification_status == "pending"
+        assert alert.notification_attempt_count == 0
+        assert alert.notified_at is None
+
+
+def test_hourly_patrol_summary_sends_one_message_for_all_channels(monkeypatch) -> None:
+    posted_payloads: list[tuple[str, dict]] = []
+
+    async def fake_post_feishu_payload(webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append((webhook_url, payload))
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        first_schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+        second_schedule = create_patrol_schedule(client, channel_id="negative_sample", quiet_minutes=0)
+        setting_response = client.patch(
+            "/api/settings/feishu-broadcast",
+            json={
+                "enabled": True,
+                "alert_broadcast_enabled": True,
+                "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test-token",
+            },
+        )
+        assert setting_response.status_code == 200
+
+    first_run_id = create_report_for_schedule(first_schedule, grade="E", score=20, labels=["suspected_model_swap"])
+    second_run_id = create_report_for_schedule(second_schedule, grade="D", score=58, labels=["signature_interop_failed"])
+    first_alert = asyncio.run(create_alerts_for_run(SessionLocal, first_run_id, first_schedule["id"]))[0]
+    second_alert = asyncio.run(create_alerts_for_run(SessionLocal, second_run_id, second_schedule["id"]))[0]
+    now = datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        for alert in (db.get(ChannelAlert, first_alert.id), db.get(ChannelAlert, second_alert.id)):
+            assert alert is not None
+            alert.created_at = datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)
+        for run_id in (first_run_id, second_run_id):
+            run = db.get(Run, run_id)
+            report = db.scalar(select(Report).where(Report.run_id == run_id))
+            assert run is not None and report is not None
+            run.created_at = datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)
+            report.created_at = datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)
+        db.commit()
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=now))
+
+    assert result == {"ok": True, "status": "sent", "message": "小时巡检汇总已发送", "alert_count": 2, "channel_count": 2}
+    assert len(posted_payloads) == 1
+    text_payload = posted_payloads[0][1]["content"]["text"]
+    assert "22:00 ~ 23:00" in text_payload
+    assert "third_party_demo" in text_payload
+    assert "negative_sample" in text_payload
+    assert "异常 1" in text_payload
+    with SessionLocal() as db:
+        stored = [db.get(ChannelAlert, first_alert.id), db.get(ChannelAlert, second_alert.id)]
+        assert all(alert is not None and alert.notification_status == "sent" for alert in stored)
+        assert all(alert is not None and alert.notification_attempt_count == 1 for alert in stored)
+
+    repeated = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=now))
+
+    assert repeated["status"] == "skipped"
+    assert len(posted_payloads) == 1
+
+
+def test_hourly_patrol_summary_sends_normal_channel_without_alerts(monkeypatch) -> None:
+    posted_payloads: list[dict] = []
+
+    async def fake_post_feishu_payload(_webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append(payload)
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    run_id = create_report_for_schedule(schedule, grade="A", score=98, labels=[])
+    with SessionLocal() as db:
+        run = db.get(Run, run_id)
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert run is not None and report is not None
+        run.created_at = datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)
+        report.created_at = datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)
+        db.commit()
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)))
+
+    assert result["status"] == "sent"
+    assert result["alert_count"] == 0
+    assert len(posted_payloads) == 1
+    assert "巡检 1，正常 1，异常 0" in posted_payloads[0]["content"]["text"]
+
+
+def test_hourly_patrol_summary_counts_repeated_deduped_anomaly_in_each_hour(monkeypatch) -> None:
+    posted_payloads: list[dict] = []
+
+    async def fake_post_feishu_payload(_webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append(payload)
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    first_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["suspected_model_swap"])
+    second_run_id = create_report_for_schedule(schedule, grade="E", score=18, labels=["suspected_model_swap"])
+    asyncio.run(create_alerts_for_run(SessionLocal, first_run_id, schedule["id"]))
+    asyncio.run(create_alerts_for_run(SessionLocal, second_run_id, schedule["id"]))
+    with SessionLocal() as db:
+        for run_id, created_at in (
+            (first_run_id, datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)),
+            (second_run_id, datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)),
+        ):
+            run = db.get(Run, run_id)
+            report = db.scalar(select(Report).where(Report.run_id == run_id))
+            assert run is not None and report is not None
+            run.created_at = created_at
+            report.created_at = created_at
+        setting = get_or_create_feishu_setting(db)
+        setting.last_hourly_summary_at = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+        db.commit()
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)))
+
+    assert result["status"] == "sent"
+    assert "巡检 1，正常 0，异常 1" in posted_payloads[0]["content"]["text"]
+
+
+def test_hourly_patrol_summary_excludes_next_hour_boundary_run(monkeypatch) -> None:
+    posted_payloads: list[dict] = []
+
+    async def fake_post_feishu_payload(_webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append(payload)
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    included_run_id = create_report_for_schedule(schedule, grade="A", score=98, labels=[])
+    boundary_run_id = create_report_for_schedule(schedule, grade="A", score=99, labels=[])
+    with SessionLocal() as db:
+        for run_id, created_at in (
+            (included_run_id, datetime(2026, 7, 23, 14, 59, tzinfo=timezone.utc)),
+            (boundary_run_id, datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)),
+        ):
+            run = db.get(Run, run_id)
+            report = db.scalar(select(Report).where(Report.run_id == run_id))
+            assert run is not None and report is not None
+            run.created_at = created_at
+            report.created_at = created_at
+        db.commit()
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)))
+
+    assert result["status"] == "sent"
+    assert "巡检 1，正常 1" in posted_payloads[0]["content"]["text"]
+
+
+def test_hourly_patrol_summary_advances_past_empty_hour() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    with SessionLocal() as db:
+        setting = get_or_create_feishu_setting(db)
+        setting.last_hourly_summary_at = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+        db.commit()
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)))
+
+    assert result["status"] == "skipped"
+    with SessionLocal() as db:
+        setting = get_or_create_feishu_setting(db)
+        assert setting.last_hourly_summary_at == datetime(2026, 7, 23, 15, 0)
+        assert setting.hourly_summary_lock_token is None
+        assert setting.hourly_summary_locked_until is None
+
+
+def test_hourly_patrol_summary_waits_five_minutes_after_hour_boundary() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    with SessionLocal() as db:
+        setting = get_or_create_feishu_setting(db)
+        setting.last_hourly_summary_at = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+        db.commit()
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=datetime(2026, 7, 23, 15, 3, tzinfo=timezone.utc)))
+
+    assert result["status"] == "skipped"
+    with SessionLocal() as db:
+        setting = get_or_create_feishu_setting(db)
+        assert setting.last_hourly_summary_at == datetime(2026, 7, 23, 14, 0)
 
 
 def test_alert_notification_marks_failed_when_feishu_post_fails(monkeypatch) -> None:
@@ -4093,8 +4327,10 @@ def test_alert_notification_marks_failed_when_feishu_post_fails(monkeypatch) -> 
         assert setting_response.status_code == 200
 
     alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+    sent = asyncio.run(send_alert_notification(SessionLocal, alerts[0].id))
 
     assert len(alerts) == 1
+    assert sent is not None
     assert len(attempts) == 3
     with SessionLocal() as db:
         alert = db.get(ChannelAlert, alerts[0].id)
@@ -6376,7 +6612,10 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
                 )
             return httpx.Response(
                 400,
-                headers={"request-id": "req_relay_header_123"},
+                headers={
+                    "x-request-id": "202607230708371735202988268d9d6v1GBjV2h",
+                    "request-id": "202607230708363486593018268d9d6rNVfkR0o",
+                },
                 json={"type": "error", "error": {"message": "Invalid `signature` in `thinking` block", "request_id": "req_123"}},
                 request=request,
             )
@@ -6440,6 +6679,8 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
             "latency_ms": payload["request_logs"][0]["latency_ms"],
             "message_id": "msg_01source",
             "request_id": "req_source_123",
+            "gateway_request_id": None,
+            "upstream_request_id": "req_source_123",
             "response_header_request_id": "req_source_123",
             "error": None,
             "request_excerpt": payload["request_logs"][0]["request_excerpt"],
@@ -6456,7 +6697,9 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
             "latency_ms": payload["request_logs"][1]["latency_ms"],
             "message_id": None,
             "request_id": "req_123",
-            "response_header_request_id": "req_relay_header_123",
+            "gateway_request_id": "202607230708371735202988268d9d6v1GBjV2h",
+            "upstream_request_id": "202607230708363486593018268d9d6rNVfkR0o",
+            "response_header_request_id": "202607230708363486593018268d9d6rNVfkR0o",
             "error": payload["request_logs"][1]["error"],
             "request_excerpt": payload["request_logs"][1]["request_excerpt"],
             "response_excerpt": payload["request_logs"][1]["response_excerpt"],

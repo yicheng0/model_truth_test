@@ -1301,6 +1301,7 @@ def feishu_setting_read(setting: FeishuBroadcastSetting) -> dict[str, Any]:
         "daily_report_enabled": setting.daily_report_enabled,
         "daily_report_time": setting.daily_report_time,
         "timezone": setting.timezone,
+        "last_hourly_summary_at": setting.last_hourly_summary_at,
         "last_daily_report_at": setting.last_daily_report_at,
         "created_at": setting.created_at,
         "updated_at": setting.updated_at,
@@ -9432,9 +9433,6 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
             db.commit()
             db.refresh(alert)
             alerts.append(alert)
-
-    for alert in alerts:
-        await send_alert_notification(session_factory, alert.id)
     return alerts
 
 
@@ -9621,6 +9619,169 @@ async def send_alert_notification(session_factory: sessionmaker[Session], alert_
         return alert
 
 
+def hourly_patrol_summary_text(report: dict[str, Any], setting: FeishuBroadcastSetting) -> str:
+    from_local = _as_utc(report["from_at"]).astimezone(_zoneinfo(setting.timezone))
+    to_local = _as_utc(report["to_at"]).astimezone(_zoneinfo(setting.timezone))
+    app_base_url = (setting.app_base_url or "").strip().rstrip("/")
+    alert_link = f"{app_base_url}/scheduled-tests?tab=alerts" if app_base_url else "/scheduled-tests?tab=alerts"
+    lines = []
+    for item in report.get("channel_summaries", []):
+        run_count = int(item.get("run_count") or 0)
+        alert_count = int(item.get("hourly_anomaly_count", item.get("alert_count", 0)) or 0)
+        operational_count = int(item.get("operational_issue_count") or 0)
+        minimum_score = item.get("minimum_score")
+        labels = item.get("top_labels") if isinstance(item.get("top_labels"), list) else []
+        if not (run_count or alert_count or operational_count):
+            continue
+        normal_count = max(0, run_count - alert_count - operational_count)
+        display = _smart_patrol_channel_display(item.get("channel_id"), item.get("channel_name"), item.get("channel_provider_type"))
+        risk_parts = []
+        if minimum_score is not None:
+            risk_parts.append(f"最低分 {_safe_float(minimum_score):g}")
+        if labels:
+            risk_parts.append(f"主要异常 {', '.join(str(label) for label in labels[:3])}")
+        risk_suffix = f"；{'；'.join(risk_parts)}" if risk_parts else ""
+        lines.append(f"- {display}（{item.get('channel_id') or '-'}）：巡检 {run_count}，正常 {normal_count}，异常 {alert_count}，运营问题 {operational_count}{risk_suffix}")
+    channel_lines = "\n".join(lines) or "- 本小时无渠道巡检数据"
+    return (
+        "Claude 渠道自动巡检小时汇总\n"
+        f"时间：{from_local:%Y-%m-%d %H:%M} ~ {to_local:%H:%M}\n"
+        f"巡检 {int(report.get('run_count') or 0)} 次，正常 {int(report.get('normal_count') or 0)}\n"
+        f"真伪异常 {int(report.get('hourly_authenticity_anomaly_count', report.get('authenticity_anomaly_count', 0)) or 0)}，运营问题 {int(report.get('operational_issue_count') or 0)}\n"
+        "渠道综合情况：\n"
+        f"{channel_lines}\n"
+        f"复审：{alert_link}"
+    )
+
+
+async def send_hourly_patrol_summary(
+    session_factory: sessionmaker[Session],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now_utc = _as_utc(now or datetime.now(timezone.utc))
+    current_hour = now_utc.replace(minute=0, second=0, microsecond=0)
+    if now_utc < current_hour + timedelta(minutes=5):
+        return {"ok": False, "status": "skipped", "message": "等待整点后巡检收尾"}
+    lock_token = uuid.uuid4().hex
+    lock_until = now_utc + timedelta(minutes=10)
+    with session_factory() as db:
+        setting = get_or_create_feishu_setting(db)
+        if not setting.enabled or not setting.alert_broadcast_enabled:
+            return {"ok": False, "status": "skipped", "message": "飞书小时汇总未启用"}
+        if not setting.webhook_url:
+            return {"ok": False, "status": "skipped", "message": "飞书 Webhook 未配置"}
+        previous_summary_at = _as_utc(setting.last_hourly_summary_at) if setting.last_hourly_summary_at else None
+        from_at = previous_summary_at or (current_hour - timedelta(hours=1))
+        if from_at >= current_hour:
+            return {"ok": False, "status": "skipped", "message": "当前小时尚未结束"}
+        to_at = from_at + timedelta(hours=1)
+        run_count = db.scalar(
+            select(func.count(func.distinct(Report.run_id)))
+            .select_from(Report)
+            .join(Run, Run.id == Report.run_id)
+            .where(
+                Run.scheduled_test_id.is_not(None),
+                Report.created_at >= from_at,
+                Report.created_at < to_at,
+            )
+        ) or 0
+        available_lock = (
+            (FeishuBroadcastSetting.hourly_summary_locked_until.is_(None))
+            | (FeishuBroadcastSetting.hourly_summary_locked_until < now_utc)
+        )
+        claimed = db.execute(
+            update(FeishuBroadcastSetting)
+            .where(FeishuBroadcastSetting.id == setting.id, available_lock)
+            .values(hourly_summary_lock_token=lock_token, hourly_summary_locked_until=lock_until)
+        )
+        if not claimed.rowcount:
+            db.rollback()
+            return {"ok": False, "status": "skipped", "message": "该小时汇总已由其他实例处理"}
+        db.commit()
+        if not run_count:
+            db.execute(
+                update(FeishuBroadcastSetting)
+                .where(
+                    FeishuBroadcastSetting.id == setting.id,
+                    FeishuBroadcastSetting.hourly_summary_lock_token == lock_token,
+                )
+                .values(
+                    last_hourly_summary_at=to_at,
+                    hourly_summary_lock_token=None,
+                    hourly_summary_locked_until=None,
+                )
+            )
+            db.commit()
+            return {"ok": False, "status": "skipped", "message": "该小时无巡检数据"}
+        alerts = list(db.scalars(select(ChannelAlert).where(
+            ChannelAlert.created_at >= from_at,
+            ChannelAlert.created_at < to_at,
+            ChannelAlert.notification_status.in_(["pending", "failed"]),
+        )).all())
+        report = build_smart_patrol_report(db, from_at, to_at)
+        refreshed_setting = db.get(FeishuBroadcastSetting, setting.id) or setting
+        payload = feishu_signed_payload(hourly_patrol_summary_text(report, refreshed_setting), refreshed_setting.webhook_secret)
+        webhook_url = refreshed_setting.webhook_url
+        alert_ids = [alert.id for alert in alerts]
+
+    try:
+        await post_feishu_payload(webhook_url, payload)
+    except Exception as exc:
+        with session_factory() as db:
+            for alert_id in alert_ids:
+                stored = db.get(ChannelAlert, alert_id)
+                if stored:
+                    stored.notification_status = "failed"
+                    stored.notification_error = str(exc)
+                    stored.notification_attempt_count = int(stored.notification_attempt_count or 0) + 1
+                    stored.last_notification_attempt_at = datetime.now(timezone.utc)
+            db.execute(
+                update(FeishuBroadcastSetting)
+                .where(
+                    FeishuBroadcastSetting.id == FEISHU_SETTING_ID,
+                    FeishuBroadcastSetting.hourly_summary_lock_token == lock_token,
+                )
+                .values(hourly_summary_lock_token=None, hourly_summary_locked_until=None)
+            )
+            db.commit()
+        return {"ok": False, "status": "failed", "message": str(exc)}
+
+    notified_at = datetime.now(timezone.utc)
+    with session_factory() as db:
+        still_owned = db.scalar(select(FeishuBroadcastSetting.hourly_summary_lock_token).where(FeishuBroadcastSetting.id == FEISHU_SETTING_ID)) == lock_token
+        if not still_owned:
+            return {"ok": False, "status": "skipped", "message": "小时汇总租约已过期"}
+        for alert_id in alert_ids:
+            stored = db.get(ChannelAlert, alert_id)
+            if stored:
+                stored.notification_status = "sent"
+                stored.notification_error = None
+                stored.notification_attempt_count = int(stored.notification_attempt_count or 0) + 1
+                stored.last_notification_attempt_at = notified_at
+                stored.notified_at = notified_at
+        db.execute(
+            update(FeishuBroadcastSetting)
+            .where(
+                FeishuBroadcastSetting.id == FEISHU_SETTING_ID,
+                FeishuBroadcastSetting.hourly_summary_lock_token == lock_token,
+            )
+            .values(
+                last_hourly_summary_at=to_at,
+                hourly_summary_lock_token=None,
+                hourly_summary_locked_until=None,
+            )
+        )
+        db.commit()
+    return {
+        "ok": True,
+        "status": "sent",
+        "message": "小时巡检汇总已发送",
+        "alert_count": len(alerts),
+        "channel_count": len({alert.channel_id for alert in alerts}),
+    }
+
+
 async def post_feishu_payload(webhook_url: str, payload: dict[str, Any]) -> None:
     async with httpx.AsyncClient(timeout=8) as client:
         response = await client.post(webhook_url, json=payload)
@@ -9679,21 +9840,29 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
     from_at = _as_utc(from_at)
     to_at = _as_utc(to_at)
     schedules = db.scalars(select(ScheduledChannelTest).order_by(ScheduledChannelTest.name)).all()
-    runs = db.scalars(
-        select(Run)
-        .where(Run.scheduled_test_id.is_not(None), Run.created_at >= from_at, Run.created_at <= to_at)
-        .order_by(Run.created_at.desc())
-    ).all()
-    run_ids = [run.id for run in runs]
-    reports = db.scalars(select(Report).where(Report.run_id.in_(run_ids)).order_by(Report.created_at.desc())).all() if run_ids else []
+    reports = list(db.scalars(
+        select(Report)
+        .join(Run, Run.id == Report.run_id)
+        .where(
+            Run.scheduled_test_id.is_not(None),
+            Report.created_at >= from_at,
+            Report.created_at < to_at,
+        )
+        .order_by(Report.created_at.desc())
+    ).all())
+    run_ids = list(dict.fromkeys(report.run_id for report in reports))
+    runs = list(db.scalars(select(Run).where(Run.id.in_(run_ids)).order_by(Run.created_at.desc())).all()) if run_ids else []
     alerts = db.scalars(
         select(ChannelAlert)
-        .where(ChannelAlert.created_at >= from_at, ChannelAlert.created_at <= to_at)
+        .where(ChannelAlert.created_at >= from_at, ChannelAlert.created_at < to_at)
         .order_by(ChannelAlert.created_at.desc())
     ).all()
     channels = {channel.id: channel for channel in db.scalars(select(Channel)).all()}
     schedule_channel_by_id = {schedule.id: schedule.channel_id for schedule in schedules}
+    schedule_by_id = {schedule.id: schedule for schedule in schedules}
+    run_by_id = {run.id: run for run in runs}
     reports_by_channel: dict[str, list[Report]] = defaultdict(list)
+    authenticity_anomaly_reports: list[Report] = []
     operational_issue_breakdown: dict[str, int] = defaultdict(int)
     operational_issue_reports: list[Report] = []
     report_channels_by_run: dict[str, set[str]] = defaultdict(set)
@@ -9706,6 +9875,11 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
             operational_issue_reports.append(report)
             for label in report_operational_labels or {PROVIDER_REQUEST_FAILED_LABEL}:
                 operational_issue_breakdown[label] += 1
+        else:
+            run = run_by_id.get(report.run_id)
+            scheduled = schedule_by_id.get(run.scheduled_test_id) if run and run.scheduled_test_id else None
+            if report_needs_alert(report, report_labels(report), scheduled):
+                authenticity_anomaly_reports.append(report)
     alerts_by_channel: dict[str, list[ChannelAlert]] = defaultdict(list)
     for alert in alerts:
         alerts_by_channel[alert.channel_id].append(alert)
@@ -9723,8 +9897,17 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
         channel = channels.get(channel_id)
         channel_runs = runs_by_channel.get(channel_id, [])
         channel_alerts = alerts_by_channel.get(channel_id, [])
+        channel_reports = reports_by_channel.get(channel_id, [])
+        channel_authenticity_anomalies = [report for report in authenticity_anomaly_reports if report.channel_id == channel_id]
         channel_operational_issues = [report for report in operational_issue_reports if report.channel_id == channel_id]
         last_run_at = max([run.created_at for run in channel_runs if run.created_at], default=None)
+        label_counts: dict[str, int] = defaultdict(int)
+        for alert in channel_alerts:
+            for label in alert.trigger_labels or []:
+                label_counts[str(label)] += 1
+        for report in channel_authenticity_anomalies:
+            for label in report_labels(report):
+                label_counts[label] += 1
         channel_summaries.append(
             {
                 "channel_id": channel_id,
@@ -9734,7 +9917,10 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
                 "channel_model_name": channel.model_name if channel else None,
                 "run_count": len(channel_runs),
                 "alert_count": len(channel_alerts),
+                "hourly_anomaly_count": len(channel_authenticity_anomalies),
                 "operational_issue_count": len(channel_operational_issues),
+                "minimum_score": min([report.final_score for report in channel_reports], default=None),
+                "top_labels": [label for label, _count in sorted(label_counts.items(), key=lambda item: (-item[1], item[0]))[:3]],
                 "pending_review_count": sum(1 for alert in channel_alerts if alert.status == "pending_review"),
                 "last_run_at": last_run_at,
             }
@@ -9758,7 +9944,7 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
             logger.warning("Failed to serialize recent patrol alert %s", getattr(alert, "id", None), exc_info=True)
             db.rollback()
     operational_run_ids = {report.run_id for report in operational_issue_reports}
-    authenticity_run_ids = {alert.run_id for alert in alerts}
+    authenticity_run_ids = {report.run_id for report in authenticity_anomaly_reports}
     return {
         "from_at": from_at,
         "to_at": to_at,
@@ -9769,6 +9955,7 @@ def build_smart_patrol_report(db: Session, from_at: datetime, to_at: datetime) -
         "failed_run_count": sum(1 for run in runs if run.status == "failed"),
         "alert_count": len(alerts),
         "authenticity_anomaly_count": len(alerts),
+        "hourly_authenticity_anomaly_count": len(authenticity_anomaly_reports),
         "operational_issue_count": len(operational_run_ids),
         "operational_issue_breakdown": dict(operational_issue_breakdown),
         "normal_count": max(0, len(runs) - len(operational_run_ids | authenticity_run_ids)),
@@ -10004,6 +10191,10 @@ async def _run_scheduled_test_with_timeout(
 
 
 async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids: set[str] | None = None, available_slots: int | None = None) -> list[str]:
+    try:
+        await send_hourly_patrol_summary(session_factory)
+    except Exception:
+        logger.exception("scheduled_hourly_summary_failed")
     try:
         await send_daily_patrol_report(session_factory)
     except Exception:
@@ -10809,6 +11000,25 @@ REQUEST_ID_HEADER_NAMES = (
     "cf-ray",
 )
 
+GATEWAY_REQUEST_ID_HEADER_NAMES = (
+    "x-oneapi-request-id",
+    "x-new-api-request-id",
+    "x-newapi-request-id",
+    "x-gateway-request-id",
+)
+
+UPSTREAM_REQUEST_ID_HEADER_NAMES = (
+    "x-upstream-request-id",
+    "upstream-request-id",
+    "x-relay-request-id",
+    "request-id",
+    "anthropic-request-id",
+    "openai-request-id",
+    "x-amzn-requestid",
+    "x-amzn-request-id",
+    "x-amz-request-id",
+)
+
 
 def _iter_sse_json_events(raw: str) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
@@ -10957,6 +11167,16 @@ def request_id_from_headers(headers: Any) -> str | None:
     if not headers:
         return None
     for name in REQUEST_ID_HEADER_NAMES:
+        value = headers.get(name) if hasattr(headers, "get") else None
+        if value:
+            return str(value)
+    return None
+
+
+def _request_id_from_named_headers(headers: Any, names: tuple[str, ...]) -> str | None:
+    if not headers:
+        return None
+    for name in names:
         value = headers.get(name) if hasattr(headers, "get") else None
         if value:
             return str(value)
@@ -11674,6 +11894,8 @@ def _signature_step_from_meta(
         "endpoint": meta.get("endpoint"),
         "http_status": meta.get("http_status"),
         "request_id": meta.get("request_id"),
+        "gateway_request_id": meta.get("gateway_request_id"),
+        "upstream_request_id": meta.get("upstream_request_id"),
         "response_body_request_id": meta.get("response_body_request_id"),
         "response_header_request_id": meta.get("response_header_request_id"),
         "message_id": meta.get("message_id"),
@@ -11839,6 +12061,11 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     response_header_request_id = request_id_from_headers(response.headers)
+    gateway_request_id = _request_id_from_named_headers(response.headers, GATEWAY_REQUEST_ID_HEADER_NAMES)
+    explicit_upstream_request_id = _request_id_from_named_headers(response.headers, UPSTREAM_REQUEST_ID_HEADER_NAMES)
+    generic_request_id = _request_id_from_named_headers(response.headers, ("x-request-id",))
+    if not gateway_request_id and generic_request_id and explicit_upstream_request_id and generic_request_id != explicit_upstream_request_id:
+        gateway_request_id = generic_request_id
     if payload.get("stream"):
         parsed = _parse_signature_stream_response(raw_response_text)
     else:
@@ -11856,6 +12083,10 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
     if error:
         error = redact_text(str(error))[:1200]
     payload_request_id = request_id_from_payload(parsed)
+    upstream_request_id = explicit_upstream_request_id
+    if not upstream_request_id and response_header_request_id != gateway_request_id:
+        upstream_request_id = response_header_request_id
+    upstream_request_id = upstream_request_id or payload_request_id
     meta = {
         "ok": ok,
         "started_at": started_at,
@@ -11863,6 +12094,8 @@ async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[st
         "endpoint": endpoint,
         "http_status": response.status_code,
         "request_id": response_header_request_id or payload_request_id,
+        "gateway_request_id": gateway_request_id,
+        "upstream_request_id": upstream_request_id,
         "response_body_request_id": payload_request_id,
         "response_header_request_id": response_header_request_id,
         "message_id": parsed.get("id") if isinstance(parsed, dict) else None,
@@ -12029,6 +12262,8 @@ def _signature_interop_result(
                     "latency_ms": step.get("latency_ms"),
                     "message_id": step.get("message_id"),
                     "request_id": step.get("response_body_request_id") or step.get("request_id"),
+                    "gateway_request_id": step.get("gateway_request_id"),
+                    "upstream_request_id": step.get("upstream_request_id"),
                     "response_header_request_id": step.get("response_header_request_id"),
                     "error": step.get("error"),
                     "request_excerpt": step.get("request_excerpt"),

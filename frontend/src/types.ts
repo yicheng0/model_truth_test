@@ -254,6 +254,8 @@ export interface SignatureInteropRequestLog {
   latency_ms?: number | null;
   message_id?: string | null;
   request_id?: string | null;
+  gateway_request_id?: string | null;
+  upstream_request_id?: string | null;
   response_header_request_id?: string | null;
   error?: string | null;
   request_excerpt?: string | null;
@@ -1678,6 +1680,7 @@ export type FeishuBroadcastSetting = {
   daily_report_enabled: boolean;
   daily_report_time: string;
   timezone: string;
+  last_hourly_summary_at?: string | null;
   last_daily_report_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;

@@ -68,6 +68,24 @@ def repair_schema() -> None:
                 else:
                     connection.execute(text(f"CREATE INDEX {name} ON results ({column})"))
 
+    if "feishu_broadcast_settings" in table_names:
+        setting_columns = {column["name"] for column in inspector.get_columns("feishu_broadcast_settings")}
+        _add_column_if_missing(
+            "feishu_broadcast_settings",
+            setting_columns,
+            Column("last_hourly_summary_at", DateTime(timezone=True), nullable=True),
+        )
+        _add_column_if_missing(
+            "feishu_broadcast_settings",
+            setting_columns,
+            Column("hourly_summary_lock_token", String(64), nullable=True),
+        )
+        _add_column_if_missing(
+            "feishu_broadcast_settings",
+            setting_columns,
+            Column("hourly_summary_locked_until", DateTime(timezone=True), nullable=True),
+        )
+
     if "channel_alerts" not in table_names:
         return
 

@@ -316,6 +316,8 @@ class SignatureInteropRequestLogRead(BaseModel):
     latency_ms: int | None = None
     message_id: str | None = None
     request_id: str | None = None
+    gateway_request_id: str | None = None
+    upstream_request_id: str | None = None
     response_header_request_id: str | None = None
     error: str | None = None
     request_excerpt: str | None = None
@@ -1282,6 +1284,7 @@ class FeishuBroadcastSettingRead(BaseModel):
     daily_report_enabled: bool
     daily_report_time: str
     timezone: str
+    last_hourly_summary_at: datetime | None = None
     last_daily_report_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None

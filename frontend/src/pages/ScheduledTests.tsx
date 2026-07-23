@@ -1614,7 +1614,7 @@ export default function ScheduledTests() {
                     </Col>
                     <Col xs={24} md={12}>
                       <Form.Item name="alert_broadcast_enabled" valuePropName="checked">
-                        <Checkbox>异常告警立即播报</Checkbox>
+                        <Checkbox>每小时汇总巡检异常（所有渠道合并为一条）</Checkbox>
                       </Form.Item>
                     </Col>
                     <Col xs={24} md={12}>
