@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Empty, Popconfirm, Progress, Space, Spin
 import { Link } from 'react-router-dom';
 import { BarChart3, CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2, Trophy } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
 
@@ -475,23 +475,29 @@ export default function Runs() {
   });
   const deleteNormalRuns = useMutation({
     mutationFn: api.deleteRuns,
-    onSuccess: async (result) => {
+    onSuccess: (result, requestedIds) => {
       const failed = Object.keys(result.failed).length;
       message.success(failed ? `已删除 ${result.deleted} 条任务，${failed} 条删除失败` : `已删除 ${result.deleted} 条任务`);
       setSelectedNormalRowKeys([]);
-      await queryClient.invalidateQueries({ queryKey: ['runs'] });
-      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.setQueryData<Run[]>(['runs'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['runs'] }),
+        queryClient.invalidateQueries({ queryKey: ['reports'] }),
+      ]);
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });
   const deletePatrolRuns = useMutation({
     mutationFn: api.deleteRuns,
-    onSuccess: async (result) => {
+    onSuccess: (result, requestedIds) => {
       const failed = Object.keys(result.failed).length;
       message.success(failed ? `已删除 ${result.deleted} 条日志，${failed} 条删除失败` : `已删除 ${result.deleted} 条日志`);
       setSelectedPatrolRowKeys([]);
-      await queryClient.invalidateQueries({ queryKey: ['runs'] });
-      await queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.setQueryData<Run[]>(['runs'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['runs'] }),
+        queryClient.invalidateQueries({ queryKey: ['reports'] }),
+      ]);
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });

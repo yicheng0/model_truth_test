@@ -100,6 +100,17 @@ export function selectableRunIds(runs: Run[]) {
   return runs.filter((run) => run.status !== 'pending' && run.status !== 'running').map((run) => run.id);
 }
 
+export function removeBulkDeletedRuns(
+  runs: Run[] | undefined,
+  requestedIds: string[],
+  result: { missing: string[]; failed: Record<string, string> },
+) {
+  if (!runs) return runs;
+  const retainedIds = new Set([...result.missing, ...Object.keys(result.failed)]);
+  const deletedIds = new Set(requestedIds.filter((id) => !retainedIds.has(id)));
+  return runs.filter((run) => !deletedIds.has(run.id));
+}
+
 export function extractPatrolEvidence(results: RunResults, preferredReportId?: string | null): PatrolEvidence | null {
   const preferredReport = preferredReportId ? results.reports.find((item) => item.id === preferredReportId) : undefined;
   const report = preferredReport ?? results.reports.find((item) => {

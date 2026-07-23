@@ -22,7 +22,7 @@ import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, func, inspect, select, text
+from sqlalchemy import create_engine, delete, event, func, inspect, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.orm import close_all_sessions, sessionmaker
@@ -1550,6 +1550,105 @@ def test_run_bulk_delete_large_batch_completes_and_cleans_related_rows() -> None
         assert db.scalar(select(func.count()).select_from(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(run_ids))) == 0
         scheduled = db.get(ScheduledChannelTest, schedule["id"])
         assert scheduled is not None and scheduled.last_run_id is None
+
+
+def test_run_bulk_delete_repairs_many_schedules_with_constant_select_count() -> None:
+    reset_database()
+    schedule_ids: list[str] = []
+    run_ids: list[str] = []
+    with TestClient(app) as client:
+        base_schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    with SessionLocal() as db:
+        for index in range(12):
+            schedule_id = f"bulk_query_schedule_{index}"
+            run_id = f"bulk_query_run_{index}"
+            schedule_ids.append(schedule_id)
+            run_ids.append(run_id)
+            db.add(ScheduledChannelTest(
+                id=schedule_id,
+                channel_id="negative_sample",
+                suite_id=base_schedule["suite_id"],
+                baseline_snapshot_id=base_schedule["baseline_snapshot_id"],
+                name=f"bulk query schedule {index}",
+                last_run_id=run_id,
+            ))
+            db.add(Run(
+                id=run_id,
+                suite_id=base_schedule["suite_id"],
+                name=f"bulk query run {index}",
+                mode="candidate_eval",
+                test_scope="scheduled_probe",
+                baseline_snapshot_id=base_schedule["baseline_snapshot_id"],
+                scheduled_test_id=schedule_id,
+                status="completed",
+            ))
+        db.commit()
+
+    select_statements: list[str] = []
+
+    def count_selects(_connection, _cursor, statement, _parameters, _context, _executemany):  # noqa: ANN001
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_statements.append(statement)
+
+    with TestClient(app) as client:
+        event.listen(engine, "before_cursor_execute", count_selects)
+        try:
+            response = client.post("/api/runs/bulk-delete", json={"ids": run_ids}, headers=ADMIN_HEADERS)
+        finally:
+            event.remove(engine, "before_cursor_execute", count_selects)
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == len(run_ids)
+    assert len(select_statements) <= 8
+    with SessionLocal() as db:
+        schedules = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.id.in_(schedule_ids))).all())
+        assert all(schedule.last_run_id is None and schedule.last_status == "idle" for schedule in schedules)
+
+
+def test_run_bulk_delete_chunks_large_id_sets() -> None:
+    import app.main as main_module
+
+    run_ids = [f"run_{index}" for index in range(main_module.DELETE_ID_BATCH_SIZE * 2 + 1)]
+
+    batches = list(main_module._id_batches(run_ids))
+
+    assert [len(batch) for batch in batches] == [
+        main_module.DELETE_ID_BATCH_SIZE,
+        main_module.DELETE_ID_BATCH_SIZE,
+        1,
+    ]
+    assert [run_id for batch in batches for run_id in batch] == run_ids
+
+
+def test_run_bulk_delete_deletes_more_than_two_id_batches() -> None:
+    reset_database()
+    run_ids = [f"bulk_chunk_run_{index}" for index in range(1001)]
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+    with SessionLocal() as db:
+        db.add_all([
+            Run(
+                id=run_id,
+                suite_id=schedule["suite_id"],
+                name=run_id,
+                mode="candidate_eval",
+                test_scope="full",
+                status="completed",
+            )
+            for run_id in run_ids
+        ])
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.post("/api/runs/bulk-delete", json={"ids": run_ids}, headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": len(run_ids), "missing": [], "failed": {}}
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Run).where(Run.id.in_(run_ids[:500]))) == 0
+        assert db.scalar(select(func.count()).select_from(Run).where(Run.id.in_(run_ids[500:1000]))) == 0
+        assert db.get(Run, run_ids[-1]) is None
 
 def test_run_bulk_delete_returns_deleted_missing_and_failed() -> None:
     reset_database()

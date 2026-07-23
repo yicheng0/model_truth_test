@@ -16,7 +16,7 @@ from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Quer
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .admin import require_admin, require_admin_if_configured, require_configured_admin
@@ -1753,36 +1753,38 @@ def _rowcount(result) -> int:  # noqa: ANN001
     return int(result.rowcount or 0)
 
 
+DELETE_ID_BATCH_SIZE = 500
+
+
+def _id_batches(ids: list[str] | set[str]):  # noqa: ANN201
+    values = list(ids)
+    for offset in range(0, len(values), DELETE_ID_BATCH_SIZE):
+        yield values[offset:offset + DELETE_ID_BATCH_SIZE]
+
+
 def _delete_patrol_jobs_for_runs(db: Session, run_ids: set[str]) -> int:
     if not run_ids:
         return 0
     deleted = 0
-    job_ids = list(db.scalars(select(PatrolJob.id).where(PatrolJob.run_id.in_(run_ids))).all())
-    if job_ids:
-        deleted += _rowcount(db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_ids))))
-        deleted += _rowcount(db.execute(delete(PatrolJob).where(PatrolJob.id.in_(job_ids))))
-    deleted += _rowcount(db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(run_ids))))
-    deleted += _rowcount(db.execute(delete(PatrolJob).where(PatrolJob.run_id.in_(run_ids))))
+    job_ids: list[str] = []
+    for run_batch in _id_batches(run_ids):
+        job_ids.extend(db.scalars(select(PatrolJob.id).where(PatrolJob.run_id.in_(run_batch))).all())
+    for job_batch in _id_batches(job_ids):
+        deleted += _rowcount(db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.job_id.in_(job_batch))))
+        deleted += _rowcount(db.execute(delete(PatrolJob).where(PatrolJob.id.in_(job_batch))))
+    for run_batch in _id_batches(run_ids):
+        deleted += _rowcount(db.execute(delete(PatrolJobAttempt).where(PatrolJobAttempt.run_id.in_(run_batch))))
+        deleted += _rowcount(db.execute(delete(PatrolJob).where(PatrolJob.run_id.in_(run_batch))))
     return deleted
 
 
-def _refresh_scheduled_state_after_run_delete(db: Session, scheduled: ScheduledChannelTest, deleted_run_ids: set[str]) -> None:
-    fallback_run_id = db.scalar(
-        select(Run.id)
-        .where(
-            Run.scheduled_test_id == scheduled.id,
-            Run.id.not_in(deleted_run_ids),
-        )
-        .order_by(Run.created_at.desc(), Run.id.desc())
-        .limit(1)
-    )
-    scheduled.last_run_id = fallback_run_id
-    if fallback_run_id:
-        fallback = db.get(Run, fallback_run_id)
-        scheduled.last_status = fallback.status if fallback else "idle"
+def _apply_scheduled_fallback(scheduled: ScheduledChannelTest, fallback: object | None) -> None:
+    scheduled.last_run_id = fallback.id if fallback else None
+    if fallback:
+        scheduled.last_status = fallback.status
         scheduled.last_error = None
-        scheduled.last_started_at = fallback.started_at if fallback else None
-        scheduled.last_finished_at = fallback.finished_at if fallback else None
+        scheduled.last_started_at = fallback.started_at
+        scheduled.last_finished_at = fallback.finished_at
     else:
         scheduled.last_status = "idle"
         scheduled.last_error = None
@@ -1793,29 +1795,37 @@ def _refresh_scheduled_state_after_run_delete(db: Session, scheduled: ScheduledC
 def _baseline_snapshots_for_deletable_runs(db: Session, run_ids: set[str]) -> list[BaselineSnapshot]:
     if not run_ids:
         return []
-    return list(db.scalars(select(BaselineSnapshot).where(BaselineSnapshot.source_run_id.in_(run_ids))).all())
+    snapshots: list[BaselineSnapshot] = []
+    for run_batch in _id_batches(run_ids):
+        snapshots.extend(db.scalars(select(BaselineSnapshot).where(BaselineSnapshot.source_run_id.in_(run_batch))).all())
+    return snapshots
 
 
 def _delete_runs_by_ids(db: Session, run_ids: set[str], *, repair_refs: bool = True) -> int:
     if not run_ids:
         return 0
     source_snapshots = _baseline_snapshots_for_deletable_runs(db, run_ids)
-    if repair_refs:
-        _repair_scheduled_last_run_refs_before_delete(db, run_ids)
+    scheduled_refs = _prepare_scheduled_last_run_refs_for_delete(db, run_ids) if repair_refs else []
     _delete_patrol_jobs_for_runs(db, run_ids)
-    db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(run_ids)))
-    db.execute(delete(RunChannel).where(RunChannel.run_id.in_(run_ids)))
-    db.execute(delete(Result).where(Result.run_id.in_(run_ids)))
-    db.execute(delete(Comparison).where(Comparison.run_id.in_(run_ids)))
-    db.execute(delete(Report).where(Report.run_id.in_(run_ids)))
-    for snapshot in source_snapshots:
-        db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id == snapshot.id))
-    if source_snapshots:
-        db.execute(delete(BaselineSnapshot).where(BaselineSnapshot.id.in_([snapshot.id for snapshot in source_snapshots])))
-    return _rowcount(db.execute(delete(Run).where(Run.id.in_(run_ids))))
+    for run_batch in _id_batches(run_ids):
+        db.execute(delete(ChannelAlert).where(ChannelAlert.run_id.in_(run_batch)))
+        db.execute(delete(RunChannel).where(RunChannel.run_id.in_(run_batch)))
+        db.execute(delete(Result).where(Result.run_id.in_(run_batch)))
+        db.execute(delete(Comparison).where(Comparison.run_id.in_(run_batch)))
+        db.execute(delete(Report).where(Report.run_id.in_(run_batch)))
+    snapshot_ids = [snapshot.id for snapshot in source_snapshots]
+    for snapshot_batch in _id_batches(snapshot_ids):
+        db.execute(delete(BaselineResult).where(BaselineResult.baseline_snapshot_id.in_(snapshot_batch)))
+        db.execute(delete(BaselineSnapshot).where(BaselineSnapshot.id.in_(snapshot_batch)))
+    deleted = 0
+    for run_batch in _id_batches(run_ids):
+        deleted += _rowcount(db.execute(delete(Run).where(Run.id.in_(run_batch))))
+    if scheduled_refs:
+        _restore_scheduled_last_run_refs_after_delete(db, scheduled_refs)
+    return deleted
 
 
-def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True, excluded_run_ids: set[str] | None = None) -> bool:
+def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True) -> bool:
     run = db.get(Run, run_id)
     if not run:
         return False
@@ -1826,28 +1836,47 @@ def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True, exc
         conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
         if conflict:
             raise HTTPException(status_code=409, detail=conflict)
-    deleted_run_ids = excluded_run_ids or {run_id}
-    if repair_refs and deleted_run_ids != {run_id}:
-        _repair_scheduled_last_run_refs_before_delete(db, deleted_run_ids)
     return _delete_runs_by_ids(db, {run_id}, repair_refs=repair_refs) > 0
 
 
-def _repair_scheduled_last_run_refs_before_delete(db: Session, run_ids: set[str]) -> int:
+def _prepare_scheduled_last_run_refs_for_delete(db: Session, run_ids: set[str]) -> list[ScheduledChannelTest]:
     if not run_ids:
-        return 0
-    scheduled_refs = list(db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(run_ids))).all())
+        return []
+    scheduled_by_id: dict[str, ScheduledChannelTest] = {}
+    for run_batch in _id_batches(run_ids):
+        for scheduled in db.scalars(select(ScheduledChannelTest).where(ScheduledChannelTest.last_run_id.in_(run_batch))).all():
+            scheduled_by_id[scheduled.id] = scheduled
+    scheduled_refs = list(scheduled_by_id.values())
     for scheduled in scheduled_refs:
-        fallback_run_id = db.scalar(
-            select(Run.id)
-            .where(
-                Run.scheduled_test_id == scheduled.id,
-                Run.id.not_in(run_ids),
+        scheduled.last_run_id = None
+    if scheduled_refs:
+        db.flush()
+    return scheduled_refs
+
+
+def _restore_scheduled_last_run_refs_after_delete(db: Session, scheduled_refs: list[ScheduledChannelTest]) -> None:
+    schedule_ids = [scheduled.id for scheduled in scheduled_refs]
+    fallback_by_schedule: dict[str, object] = {}
+    for schedule_batch in _id_batches(schedule_ids):
+        ranked_runs = (
+            select(
+                Run.id.label("id"),
+                Run.scheduled_test_id.label("scheduled_test_id"),
+                Run.status.label("status"),
+                Run.started_at.label("started_at"),
+                Run.finished_at.label("finished_at"),
+                func.row_number().over(
+                    partition_by=Run.scheduled_test_id,
+                    order_by=(Run.created_at.desc(), Run.id.desc()),
+                ).label("rank"),
             )
-            .order_by(Run.created_at.desc(), Run.id.desc())
-            .limit(1)
+            .where(Run.scheduled_test_id.in_(schedule_batch))
+            .subquery()
         )
-        _refresh_scheduled_state_after_run_delete(db, scheduled, run_ids)
-    return len(scheduled_refs)
+        for fallback in db.execute(select(ranked_runs).where(ranked_runs.c.rank == 1)).all():
+            fallback_by_schedule[fallback.scheduled_test_id] = fallback
+    for scheduled in scheduled_refs:
+        _apply_scheduled_fallback(scheduled, fallback_by_schedule.get(scheduled.id))
 
 
 def _run_ids_blocked_by_baseline_refs(db: Session, run_ids: set[str]) -> dict[str, str]:
@@ -1865,7 +1894,9 @@ def _preflight_deletable_run_ids(db: Session, run_ids: list[str]) -> tuple[set[s
     requested = list(dict.fromkeys(str(item).strip() for item in run_ids if str(item).strip()))
     if not requested:
         return set(), [], {}
-    runs = {run.id: run for run in db.scalars(select(Run).where(Run.id.in_(requested))).all()}
+    runs: dict[str, Run] = {}
+    for run_batch in _id_batches(requested):
+        runs.update((run.id, run) for run in db.scalars(select(Run).where(Run.id.in_(run_batch))).all())
     blocked_by_baseline = _run_ids_blocked_by_baseline_refs(db, set(runs))
     deletable: set[str] = set()
     missing: list[str] = []

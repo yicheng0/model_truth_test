@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -26,6 +26,16 @@ describe('runs utilities', () => {
     const running = { ...run('running_1'), status: 'running' as const };
 
     expect(selectableRunIds([completed, failed, pending, running])).toEqual(['completed_1', 'failed_1']);
+  });
+
+  it('removes successfully bulk-deleted tasks from the cached list immediately', () => {
+    const runs = [run('deleted_1'), run('failed_1'), run('missing_1'), run('untouched_1')];
+
+    expect(removeBulkDeletedRuns(
+      runs,
+      ['deleted_1', 'failed_1', 'missing_1'],
+      { missing: ['missing_1'], failed: { failed_1: 'blocked' } },
+    )?.map((item) => item.id)).toEqual(['failed_1', 'missing_1', 'untouched_1']);
   });
 
   it('splits scheduled patrol runs out of the normal task list', () => {
