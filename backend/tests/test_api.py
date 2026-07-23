@@ -1681,45 +1681,6 @@ def test_run_bulk_delete_returns_deleted_missing_and_failed() -> None:
         assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.run_id == first_run_id)) == 0
 
 
-def test_report_compare_rejects_mixed_modes() -> None:
-    reset_database()
-    with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        compare_run = client.post(
-            "/api/runs",
-            json={
-                "name": "pytest authenticity report",
-                "suite_id": suite_id,
-                "channel_ids": {"gold": ["anthropic_official"], "candidate": ["third_party_demo"]},
-                "repeat_count": 1,
-                "concurrency": 4,
-                "use_mock": True,
-            },
-        ).json()
-        performance_run = client.post(
-            "/api/runs",
-            json={
-                "name": "pytest performance report",
-                "suite_id": suite_id,
-                "mode": "performance_benchmark",
-                "test_scope": "quick",
-                "channel_ids": {"candidate": ["third_party_demo"]},
-                "repeat_count": 1,
-                "concurrency": 2,
-                "use_mock": True,
-            },
-        ).json()
-        client.get(f"/api/runs/{compare_run['id']}/results")
-        client.get(f"/api/runs/{performance_run['id']}/results")
-        summaries = client.get("/api/reports/summary").json()
-        compare_report_id = next(item["report_id"] for item in summaries if item["run_id"] == compare_run["id"])
-        performance_report_id = next(item["report_id"] for item in summaries if item["run_id"] == performance_run["id"])
-        response = client.get("/api/reports/compare", params={"ids": f"{compare_report_id},{performance_report_id}"})
-
-    assert response.status_code == 400
-    assert "modes must match" in response.json()["detail"]
-
-
 def test_default_suite_is_representative_32_and_keeps_custom_default_suite_cases() -> None:
     reset_database()
     with SessionLocal() as db:
@@ -1791,78 +1752,37 @@ def test_quick_run_uses_only_quick_cases() -> None:
     assert len(payload["results"]) == 24
 
 
-def test_performance_benchmark_writes_evalscope_style_metrics_and_summary() -> None:
+def test_removed_performance_and_arena_run_modes_are_unavailable() -> None:
     reset_database()
     with TestClient(app) as client:
         suite_id = client.get("/api/suites").json()[0]["id"]
-        response = client.post(
+        performance_response = client.post(
             "/api/runs",
             json={
-                "name": "pytest perf run",
+                "name": "removed performance run",
                 "suite_id": suite_id,
-                "test_scope": "quick",
                 "mode": "performance_benchmark",
                 "channel_ids": {"candidate": ["third_party_demo"]},
                 "repeat_count": 1,
-                "concurrency": 4,
+                "concurrency": 1,
                 "use_mock": True,
-                "benchmark_config": {
-                    "concurrency_steps": [1, 3],
-                    "warmup_requests": 1,
-                    "sla_p95_ms": 5000,
-                    "max_error_rate": 5,
-                },
             },
         )
-        assert response.status_code == 200
-        run = response.json()
-        payload = client.get(f"/api/runs/{run['id']}/results").json()
-        summary = client.get(f"/api/runs/{run['id']}/summary").json()
-
-    assert payload["run"]["status"] == "completed"
-    assert payload["reports"]
-    first_metrics = payload["results"][0]["metrics"]
-    assert first_metrics["ttft_ms"] is not None
-    assert "tpot_ms" in first_metrics
-    assert "tokens_per_second" in first_metrics
-    assert summary["avg_ttft_ms"] is not None
-    assert summary["performance_by_channel"][0]["channel_id"] == "third_party_demo"
-    assert payload["reports"][0]["evidence"]["benchmark_config"]["concurrency_steps"] == [1, 3]
-    assert "performance_distribution" in payload["reports"][0]["evidence"]
-
-
-def test_arena_run_generates_rankings_and_reports() -> None:
-    reset_database()
-    with TestClient(app) as client:
-        suite_id = client.get("/api/suites").json()[0]["id"]
-        response = client.post(
+        arena_response = client.post(
             "/api/runs/arena",
             json={
-                "name": "pytest arena run",
+                "name": "removed arena run",
                 "suite_id": suite_id,
                 "candidate_channel_ids": ["third_party_demo", "negative_sample"],
-                "judge_channel_id": "anthropic_official",
-                "judge_mode": "direct_score",
-                "judge_rubric": "Prefer safe, concise, instruction-following answers.",
                 "repeat_count": 1,
-                "concurrency": 4,
+                "concurrency": 1,
                 "use_mock": True,
             },
         )
-        assert response.status_code == 200
-        run = response.json()
-        payload = client.get(f"/api/runs/{run['id']}/results").json()
-        summary = client.get(f"/api/runs/{run['id']}/summary").json()
 
-    assert payload["run"]["mode"] == "arena_comparison"
-    assert {item["channel_id"] for item in payload["run_channels"]} == {"third_party_demo", "negative_sample"}
-    assert all(item["role_in_run"] == "candidate" for item in payload["run_channels"])
-    assert payload["reports"]
-    assert summary["arena_rankings"]
-    assert {item["channel_id"] for item in summary["arena_rankings"]} == {"third_party_demo", "negative_sample"}
-    assert "anthropic_official" not in {item["channel_id"] for item in summary["arena_rankings"]}
-    assert payload["reports"][0]["evidence"]["arena_matrix"]
-    assert payload["reports"][0]["evidence"]["judge_evidence"]["judge_channel_id"] == "anthropic_official"
+    assert performance_response.status_code == 400
+    assert performance_response.json()["detail"] == "Unsupported run mode: performance_benchmark"
+    assert arena_response.status_code == 405
 
 
 def test_suite_bundle_import_export_and_diff() -> None:
@@ -3691,7 +3611,7 @@ def test_scheduled_channel_test_retries_failed_runs(monkeypatch) -> None:
     sleep_calls: list[int] = []
     attempts = 0
 
-    async def fake_execute_run(session_factory, run_id, runtime_credentials=None, use_mock=True, benchmark_config=None, arena_config=None):  # noqa: ANN001, ARG001
+    async def fake_execute_run(session_factory, run_id, runtime_credentials=None, use_mock=True):  # noqa: ANN001, ARG001
         nonlocal attempts
         attempts += 1
         with session_factory() as db:
@@ -11685,62 +11605,6 @@ def test_execute_run_stops_remaining_jobs_when_canceled(monkeypatch) -> None:
         assert run.completed_jobs < run.total_jobs
         assert result_count == 0
         assert report_count == 0
-        return run_id
-
-    asyncio.run(scenario())
-
-
-def test_arena_run_reports_progress_and_completes_all_jobs(monkeypatch) -> None:
-    reset_database()
-
-    async def scenario() -> str:
-        call_count = 0
-
-        async def live_like_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
-            nonlocal call_count
-            call_count += 1
-            await asyncio.sleep(0.01)
-            return {
-                "content_text": f"{channel.name}:{case.id}:{attempt}",
-                "raw_request": {},
-                "raw_response": {},
-                "latency_ms": 10,
-                "first_token_ms": 5,
-            }
-
-        monkeypatch.setattr("app.services.invoke_channel", live_like_invoke)
-
-        with SessionLocal() as db:
-            suite_id = db.scalar(select(TestSuiteModel.id))
-            run = create_run(
-                db,
-                RunCreate(
-                    name="arena progress run",
-                    suite_id=suite_id,
-                    channel_ids={"candidate": ["third_party_demo", "negative_sample"]},
-                    repeat_count=1,
-                    concurrency=2,
-                    mode="arena_comparison",
-                    test_scope="quick",
-                    use_mock=False,
-                ),
-            )
-            run_id = run.id
-
-        await asyncio.wait_for(execute_run(SessionLocal, run_id, use_mock=False, arena_config={"judge_mode": "direct_score"}), timeout=10)
-
-        with SessionLocal() as db:
-            run = db.get(Run, run_id)
-            result_count = db.scalar(select(func.count()).select_from(Result).where(Result.run_id == run_id))
-            summary = db.execute(select(Run.completed_jobs, Run.total_jobs).where(Run.id == run_id)).one()
-
-        assert call_count > 0
-        assert run is not None
-        assert run.status == "completed"
-        assert run.finished_at is not None
-        assert run.completed_jobs == run.total_jobs
-        assert summary.completed_jobs == summary.total_jobs
-        assert result_count == run.total_jobs
         return run_id
 
     asyncio.run(scenario())
