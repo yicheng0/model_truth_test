@@ -51,6 +51,23 @@ def repair_schema() -> None:
         _add_column_if_missing("scheduled_channel_tests", scheduled_columns, Column("patrol_modules", JSON, nullable=True))
         _add_column_if_missing("scheduled_channel_tests", scheduled_columns, Column("model_request_probe_keys", JSON, nullable=True))
 
+    if "results" in table_names:
+        result_columns = {column["name"] for column in inspector.get_columns("results")}
+        _add_column_if_missing("results", result_columns, Column("upstream_response_id", String(255), nullable=True))
+        _add_column_if_missing("results", result_columns, Column("upstream_request_id", String(255), nullable=True))
+        result_indexes = {index["name"] for index in inspect(engine).get_indexes("results")}
+        with engine.begin() as connection:
+            for name, column in (
+                ("ix_results_upstream_response_id", "upstream_response_id"),
+                ("ix_results_upstream_request_id", "upstream_request_id"),
+            ):
+                if name in result_indexes:
+                    continue
+                if engine.dialect.name == "sqlite":
+                    connection.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON results ({column})"))
+                else:
+                    connection.execute(text(f"CREATE INDEX {name} ON results ({column})"))
+
     if "channel_alerts" not in table_names:
         return
 

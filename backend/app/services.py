@@ -578,6 +578,7 @@ def grade_from_score(score: float, labels: list[str] | None = None) -> str:
 
 ALERT_RED_FLAGS = {
     "identity_mismatch",
+    "kiro_identity_leak",
     "unsafe_response",
     "tool_use_invalid",
     "tool_name_mismatch",
@@ -2306,6 +2307,8 @@ def _result_from_normalized(run_id: str, case: TestCase, channel: Channel, attem
         test_case_id=case.id,
         channel_id=channel.id,
         attempt_index=attempt,
+        upstream_response_id=normalized.get("provider_message_id"),
+        upstream_request_id=request_id_from_normalized(normalized),
         normalized_response=stored_normalized,
         raw_request=redact_secrets(normalized.get("raw_request")),
         raw_response=redact_secrets(normalized.get("raw_response")),
@@ -4400,6 +4403,14 @@ def _manual_probe_scoring_rules(request_params: dict[str, Any]) -> dict[str, Any
     return rules
 
 
+SCHEDULED_IDENTITY_PROBE: dict[str, Any] = {
+    "key": "identity_self_report",
+    "title": "固定身份探针",
+    "prompt": "你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。",
+    "request_params": {"max_tokens": 120, "temperature": 0},
+    "scoring_rules": {"scheduled_identity_probe": True},
+}
+
 SCHEDULED_ADAPTIVE_THINKING_PROMPT = "请用一句话回答：这是自动巡检 adaptive thinking 协议探针。"
 SCHEDULED_ADAPTIVE_THINKING_PARAMS: dict[str, Any] = {
     "max_tokens": 2048,
@@ -4499,6 +4510,13 @@ def scheduled_model_request_probes(scheduled: ScheduledChannelTest | None) -> li
         return list(SCHEDULED_MODEL_REQUEST_PROBES)
     chosen = set(selection)
     return [probe for probe in SCHEDULED_MODEL_REQUEST_PROBES if str(probe["key"]) in chosen]
+
+
+def scheduled_execution_probes(scheduled: ScheduledChannelTest) -> list[dict[str, Any]]:
+    probes = [SCHEDULED_IDENTITY_PROBE]
+    if "model_request_probes" in scheduled_patrol_modules(scheduled):
+        probes.extend(scheduled_model_request_probes(scheduled))
+    return probes
 
 CLAUDE_CODE_DEFAULT_IMAGE_URL = "https://dummyimage.com/64x64/ff0000/ffffff.png&text=R"
 CLAUDE_CODE_RED_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfElEQVR4nNXOQREAMAjAsK7+PTMRPLhGQd7QJnESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ES53Vg6wNShQF/fRSLfgAAAABJRU5ErkJggg=="
@@ -7713,7 +7731,7 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
     if not channel.enabled:
         raise ValueError("Channel is disabled")
 
-    probes = scheduled_model_request_probes(scheduled)
+    probes = scheduled_execution_probes(scheduled)
     suite = _manual_probe_suite(db)
     started_at = datetime.now(timezone.utc)
     run = Run(
@@ -7746,7 +7764,7 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
             prompt=str(probe["prompt"]),
             system_prompt=None,
             request_params=request_params,
-            scoring_rules=_manual_probe_scoring_rules(request_params),
+            scoring_rules=dict(probe.get("scoring_rules") or _manual_probe_scoring_rules(request_params)),
             is_hidden=False,
             enabled=True,
         )
@@ -7760,15 +7778,18 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
         db.commit()
         db.refresh(result)
         completed_at = result.created_at or datetime.now(timezone.utc)
+        response_id = result.upstream_response_id
+        request_id = result.upstream_request_id
         probe_results.append(
             {
                 "key": probe["key"],
                 "title": probe["title"],
                 "run_id": run.id,
                 "result_id": result.id,
-                "message_id": normalized.get("provider_message_id"),
-                "message_channel_type": classify_claude_message_id(normalized.get("provider_message_id")),
-                "request_id": request_id_from_normalized(normalized),
+                "response_id": response_id,
+                "message_id": response_id,
+                "message_channel_type": classify_claude_message_id(response_id),
+                "request_id": request_id,
                 "request_protocol": normalized.get("request_protocol"),
                 "provider_endpoint": normalized.get("provider_endpoint"),
                 "created_at": completed_at.isoformat(),
@@ -7776,6 +7797,8 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
                 "labels": result.labels or [],
                 "score": result.score,
                 "error": normalized.get("error"),
+                "response_text": redact_text(str(normalized.get("content_text") or "")) if probe["key"] == "identity_self_report" else None,
+                "raw_response": redact_secrets(normalized.get("raw_response")) if probe["key"] == "identity_self_report" else None,
             }
         )
 
@@ -8402,30 +8425,9 @@ async def execute_scheduled_probe_run(
             if not scheduled or not channel:
                 return None
             modules = scheduled_patrol_modules(scheduled)
-            if "model_request_probes" in modules:
-                model_payload = await create_scheduled_model_request_probe(db, channel, scheduled)
-                run = model_payload["run"]
-                result = model_payload.get("result")
-            else:
-                started_at = datetime.now(timezone.utc)
-                suite = _manual_probe_suite(db)
-                run = Run(
-                    id=new_id("run"),
-                    suite_id=suite.id,
-                    name=f"{patrol_channel_display_name(channel)} - 自动巡检 Signature"[:200],
-                    mode=MANUAL_PROBE_MODE,
-                    test_scope="scheduled_probe",
-                    status="running",
-                    repeat_count=1,
-                    concurrency=1,
-                    total_jobs=1,
-                    completed_jobs=0,
-                    started_at=started_at,
-                )
-                db.add(run)
-                db.add(RunChannel(id=new_id("rch"), run_id=run.id, channel_id=channel.id, role_in_run=channel.role or "candidate"))
-                db.flush()
-                model_payload = {"run": run, "result": None, "results": [], "modules": modules}
+            model_payload = await create_scheduled_model_request_probe(db, channel, scheduled)
+            run = model_payload["run"]
+            result = model_payload.get("result")
             run.scheduled_test_id = scheduled.id
             job = db.get(PatrolJob, job_id) if job_id else None
             if job:
@@ -8554,7 +8556,10 @@ async def build_scheduled_probe_report(
         labels.add("patrol_probe_claude")
     grade = capped_grade_from_score(score, sorted(labels))
     provider_hint = classification_label
-    primary_request = next((item for item in model_requests if item.get("key") == "thinking_temperature"), model_requests[0] if model_requests else {})
+    primary_request = next(
+        (item for item in model_requests if "kiro_identity_leak" in (item.get("labels") or [])),
+        next((item for item in model_requests if item.get("key") == "thinking_temperature"), model_requests[0] if model_requests else {}),
+    )
     evidence = {
         "labels": sorted(labels),
         "red_flags": sorted(labels.intersection(ALERT_RED_FLAGS)),
@@ -8618,6 +8623,7 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
                 "channel_provider_type": item.get("channel_provider_type"),
                 "channel_account_type": item.get("channel_account_type"),
                 "result_id": item.get("result_id"),
+                "response_id": item.get("response_id") or item.get("message_id"),
                 "message_id": item.get("message_id"),
                 "message_channel_type": item.get("message_channel_type"),
                 "request_id": item.get("request_id"),
@@ -8628,6 +8634,8 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
                 "labels": item.get("labels") if isinstance(item.get("labels"), list) else [],
                 "score": item.get("score"),
                 "error": item.get("error"),
+                "response_text": item.get("response_text"),
+                "raw_response": item.get("raw_response"),
             }
             for item in results
             if isinstance(item, dict)
@@ -8644,6 +8652,7 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
             "channel_provider_type": model_payload.get("channel_provider_type") or (channel.provider_type if channel else None),
             "channel_account_type": model_payload.get("channel_account_type") or ((channel.auth_config or {}).get("account_type") if channel else None),
             "result_id": result.id if isinstance(result, Result) else None,
+            "response_id": model_payload.get("response_id") or model_payload.get("message_id"),
             "message_id": model_payload.get("message_id"),
             "message_channel_type": model_payload.get("message_channel_type"),
             "request_id": model_payload.get("request_id"),
@@ -8898,6 +8907,7 @@ def alert_evidence_summary(db: Session, alert: ChannelAlert) -> dict[str, Any] |
         "channel_model_name": channel.model_name if channel else None,
         "error_message": error_message,
         "model_request_result_id": model_request.get("result_id"),
+        "model_request_response_id": model_request.get("response_id") or model_request.get("message_id"),
         "model_request_message_id": model_request.get("message_id"),
         "model_request_request_id": model_request.get("request_id"),
         "model_request_channel_type": model_request.get("message_channel_type"),
@@ -8978,6 +8988,10 @@ def channel_alert_matches_id_query(db: Session, alert: ChannelAlert, query: str)
         results.extend(db.scalars(select(Result).where(Result.run_id == alert.run_id)).all())
     for result in results:
         if _value_contains_query(result.id, normalized_query):
+            return True
+        if _value_contains_query(result.upstream_response_id, normalized_query):
+            return True
+        if _value_contains_query(result.upstream_request_id, normalized_query):
             return True
         if _json_contains_query(result.raw_request, normalized_query):
             return True
@@ -9111,6 +9125,7 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
                 "channel_id": model_request.get("channel_id") or model_channel_id,
                 "channel_name": model_request.get("channel_name") or model_channel_name,
                 "result_id": model_request.get("result_id"),
+                "response_id": model_request.get("response_id") or model_request.get("message_id"),
                 "message_id": model_request.get("message_id"),
                 "message_channel_type": model_request.get("message_channel_type"),
                 "request_id": model_request.get("request_id"),
@@ -9128,6 +9143,7 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
                     "channel_id": item.get("channel_id") or model_channel_id,
                     "channel_name": item.get("channel_name") or model_channel_name,
                     "result_id": item.get("result_id"),
+                    "response_id": item.get("response_id") or item.get("message_id"),
                     "message_id": item.get("message_id"),
                     "message_channel_type": item.get("message_channel_type"),
                     "request_id": item.get("request_id"),
@@ -9475,6 +9491,7 @@ def alert_evidence_summary_for_evidence(evidence: dict[str, Any]) -> dict[str, A
     signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
     return {
         "model_request_result_id": primary.get("result_id"),
+        "model_request_response_id": primary.get("response_id") or primary.get("message_id"),
         "model_request_message_id": primary.get("message_id"),
         "model_request_request_id": primary.get("request_id"),
         "model_request_channel_provider_type": primary.get("channel_provider_type"),
@@ -9591,7 +9608,7 @@ def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadca
     channel_display_name = patrol_channel_display_name(channel, alert.channel_id)
     labels = ", ".join(alert.trigger_labels or []) or "无"
     evidence = alert_evidence_summary(db, alert) or {}
-    message_id = evidence.get("model_request_message_id") or evidence.get("signature_relay_message_id") or evidence.get("signature_source_message_id")
+    message_id = evidence.get("model_request_response_id") or evidence.get("model_request_message_id") or evidence.get("signature_relay_message_id") or evidence.get("signature_source_message_id")
     request_id = evidence.get("model_request_request_id") or evidence.get("signature_relay_request_id") or evidence.get("signature_source_request_id")
     detail = evidence.get("error_message") or scoreless_alert_message(alert.message)
     text = (
@@ -9601,7 +9618,7 @@ def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadca
         f"任务：{run.name if run else alert.run_id}\n"
         f"错误：{detail}\n"
         f"异常标签：{labels}\n"
-        f"Message ID：{message_id or '-'}\n"
+        f"上游响应 ID（Message ID）：{message_id or '-'}\n"
         f"Request ID：{request_id or '-'}"
     )
     return feishu_signed_payload(text, setting.webhook_secret)
@@ -11482,6 +11499,8 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         test_case_id=case.id,
         channel_id=relay.id,
         attempt_index=1,
+        upstream_response_id=normalized.get("provider_message_id"),
+        upstream_request_id=result_payload.get("relay_request_id") or result_payload.get("source_request_id"),
         normalized_response=normalized,
         raw_request={
             "test_type": "signature_interop",
@@ -12380,6 +12399,8 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
 
     if normalized.get("channel_preflight_failed"):
         return 0.0, ["channel_preflight_failed", "request_failed"]
+    if rules.get("scheduled_identity_probe"):
+        return _score_scheduled_identity_probe(normalized)
     if rules.get("expected_error_contains") or rules.get("expected_error_any") or rules.get("expected_error_variant_any") or rules.get("expected_error_required_all"):
         missing_label = str(rules.get("expected_error_missing_label") or "thinking_temperature_not_rejected")
         variant_label = str(rules.get("expected_error_variant_label") or "provider_error_variant")
@@ -12534,6 +12555,21 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         labels.append("latency_outlier")
 
     return max(0.0, min(100.0, score)), sorted(set(labels))
+
+
+def _score_scheduled_identity_probe(normalized: dict[str, Any]) -> tuple[float, list[str]]:
+    if normalized.get("error"):
+        operational_label = operational_failure_label(_normalized_error_text(normalized), http_status=normalized.get("status_code"))
+        return 0.0, [operational_label or PROVIDER_REQUEST_FAILED_LABEL]
+    text = str(normalized.get("content_text") or "").strip()
+    lowered = text.lower()
+    if "kiro" in lowered:
+        return 0.0, ["identity_mismatch", "kiro_identity_leak", "suspected_model_swap"]
+    if re.search(r"\b(?:claude|anthropic)\b", lowered, flags=re.IGNORECASE):
+        return 100.0, []
+    if re.search(r"\b(?:chatgpt|openai|gpt(?:-\w+)?|gemini|qwen|deepseek)\b", lowered, flags=re.IGNORECASE):
+        return 70.0, ["identity_mismatch"]
+    return 100.0, ["identity_uncertain"]
 
 
 def _lower_text(value: Any) -> str:
@@ -13638,6 +13674,7 @@ LABEL_EXPLANATIONS = {
     "regex_keypoint_missing": "输出未命中题目要求的正则关键点。",
     "forbidden_pattern_hit": "输出命中题目禁止的正则模式。",
     "identity_mismatch": "模型明确自报为 OpenAI、ChatGPT、GPT、Gemini 等其他厂商或模型身份；仅作为低权重身份异常信号。",
+    "kiro_identity_leak": "固定身份探针明确命中 Kiro，自报与 Claude 渠道预期冲突，按路由混入高风险处理。",
     "unsafe_response": "安全题中给出了不应提供的危险或违法内容。",
     "suspected_model_swap": "负样本或候选渠道表现出疑似模型替换特征。",
     "latency_outlier": "延迟明显偏高，可能存在中转链路或路由异常。",

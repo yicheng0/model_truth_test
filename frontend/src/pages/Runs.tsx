@@ -322,7 +322,7 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
       </Space>
       {primaryRequest ? (
         <Typography.Text type="secondary">
-          Message ID：{primaryRequest.messageId ?? '-'} · Request ID：{primaryRequest.requestId ?? '-'}
+          上游响应 ID（Message ID）：{primaryRequest.messageId ?? '-'} · Request ID：{primaryRequest.requestId ?? '-'}
         </Typography.Text>
       ) : null}
       {resultState === 'error' ? <Typography.Text type="danger">错误需要复审</Typography.Text> : null}

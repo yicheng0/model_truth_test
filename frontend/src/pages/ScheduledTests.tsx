@@ -56,7 +56,7 @@ const patrolModuleOptions: Array<{ value: ScheduledPatrolModule; label: string }
 
 const patrolModuleDescriptions: Record<ScheduledPatrolModule, string> = {
   signature_interop: '检测带 signature 的 thinking block 能否跨渠道复用，不消耗候选渠道的模型额度。',
-  model_request_probes: '向候选渠道发起真实模型请求并核对协议字段，会额外消耗模型调用。',
+  model_request_probes: '向候选渠道发起可选参数探针并核对协议字段；固定身份探针始终执行。',
 };
 
 const patrolModuleSelectOptions = patrolModuleOptions.map((item) => ({
@@ -684,7 +684,7 @@ export default function ScheduledTests() {
                             <div>
                               <Typography.Title level={4}>自动巡检配置教程</Typography.Title>
                               <Typography.Paragraph type="secondary">
-                                自动巡检会执行 Thinking Signature 互通检测和多项真实模型请求探针；点击展开查看详情。
+                                每轮自动巡检固定执行一次“你是谁”身份请求；可再执行 Thinking Signature 与参数探针。
                               </Typography.Paragraph>
                             </div>
                           </div>
@@ -707,7 +707,7 @@ export default function ScheduledTests() {
                               </div>
                               <div className="patrol-preset-preview">
                                 <strong>MODEL REQUEST</strong>
-                                <small>真实模型请求：记录 message id、request id、协议和 endpoint。</small>
+                                <small>真实模型请求：固定身份探针 + 可选参数探针，记录响应 ID、Request ID、协议和 endpoint。</small>
                               </div>
                               <div className="patrol-preset-preview">
                                 <strong>告警证据</strong>
@@ -1811,7 +1811,7 @@ export default function ScheduledTests() {
             showIcon
             style={{ marginBottom: 16 }}
             message="选择巡检模块"
-            description="默认只跑 Thinking Signature 互通，专门检测 ClaudeCode/原生 thinking signature 能不能互通；需要完整资源画像时可额外勾选真实模型请求探针。"
+            description="每轮固定执行一次“你是谁”身份请求（额外消耗一次真实调用）；默认另跑 Thinking Signature，需要完整资源画像时可勾选参数探针。"
           />
           <Form.Item label="计划名称" name="name" rules={[{ required: true, message: '请输入计划名称' }]}>
             <Input placeholder="第三方 Sonnet 渠道每日巡检" />
@@ -1826,7 +1826,7 @@ export default function ScheduledTests() {
             label="巡检模块"
             name="patrol_modules"
             rules={[{ required: true, message: '请至少选择一个巡检模块' }]}
-            extra="可多选。Signature 互通用于检测带 signature 的 thinking block 能否跨渠道复用；真实模型请求探针会额外消耗模型调用。"
+            extra="可多选。固定身份探针不在此列表且不可关闭；Signature 用于验证 thinking block，参数探针每项额外消耗一次调用。"
           >
             <Select
               mode="multiple"
@@ -1853,7 +1853,7 @@ export default function ScheduledTests() {
                   label="真实请求子探针"
                   name="model_request_probe_keys"
                   rules={[{ required: true, message: '请至少选择一个真实请求子探针' }]}
-                  extra="仅在启用「真实模型请求探针」时生效；每个子探针都会真实消耗一次模型调用。"
+                  extra="仅管理三个可选参数探针；固定身份探针始终执行。每个选中项另消耗一次真实调用。"
                 >
                   <Select
                     mode="multiple"

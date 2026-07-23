@@ -36,7 +36,7 @@ from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseC
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
 from app.scheduled_probe import _probe_status_text, operational_failure_label
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, smart_patrol_daily_text, suite_fingerprint
 from app.routers.channels import _result_failure_kind
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
@@ -47,6 +47,96 @@ _backfill_spec.loader.exec_module(scheduled_tests_backfill)
 
 
 ADMIN_HEADERS = {"X-Admin-Key": "test-admin-key"}
+
+
+def test_result_persists_upstream_response_and_request_ids() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "third_party_demo")
+        case = db.scalar(select(TestCaseModel).where(TestCaseModel.enabled.is_(True)))
+        assert channel is not None
+        assert case is not None
+        run = create_run(db, RunCreate(name="upstream id persistence", suite_id=case.suite_id, use_mock=True))
+
+        result = _result_from_normalized(
+            run.id,
+            case,
+            channel,
+            1,
+            {
+                "provider_message_id": "msg_upstream_123",
+                "raw_response": {
+                    "id": "msg_upstream_123",
+                    "_response_metadata": {"request_id": "req_upstream_456"},
+                },
+                "content_text": "ok",
+            },
+        )
+        db.add(result)
+        db.commit()
+        result_id = result.id
+
+    with SessionLocal() as db:
+        stored = db.get(Result, result_id)
+        assert stored is not None
+        assert stored.upstream_response_id == "msg_upstream_123"
+        assert stored.upstream_request_id == "req_upstream_456"
+
+
+def test_results_table_has_upstream_id_columns() -> None:
+    reset_database()
+    columns = {column["name"] for column in inspect(engine).get_columns("results")}
+    assert {"upstream_response_id", "upstream_request_id"} <= columns
+
+
+def test_result_upstream_id_migration_backfills_existing_rows(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy_results.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    legacy_engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO alembic_version (version_num) VALUES ('20260722_health_indexes')"
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE results (
+                id VARCHAR PRIMARY KEY NOT NULL,
+                normalized_response JSON,
+                raw_response JSON
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO results (id, normalized_response, raw_response) VALUES (?, ?, ?)",
+            (
+                "legacy_result",
+                json.dumps({"provider_message_id": "msg_legacy_123"}),
+                json.dumps({"_response_metadata": {"request_id": "req_legacy_456"}}),
+            ),
+        )
+
+    previous_database_url = os.environ.get("DATABASE_URL")
+    try:
+        os.environ["DATABASE_URL"] = database_url
+        cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+        cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "alembic"))
+        command.upgrade(cfg, "head")
+    finally:
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+
+    with legacy_engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT upstream_response_id, upstream_request_id FROM results WHERE id = 'legacy_result'")
+        ).mappings().one()
+
+    assert row["upstream_response_id"] == "msg_legacy_123"
+    assert row["upstream_request_id"] == "req_legacy_456"
 
 
 def test_channel_groups_crud_assignment_filter_and_safe_delete() -> None:
@@ -2446,7 +2536,7 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
 
 def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
-    called = {"signature": 0, "model_probe": 0}
+    called = {"signature": 0, "identity": 0}
 
     async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
         called["signature"] += 1
@@ -2462,12 +2552,29 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
             "steps": [{"name": "最终判定", "status": "ok", "detail": "兼容", "excerpt": None}],
         }
 
-    async def fake_model_probe(db, channel, scheduled):  # noqa: ANN001, ARG001
-        called["model_probe"] += 1
-        raise AssertionError("signature-only patrol must not run model request probes")
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
+        assert use_mock is False
+        assert case.prompt == "你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"
+        called["identity"] += 1
+        return {
+            "provider_message_id": "msg_identity_signature_only",
+            "content_text": "我是 Claude，由 Anthropic 开发。",
+            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
+            "raw_response": {
+                "id": "msg_identity_signature_only",
+                "type": "message",
+                "content": [{"type": "text", "text": "我是 Claude，由 Anthropic 开发。"}],
+                "usage": {"input_tokens": 20, "output_tokens": 10},
+                "_response_metadata": {"request_id": "req_identity_signature_only"},
+            },
+            "usage": {"input_tokens": 20, "output_tokens": 10},
+            "request_protocol": "anthropic_messages",
+            "provider_endpoint": "https://example.com/v1/messages",
+            "error": None,
+        }
 
     monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
-    monkeypatch.setattr("app.services.create_scheduled_model_request_probe", fake_model_probe)
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
     reset_database()
     with TestClient(app) as client:
         schedule_response = client.post(
@@ -2486,7 +2593,7 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
 
     asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
 
-    assert called == {"signature": 1, "model_probe": 0}
+    assert called == {"signature": 1, "identity": 1}
     with SessionLocal() as db:
         scheduled = db.get(ScheduledChannelTest, schedule["id"])
         assert scheduled is not None
@@ -2498,7 +2605,180 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
         assert report is not None
         assert report.evidence["patrol_modules"] == ["signature_interop"]
         assert report.evidence["signature_interop"]["ok"] is True
-        assert report.evidence["model_requests"] == []
+        assert [item["key"] for item in report.evidence["model_requests"]] == ["identity_self_report"]
+        identity = report.evidence["model_requests"][0]
+        assert identity["response_id"] == "msg_identity_signature_only"
+        assert identity["message_id"] == "msg_identity_signature_only"
+        assert identity["request_id"] == "req_identity_signature_only"
+
+
+@pytest.mark.parametrize("text", ["我是 Kiro。", "我是Kiro。", "KIRO assistant by AWS"])
+def test_scheduled_identity_probe_flags_kiro_as_high_risk(text: str) -> None:
+    channel = Channel(id="identity_candidate", name="Identity Candidate", provider_type="third_party_anthropic", role="candidate")
+    case = TestCaseModel(
+        id="scheduled_identity_probe",
+        suite_id="manual_model_request_probe",
+        module="scheduled_probe",
+        title="身份探针",
+        prompt="你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。",
+        scoring_rules={"scheduled_identity_probe": True},
+    )
+    normalized = {
+        "content_text": text,
+        "raw_response": {"type": "message", "usage": {"input_tokens": 10, "output_tokens": 5}},
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "error": None,
+    }
+
+    score, labels = score_result(channel, case, normalized)
+
+    assert score == 0
+    assert {"identity_mismatch", "suspected_model_swap", "kiro_identity_leak"} <= set(labels)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_labels"),
+    [
+        ("我是 Claude，由 Anthropic 开发。", set()),
+        ("我是一个通用 AI 助手。", {"identity_uncertain"}),
+    ],
+)
+def test_scheduled_identity_probe_treats_self_report_as_supporting_evidence(text: str, expected_labels: set[str]) -> None:
+    channel = Channel(id="identity_candidate", name="Identity Candidate", provider_type="third_party_anthropic", role="candidate")
+    case = TestCaseModel(
+        id="scheduled_identity_probe",
+        suite_id="manual_model_request_probe",
+        module="scheduled_probe",
+        title="身份探针",
+        prompt="你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。",
+        scoring_rules={"scheduled_identity_probe": True},
+    )
+    normalized = {
+        "content_text": text,
+        "raw_response": {"type": "message", "usage": {"input_tokens": 10, "output_tokens": 5}},
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "error": None,
+    }
+
+    score, labels = score_result(channel, case, normalized)
+
+    assert score == 100
+    assert set(labels) == expected_labels
+
+
+def test_scheduled_identity_probe_request_failure_is_not_treated_as_identity_pass() -> None:
+    channel = Channel(id="identity_candidate", name="Identity Candidate", provider_type="third_party_anthropic", role="candidate")
+    case = TestCaseModel(
+        id="scheduled_identity_probe",
+        suite_id="manual_model_request_probe",
+        module="scheduled_probe",
+        title="身份探针",
+        prompt="你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。",
+        scoring_rules={"scheduled_identity_probe": True},
+    )
+    normalized = {
+        "content_text": "",
+        "raw_response": {"type": "error", "error": {"message": "503 Service Unavailable"}},
+        "status_code": 503,
+        "error": "503 Service Unavailable",
+    }
+
+    score, labels = score_result(channel, case, normalized)
+    classification = scheduled_probe_classification(
+        [{"key": "identity_self_report", "labels": labels, "score": score, "error": normalized["error"], "status_code": 503}],
+        {"status": "skipped"},
+        labels,
+        score,
+    )
+
+    assert score == 0
+    assert labels == ["provider_temporarily_unavailable"]
+    assert classification["status"] == "operational_issue"
+
+
+def test_scheduled_probe_classification_prioritizes_kiro_over_claude_and_aws_evidence() -> None:
+    result = scheduled_probe_classification(
+        model_requests=[
+            {"key": "identity_self_report", "labels": ["identity_mismatch", "suspected_model_swap", "kiro_identity_leak"], "score": 0},
+            {"key": "thinking_temperature", "labels": ["provider_error_variant"], "error": "temperature may only be set to 1 when thinking is enabled"},
+            {"key": "web_search", "labels": ["provider_error_variant"], "error": "web search is not supported"},
+            {"key": "thinking_adaptive_enabled", "labels": ["provider_error_variant"], "error": "thinking.adaptive.enabled is not supported"},
+        ],
+        signature_evidence={"ok": True, "relay_message_channel_type": "AWS Bedrock"},
+        labels=["identity_mismatch", "suspected_model_swap", "kiro_identity_leak", "provider_error_variant"],
+        score=0,
+    )
+
+    assert result == {
+        "status": "anomaly",
+        "label": "疑似 Kiro 路由混入",
+        "reason": "身份探针响应明确泄漏 Kiro 身份，按路由混入高风险处理。",
+        "score": 0,
+    }
+
+
+def test_scheduled_kiro_identity_leak_creates_critical_alert_with_identity_ids(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
+        is_identity = case.scoring_rules.get("scheduled_identity_probe") is True
+        content = "我是 Kiro。" if is_identity else ""
+        message_id = "msg_kiro_identity" if is_identity else f"msg_parameter_{case.sort_order}"
+        request_id = "req_kiro_identity" if is_identity else f"req_parameter_{case.sort_order}"
+        error = None if is_identity else "temperature may only be set to 1 when thinking is enabled"
+        return {
+            "provider_message_id": message_id,
+            "content_text": content,
+            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
+            "raw_response": {
+                "id": message_id,
+                "type": "message" if is_identity else "error",
+                "content": [{"type": "text", "text": content}],
+                "usage": {"input_tokens": 20, "output_tokens": 10},
+                "_response_metadata": {"request_id": request_id},
+                "error": {"message": error} if error else None,
+            },
+            "usage": {"input_tokens": 20, "output_tokens": 10},
+            "request_protocol": "anthropic_messages",
+            "provider_endpoint": "https://example.com/v1/messages",
+            "error": error,
+        }
+
+    async def fake_signature(session_factory, run_id, scheduled_id):  # noqa: ANN001, ARG001
+        return {"ok": True, "status": "pass", "reason": "Signature 互通通过", "labels": []}
+
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
+    monkeypatch.setattr("app.services.attach_signature_interop_to_scheduled_run", fake_signature)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "Kiro leak patrol",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "enabled": True,
+                "patrol_modules": ["model_request_probes"],
+                "model_request_probe_keys": ["thinking_temperature"],
+            },
+        ).json()
+
+    asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        report = db.scalar(select(Report).where(Report.run_id == scheduled.last_run_id))
+        alert = db.scalar(select(ChannelAlert).where(ChannelAlert.run_id == scheduled.last_run_id))
+        assert report is not None
+        assert alert is not None
+        assert report.final_score == 0
+        assert report.evidence["classification_label"] == "疑似 Kiro 路由混入"
+        assert {"identity_mismatch", "suspected_model_swap", "kiro_identity_leak"} <= set(report.evidence["labels"])
+        assert report.evidence["model_request"]["key"] == "identity_self_report"
+        assert report.evidence["model_request"]["response_id"] == "msg_kiro_identity"
+        assert report.evidence["model_request"]["request_id"] == "req_kiro_identity"
+        assert alert.severity == "critical"
 
 
 def test_scheduled_channel_test_model_request_probe_keys_subset(monkeypatch) -> None:
@@ -3365,9 +3645,11 @@ def test_list_alerts_filters_by_any_locator_id_and_time_range() -> None:
             test_case_id="manual_thinking_temperature_probe",
             channel_id=schedule["channel_id"],
             attempt_index=1,
-            normalized_response={"provider_message_id": "msg_01locator"},
-            raw_request={"headers": {"x-client-request-id": "client_req_locator"}},
-            raw_response={"type": "error", "error": {"request_id": "req_locator_123", "message": "blocked"}},
+            upstream_response_id="msg_01locator",
+            upstream_request_id="req_locator_123",
+            normalized_response={},
+            raw_request={},
+            raw_response={},
             metrics={},
             score=0,
             labels=["request_failed"],
@@ -3377,12 +3659,10 @@ def test_list_alerts_filters_by_any_locator_id_and_time_range() -> None:
             "red_flags": ["identity_mismatch"],
             "model_request": {
                 "result_id": result.id,
-                "message_id": "msg_01locator",
             },
             "model_requests": [
                 {
                     "result_id": result.id,
-                    "message_id": "msg_01locator",
                 }
             ],
             "signature_interop": {
@@ -3400,7 +3680,7 @@ def test_list_alerts_filters_by_any_locator_id_and_time_range() -> None:
     outside_to = (alert_created_at + timedelta(days=1, minutes=5)).isoformat()
 
     with TestClient(app) as client:
-        for locator in [run_id, "res_locator_probe", "msg_01locator", "msg_bdrk_locator", "req_locator_123", "client_req_locator"]:
+        for locator in [run_id, "res_locator_probe", "msg_01locator", "msg_bdrk_locator", "req_locator_123"]:
             response = client.get(
                 "/api/alerts",
                 params={"status": "pending_review", "id_query": locator, "created_from": created_from, "created_to": created_to},
@@ -10079,7 +10359,7 @@ def test_scheduled_alert_notification_uses_error_message(monkeypatch) -> None:
     assert "渠道：Negative Sample（negative_sample）" in text
     assert "模型：" in text
     assert "Request ID：" in text
-    assert "Message ID：" in text
+    assert "上游响应 ID（Message ID）：" in text
     assert "Result ID：" not in text
 
 
@@ -10144,13 +10424,14 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert payload["latest_report_id"]
     assert payload["latest_grade"]
     assert payload["latest_score"] is not None
-    assert {item["key"] for item in summary["model_requests"]} == {"thinking_temperature", "web_search", "thinking_adaptive_enabled"}
+    assert {item["key"] for item in summary["model_requests"]} == {"identity_self_report", "thinking_temperature", "web_search", "thinking_adaptive_enabled"}
     for item in summary["model_requests"]:
         assert item["channel_id"] == "negative_sample"
         assert item["channel_name"] == "Negative Sample"
         assert item["result_id"]
         assert item["completed_at"]
         assert "request_id" in item
+        assert "response_id" in item
         assert "message_id" in item
         assert "status" in item
     assert summary["model_request"]["channel_id"] == "negative_sample"
@@ -10158,6 +10439,7 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert summary["model_request"]["result_id"]
     assert summary["model_request"]["completed_at"]
     assert "request_id" in summary["model_request"]
+    assert "response_id" in summary["model_request"]
     assert "message_id" in summary["model_request"]
     assert "status" in summary["signature_interop"]
     assert summary["signature_interop"]["source_channel_id"]
@@ -10177,7 +10459,7 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert "Thinking temperature 冲突" in markdown
     assert "Web Search tool" in markdown
     assert "thinking.adaptive.enabled" in markdown
-    assert "Message ID" in markdown
+    assert "上游响应 ID（Message ID）" in markdown
     assert "Request ID" in markdown
     assert "Result ID" not in markdown
     assert "时间" in markdown

@@ -157,8 +157,8 @@ function hydrateModelRequest(item: PatrolModelRequestEvidence, result?: Result):
   const rawResponse = asRecord(result.raw_response);
   return {
     ...item,
-    messageId: item.messageId ?? asNullableString(rawResponse?.id) ?? asNullableString(normalized?.provider_message_id),
-    requestId: item.requestId ?? requestIdFromPayload(result.raw_request) ?? requestIdFromPayload(result.raw_response) ?? requestIdFromPayload(result.normalized_response),
+    messageId: item.messageId ?? result.upstream_response_id ?? asNullableString(rawResponse?.id) ?? asNullableString(normalized?.provider_message_id),
+    requestId: item.requestId ?? result.upstream_request_id ?? requestIdFromPayload(result.raw_request) ?? requestIdFromPayload(result.raw_response) ?? requestIdFromPayload(result.normalized_response),
     createdAt: item.createdAt ?? result.created_at ?? null,
     completedAt: item.completedAt ?? result.created_at ?? null,
     responseText: modelResponseText(result) ?? item.error ?? null,
@@ -200,7 +200,7 @@ function normalizeModelRequest(value: unknown): PatrolModelRequestEvidence | nul
     channelProviderType: asNullableString(item.channel_provider_type),
     channelAccountType: asNullableString(item.channel_account_type),
     resultId: asNullableString(item.result_id),
-    messageId: asNullableString(item.message_id),
+    messageId: asNullableString(item.response_id) ?? asNullableString(item.message_id),
     requestId: asNullableString(item.request_id),
     messageChannelType: asNullableString(item.message_channel_type),
     requestProtocol: asNullableString(item.request_protocol),

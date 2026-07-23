@@ -1364,6 +1364,8 @@ class ResultRead(BaseModel):
     test_case_id: str
     channel_id: str
     attempt_index: int
+    upstream_response_id: str | None = None
+    upstream_request_id: str | None = None
     normalized_response: dict[str, Any] | None = None
     raw_request: dict[str, Any] | None = None
     raw_response: dict[str, Any] | None = None

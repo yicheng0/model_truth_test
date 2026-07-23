@@ -91,7 +91,7 @@ def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: st
     if not model_requests and isinstance(evidence.get("model_request"), dict):
         model_requests = [evidence["model_request"]]
     model_rows = "\n".join(
-        f"| {_scheduled_probe_display_title(item)} | {item.get('channel_name') or '-'} ({item.get('channel_id') or '-'}) | {_probe_status_text(item)} | {item.get('completed_at') or item.get('created_at') or '-'} | {item.get('message_id') or '-'} | {item.get('request_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
+        f"| {_scheduled_probe_display_title(item)} | {item.get('channel_name') or '-'} ({item.get('channel_id') or '-'}) | {_probe_status_text(item)} | {item.get('completed_at') or item.get('created_at') or '-'} | {item.get('response_id') or item.get('message_id') or '-'} | {item.get('request_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
         for item in model_requests
         if isinstance(item, dict)
     ) or "| - | - | - | - | - | - | - | - | - | - |"
@@ -127,7 +127,7 @@ def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: st
 
 ## 真实模型请求
 
-| 参数探针 | 渠道 | 状态 | 时间 | Message ID | Request ID | 请求协议 | Provider endpoint | 标签 | 错误 |
+| 探针 | 渠道 | 状态 | 时间 | 上游响应 ID（Message ID） | Request ID | 请求协议 | Provider endpoint | 标签 | 错误 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 {model_rows}
 
@@ -137,12 +137,12 @@ def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: st
 - 状态：{signature.get("status") or "-"}
 - 检测时间：{signature_time}
 - Source 渠道：{signature.get("source_channel_name") or "-"} ({signature.get("source_channel_id") or "-"})
-- 来源 message id：{signature.get("source_message_id") or "-"}
-- 来源 request id：{signature.get("source_request_id") or "-"}
+- 来源上游响应 ID（Message ID）：{signature.get("source_message_id") or "-"}
+- 来源 Request ID：{signature.get("source_request_id") or "-"}
 - 来源渠道类型：{signature.get("source_message_channel_type") or "-"}
 - Relay 渠道：{signature.get("relay_channel_name") or "-"} ({signature.get("relay_channel_id") or "-"})
-- Relay message id：{signature.get("relay_message_id") or "-"}
-- Relay request id：{signature.get("relay_request_id") or "-"}
+- Relay 上游响应 ID（Message ID）：{signature.get("relay_message_id") or "-"}
+- Relay Request ID：{signature.get("relay_request_id") or "-"}
 - Relay 渠道类型：{signature.get("relay_message_channel_type") or "-"}
 - Signature 前缀：{", ".join(signature.get("signature_prefixes") or []) or "-"}
 - 协议 profile：source={signature.get("source_protocol_profile") or "-"} / relay={signature.get("relay_protocol_profile") or "-"}
@@ -173,6 +173,10 @@ def _probe_status_text(item: dict[str, Any]) -> str:
         return "额度不足"
     if operational_label == PROVIDER_REQUEST_FAILED_LABEL:
         return "检测失败"
+    if "kiro_identity_leak" in labels:
+        return "Kiro 身份泄漏"
+    if labels == {"identity_uncertain"}:
+        return "身份待确认"
     if labels.intersection({"provider_error_variant"}) or _probe_parameter_unsupported(item):
         return "符合预期"
     if labels:
@@ -199,10 +203,11 @@ def _scheduled_probe_all_parameter_unsupported(model_requests: list[dict[str, An
     # misreading a single Claude-native rejection as the AWS generic shape;
     # subset runs are still classified by the Claude-native and AWS-message-id
     # branches below, which are count-agnostic.
-    request_keys = {str(item.get("key") or "") for item in model_requests}
+    parameter_requests = [item for item in model_requests if str(item.get("key") or "") in EXPECTED_SCHEDULED_PROBE_KEYS]
+    request_keys = {str(item.get("key") or "") for item in parameter_requests}
     if request_keys != EXPECTED_SCHEDULED_PROBE_KEYS:
         return False
-    return all(_probe_parameter_unsupported(item) for item in model_requests)
+    return all(_probe_parameter_unsupported(item) for item in parameter_requests)
 
 
 def scheduled_probe_classification(
@@ -213,8 +218,16 @@ def scheduled_probe_classification(
 ) -> dict[str, Any]:
     label_set = set(labels)
     normalized_score = _safe_float(score)
+    if "kiro_identity_leak" in label_set:
+        return {
+            "status": "anomaly",
+            "label": "疑似 Kiro 路由混入",
+            "reason": "身份探针响应明确泄漏 Kiro 身份，按路由混入高风险处理。",
+            "score": 0,
+        }
     provider_hint = scheduled_provider_hint_from_evidence(model_requests, signature_evidence, labels)
-    probe_count = len({str(item.get("key") or "") for item in model_requests if str(item.get("key") or "")}) or len(model_requests)
+    parameter_requests = [item for item in model_requests if str(item.get("key") or "") in EXPECTED_SCHEDULED_PROBE_KEYS]
+    probe_count = len({str(item.get("key") or "") for item in parameter_requests if str(item.get("key") or "")}) or len(parameter_requests)
     probe_count_text = f"{probe_count} 项" if probe_count else "所选"
     signature_operational_label = operational_failure_label_for_item(signature_evidence)
     if only_operational_failures(model_requests, label_set) or (label_set and label_set.issubset(OPERATIONAL_FAILURE_LABELS) and signature_operational_label):
@@ -232,6 +245,13 @@ def scheduled_probe_classification(
             "label": display_label,
             "reason": reason,
             "score": max(normalized_score, 90),
+        }
+    if not parameter_requests and (signature_evidence.get("status") == "skipped" or signature_evidence.get("ok")):
+        return {
+            "status": "claude_signature",
+            "label": "身份探针完成，Signature 互通通过" if signature_evidence.get("ok") else "身份探针完成",
+            "reason": str(signature_evidence.get("reason") or "固定身份探针已完成；模型自报仅作为辅助证据。"),
+            "score": max(normalized_score, 95),
         }
     if _scheduled_probe_all_parameter_unsupported(model_requests):
         return {
@@ -287,6 +307,8 @@ def scheduled_probe_needs_ai_judge(model_requests: list[dict[str, Any]], labels:
     if not model_requests:
         return False
     label_set = {str(label) for label in labels}
+    if "kiro_identity_leak" in label_set:
+        return False
     if str(classification.get("status") or "") == "operational_issue" or only_operational_failures(model_requests, label_set):
         return False
     if str(classification.get("status") or "") == "anomaly":

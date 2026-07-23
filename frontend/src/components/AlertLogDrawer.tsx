@@ -92,8 +92,8 @@ export default function AlertLogDrawer({ alert, channelName, channelDisplayId, o
             <Descriptions.Item label="Result ID">
               <Typography.Text copyable={{ text: resultId, onCopy: () => message.success('Result ID 已复制') }}>{resultId || '-'}</Typography.Text>
             </Descriptions.Item>
-            <Descriptions.Item label="Message ID">
-              <Typography.Text copyable={{ text: messageId, onCopy: () => message.success('Message ID 已复制') }}>{messageId || '-'}</Typography.Text>
+            <Descriptions.Item label="上游响应 ID（Message ID）">
+              <Typography.Text copyable={{ text: messageId, onCopy: () => message.success('上游响应 ID 已复制') }}>{messageId || '-'}</Typography.Text>
             </Descriptions.Item>
             <Descriptions.Item label="Request ID">
               <Typography.Text copyable={{ text: requestId, onCopy: () => message.success('Request ID 已复制') }}>{requestId || '-'}</Typography.Text>

@@ -53,6 +53,23 @@ describe('scheduled alert log helpers', () => {
     expect(alertErrorText(alert)).toBe('接口超时');
   });
 
+  it('prefers canonical response_id and uses the unified response id label', () => {
+    const alert: ChannelAlert = {
+      ...baseAlert,
+      evidence_summary: {
+        model_requests: [{ response_id: 'msg_canonical', message_id: 'msg_legacy', request_id: 'req_123' }],
+      },
+    };
+
+    expect(alertResponseId(alert)).toBe('msg_canonical');
+    expect(
+      alertLogText({
+        alertCreatedAt: '', probeCompletedAt: '', probeTitle: '', channel: '', channelId: '', channelModel: '',
+        probeSource: '', resultId: '', messageId: 'msg_canonical', requestId: 'req_123', error: '',
+      }),
+    ).toContain('上游响应 ID（Message ID）：msg_canonical');
+  });
+
   it('formats smart report channel labels with provider type', () => {
     const alert: ChannelAlert = {
       ...baseAlert,

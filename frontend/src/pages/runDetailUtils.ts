@@ -173,6 +173,10 @@ export function runModeLabel(mode?: RunMode | string) {
   return '真实性对比';
 }
 
+export function shouldShowRunSummaryModule(input: { hasSummary: boolean; isPatrolRun: boolean; mode?: RunMode | string }) {
+  return input.hasSummary && !input.isPatrolRun && input.mode !== 'manual_probe';
+}
+
 export function evidenceStatusColor(status?: string | null) {
   if (status === 'ok' || status === 'pass') return 'green';
   if (status === 'error' || status === 'fail') return 'red';

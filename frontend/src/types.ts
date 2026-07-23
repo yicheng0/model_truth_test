@@ -1260,6 +1260,8 @@ export type Result = {
   test_case_id: string;
   channel_id: string;
   attempt_index: number;
+  upstream_response_id?: string | null;
+  upstream_request_id?: string | null;
   normalized_response?: ResponsePayload | null;
   raw_request?: JsonObject | null;
   raw_response?: ResponsePayload | null;

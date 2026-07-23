@@ -216,7 +216,7 @@ export default function ReportDetailPage() {
                 </div>
                 {modelRequests[0] ? (
                   <Typography.Text type="secondary">
-                    Message ID：{String(modelRequests[0].message_id ?? '-')} · Request ID：{String(modelRequests[0].request_id ?? '-')}
+                    上游响应 ID（Message ID）：{String(modelRequests[0].response_id ?? modelRequests[0].message_id ?? '-')} · Request ID：{String(modelRequests[0].request_id ?? '-')}
                   </Typography.Text>
                 ) : null}
                 <Table
@@ -236,7 +236,7 @@ export default function ReportDetailPage() {
                         return <Tag color={hasError ? 'red' : 'green'}>{hasError ? '异常' : '正常'}</Tag>;
                       },
                     },
-                    { title: 'Message ID', width: 190, render: (_, row) => compactId(row.message_id) },
+                    { title: '上游响应 ID（Message ID）', width: 220, render: (_, row) => compactId(row.response_id ?? row.message_id) },
                     { title: 'Request ID', width: 190, render: (_, row) => compactId(row.request_id) },
                     { title: '协议', width: 130, render: (_, row) => stringValue(row.request_protocol) },
                     { title: 'Endpoint', width: 230, render: (_, row) => compactId(row.provider_endpoint) },
@@ -255,10 +255,10 @@ export default function ReportDetailPage() {
                     <strong><Tag color={signatureInterop.status === 'pass' ? 'green' : signatureInterop.status === 'fail' ? 'red' : 'default'}>{stringValue(signatureInterop.status)}</Tag></strong>
                   </div>
                   <div><span>Source 渠道</span><strong>{formatPatrolChannel({ id: stringValue(signatureInterop.source_channel_id), name: stringValue(signatureInterop.source_channel_name), providerType: stringValue((signatureInterop as Record<string, unknown>).source_channel_provider_type), accountType: stringValue((signatureInterop as Record<string, unknown>).source_channel_account_type) }, stringValue(signatureInterop.source_channel_id))}</strong></div>
-                  <div><span>Source Message ID</span><strong>{compactId(signatureInterop.source_message_id)}</strong></div>
+                  <div><span>Source 上游响应 ID（Message ID）</span><strong>{compactId(signatureInterop.source_message_id)}</strong></div>
                   <div><span>Source Request ID</span><strong>{compactId(signatureInterop.source_request_id)}</strong></div>
                   <div><span>Relay 渠道</span><strong>{formatPatrolChannel({ id: stringValue(signatureInterop.relay_channel_id), name: stringValue(signatureInterop.relay_channel_name), providerType: stringValue((signatureInterop as Record<string, unknown>).relay_channel_provider_type), accountType: stringValue((signatureInterop as Record<string, unknown>).relay_channel_account_type) }, stringValue(signatureInterop.relay_channel_id))}</strong></div>
-                  <div><span>Relay Message ID</span><strong>{compactId(signatureInterop.relay_message_id)}</strong></div>
+                  <div><span>Relay 上游响应 ID（Message ID）</span><strong>{compactId(signatureInterop.relay_message_id)}</strong></div>
                   <div><span>Relay Request ID</span><strong>{compactId(signatureInterop.relay_request_id)}</strong></div>
                   <div><span>Signature 前缀</span><strong>{arrayValue(signatureInterop.signature_prefixes).join(', ') || '-'}</strong></div>
                   <div><span>失败阶段</span><strong>{stringValue(signatureInterop.error_stage)}</strong></div>
@@ -285,7 +285,7 @@ export default function ReportDetailPage() {
                       { title: '状态', width: 90, render: (_, row) => <Tag color={row.status === 'ok' ? 'green' : 'red'}>{row.status === 'ok' ? '成功' : '失败'}</Tag> },
                       { title: '时间', width: 180, render: (_, row) => formatDateTime(String(row.completed_at ?? row.started_at ?? '')) },
                       { title: 'HTTP', width: 90, render: (_, row) => String(row.http_status ?? '-') },
-                      { title: 'Message ID', width: 190, render: (_, row) => compactId(row.message_id) },
+                      { title: '上游响应 ID（Message ID）', width: 220, render: (_, row) => compactId(row.response_id ?? row.message_id) },
                       { title: 'Request ID', width: 190, render: (_, row) => compactId(row.request_id) },
                       { title: '错误', render: (_, row) => stringValue(row.error) },
                     ]}
@@ -399,7 +399,7 @@ export default function ReportDetailPage() {
             scroll={{ x: 980 }}
             columns={[
               { title: '题目', dataIndex: 'test_case_id', width: 220 },
-              { title: 'message id', width: 220, render: (_, result) => result.normalized_response?.provider_message_id ?? '-' },
+              { title: '上游响应 ID（Message ID）', width: 220, render: (_, result) => result.upstream_response_id ?? result.normalized_response?.provider_message_id ?? '-' },
               { title: 'model', width: 180, render: (_, result) => result.normalized_response?.provider_model ?? '-' },
               { title: 'stop_reason', width: 140, render: (_, result) => result.normalized_response?.stop_reason ?? '-' },
               { title: 'usage', width: 180, render: (_, result) => jsonText(result.normalized_response?.usage ?? result.raw_response?.usage) },

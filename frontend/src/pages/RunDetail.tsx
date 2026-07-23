@@ -40,6 +40,7 @@ import {
   rowStatus,
   runModeLabel,
   sampleRowStatus,
+  shouldShowRunSummaryModule,
   stringifyJson,
   toText,
 } from './runDetailUtils';
@@ -123,7 +124,7 @@ function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
           <Typography.Text code copyable={item.resultId ? { text: item.resultId } : false}>{item.resultId || '-'}</Typography.Text>
         </div>
         <div>
-          <span>Message ID</span>
+          <span>上游响应 ID（Message ID）</span>
           <Typography.Text code copyable={item.messageId ? { text: item.messageId } : false}>{item.messageId || '-'}</Typography.Text>
         </div>
         <div>
@@ -163,7 +164,7 @@ function SignatureRequestLogDetail({ item }: { item: PatrolSignatureRequestLog }
       <div className="patrol-probe-meta-grid">
         <div><span>时间</span><Typography.Text>{formatDateTime(item.completedAt ?? item.startedAt)}</Typography.Text></div>
         <div><span>HTTP 状态</span><Typography.Text code>{item.httpStatus ?? '-'}</Typography.Text></div>
-        <div><span>Message ID</span><SignatureIdText value={item.messageId} /></div>
+        <div><span>上游响应 ID（Message ID）</span><SignatureIdText value={item.messageId} /></div>
         <div><span>Request ID</span><SignatureIdText value={item.requestId} /></div>
         <div><span>响应头 Request ID</span><SignatureIdText value={item.responseHeaderRequestId} /></div>
         <div><span>耗时</span><Typography.Text>{item.latencyMs === null || item.latencyMs === undefined ? '-' : `${item.latencyMs} ms`}</Typography.Text></div>
@@ -256,7 +257,7 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
       ) : null}
       {visibleModelRequests[0] ? (
         <Typography.Text type="secondary">
-          Message ID：{visibleModelRequests[0].messageId ?? '-'} · Request ID：{visibleModelRequests[0].requestId ?? '-'}
+          上游响应 ID（Message ID）：{visibleModelRequests[0].messageId ?? '-'} · Request ID：{visibleModelRequests[0].requestId ?? '-'}
         </Typography.Text>
       ) : null}
       {evidence.detectedProviderHint ? <Typography.Paragraph className="report-summary-text">{evidence.detectedProviderHint}</Typography.Paragraph> : null}
@@ -338,7 +339,7 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
               { title: '状态', width: 90, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '成功' : '失败'}</Tag> },
               { title: '时间', width: 180, render: (_, item) => formatDateTime(item.completedAt ?? item.startedAt) },
               { title: 'HTTP', width: 90, render: (_, item) => item.httpStatus ?? '-' },
-              { title: 'Message ID', width: 210, render: (_, item) => <SignatureIdText value={item.messageId} /> },
+              { title: '上游响应 ID（Message ID）', width: 230, render: (_, item) => <SignatureIdText value={item.messageId} /> },
               { title: 'Request ID', width: 210, render: (_, item) => <SignatureIdText value={item.requestId} /> },
               { title: '错误', render: (_, item) => <Typography.Text type={item.error ? 'danger' : undefined}>{compactPatrolText(item.error)}</Typography.Text> },
             ]}
@@ -393,8 +394,8 @@ function extractManualProbeRows(results: RunResults, cases: TestCase[], channels
         channelId,
         channelType: manualProbeChannelType(channel, taxonomy),
         resultId: result.id,
-        messageId: toText(rawResponse?.id) ?? toText(normalized.provider_message_id),
-        requestId: payloadRequestId(result.raw_request) ?? payloadRequestId(normalized) ?? toText(rawResponse?.request_id) ?? toText(normalized.request_id),
+        messageId: result.upstream_response_id ?? toText(rawResponse?.id) ?? toText(normalized.provider_message_id),
+        requestId: result.upstream_request_id ?? payloadRequestId(result.raw_request) ?? payloadRequestId(normalized) ?? toText(rawResponse?.request_id) ?? toText(normalized.request_id),
         requestProtocol: toText(rawResponse?.request_protocol) ?? toText(normalized.request_protocol),
         providerEndpoint: toText(rawResponse?.provider_endpoint) ?? toText(normalized.provider_endpoint),
         completedAt: result.created_at ? String(result.created_at) : null,
@@ -962,7 +963,7 @@ export default function RunDetail() {
               { title: '渠道', width: 220, render: (_, item) => channelLabel(item.channelDisplayName ?? item.channelName, item.channelId) },
               { title: '渠道类型', dataIndex: 'channelType', width: 340, render: (value) => value ?? '-' },
               {
-                title: 'Message ID',
+                title: '上游响应 ID（Message ID）',
                 dataIndex: 'messageId',
                 width: 210,
                 render: (value) => value ? <Typography.Text code copyable>{value}</Typography.Text> : '-',
@@ -996,7 +997,7 @@ export default function RunDetail() {
                   <Descriptions.Item label="状态"><Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag></Descriptions.Item>
                   <Descriptions.Item label="渠道">{channelLabel(item.channelDisplayName ?? item.channelName, item.channelId)}</Descriptions.Item>
                   <Descriptions.Item label="渠道类型">{item.channelType}</Descriptions.Item>
-                  <Descriptions.Item label="Message ID">{item.messageId ? <Typography.Text code copyable>{item.messageId}</Typography.Text> : '-'}</Descriptions.Item>
+                  <Descriptions.Item label="上游响应 ID（Message ID）">{item.messageId ? <Typography.Text code copyable>{item.messageId}</Typography.Text> : '-'}</Descriptions.Item>
                   <Descriptions.Item label="Request ID">{item.requestId ? <Typography.Text code copyable>{item.requestId}</Typography.Text> : '-'}</Descriptions.Item>
                   <Descriptions.Item label="协议">{item.requestProtocol ?? '-'}</Descriptions.Item>
                   <Descriptions.Item label="Endpoint">{item.providerEndpoint ?? '-'}</Descriptions.Item>
@@ -1011,7 +1012,7 @@ export default function RunDetail() {
             ))}
           </div>
         </Card>
-      ) : summary ? (
+      ) : shouldShowRunSummaryModule({ hasSummary: Boolean(summary), isPatrolRun, mode: data.run.mode }) && summary ? (
         <Card bordered={false}>
           <Tabs
             items={[

@@ -271,6 +271,8 @@ class Result(Base):
     test_case_id: Mapped[str] = mapped_column(ForeignKey("test_cases.id"), nullable=False, index=True)
     channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id"), nullable=False, index=True)
     attempt_index: Mapped[int] = mapped_column(Integer, default=1)
+    upstream_response_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    upstream_request_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     normalized_response: Mapped[dict | None] = mapped_column(JSON)
     raw_request: Mapped[dict | None] = mapped_column(JSON)
     raw_response: Mapped[dict | None] = mapped_column(JSON)

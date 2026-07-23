@@ -134,7 +134,7 @@ npm run build
 「Claude 指纹」页面会保存每次检测的脱敏证据，并支持按日期范围查看每天的检测记录。警告和失败探针可展开查看判定原因、标签解释、HTTP 状态、上游错误、脱敏请求快照和结构化证据。
 
 - Web Search 使用 Anthropic server-side tool block、引用和 `usage.server_tool_use.web_search_requests` 作为成功证据；能力不支持会跳过，工具错误、限流和证据缺失会分别保留具体原因，不单独作为 Claude 真伪核心失败。
-- 身份探针使用“你是谁”和“你好，请介绍一下你自己”等自然问题。模型自报身份只作为低权重辅助信号，不能覆盖协议结构、message id、usage 和 tool use 等硬证据。
+- 身份探针使用“你是谁”和“你好，请介绍一下你自己”等自然问题。模型自报身份通常只作为低权重辅助信号，不能覆盖协议结构、响应 ID、usage 和 tool use 等硬证据；但明确泄漏 `Kiro` 按路由混入高风险处理。
 - 流式协议探针检查 Anthropic 官方 SSE 关键生命周期；事件可被仿造，因此只证明原生协议兼容度，不证明第三方 URL 的来源。
 - 页面内置四级证据 Spec 和渠道差异矩阵：来源/控制面证据最高，跨请求 Signature 连续性其次，协议形态为中等证据，行为与自报仅作弱信号。
 - 页面把结论拆成五层：Claude 得分衡量模型与 Messages API 兼容性，Claude Code 网关兼容度衡量客户端/网关契约，访问路径描述官方端点配置、网关、协议翻译或透明未决，上游完整性独立汇总双向验签与差分证据，资源身份单独记录调用方配置或本机 CLI 认证证据。自定义 Base URL 即使响应与官方完全相同，也不会被标成官方直连或 Claude Code OAuth 资源。
@@ -148,12 +148,14 @@ npm run build
 
 自动巡检在“自动巡检”页面按渠道创建计划。每个计划只检测一个待测渠道，创建时只需要选择待测渠道和执行间隔。
 
-巡检内容固定为 Thinking Signature 互通检测和多项真实模型请求探针：
+每轮巡检固定增加一次真实身份请求：`你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。`。该探针不可关闭，会产生一次额外模型调用；回复不区分大小写命中 `Kiro` 时直接触发高风险告警。
+
+其他巡检内容包括 Thinking Signature 互通检测和可选参数探针：
 
 - Thinking Signature 互通检测：指纹源渠道生成带 signature 的 thinking block，再让待测渠道复用。
-- 真实模型请求探针：发送 adaptive thinking 协议、Web Search tool、adaptive thinking effort 等参数探针，记录 `message.id`、request id、协议和 endpoint。
+- 真实模型请求探针：发送 adaptive thinking 协议、Web Search tool、adaptive thinking effort 等参数探针，独立记录上游响应 ID（Message ID）、Request ID、协议和 endpoint。
 
-告警会携带 run、report、message id、request id 和 source/relay message id 等证据，方便复审定位。自动巡检默认不使用 mock，也不需要手动选择测试集、渠道指纹、重复次数、并发度或评分阈值；这些旧字段仅用于兼容已有数据。
+告警会携带 run、report、上游响应 ID（Message ID）、Request ID 和 source/relay ID 等证据，方便复审定位。自动巡检默认不使用 mock，也不需要手动选择测试集、渠道指纹、重复次数、并发度或评分阈值；这些旧字段仅用于兼容已有数据。
 ## 生产部署安全说明
 
 当前项目支持运行时传入 API Key，并在报告、告警和原始请求/响应证据中尽量执行脱敏；但现有 `Channel.auth_config_encrypted` 字段在模型层仍是 JSON 配置字段，不能仅凭字段名视为已经完成企业级强加密或 KMS/Vault 托管。

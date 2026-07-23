@@ -275,7 +275,7 @@ describe('runs utilities', () => {
             test_scope: 'scheduled_probe',
             labels: ['web_search_not_rejected'],
             model_requests: [
-              { key: 'thinking_temperature', result_id: 'res_1', labels: [] },
+              { key: 'thinking_temperature', result_id: 'res_1', response_id: 'msg_canonical_response', message_id: 'msg_legacy_alias', labels: [] },
               { key: 'web_search', result_id: 'res_2', labels: ['web_search_not_rejected'] },
             ],
           },
@@ -287,6 +287,7 @@ describe('runs utilities', () => {
 
     expect(evidence?.modelRequests[0]).toMatchObject({
       resultId: 'res_1',
+      messageId: 'msg_canonical_response',
       responseText: '真实响应正文',
       requestId: 'req_from_header',
       completedAt: '2026-05-16T02:03:04Z',

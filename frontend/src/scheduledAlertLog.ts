@@ -94,6 +94,7 @@ function directModelRequestEvidence(evidence: AlertEvidence): Record<string, unk
   const direct: Record<string, unknown> = {};
   for (const [from, to] of [
     ['model_request_result_id', 'result_id'],
+    ['model_request_response_id', 'response_id'],
     ['model_request_message_id', 'message_id'],
     ['model_request_request_id', 'request_id'],
     ['model_request_channel_type', 'message_channel_type'],
@@ -150,6 +151,8 @@ export function alertResponseId(alert: ChannelAlert): string {
   const evidence = getEvidence(alert);
   const request = alertProbeEvidence(alert);
   return firstText(
+    request?.response_id,
+    request?.responseId,
     request?.message_id,
     request?.messageId,
     evidence.model_request_message_id,
@@ -243,7 +246,7 @@ export function alertLogText(input: AlertLogTextInput) {
     `渠道模型：${input.channelModel || '-'}`,
     `探针来源：${input.probeSource || '-'}`,
     `Result ID：${input.resultId || '-'}`,
-    `Message ID：${input.messageId || '-'}`,
+    `上游响应 ID（Message ID）：${input.messageId || '-'}`,
     `Request ID：${input.requestId || '-'}`,
     `报错内容：${input.error || '-'}`,
   ].join('\n');
