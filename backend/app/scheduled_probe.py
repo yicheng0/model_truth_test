@@ -97,6 +97,15 @@ def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: st
     ) or "| - | - | - | - | - | - | - | - | - | - |"
     signature = evidence.get("signature_interop") or {}
     signature_time = signature.get("completed_at") or signature.get("created_at") or evidence.get("completed_at") or "-"
+    identity_request = next(
+        (item for item in model_requests if isinstance(item, dict) and item.get("key") == "identity_self_report"),
+        {},
+    )
+    identity_response_text = signature.get("identity_response_text") or identity_request.get("response_text") or "-"
+    identity_message_id = signature.get("identity_message_id") or identity_request.get("response_id") or identity_request.get("message_id") or "-"
+    identity_request_id = signature.get("identity_request_id") or identity_request.get("request_id") or "-"
+    identity_status = signature.get("identity_status") or _probe_status_text(identity_request) if identity_request else signature.get("identity_status") or "-"
+    identity_labels = signature.get("identity_labels") or identity_request.get("labels") or []
     classification_label = evidence.get("classification_label") or evidence.get("detected_provider_hint") or "未分类"
     classification_reason = evidence.get("classification_reason") or "-"
     ai_judge = evidence.get("ai_judge") if isinstance(evidence.get("ai_judge"), dict) else None
@@ -134,6 +143,11 @@ def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: st
 {ai_judge_section}
 ## Thinking Signature 互通
 
+- 身份探针状态：{identity_status}
+- 身份探针回复：{identity_response_text}
+- 身份上游响应 ID（Message ID）：{identity_message_id}
+- 身份 Request ID：{identity_request_id}
+- 身份标签：{", ".join(identity_labels) or "-"}
 - 状态：{signature.get("status") or "-"}
 - 检测时间：{signature_time}
 - Source 渠道：{signature.get("source_channel_name") or "-"} ({signature.get("source_channel_id") or "-"})

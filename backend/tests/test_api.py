@@ -2809,6 +2809,9 @@ def test_scheduled_kiro_identity_leak_creates_critical_alert_with_identity_ids(m
         assert report.evidence["model_request"]["key"] == "identity_self_report"
         assert report.evidence["model_request"]["response_id"] == "msg_kiro_identity"
         assert report.evidence["model_request"]["request_id"] == "req_kiro_identity"
+        assert "身份探针回复：我是 Kiro" in (report.markdown or "")
+        assert "身份上游响应 ID（Message ID）：msg_kiro_identity" in (report.markdown or "")
+        assert "身份 Request ID：req_kiro_identity" in (report.markdown or "")
         assert alert.severity == "critical"
 
 
@@ -5889,14 +5892,26 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
                     },
                     request=request,
                 )
+            if len(calls) == 2:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_vrtx_01relay",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "_response_metadata": {"request_id": "req_relay_456"},
+                        "content": [{"type": "text", "text": "relay answer"}],
+                    },
+                    request=request,
+                )
             return httpx.Response(
                 200,
                 json={
-                    "id": "msg_vrtx_01relay",
+                    "id": "msg_01identity",
                     "type": "message",
                     "model": "claude-opus-4-6",
-                    "_response_metadata": {"request_id": "req_relay_456"},
-                    "content": [{"type": "text", "text": "relay answer"}],
+                    "_response_metadata": {"request_id": "req_identity_789"},
+                    "content": [{"type": "text", "text": "我是 Claude，由 Anthropic 开发。"}],
                 },
                 request=request,
             )
@@ -5961,6 +5976,7 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
         "步骤 A：请求 Source thinking",
         "Signature 校验",
         "步骤 B：发送 Relay 复用请求",
+        "Relay 身份验证",
         "最终判定",
     ]
     assert payload["steps"][0]["http_status"] == 200
@@ -5970,6 +5986,9 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert payload["steps"][2]["http_status"] == 200
     assert payload["steps"][2]["request_id"] == "req_relay_456"
     assert payload["steps"][2]["message_id"] == "msg_vrtx_01relay"
+    assert payload["identity_status"] == "ok"
+    assert payload["identity_message_id"] == "msg_01identity"
+    assert payload["identity_request_id"] == "req_identity_789"
     assert payload["steps"][-1]["status"] == "ok"
     assert latest_response.status_code == 200
     assert latest_by_probe_response.status_code == 200
@@ -5979,12 +5998,171 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert latest_payload["source_request_id"] == "req_source_123"
     assert calls[0]["url"] == "https://source.example/v1/messages"
     assert calls[1]["url"] == "https://relay.example/v1/messages"
+    assert calls[2]["url"] == "https://relay.example/v1/messages"
     assert calls[1]["json"]["messages"][1]["content"][0]["signature"] == "sig-source-compatible"
     assert calls[0]["json"]["thinking"] == {"type": "enabled", "budget_tokens": 2000}
     assert calls[1]["json"]["thinking"] == {"type": "enabled", "budget_tokens": 2000}
     with SessionLocal() as db:
         assert db.get(Run, payload["run"]["id"]) is not None
         assert db.get(Result, payload["result"]["id"]) is not None
+
+
+def test_signature_interop_kiro_identity_overrides_signature_success(monkeypatch) -> None:
+    reset_database()
+    calls: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            calls.append({"url": url, "json": json, "headers": headers})
+            request = httpx.Request("POST", url)
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_01source",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "content": [
+                            {"type": "thinking", "thinking": "source thinking", "signature": "sig-source-compatible"},
+                            {"type": "text", "text": "source answer"},
+                        ],
+                    },
+                    request=request,
+                )
+            if len(calls) == 2:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_01relay",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "content": [{"type": "text", "text": "relay answer"}],
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                headers={"request-id": "req_identity_header"},
+                json={
+                    "id": "msg_01identity",
+                    "type": "message",
+                    "model": "claude-opus-4-6",
+                        "content": [{"type": "text", "text": "我是KIRO assistant，由 AWS 开发。"}],
+                },
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Source",
+                "provider_type": "anthropic",
+                "base_url": "https://source.example",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "source-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Relay",
+                "provider_type": "anthropic",
+                "base_url": "https://relay.example/v1",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "relay-key"},
+                "enabled": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["status"] == "fail"
+    assert "Kiro" in payload["reason"]
+    assert payload["identity_status"] == "fail"
+    assert payload["identity_response_text"] == "我是KIRO assistant，由 AWS 开发。"
+    assert payload["identity_message_id"] == "msg_01identity"
+    assert payload["identity_request_id"] == "req_identity_header"
+    assert {"identity_mismatch", "suspected_model_swap", "kiro_identity_leak"} <= set(payload["identity_labels"])
+    assert {"identity_mismatch", "suspected_model_swap", "kiro_identity_leak"} <= set(payload["labels"])
+    assert payload["result"]["score"] == 0
+    assert {"identity_mismatch", "suspected_model_swap", "kiro_identity_leak"} <= set(payload["result"]["labels"])
+    assert payload["result"]["upstream_response_id"] == "msg_01identity"
+    assert payload["result"]["upstream_request_id"] == "req_identity_header"
+    assert calls[2]["json"]["messages"] == [
+        {"role": "user", "content": "你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"}
+    ]
+    assert [step["name"] for step in payload["steps"]][-2:] == ["Relay 身份验证", "最终判定"]
+    assert payload["steps"][-2]["status"] == "fail"
+    assert payload["steps"][-1]["status"] == "fail"
+    assert any(log["stage"] == "relay_identity" and log["message_id"] == "msg_01identity" for log in payload["request_logs"])
+
+
+@pytest.mark.parametrize(
+    ("identity_text", "expected_status", "expected_labels", "expected_ok"),
+    [
+        ("我是 Claude，由 Anthropic 开发。", "ok", set(), True),
+        ("我是一个通用 AI 助手。", "uncertain", {"identity_uncertain"}, True),
+    ],
+)
+def test_signature_interop_identity_supporting_evidence_does_not_fail_signature(
+    monkeypatch,
+    identity_text,
+    expected_status,
+    expected_labels,
+    expected_ok,
+) -> None:  # noqa: ANN001
+    reset_database()
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            payloads = [
+                {"id": "msg_source", "type": "message", "model": "claude-opus-4-6", "content": [{"type": "thinking", "thinking": "x", "signature": "sig-ok"}]},
+                {"id": "msg_relay", "type": "message", "model": "claude-opus-4-6", "content": [{"type": "text", "text": "ok"}]},
+                {"id": "msg_identity", "type": "message", "model": "claude-opus-4-6", "content": [{"type": "text", "text": identity_text}]},
+            ]
+            return httpx.Response(200, json=payloads[calls - 1], request=request)
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        source_id = client.post("/api/channels", json={"name": "Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "source-key"}, "enabled": True}).json()["id"]
+        relay_id = client.post("/api/channels", json={"name": "Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True}).json()["id"]
+        payload = client.post("/api/channels/signature-interop-test", json={"source_channel_id": source_id, "relay_channel_id": relay_id}).json()
+
+    assert payload["ok"] is expected_ok
+    assert payload["identity_status"] == expected_status
+    assert set(payload["identity_labels"]) == expected_labels
+    assert payload["result"]["labels"] == []
 
 
 def test_signature_interop_uses_adaptive_thinking_for_opus_48(monkeypatch) -> None:
@@ -6151,7 +6329,7 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
     assert payload["error_http_status"] == 400
     assert payload["error_stage"] == "relay"
     assert payload["raw_error"]
-    assert payload["request_logs"] == [
+    assert payload["request_logs"][:2] == [
         {
             "stage": "source",
             "name": "步骤 A：请求 Source thinking",
@@ -6185,6 +6363,8 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
             "response_excerpt": payload["request_logs"][1]["response_excerpt"],
         },
     ]
+    assert payload["request_logs"][2]["stage"] == "relay_identity"
+    assert payload["request_logs"][2]["status"] == "fail"
     assert "Invalid `signature`" in payload["request_logs"][1]["error"]
     assert "req_123" in payload["request_logs"][1]["response_excerpt"]
     assert "x-api-key" not in payload["request_logs"][0]["request_excerpt"].lower()
@@ -6235,6 +6415,18 @@ def test_signature_interop_streaming_extracts_relay_message_id(monkeypatch) -> N
                             {"type": "thinking", "thinking": "source thinking", "signature": "sig-source-stream"},
                             {"type": "text", "text": "source answer"},
                         ],
+                    },
+                    request=request,
+                )
+            if len(calls) == 3:
+                return httpx.Response(
+                    200,
+                    headers={"x-request-id": "req_identity_stream"},
+                    json={
+                        "id": "msg_01identity_stream",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "content": [{"type": "text", "text": "我是 Claude，由 Anthropic 开发。"}],
                     },
                     request=request,
                 )

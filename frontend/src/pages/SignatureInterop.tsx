@@ -15,6 +15,7 @@ const defaultSteps: DisplayStep[] = [
   { name: '步骤 A：请求 Source thinking', status: 'wait', detail: '等待开始检测', excerpt: null },
   { name: 'Signature 校验', status: 'wait', detail: '等待 source 返回 thinking block 后校验 signature', excerpt: null },
   { name: '步骤 B：发送 Relay 复用请求', status: 'wait', detail: '等待发送包含 source assistant content 的 relay 请求', excerpt: null },
+  { name: 'Relay 身份验证', status: 'wait', detail: '固定询问 Relay 身份；命中 Kiro 将直接判定高风险', excerpt: null },
   { name: '最终判定', status: 'wait', detail: '等待 relay 响应后判断是否互通', excerpt: null },
 ];
 
@@ -83,7 +84,8 @@ function compactStepValue(value: string | number | null | undefined, suffix = ''
 
 function requestRows(result: SignatureInteropResult) {
   const sourceStep = result.steps.find((step) => step.name.includes('Source'));
-  const relayStep = result.steps.find((step) => step.name.includes('Relay'));
+  const relayStep = result.steps.find((step) => step.name.includes('Relay 复用'));
+  const identityStep = result.steps.find((step) => step.name.includes('身份验证'));
   return [
     {
       key: 'source',
@@ -98,7 +100,7 @@ function requestRows(result: SignatureInteropResult) {
     },
     {
       key: 'relay',
-      label: 'Relay 第二次请求',
+      label: 'Relay Signature 请求',
       endpoint: relayStep?.endpoint || result.relay_endpoint,
       status: relayStep?.status,
       http_status: relayStep?.http_status,
@@ -106,6 +108,17 @@ function requestRows(result: SignatureInteropResult) {
       message_id: relayStep?.message_id || result.relay_message_id,
       latency_ms: relayStep?.latency_ms,
       error: relayStep?.error,
+    },
+    {
+      key: 'relay_identity',
+      label: 'Relay 身份请求',
+      endpoint: identityStep?.endpoint || result.relay_endpoint,
+      status: identityStep?.status || result.identity_status,
+      http_status: identityStep?.http_status,
+      request_id: identityStep?.request_id || result.identity_request_id,
+      message_id: identityStep?.message_id || result.identity_message_id,
+      latency_ms: identityStep?.latency_ms,
+      error: identityStep?.error,
     },
   ];
 }
@@ -157,8 +170,9 @@ export default function SignatureInterop() {
             excerpt: `client_probe_id=${clientProbeId || '-'}; source=${values.source_channel_id}; relay=${values.relay_channel_id}`,
           },
           { ...defaultSteps[1], status: 'running', detail: '等待后端日志写入后恢复 Signature 校验证据' },
-          { ...defaultSteps[2], status: 'running', detail: '等待后端日志写入后恢复 Relay 请求证据' },
-          { ...defaultSteps[3], status: 'running', detail: `原始同步错误：${detail}`, error: detail },
+          { ...defaultSteps[2], status: 'running', detail: '等待后端日志写入后恢复 Relay Signature 请求证据' },
+          { ...defaultSteps[3], status: 'running', detail: '等待后端日志写入后恢复 Relay 身份证据' },
+          { ...defaultSteps[4], status: 'running', detail: `原始同步错误：${detail}`, error: detail },
         ]);
         for (let attempt = 1; attempt <= 45; attempt += 1) {
           try {
@@ -185,7 +199,8 @@ export default function SignatureInterop() {
         { ...defaultSteps[0], status: 'fail', detail: '未找到本次检测日志；后端可能未生成日志，或请求在进入后端前已被代理中断', error: detail, excerpt: `client_probe_id=${clientProbeId || '-'}` },
         defaultSteps[1],
         defaultSteps[2],
-        { ...defaultSteps[3], status: 'fail', detail: `请求失败：${detail}。可去日志页按时间/渠道排查。`, error: detail },
+        defaultSteps[3],
+        { ...defaultSteps[4], status: 'fail', detail: `请求失败：${detail}。可去日志页按时间/渠道排查。`, error: detail },
       ]);
       message.error('Signature 互通检测失败，且未找到本次检测日志');
     },
@@ -211,6 +226,7 @@ export default function SignatureInterop() {
       defaultSteps[1],
       defaultSteps[2],
       defaultSteps[3],
+      defaultSteps[4],
     ]);
     signatureInterop.mutate({ ...values, stream: true, client_probe_id: clientProbeId });
   }
@@ -230,7 +246,7 @@ export default function SignatureInterop() {
           <Typography.Text className="section-kicker">SIGNATURE INTEROP</Typography.Text>
           <Typography.Title level={2}>Thinking Signature 互通检测</Typography.Title>
           <Typography.Paragraph>
-            用 source 渠道生成带 signature 的 thinking block，再以流式请求发送给 relay 渠道验证跨渠道复用是否被接受。
+            用 source 渠道生成带 signature 的 thinking block，再以流式请求发送给 relay 渠道验证跨渠道复用；同时固定询问 Relay 身份，回复命中 Kiro 时直接判定为疑似掺假/逆向路由。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">可检测渠道 {availableChannels.length}</Tag>
@@ -338,7 +354,7 @@ export default function SignatureInterop() {
           <Alert
             type={resultTone(result)}
             showIcon
-            message={result.ok ? '[PASS] Signature 互通' : '[FAIL] Signature 不互通'}
+            message={result.identity_labels?.includes('kiro_identity_leak') ? '[HIGH RISK] 疑似 Kiro 路由混入' : result.ok ? '[PASS] Signature 互通与身份验证' : '[FAIL] Signature / 身份检测未通过'}
             description={result.reason}
           />
 
@@ -366,6 +382,19 @@ export default function SignatureInterop() {
               </Descriptions.Item>
               <Descriptions.Item label="Relay Request ID">
                 {result.relay_request_id || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="身份结论">
+                <Tag color={result.identity_status === 'fail' ? 'red' : result.identity_status === 'uncertain' ? 'orange' : 'green'}>{result.identity_status || '-'}</Tag>
+                {result.identity_labels?.length ? ` ${result.identity_labels.join(', ')}` : ''}
+              </Descriptions.Item>
+              <Descriptions.Item label="身份 Message ID">
+                {result.identity_message_id || '-'} · {result.identity_message_channel_type || '未知'}
+              </Descriptions.Item>
+              <Descriptions.Item label="身份 Request ID">
+                {result.identity_request_id || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="身份回复" span={2}>
+                {result.identity_response_text || '-'}
               </Descriptions.Item>
               <Descriptions.Item label="Source endpoint" span={2}>{result.source_endpoint}</Descriptions.Item>
               <Descriptions.Item label="Relay endpoint" span={2}>{result.relay_endpoint}</Descriptions.Item>

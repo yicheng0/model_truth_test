@@ -1144,6 +1144,7 @@ coalsmoke and fumes of fried grease floated, turning.
 SIGNATURE_INVALID_ERROR = "Invalid `signature` in `thinking` block"
 SIGNATURE_TEST_PROMPT_A = "请用中文解释：为什么 0.1 + 0.2 不等于 0.3？请展示完整推理过程。"
 SIGNATURE_TEST_PROMPT_B = "好的，那 0.1 + 0.2 + 0.3 == 0.6 是否成立？"
+SIGNATURE_IDENTITY_PROMPT = "你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"
 SIGNATURE_FALLBACK_NOTE = """企业级 API 渠道（AWS/Vertex/Anthropic）
 优先 AWS，风控饱和则以 Vertex/Anthropic 兜底
 都是 Anthropic 和企业云服务商合作
@@ -6140,7 +6141,14 @@ async def _run_claude_code_signature_interop_probe(
                 "raw_evidence": redact_secrets({"source_message_id": payload.get("source_message_id"), "relay_message_id": payload.get("relay_message_id")}),
                 "evidence_excerpt": error_excerpt[:1200],
             }
-        labels = [] if ok else ["signature_interop_failed"]
+        labels = sorted(
+            {
+                *(str(label) for label in (payload.get("labels") or []) if str(label)),
+                *([] if ok else ["signature_interop_failed"]),
+            }
+        )
+        primary_message_id = payload.get("identity_message_id") if "kiro_identity_leak" in labels else payload.get("relay_message_id") or payload.get("source_message_id")
+        primary_request_id = payload.get("identity_request_id") if "kiro_identity_leak" in labels else payload.get("relay_request_id") or payload.get("source_request_id")
         return {
             **config,
             "section": "signature",
@@ -6151,16 +6159,26 @@ async def _run_claude_code_signature_interop_probe(
             "label_explanations": label_explanations(labels),
             "run_id": None,
             "result_id": None,
-            "message_id": payload.get("relay_message_id") or payload.get("source_message_id"),
-            "request_id": payload.get("relay_request_id") or payload.get("source_request_id"),
+            "message_id": primary_message_id,
+            "request_id": primary_request_id,
             "request_protocol": None,
             "provider_endpoint": payload.get("relay_endpoint"),
             "http_status": None,
-            "error_type": None if ok else "signature_interop_failed",
+            "error_type": None if ok else ("kiro_identity_leak" if "kiro_identity_leak" in labels else "signature_interop_failed"),
             "error_detail": None if ok else (error_excerpt or None),
             "response_excerpt": error_excerpt or None,
             "request_snapshot": {},
-            "raw_evidence": redact_secrets({"source_message_id": payload.get("source_message_id"), "relay_message_id": payload.get("relay_message_id")}),
+            "raw_evidence": redact_secrets(
+                {
+                    "source_message_id": payload.get("source_message_id"),
+                    "relay_message_id": payload.get("relay_message_id"),
+                    "identity_status": payload.get("identity_status"),
+                    "identity_response_text": payload.get("identity_response_text"),
+                    "identity_message_id": payload.get("identity_message_id"),
+                    "identity_request_id": payload.get("identity_request_id"),
+                    "identity_labels": payload.get("identity_labels") or [],
+                }
+            ),
             "evidence_excerpt": error_excerpt[:1200],
         }
     except Exception as exc:
@@ -8305,8 +8323,13 @@ def _attach_signature_interop_result_to_reports(
         safe_evidence = redact_secrets(evidence)
         report.evidence = safe_evidence
         if signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_operational_label:
-            report.grade = worse_grade(report.grade, "D")
-            report.summary = f"{report.summary or _summary_for(report.grade)} Signature 互通检测未通过，仅表示 ClaudeCode/原生 thinking 链路不可验证。"
+            if "kiro_identity_leak" in labels:
+                report.grade = worse_grade(report.grade, "E")
+                report.final_score = 0
+                report.summary = "身份探针明确命中 Kiro，疑似 Kiro 路由混入，按高风险处理。"
+            else:
+                report.grade = worse_grade(report.grade, "D")
+                report.summary = f"{report.summary or _summary_for(report.grade)} Signature 互通检测未通过，仅表示 ClaudeCode/原生 thinking 链路不可验证。"
         channel = db.get(Channel, report.channel_id)
         if channel:
             report.markdown = redact_text(report_markdown(channel, report.final_score, report.grade, report.summary or _summary_for(report.grade), safe_evidence))
@@ -8346,6 +8369,13 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
         "relay_message_id": result.get("relay_message_id"),
         "relay_message_channel_type": result.get("relay_message_channel_type"),
         "relay_request_id": result.get("relay_request_id"),
+        "identity_status": result.get("identity_status"),
+        "identity_response_text": result.get("identity_response_text"),
+        "identity_message_id": result.get("identity_message_id"),
+        "identity_message_channel_type": result.get("identity_message_channel_type"),
+        "identity_request_id": result.get("identity_request_id"),
+        "identity_labels": result.get("identity_labels") or [],
+        "labels": result.get("labels") or [],
         "thinking_block_count": result.get("thinking_block_count"),
         "signature_prefixes": result.get("signature_prefixes") or [],
         "source_protocol_profile": result.get("source_protocol_profile"),
@@ -11237,7 +11267,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             }
         )
         steps.append({"name": "最终判定", "status": "fail", "detail": "source 请求失败", "excerpt": None})
-        return _signature_interop_result(
+        return await _signature_interop_result_with_identity(
             ok=False,
             reason="source 请求失败",
             source=source,
@@ -11276,7 +11306,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         )
         steps.append({"name": "步骤 B：发送 Relay 复用请求", "status": "wait", "detail": "Signature 校验失败，未发起 Relay 请求", "endpoint": relay_endpoint})
         steps.append({"name": "最终判定", "status": "fail", "detail": "source 响应缺少 content 数组", "excerpt": None})
-        return _signature_interop_result(
+        return await _signature_interop_result_with_identity(
             ok=False,
             reason="source 响应缺少 content 数组，无法进行 signature 互通检测",
             source=source,
@@ -11304,7 +11334,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         )
         steps.append({"name": "步骤 B：发送 Relay 复用请求", "status": "wait", "detail": "Signature 校验失败，未发起 Relay 请求", "endpoint": relay_endpoint})
         steps.append({"name": "最终判定", "status": "fail", "detail": "source 响应中没有 thinking block", "excerpt": None})
-        return _signature_interop_result(
+        return await _signature_interop_result_with_identity(
             ok=False,
             reason="source 响应中没有 thinking block，无法进行 signature 互通检测",
             source=source,
@@ -11332,7 +11362,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         )
         steps.append({"name": "步骤 B：发送 Relay 复用请求", "status": "wait", "detail": "Signature 校验失败，未发起 Relay 请求", "endpoint": relay_endpoint})
         steps.append({"name": "最终判定", "status": "fail", "detail": "source thinking block 缺少 signature 字段", "excerpt": None})
-        return _signature_interop_result(
+        return await _signature_interop_result_with_identity(
             ok=False,
             reason=f"source thinking block 缺少 signature 字段，block 索引：{missing_signature}",
             source=source,
@@ -11390,7 +11420,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             request_payload=relay_payload,
         )
         steps.append({"name": "最终判定", "status": "fail", "detail": reason, "excerpt": None})
-        return _signature_interop_result(
+        return await _signature_interop_result_with_identity(
             ok=False,
             reason=reason,
             source=source,
@@ -11429,7 +11459,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         request_payload=relay_payload,
     )
     steps.append({"name": "最终判定", "status": "ok" if ok else "fail", "detail": reason, "excerpt": None})
-    return _signature_interop_result(
+    return await _signature_interop_result_with_identity(
         ok=ok,
         reason=reason,
         source=source,
@@ -11496,7 +11526,11 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
     normalized = {
         "content_text": result_payload.get("reason"),
         "error": None if result_payload.get("ok") else result_payload.get("reason"),
-        "provider_message_id": result_payload.get("relay_message_id") or result_payload.get("source_message_id"),
+        "provider_message_id": (
+            result_payload.get("identity_message_id")
+            if "kiro_identity_leak" in (result_payload.get("identity_labels") or [])
+            else result_payload.get("relay_message_id") or result_payload.get("source_message_id")
+        ),
         "request_protocol": "anthropic_messages",
         "provider_endpoint": result_payload.get("relay_endpoint"),
         "provider_model": result_payload.get("model"),
@@ -11509,7 +11543,11 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         channel_id=relay.id,
         attempt_index=1,
         upstream_response_id=normalized.get("provider_message_id"),
-        upstream_request_id=result_payload.get("relay_request_id") or result_payload.get("source_request_id"),
+        upstream_request_id=(
+            result_payload.get("identity_request_id")
+            if "kiro_identity_leak" in (result_payload.get("identity_labels") or [])
+            else result_payload.get("relay_request_id") or result_payload.get("source_request_id")
+        ),
         normalized_response=normalized,
         raw_request={
             "test_type": "signature_interop",
@@ -11522,7 +11560,16 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         raw_response=result_payload,
         metrics={"status_code": 200 if result_payload.get("ok") else 500, "error_type": "signature_interop" if (error or not result_payload.get("ok")) else None},
         score=100 if result_payload.get("ok") else 0,
-        labels=[] if result_payload.get("ok") else ["signature_interop_failed"],
+        labels=sorted(
+            {
+                *(
+                    str(label)
+                    for label in (result_payload.get("identity_labels") or [])
+                    if str(label) in {"identity_mismatch", "kiro_identity_leak", "suspected_model_swap"}
+                ),
+                *([] if result_payload.get("ok") else ["signature_interop_failed"]),
+            }
+        ),
     )
     run.completed_jobs = 1
     run.finished_at = finished_at
@@ -11564,6 +11611,13 @@ def _signature_interop_error_result(source: Channel, relay: Channel, stream: boo
         "relay_message_channel_type": "未知",
         "relay_request_id": None,
         "relay_raw_excerpt": redact_text(error),
+        "identity_status": "fail",
+        "identity_response_text": None,
+        "identity_message_id": None,
+        "identity_message_channel_type": "未知",
+        "identity_request_id": None,
+        "identity_labels": ["identity_probe_failed"],
+        "labels": [],
         "raw_error": redact_text(error),
         "error_http_status": None,
         "error_stage": "setup",
@@ -11629,6 +11683,117 @@ def _signature_step_from_meta(
         "completed_at": meta.get("completed_at"),
         "request_excerpt": _signature_log_payload(request_payload) if request_payload else None,
     }
+
+
+def _signature_identity_text(payload: Any) -> str:
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
+        return ""
+    return "\n".join(
+        str(block.get("text") or "").strip()
+        for block in payload["content"]
+        if isinstance(block, dict) and block.get("type") == "text" and str(block.get("text") or "").strip()
+    ).strip()
+
+
+async def _signature_interop_result_with_identity(
+    *,
+    ok: bool,
+    reason: str,
+    source: Channel,
+    relay: Channel,
+    source_endpoint: str,
+    relay_endpoint: str,
+    model: str,
+    response_a: dict[str, Any],
+    response_b: dict[str, Any],
+    thinking_blocks: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+    source_protocol_profile: str | None = None,
+    relay_protocol_profile: str | None = None,
+    request_normalization_notes: list[str] | None = None,
+    raw_error: str | None = None,
+    error_http_status: int | None = None,
+    error_stage: str | None = None,
+) -> dict[str, Any]:
+    relay_credentials = _merged_channel_credentials(relay, {})
+    identity_payload = {
+        "model": str(relay_credentials.get("model") or relay.model_name or model),
+        "max_tokens": 120,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": SIGNATURE_IDENTITY_PROMPT}],
+    }
+    identity_response, identity_meta = await _signature_messages_call(
+        relay_endpoint,
+        relay_credentials["api_key"],
+        identity_payload,
+    )
+    identity_text = redact_text(_signature_identity_text(identity_response))[:4000]
+    identity_labels: list[str] = []
+    identity_status = "ok"
+    identity_detail = "Relay 身份回复未发现明确异常"
+    if not identity_meta.get("ok"):
+        identity_status = "fail"
+        identity_labels = ["identity_probe_failed"]
+        identity_detail = "Relay 身份请求失败"
+        if ok:
+            ok = False
+            reason = f"Relay 身份请求失败：{identity_meta.get('error') or '未获得有效响应'}"
+            raw_error = str(identity_meta.get("error") or raw_error or "") or None
+            error_http_status = identity_meta.get("http_status")
+            error_stage = "relay_identity"
+    elif "kiro" in identity_text.lower():
+        identity_status = "fail"
+        identity_labels = ["identity_mismatch", "kiro_identity_leak", "suspected_model_swap"]
+        identity_detail = "身份探针命中 Kiro，疑似掺假/逆向路由"
+        ok = False
+        reason = identity_detail
+        error_stage = "relay_identity"
+    elif not re.search(r"\b(?:claude|anthropic)\b", identity_text, flags=re.IGNORECASE):
+        identity_status = "uncertain"
+        identity_labels = ["identity_uncertain"]
+        identity_detail = "Relay 仅给出通用或不明确身份，作为辅助证据保留"
+
+    final_step = steps.pop() if steps and steps[-1].get("name") == "最终判定" else None
+    steps.append(
+        _signature_step_from_meta(
+            "Relay 身份验证",
+            {**identity_meta, "ok": identity_status != "fail", "excerpt": identity_text or identity_meta.get("excerpt")},
+            success_detail=identity_detail,
+            fail_detail=identity_detail,
+            request_payload=identity_payload,
+        )
+    )
+    steps.append(
+        {
+            "name": "最终判定",
+            "status": "ok" if ok else "fail",
+            "detail": reason,
+            "excerpt": final_step.get("excerpt") if isinstance(final_step, dict) else None,
+        }
+    )
+    return _signature_interop_result(
+        ok=ok,
+        reason=reason,
+        source=source,
+        relay=relay,
+        source_endpoint=source_endpoint,
+        relay_endpoint=relay_endpoint,
+        model=model,
+        response_a=response_a,
+        response_b=response_b,
+        thinking_blocks=thinking_blocks,
+        steps=steps,
+        identity_response=identity_response,
+        identity_status=identity_status,
+        identity_response_text=identity_text or None,
+        identity_labels=identity_labels,
+        source_protocol_profile=source_protocol_profile,
+        relay_protocol_profile=relay_protocol_profile,
+        request_normalization_notes=request_normalization_notes,
+        raw_error=raw_error,
+        error_http_status=error_http_status,
+        error_stage=error_stage,
+    )
 
 
 async def _signature_messages_call(endpoint: str, api_key: str, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -11819,6 +11984,10 @@ def _signature_interop_result(
     response_b: dict[str, Any],
     thinking_blocks: list[dict[str, Any]],
     steps: list[dict[str, Any]],
+    identity_response: dict[str, Any] | None = None,
+    identity_status: str | None = None,
+    identity_response_text: str | None = None,
+    identity_labels: list[str] | None = None,
     source_protocol_profile: str | None = None,
     relay_protocol_profile: str | None = None,
     request_normalization_notes: list[str] | None = None,
@@ -11829,8 +11998,14 @@ def _signature_interop_result(
     relay_raw_excerpt = json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:3000]
     source_message_id = response_a.get("id")
     relay_message_id = response_b.get("id")
+    identity_response = identity_response or {}
+    identity_message_id = identity_response.get("id")
     request_logs = []
-    for stage, name in (("source", "步骤 A：请求 Source thinking"), ("relay", "步骤 B：发送 Relay 复用请求")):
+    for stage, name in (
+        ("source", "步骤 A：请求 Source thinking"),
+        ("relay", "步骤 B：发送 Relay 复用请求"),
+        ("relay_identity", "Relay 身份验证"),
+    ):
         step = next(
             (
                 item
@@ -11841,7 +12016,7 @@ def _signature_interop_result(
             None,
         )
         if step:
-            response = response_a if stage == "source" else response_b
+            response = response_a if stage == "source" else identity_response if stage == "relay_identity" else response_b
             request_logs.append(
                 {
                     "stage": stage,
@@ -11883,6 +12058,18 @@ def _signature_interop_result(
         "relay_message_channel_type": classify_claude_message_id(relay_message_id),
         "relay_request_id": request_id_from_payload(response_b),
         "relay_raw_excerpt": relay_raw_excerpt,
+        "identity_status": identity_status,
+        "identity_response_text": identity_response_text,
+        "identity_message_id": identity_message_id,
+        "identity_message_channel_type": classify_claude_message_id(identity_message_id),
+        "identity_request_id": request_id_from_payload(identity_response),
+        "identity_labels": sorted(set(identity_labels or [])),
+        "labels": sorted(
+            {
+                *(str(label) for label in (identity_labels or []) if str(label)),
+                *([] if ok else ["signature_interop_failed"]),
+            }
+        ),
         "request_logs": request_logs,
         "source_protocol_profile": source_protocol_profile,
         "relay_protocol_profile": relay_protocol_profile,
@@ -13926,6 +14113,9 @@ def signature_interop_markdown(signature: Any) -> str:
         f"- 原因：{signature.get('reason') or '-'}\n"
         f"- Source：{signature.get('source_channel_id') or '-'} / {signature.get('source_message_channel_type') or '-'}\n"
         f"- Relay：{signature.get('relay_channel_id') or '-'} / {signature.get('relay_message_channel_type') or '-'}\n"
+        f"- 身份探针：{signature.get('identity_status') or '-'} / {signature.get('identity_response_text') or '-'}\n"
+        f"- 身份响应 ID：{signature.get('identity_message_id') or '-'} / Request ID：{signature.get('identity_request_id') or '-'}\n"
+        f"- 身份标签：{', '.join(signature.get('identity_labels') or []) or '-'}\n"
         f"- 协议 profile：source={signature.get('source_protocol_profile') or '-'} / relay={signature.get('relay_protocol_profile') or '-'}\n"
         f"- 请求归一化：{'; '.join(signature.get('request_normalization_notes') or []) or '-'}\n"
         f"- 兜底说明：{signature.get('fallback_note') or SIGNATURE_FALLBACK_NOTE}\n"

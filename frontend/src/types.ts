@@ -230,6 +230,13 @@ export interface SignatureInteropEvidence {
   relay_message_id?: string | null;
   relay_request_id?: string | null;
   relay_message_channel_type?: string | null;
+  identity_status?: string | null;
+  identity_response_text?: string | null;
+  identity_message_id?: string | null;
+  identity_message_channel_type?: string | null;
+  identity_request_id?: string | null;
+  identity_labels?: string[];
+  labels?: string[];
   signature_prefixes?: string[];
   request_logs?: SignatureInteropRequestLog[];
   created_at?: string | null;
@@ -370,6 +377,13 @@ export type SignatureInteropResult = {
   relay_message_channel_type: string;
   relay_request_id?: string | null;
   relay_raw_excerpt: string;
+  identity_status?: string | null;
+  identity_response_text?: string | null;
+  identity_message_id?: string | null;
+  identity_message_channel_type?: string | null;
+  identity_request_id?: string | null;
+  identity_labels?: string[];
+  labels?: string[];
   raw_error?: string | null;
   error_http_status?: number | null;
   error_stage?: string | null;

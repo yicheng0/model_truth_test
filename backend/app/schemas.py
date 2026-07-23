@@ -345,6 +345,13 @@ class SignatureInteropTestRead(BaseModel):
     relay_message_channel_type: str
     relay_request_id: str | None = None
     relay_raw_excerpt: str
+    identity_status: str | None = None
+    identity_response_text: str | None = None
+    identity_message_id: str | None = None
+    identity_message_channel_type: str | None = None
+    identity_request_id: str | None = None
+    identity_labels: list[str] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
     raw_error: str | None = None
     error_http_status: int | None = None
     error_stage: str | None = None
