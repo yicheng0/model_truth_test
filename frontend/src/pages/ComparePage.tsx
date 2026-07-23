@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Empty, Select, Space, Table, Tabs, Tag, Typography } from 'antd';
 import { GitCompare, Radar as RadarIcon } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Bar, BarChart, CartesianGrid, Legend, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Legend, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Tooltip } from 'recharts';
 import { api, getErrorMessage } from '../api';
 import type { Report, ReportCompareMatrixRow, ReportComparePredictionCell, RunMode } from '../types';
 
@@ -28,15 +28,11 @@ function responseText(value?: ReportComparePredictionCell | null) {
 }
 
 function modeLabel(mode: RunMode | string) {
-  if (mode === 'performance_benchmark') return '性能诊断分析';
-  if (mode === 'arena_comparison') return 'Arena 排名分析';
   if (mode === 'baseline_build') return '渠道指纹分析';
   return '真实性报告对比';
 }
 
 function pageDescription(mode: RunMode | string) {
-  if (mode === 'performance_benchmark') return '比较多个渠道的独立性能诊断结果，包括延迟、TTFT、吞吐和失败率，不作为真实性判断。';
-  if (mode === 'arena_comparison') return '比较候选渠道之间的 Arena 排名、胜率和样本级分歧，不等同于官方基线真实性对比。';
   return '横向比较 2-3 个真实性报告的维度分、样本输出、协议证据和异常标签。';
 }
 
@@ -72,8 +68,6 @@ export default function ComparePage() {
 
   const data = compare.data;
   const mode = data.mode;
-  const isPerformance = mode === 'performance_benchmark';
-  const isArena = mode === 'arena_comparison';
   const reportKeys = data.reports.map((report) => report.report_id);
   const modules = Array.from(new Set(data.prediction_rows.map((row) => row.module))).sort();
   const chartRows: DimensionChartRow[] = data.dimensions.map((dimension) => ({
@@ -115,57 +109,34 @@ export default function ComparePage() {
         items={[
           {
             key: 'scores',
-            label: isPerformance ? '性能矩阵' : isArena ? '排名对比' : '得分对比',
+            label: '得分对比',
             children: (
               <Space direction="vertical" size={16} className="full-width">
-                <Card bordered={false} title={<span className="card-title-with-icon"><RadarIcon size={18} />{isPerformance ? '性能指标' : isArena ? 'Arena 分数' : '维度雷达'}</span>}>
+                <Card bordered={false} title={<span className="card-title-with-icon"><RadarIcon size={18} />维度雷达</span>}>
                   <div className="chart-grid">
-                    {!isPerformance ? (
-                      <div className="report-chart">
-                        <ResponsiveContainer width="100%" height={340}>
-                          <RadarChart data={chartRows}>
-                            <PolarGrid />
-                            <PolarAngleAxis dataKey="dimension" />
-                            <PolarRadiusAxis angle={30} domain={[0, 100]} />
-                            {data.reports.map((report, index) => (
-                              <Radar key={report.report_id} name={report.channel_name} dataKey={report.channel_name} stroke={['#2563eb', '#f97316', '#16a34a'][index]} fill={['#2563eb', '#f97316', '#16a34a'][index]} fillOpacity={0.16} />
-                            ))}
-                            <Legend />
-                            <Tooltip />
-                          </RadarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    ) : null}
                     <div className="report-chart">
                       <ResponsiveContainer width="100%" height={340}>
-                        <BarChart data={data.performance_matrix as ReportCompareMatrixRow[]}>
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="channel_name" />
-                          <YAxis />
-                          <Tooltip />
+                        <RadarChart data={chartRows}>
+                          <PolarGrid />
+                          <PolarAngleAxis dataKey="dimension" />
+                          <PolarRadiusAxis angle={30} domain={[0, 100]} />
+                          {data.reports.map((report, index) => (
+                            <Radar key={report.report_id} name={report.channel_name} dataKey={report.channel_name} stroke={['#2563eb', '#f97316', '#16a34a'][index]} fill={['#2563eb', '#f97316', '#16a34a'][index]} fillOpacity={0.16} />
+                          ))}
                           <Legend />
-                          <Bar dataKey="p95_latency_ms" name="P95 ms" fill="#f97316" />
-                          <Bar dataKey="avg_ttft_ms" name="TTFT ms" fill="#2563eb" />
-                          <Bar dataKey="failure_rate" name="失败率 %" fill="#dc2626" />
-                        </BarChart>
+                          <Tooltip />
+                        </RadarChart>
                       </ResponsiveContainer>
                     </div>
                   </div>
                 </Card>
-                <Card bordered={false} title={isPerformance ? '性能指标矩阵' : isArena ? 'Arena 报告矩阵' : '维度得分矩阵'}>
+                <Card bordered={false} title="维度得分矩阵">
                   <Table
-                    rowKey={isPerformance ? 'report_id' : 'dimension'}
-                    dataSource={isPerformance ? (data.performance_matrix as ReportCompareMatrixRow[]) : (data.score_matrix as ReportCompareMatrixRow[])}
+                    rowKey="dimension"
+                    dataSource={data.score_matrix as ReportCompareMatrixRow[]}
                     pagination={false}
                     scroll={{ x: 720 }}
-                    columns={isPerformance ? [
-                      { title: '渠道', dataIndex: 'channel_name', width: 180 },
-                      { title: '成功率', dataIndex: 'success_rate', render: (value: number | null) => <strong>{fmt(value, '%')}</strong> },
-                      { title: 'P95 延迟', dataIndex: 'p95_latency_ms', render: (value: number | null) => <strong>{fmt(value, ' ms')}</strong> },
-                      { title: 'TTFT', dataIndex: 'avg_ttft_ms', render: (value: number | null) => <strong>{fmt(value, ' ms')}</strong> },
-                      { title: 'TPOT', dataIndex: 'avg_tpot_ms', render: (value: number | null) => <strong>{fmt(value, ' ms')}</strong> },
-                      { title: '吞吐', dataIndex: 'avg_tokens_per_second', render: (value: number | null) => <strong>{fmt(value, ' t/s')}</strong> },
-                    ] : [
+                    columns={[
                       { title: '维度', dataIndex: 'dimension', width: 180 },
                       ...data.reports.map((report) => ({
                         title: report.channel_name,
@@ -180,9 +151,9 @@ export default function ComparePage() {
           },
           {
             key: 'predictions',
-            label: isPerformance ? '慢样本' : isArena ? '样本分歧' : '预测对比',
+            label: '预测对比',
             children: (
-              <Card bordered={false} title={<span className="card-title-with-icon"><GitCompare size={18} />{isPerformance ? '性能样本明细' : isArena ? 'Arena 样本分歧' : '同题输出对比'}</span>}>
+              <Card bordered={false} title={<span className="card-title-with-icon"><GitCompare size={18} />同题输出对比</span>}>
                 <div className="report-filter-grid">
                   <Select value={moduleFilter} onChange={setModuleFilter} options={[{ value: 'all', label: '全部模块' }, ...modules.map((item) => ({ value: item, label: item }))]} />
                   <Select
@@ -240,7 +211,7 @@ export default function ComparePage() {
           },
           {
             key: 'labels',
-            label: isPerformance ? '性能异常' : isArena ? '排名差异' : '异常差异',
+            label: '异常差异',
             children: (
               <Card bordered={false} title="标签差异">
                 <div className="label-diff-grid">

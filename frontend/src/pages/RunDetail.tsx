@@ -9,16 +9,13 @@ import { accountTypeLabel, formatChannelDisplayName } from '../channelCredential
 import { providerTypeLabel, roleColor } from '../channelTaxonomy';
 import { extractPatrolEvidence, formatPatrolChannel, type PatrolEvidence, type PatrolModelRequestEvidence, type PatrolSignatureRequestLog } from '../runsUtils';
 import { formatDateTime } from '../time';
-import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunMode, RunResults, RunSummary, TestCase } from '../types';
+import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunResults, RunSummary, TestCase } from '../types';
 import { isComboManualProbeRun, manualProbeSummaryRows } from './runDetailManualProbe';
 import {
-  type ArenaEvidenceRow,
-  type ArenaRankingRow,
   type CasePanelRow,
   type DisplayResult,
   type ManualProbeRow,
   type OutputDrawerState,
-  arrayValue,
   asRecord,
   channelLabel,
   compactPatrolText,
@@ -29,7 +26,6 @@ import {
   latestResult,
   manualProbeChannelType,
   metricValue,
-  numberValue,
   payloadRequestId,
   prettyJson,
   patrolProbeStatusColor,
@@ -165,7 +161,8 @@ function SignatureRequestLogDetail({ item }: { item: PatrolSignatureRequestLog }
         <div><span>时间</span><Typography.Text>{formatDateTime(item.completedAt ?? item.startedAt)}</Typography.Text></div>
         <div><span>HTTP 状态</span><Typography.Text code>{item.httpStatus ?? '-'}</Typography.Text></div>
         <div><span>上游响应 ID（Message ID）</span><SignatureIdText value={item.messageId} /></div>
-        <div><span>Request ID</span><SignatureIdText value={item.requestId} /></div>
+        <div><span>请求 ID</span><SignatureIdText value={item.gatewayRequestId} /></div>
+        <div><span>上游请求 ID</span><SignatureIdText value={item.upstreamRequestId ?? item.responseHeaderRequestId ?? item.requestId} /></div>
         <div><span>响应头 Request ID</span><SignatureIdText value={item.responseHeaderRequestId} /></div>
         <div><span>耗时</span><Typography.Text>{item.latencyMs === null || item.latencyMs === undefined ? '-' : `${item.latencyMs} ms`}</Typography.Text></div>
         <div className="full"><span>Endpoint</span><Typography.Text copyable={item.endpoint ? { text: item.endpoint } : false}>{item.endpoint || '-'}</Typography.Text></div>
@@ -340,10 +337,11 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
               { title: '时间', width: 180, render: (_, item) => formatDateTime(item.completedAt ?? item.startedAt) },
               { title: 'HTTP', width: 90, render: (_, item) => item.httpStatus ?? '-' },
               { title: '上游响应 ID（Message ID）', width: 230, render: (_, item) => <SignatureIdText value={item.messageId} /> },
-              { title: 'Request ID', width: 210, render: (_, item) => <SignatureIdText value={item.requestId} /> },
+              { title: '请求 ID', width: 210, render: (_, item) => <SignatureIdText value={item.gatewayRequestId} /> },
+              { title: '上游请求 ID', width: 210, render: (_, item) => <SignatureIdText value={item.upstreamRequestId ?? item.responseHeaderRequestId ?? item.requestId} /> },
               { title: '错误', render: (_, item) => <Typography.Text type={item.error ? 'danger' : undefined}>{compactPatrolText(item.error)}</Typography.Text> },
             ]}
-            scroll={{ x: 1080 }}
+            scroll={{ x: 1290 }}
           />
         </div>
       ) : null}
@@ -463,8 +461,6 @@ export default function RunDetail() {
   const patrolChannelId = data?.run.patrol_channel_id ?? patrolEvidence?.modelRequests[0]?.channelId ?? patrolEvidence?.signature?.relayChannelId ?? null;
   const patrolChannel = patrolChannelId ? channelById.get(patrolChannelId) : undefined;
   const isSamplingRun = !isPatrolRun && data?.run.mode === 'baseline_build';
-  const isPerformanceRun = !isPatrolRun && data?.run.mode === 'performance_benchmark';
-  const isArenaRun = !isPatrolRun && data?.run.mode === 'arena_comparison';
   const isAuthenticityRun = !isPatrolRun && (data?.run.mode === 'candidate_eval' || data?.run.mode === 'full_comparison');
 
   const caseById = useMemo(() => new Map(cases.map((caseItem) => [caseItem.id, caseItem])), [cases]);
@@ -603,11 +599,8 @@ export default function RunDetail() {
 
   const percent = data?.run.total_jobs ? Math.round((data.run.completed_jobs / data.run.total_jobs) * 100) : 0;
   const sampleReturnedRows = rows.filter((row) => row.sample).length;
-  const arenaReturnedSamples = isArenaRun ? data?.run.completed_jobs ?? 0 : 0;
-  const arenaExpectedSamples = isArenaRun ? data?.run.total_jobs ?? 0 : 0;
-  const returnedRows = isSamplingRun ? sampleReturnedRows : isArenaRun ? arenaReturnedSamples : rows.filter((row) => row.official && row.candidate).length;
-  const expectedRows = isArenaRun ? arenaExpectedSamples : rows.length;
-  const arenaRankingIsLive = isArenaRun && (data?.run.status === 'pending' || data?.run.status === 'running');
+  const returnedRows = isSamplingRun ? sampleReturnedRows : rows.filter((row) => row.official && row.candidate).length;
+  const expectedRows = rows.length;
   const comparedRows = rows.filter((row) => row.comparison).length;
   const riskyRows = rows.filter((row) => (row.comparison?.final_score ?? 100) < 70).length;
   const averageScore = rows.length
@@ -627,55 +620,6 @@ export default function RunDetail() {
     tps: Number(item.avg_tokens_per_second ?? 0),
     success: Number(item.success_rate ?? 0),
   }));
-  const arenaChartData: ArenaRankingRow[] = (summary?.arena_rankings ?? []).map((item, index) => {
-    const channelId = String(item.channel_id ?? '');
-    return {
-      key: channelId || String(index),
-      rank: index + 1,
-      channelId,
-      name: String(channelById.get(channelId)?.name ?? item.channel_id ?? '-'),
-      score: numberValue(item.score),
-      winRate: numberValue(item.win_rate),
-      avgCaseScore: numberValue(item.avg_case_score),
-      wins: numberValue(item.wins),
-      pairCount: numberValue(item.pair_count),
-      caseCount: numberValue(item.case_count),
-      labels: arrayValue(item.labels).map(String),
-    };
-  });
-  const arenaLeader = arenaChartData[0];
-  const arenaRunnerUp = arenaChartData[1];
-  const arenaLeadMargin = arenaLeader && arenaRunnerUp ? arenaLeader.score - arenaRunnerUp.score : null;
-  const arenaMatrixSource = arrayValue(data?.reports.find((report) => Array.isArray(report.evidence?.arena_matrix))?.evidence?.arena_matrix) as Array<Record<string, unknown>>;
-  const arenaMatrixChannelIds = arenaChartData.map((item) => item.channelId).filter(Boolean);
-  const arenaMatrixRows = arenaMatrixSource.map((row) => {
-    const channelId = String(row.channel_id ?? '');
-    return {
-      ...row,
-      key: channelId,
-      channelId,
-      channelName: String(channelById.get(channelId)?.name ?? channelId),
-    };
-  });
-  const arenaEvidenceRows: ArenaEvidenceRow[] = arrayValue(summary?.top_evidence).map((item, index) => {
-    const row = item as Record<string, unknown>;
-    const testCaseId = String(row.test_case_id ?? '');
-    const winnerChannelId = String(row.winner_channel_id ?? '');
-    const loserChannelId = String(row.loser_channel_id ?? '');
-    return {
-      key: `${testCaseId}:${loserChannelId}:${index}`,
-      testCaseId,
-      caseTitle: caseById.get(testCaseId)?.title ?? testCaseId,
-      winnerChannelId,
-      loserChannelId,
-      winnerName: channelById.get(winnerChannelId)?.name ?? winnerChannelId,
-      loserName: channelById.get(loserChannelId)?.name ?? loserChannelId,
-      winnerScore: numberValue(row.winner_score),
-      loserScore: numberValue(row.loser_score),
-      margin: numberValue(row.margin),
-      labels: arrayValue(row.labels).map(String),
-    };
-  });
   const labelRows = Object.entries(summary?.label_distribution ?? {}).map(([label, count]) => ({ label, count }));
   const manualProbeIsCombo = isComboManualProbeRun(data?.run.name, manualProbeRows.length);
   const manualProbeSummary = data?.run.mode === 'manual_probe'
@@ -864,7 +808,7 @@ export default function RunDetail() {
               <Typography.Text className="brand-kicker">SCHEDULED PATROL</Typography.Text>
               <Typography.Title level={2}>{data.run.name}</Typography.Title>
               <Typography.Paragraph>
-                这里只展示真实模型请求参数探针和 Thinking Signature 互通结果，不混入性能诊断或 Arena 排名视图。
+                这里只展示真实模型请求参数探针和 Thinking Signature 互通结果。
               </Typography.Paragraph>
               <Space wrap size={16}>
                 <Typography.Text type="secondary">
@@ -902,7 +846,7 @@ export default function RunDetail() {
               type={manualProbeIsCombo ? 'warning' : 'info'}
               showIcon
               message={manualProbeIsCombo ? '组合纯度检测日志' : '单项参数报错日志'}
-              description="这里只展示参数纯度探针、原生报错、message/request id 和原始响应，不显示 Arena 或性能诊断内容。"
+              description="这里只展示参数纯度探针、原生报错、message/request id 和原始响应。"
               style={{ marginBottom: 16 }}
             />
           ) : null}
@@ -922,7 +866,7 @@ export default function RunDetail() {
               <>
                 <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
                 <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>{data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}</Descriptions.Item>
-                <Descriptions.Item label={isArenaRun ? '已返回样本' : '已返回题目'}>{returnedRows} / {expectedRows}</Descriptions.Item>
+                <Descriptions.Item label="已返回题目">{returnedRows} / {expectedRows}</Descriptions.Item>
                 {isSamplingRun ? (
                   <Descriptions.Item label="指纹源渠道">{sampleChannels.length}</Descriptions.Item>
                 ) : (
@@ -1074,258 +1018,12 @@ export default function RunDetail() {
                 ),
               },
               {
-                key: 'arena',
-                label: 'Arena 排名',
-                children: arenaChartData.length ? (
-                  <Space direction="vertical" size={16} style={{ width: '100%' }}>
-                    <div className="arena-formula-panel">
-                      <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
-                      <span>胜率来自同题两两比较；平均题目分来自每个渠道自身的答案质量、规则匹配和性能惩罚。</span>
-                    </div>
-                    <div style={{ height: 300 }}>
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={arenaChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                          <XAxis dataKey="name" angle={-20} textAnchor="end" interval={0} height={70} />
-                          <YAxis />
-                          <ChartTooltip />
-                          <Bar dataKey="score" name="Arena 总分" fill="#2563EB" />
-                          <Bar dataKey="winRate" name="胜率(%)" fill="#16A34A" />
-                          <Bar dataKey="avgCaseScore" name="平均题目分" fill="#F97316" />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                    <Table
-                      size="small"
-                      rowKey="name"
-                      dataSource={arenaChartData}
-                      pagination={false}
-                      columns={[
-                        { title: '排名', dataIndex: 'rank', width: 80, render: (rank: number) => <Tag color={rank === 1 ? 'purple' : 'default'}>#{rank}</Tag> },
-                        { title: '渠道', dataIndex: 'name' },
-                        { title: 'Arena 总分', dataIndex: 'score', width: 120, render: (value: number) => value.toFixed(1) },
-                        { title: '胜率', dataIndex: 'winRate', width: 110, render: (value: number) => `${value.toFixed(1)}%` },
-                        { title: '平均题目分', dataIndex: 'avgCaseScore', width: 130, render: (value: number) => value.toFixed(1) },
-                        { title: '胜场/对战', width: 130, render: (_, row) => `${row.wins.toFixed(1)} / ${row.pairCount}` },
-                      ]}
-                    />
-                  </Space>
-                ) : (
-                  <Empty description="当前任务不是 Arena 模式，或暂无排名数据" />
-                ),
-              },
-              {
                 key: 'ai_verdict',
                 label: 'AI 判定',
                 children: aiVerdictNode,
               },
             ]}
           />
-        </Card>
-      ) : null}
-
-      {isPerformanceRun && summary ? (
-        <Card bordered={false} className="live-monitor-card">
-          <div className="live-monitor-header">
-            <div>
-              <Typography.Text className="brand-kicker">PERFORMANCE DIAGNOSTICS</Typography.Text>
-              <Typography.Title level={2}>性能诊断面板</Typography.Title>
-              <Typography.Paragraph>
-                这里展示单个或多个渠道各自的延迟、首 token、吞吐和失败率，不代表渠道是否接近官方 Claude 指纹。
-              </Typography.Paragraph>
-            </div>
-            <Tag color={data.run.status === 'running' ? 'processing' : 'default'}>{data.run.status === 'running' ? '实时刷新中' : '当前为静态快照'}</Tag>
-          </div>
-          <div className="channel-pair-grid">
-            <div className="monitor-stat-card"><span>成功率</span><strong>{summary.success_rate === null || summary.success_rate === undefined ? '-' : `${summary.success_rate.toFixed(1)}%`}</strong></div>
-            <div className="monitor-stat-card"><span>P95 延迟</span><strong>{summary.p95_latency_ms === null || summary.p95_latency_ms === undefined ? '-' : `${summary.p95_latency_ms.toFixed(0)} ms`}</strong></div>
-            <div className="monitor-stat-card"><span>平均 TTFT</span><strong>{summary.avg_ttft_ms === null || summary.avg_ttft_ms === undefined ? '-' : `${summary.avg_ttft_ms.toFixed(0)} ms`}</strong></div>
-            <div className="monitor-stat-card"><span>平均吞吐</span><strong>{summary.avg_tokens_per_second === null || summary.avg_tokens_per_second === undefined ? '-' : `${summary.avg_tokens_per_second.toFixed(1)} t/s`}</strong></div>
-          </div>
-          {performanceChartData.length ? (
-            <div style={{ height: 320 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={performanceChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="name" angle={-20} textAnchor="end" interval={0} height={70} />
-                  <YAxis />
-                  <ChartTooltip />
-                  <Bar dataKey="p95" name="P95 延迟(ms)" fill="#F97316" />
-                  <Bar dataKey="ttft" name="平均 TTFT(ms)" fill="#2563EB" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          ) : <Empty description="暂无性能指标" />}
-          <Table
-            rowKey="channel_id"
-            dataSource={summary.performance_by_channel}
-            pagination={false}
-            scroll={{ x: 900 }}
-            columns={[
-              { title: '渠道', dataIndex: 'channel_name', width: 220 },
-              { title: '成功率', dataIndex: 'success_rate', width: 120, render: (value: number) => value === undefined ? '-' : `${value.toFixed(1)}%` },
-              { title: 'P95 延迟', dataIndex: 'p95_latency_ms', width: 130, render: (value: number) => value === undefined || value === null ? '-' : `${value.toFixed(0)} ms` },
-              { title: 'TTFT', dataIndex: 'avg_ttft_ms', width: 120, render: (value: number) => value === undefined || value === null ? '-' : `${value.toFixed(0)} ms` },
-              { title: 'TPOT', dataIndex: 'avg_tpot_ms', width: 120, render: (value: number) => value === undefined || value === null ? '-' : `${value.toFixed(1)} ms` },
-              { title: '吞吐', dataIndex: 'avg_tokens_per_second', width: 130, render: (value: number) => value === undefined || value === null ? '-' : `${value.toFixed(1)} t/s` },
-            ]}
-          />
-        </Card>
-      ) : null}
-
-      {isArenaRun && summary ? (
-        <Card bordered={false} className="live-monitor-card">
-          <div className="live-monitor-header">
-            <div>
-              <Typography.Text className="brand-kicker">ARENA RANKING</Typography.Text>
-              <Typography.Title level={2}>Arena 排名面板</Typography.Title>
-              <Typography.Paragraph>
-                Arena 用于候选渠道之间的横向排名和样本分歧分析，不引用官方基线，因此不作为真实性结论。
-              </Typography.Paragraph>
-            </div>
-            <Tag color="purple">排名视图</Tag>
-          </div>
-          {arenaChartData.length ? (
-            <Space direction="vertical" size={16} style={{ width: '100%' }}>
-              {arenaRankingIsLive ? (
-                <Alert
-                  type="info"
-                  showIcon
-                  message="运行中临时排名"
-                  description={`当前排名只基于已返回的 ${arenaReturnedSamples} / ${arenaExpectedSamples} 个 Arena 样本，最终结果以任务完成后为准。`}
-                />
-              ) : null}
-              <div className="arena-explain-grid">
-                <section className="arena-explain-panel">
-                  <Typography.Text className="section-kicker">LEADER</Typography.Text>
-                  <Typography.Title level={4}>{arenaLeader?.name ?? '-'}</Typography.Title>
-                  <Typography.Paragraph>
-                    当前第一名 Arena 总分 {arenaLeader ? arenaLeader.score.toFixed(1) : '-'}，胜率 {arenaLeader ? arenaLeader.winRate.toFixed(1) : '-'}%。
-                    {arenaLeadMargin !== null ? ` 领先第二名 ${arenaLeadMargin.toFixed(1)} 分。` : ''}
-                  </Typography.Paragraph>
-                </section>
-                <section className="arena-explain-panel">
-                  <Typography.Text className="section-kicker">HOW TO READ</Typography.Text>
-                  <Typography.Title level={4}>先看总分，再看分歧样本</Typography.Title>
-                  <Typography.Paragraph>
-                    总分说明整体排名；胜率说明同题对战赢面；关键分歧样本解释低排名渠道主要输在哪些题上。
-                  </Typography.Paragraph>
-                </section>
-              </div>
-              <div className="arena-formula-panel">
-                <strong>Arena 总分 = 胜率 * 55% + 平均题目分 * 45%</strong>
-                <span>胜率来自候选渠道之间的同题两两比较，不代表接近官方渠道；平均题目分会受到答案质量、标签和延迟惩罚影响。</span>
-              </div>
-              <div className="arena-basis-panel">
-                <Typography.Text className="section-kicker">SCORING BASIS</Typography.Text>
-                <Typography.Title level={4}>样本分怎么算</Typography.Title>
-                <Typography.Paragraph>
-                  每个候选渠道先回答同一批题。系统用每题基础结果分作为主要依据，乘以 0.85；如果有有效文本会加少量补偿；延迟超过 5000ms 会扣分；最后乘题目权重并限制在 0-100。Arena 再用这些样本分做同题两两比较，得到胜场、胜率和总分。
-                </Typography.Paragraph>
-              </div>
-              <div style={{ height: 320 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={arenaChartData} margin={{ top: 12, right: 16, left: 0, bottom: 48 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="name" angle={-20} textAnchor="end" interval={0} height={70} />
-                    <YAxis />
-                    <ChartTooltip />
-                    <Bar dataKey="score" name="Arena 总分" fill="#2563EB" />
-                    <Bar dataKey="winRate" name="胜率(%)" fill="#16A34A" />
-                    <Bar dataKey="avgCaseScore" name="平均题目分" fill="#F97316" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-              <Table
-                rowKey="key"
-                dataSource={arenaChartData}
-                pagination={false}
-                scroll={{ x: 980 }}
-                columns={[
-                  { title: '排名', dataIndex: 'rank', width: 80, render: (rank: number) => <Tag color={rank === 1 ? 'purple' : 'default'}>#{rank}</Tag> },
-                  { title: '渠道', dataIndex: 'name', width: 220 },
-                  { title: 'Arena 总分', dataIndex: 'score', width: 120, render: (value: number) => value.toFixed(1) },
-                  { title: '胜率', dataIndex: 'winRate', width: 110, render: (value: number) => `${value.toFixed(1)}%` },
-                  { title: '平均题目分', dataIndex: 'avgCaseScore', width: 130, render: (value: number) => value.toFixed(1) },
-                  { title: '胜场/对战', width: 130, render: (_, row) => `${row.wins.toFixed(1)} / ${row.pairCount}` },
-                  { title: '样本数', dataIndex: 'caseCount', width: 100 },
-                  {
-                    title: '主要标签',
-                    width: 240,
-                    render: (_, row) => (
-                      <Space wrap size={4}>
-                        {(row.labels.length ? row.labels : ['无明显异常']).slice(0, 3).map((label) => (
-                          <Tag key={label} color={label === '无明显异常' ? 'green' : 'orange'}>{label}</Tag>
-                        ))}
-                      </Space>
-                    ),
-                  },
-                ]}
-              />
-              {arenaMatrixRows.length ? (
-                <Card bordered={false} title="胜负矩阵">
-                  <Typography.Paragraph type="secondary">
-                    单元格表示“行渠道 Arena 总分 - 列渠道 Arena 总分”。正数表示行渠道领先，负数表示行渠道落后；这是总分差，不是人工投票数。
-                  </Typography.Paragraph>
-                  <Table
-                    rowKey="key"
-                    size="small"
-                    dataSource={arenaMatrixRows}
-                    pagination={false}
-                    scroll={{ x: Math.max(720, arenaMatrixChannelIds.length * 150) }}
-                    columns={[
-                      { title: '渠道', dataIndex: 'channelName', fixed: 'left', width: 220 },
-                      ...arenaMatrixChannelIds.map((channelId) => ({
-                        title: channelById.get(channelId)?.name ?? channelId,
-                        dataIndex: channelId,
-                        width: 150,
-                        render: (value: number | null | undefined) =>
-                          value === null || value === undefined ? '-' : <Tag color={value >= 0 ? 'green' : 'red'}>{value > 0 ? '+' : ''}{Number(value).toFixed(1)}</Tag>,
-                      })),
-                    ]}
-                  />
-                </Card>
-              ) : null}
-              <Card bordered={false} title="关键分歧样本">
-                <Typography.Paragraph type="secondary">
-                  这些样本来自同题两两比较中的较大分差。分差越大，越能说明败方渠道在该题上的输出质量、错误标签或性能表现拖累了排名。
-                </Typography.Paragraph>
-                <Table
-                  rowKey="key"
-                  dataSource={arenaEvidenceRows}
-                  pagination={{ pageSize: 5, hideOnSinglePage: true }}
-                  locale={{ emptyText: <Empty description="暂无关键分歧样本" /> }}
-                  scroll={{ x: 960 }}
-                  columns={[
-                    {
-                      title: '题目',
-                      dataIndex: 'caseTitle',
-                      width: 260,
-                      render: (value: string, row) => (
-                        <Space direction="vertical" size={2}>
-                          <strong>{value}</strong>
-                          <Typography.Text type="secondary">{row.testCaseId}</Typography.Text>
-                        </Space>
-                      ),
-                    },
-                    { title: '胜方', dataIndex: 'winnerName', width: 180, render: (value: string) => <Tag color="green">{value}</Tag> },
-                    { title: '败方', dataIndex: 'loserName', width: 180, render: (value: string) => <Tag color="red">{value}</Tag> },
-                    { title: '分差', dataIndex: 'margin', width: 100, render: (value: number) => value.toFixed(1) },
-                    { title: '样本分', width: 150, render: (_, row) => `${row.winnerScore.toFixed(1)} / ${row.loserScore.toFixed(1)}` },
-                    {
-                      title: '标签',
-                      width: 220,
-                      render: (_, row) => (
-                        <Space wrap size={4}>
-                          {(row.labels.length ? row.labels : ['无标签']).map((label) => <Tag key={label}>{label}</Tag>)}
-                        </Space>
-                      ),
-                    },
-                  ]}
-                />
-              </Card>
-            </Space>
-          ) : <Empty description="暂无 Arena 排名数据" />}
         </Card>
       ) : null}
 

@@ -70,20 +70,6 @@ import type {
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const ADMIN_KEY_STORAGE_KEY = 'apipro.adminApiKey';
 
-type ArenaRunCreatePayload = {
-  name: string;
-  suite_id: string;
-  candidate_channel_ids: string[];
-  judge_channel_id?: string | null;
-  repeat_count: number;
-  concurrency: number;
-  use_mock?: boolean;
-  test_scope?: TestScope;
-  runtime_credentials?: Record<string, Record<string, unknown>>;
-  judge_mode?: string;
-  judge_rubric?: string | null;
-};
-
 type AlertFilters = {
   status?: string;
   channel_id?: string;
@@ -252,7 +238,6 @@ export const api = {
   runSummary: (runId: string) => request<RunSummary>(`/api/runs/${runId}/summary`),
   startRun: (payload: RunCreate) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
   samplePlan: (payload: SamplePlanCreate) => request<SamplePlan>('/api/runs/sample-plan', { method: 'POST', body: JSON.stringify(payload) }),
-  startArenaRun: (payload: ArenaRunCreatePayload) => request<Run>('/api/runs/arena', { method: 'POST', body: JSON.stringify(payload) }),
   baselines: (suiteId?: string) => request<BaselineSnapshot[]>(suiteId ? `/api/baselines?suite_id=${encodeURIComponent(suiteId)}` : '/api/baselines'),
   baseline: (id: string) => request<BaselineSnapshot>(`/api/baselines/${id}`),
   baselineResults: (id: string) => request<BaselineResult[]>(`/api/baselines/${id}/results`),

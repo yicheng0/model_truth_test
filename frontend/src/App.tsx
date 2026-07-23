@@ -1,14 +1,12 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Typography } from 'antd';
-import { Activity, BarChart3, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, Layers, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare, Trophy } from 'lucide-react';
+import { Activity, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, Layers, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
 const Baselines = lazy(() => import('./pages/Baselines'));
 const CreateRun = lazy(() => import('./pages/CreateRun'));
-const CreatePerformanceRun = lazy(() => import('./pages/CreatePerformanceRun'));
-const CreateArenaRun = lazy(() => import('./pages/CreateArenaRun'));
 const Runs = lazy(() => import('./pages/Runs'));
 const RunDetail = lazy(() => import('./pages/RunDetail'));
 const TestCases = lazy(() => import('./pages/TestCases'));
@@ -61,8 +59,6 @@ const navItems = [
   { key: '/baselines', icon: Database, label: '渠道指纹', to: '/baselines' },
   { key: '/scheduled-tests', icon: CalendarClock, label: '自动巡检', to: '/scheduled-tests' },
   { key: '/new-run', icon: ListChecks, label: '新建任务', to: '/new-run' },
-  { key: '/new-performance', icon: BarChart3, label: '性能诊断', to: '/new-performance' },
-  { key: '/new-arena', icon: Trophy, label: 'Arena 排名', to: '/new-arena' },
   { key: '/runs', icon: GitCompare, label: '任务列表', to: '/runs' },
 ];
 
@@ -153,8 +149,6 @@ function Shell() {
               <Route path="/scheduled-tests" element={<ScheduledTests />} />
               <Route path="/resource-log-management" element={<ResourceLogManagement />} />
               <Route path="/new-run" element={<CreateRun />} />
-              <Route path="/new-performance" element={<CreatePerformanceRun />} />
-              <Route path="/new-arena" element={<CreateArenaRun />} />
               <Route path="/runs" element={<Runs />} />
               <Route path="/runs/:runId" element={<RunDetail />} />
               <Route path="/reports" element={<ReportsPage />} />
