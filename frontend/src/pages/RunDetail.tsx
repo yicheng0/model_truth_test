@@ -161,8 +161,7 @@ function SignatureRequestLogDetail({ item }: { item: PatrolSignatureRequestLog }
         <div><span>时间</span><Typography.Text>{formatDateTime(item.completedAt ?? item.startedAt)}</Typography.Text></div>
         <div><span>HTTP 状态</span><Typography.Text code>{item.httpStatus ?? '-'}</Typography.Text></div>
         <div><span>上游响应 ID（Message ID）</span><SignatureIdText value={item.messageId} /></div>
-        <div><span>请求 ID</span><SignatureIdText value={item.gatewayRequestId} /></div>
-        <div><span>上游请求 ID</span><SignatureIdText value={item.upstreamRequestId ?? item.responseHeaderRequestId ?? item.requestId} /></div>
+        <div><span>Request ID</span><SignatureIdText value={item.requestId} /></div>
         <div><span>响应头 Request ID</span><SignatureIdText value={item.responseHeaderRequestId} /></div>
         <div><span>耗时</span><Typography.Text>{item.latencyMs === null || item.latencyMs === undefined ? '-' : `${item.latencyMs} ms`}</Typography.Text></div>
         <div className="full"><span>Endpoint</span><Typography.Text copyable={item.endpoint ? { text: item.endpoint } : false}>{item.endpoint || '-'}</Typography.Text></div>
@@ -337,11 +336,10 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
               { title: '时间', width: 180, render: (_, item) => formatDateTime(item.completedAt ?? item.startedAt) },
               { title: 'HTTP', width: 90, render: (_, item) => item.httpStatus ?? '-' },
               { title: '上游响应 ID（Message ID）', width: 230, render: (_, item) => <SignatureIdText value={item.messageId} /> },
-              { title: '请求 ID', width: 210, render: (_, item) => <SignatureIdText value={item.gatewayRequestId} /> },
-              { title: '上游请求 ID', width: 210, render: (_, item) => <SignatureIdText value={item.upstreamRequestId ?? item.responseHeaderRequestId ?? item.requestId} /> },
+              { title: 'Request ID', width: 210, render: (_, item) => <SignatureIdText value={item.requestId} /> },
               { title: '错误', render: (_, item) => <Typography.Text type={item.error ? 'danger' : undefined}>{compactPatrolText(item.error)}</Typography.Text> },
             ]}
-            scroll={{ x: 1290 }}
+            scroll={{ x: 1080 }}
           />
         </div>
       ) : null}

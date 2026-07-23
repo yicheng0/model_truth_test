@@ -236,11 +236,10 @@ export default function ReportDetailPage() {
                       { title: '时间', width: 180, render: (_, row) => formatDateTime(String(row.completed_at ?? row.started_at ?? '')) },
                       { title: 'HTTP', width: 90, render: (_, row) => String(row.http_status ?? '-') },
                       { title: '上游响应 ID（Message ID）', width: 220, render: (_, row) => compactId(row.response_id ?? row.message_id) },
-                      { title: '请求 ID', width: 190, render: (_, row) => compactId(row.gateway_request_id) },
-                      { title: '上游请求 ID', width: 190, render: (_, row) => compactId(row.upstream_request_id ?? row.response_header_request_id ?? row.request_id) },
+                      { title: 'Request ID', width: 190, render: (_, row) => compactId(row.request_id) },
                       { title: '错误', render: (_, row) => stringValue(row.error) },
                     ]}
-                    scroll={{ x: 1140 }}
+                    scroll={{ x: 950 }}
                   />
                 ) : null}
               </div>
