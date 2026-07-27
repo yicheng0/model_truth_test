@@ -4382,7 +4382,7 @@ SCHEDULED_IDENTITY_PROBE: dict[str, Any] = {
     "key": "identity_self_report",
     "title": "固定身份探针",
     "prompt": "你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。",
-    "request_params": {"max_tokens": 120, "temperature": 0},
+    "request_params": {"max_tokens": 120},
     "scoring_rules": {"scheduled_identity_probe": True},
 }
 
@@ -11908,7 +11908,6 @@ async def _signature_interop_result_with_identity(
     identity_payload = {
         "model": str(relay_credentials.get("model") or relay.model_name or model),
         "max_tokens": 120,
-        "temperature": 0,
         "messages": [{"role": "user", "content": SIGNATURE_IDENTITY_PROMPT}],
     }
     identity_response, identity_meta = await _signature_messages_call(

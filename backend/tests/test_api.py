@@ -2685,6 +2685,12 @@ def test_scheduled_identity_probe_treats_self_report_as_supporting_evidence(text
     assert set(labels) == expected_labels
 
 
+def test_scheduled_identity_probe_omits_temperature_to_avoid_model_deprecation_errors() -> None:
+    from app.services import SCHEDULED_IDENTITY_PROBE
+
+    assert SCHEDULED_IDENTITY_PROBE["request_params"] == {"max_tokens": 120}
+
+
 def test_scheduled_identity_probe_request_failure_is_not_treated_as_identity_pass() -> None:
     channel = Channel(id="identity_candidate", name="Identity Candidate", provider_type="third_party_anthropic", role="candidate")
     case = TestCaseModel(
@@ -6224,6 +6230,7 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert calls[1]["json"]["messages"][1]["content"][0]["signature"] == "sig-source-compatible"
     assert calls[0]["json"]["thinking"] == {"type": "enabled", "budget_tokens": 2000}
     assert calls[1]["json"]["thinking"] == {"type": "enabled", "budget_tokens": 2000}
+    assert "temperature" not in calls[2]["json"]
     with SessionLocal() as db:
         assert db.get(Run, payload["run"]["id"]) is not None
         assert db.get(Result, payload["result"]["id"]) is not None
