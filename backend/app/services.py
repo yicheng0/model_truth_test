@@ -1142,6 +1142,13 @@ from the high barbacans: and at the meeting of their rays a cloud of
 coalsmoke and fumes of fried grease floated, turning.
 """.strip()
 SIGNATURE_INVALID_ERROR = "Invalid `signature` in `thinking` block"
+SIGNATURE_NOT_COMPARABLE_ERRORS = (
+    "no permission to access model",
+    "model not found",
+    "model is not available",
+    "model is unavailable",
+    "unsupported model",
+)
 SIGNATURE_TEST_PROMPT_A = "请用中文解释：为什么 0.1 + 0.2 不等于 0.3？请展示完整推理过程。"
 SIGNATURE_TEST_PROMPT_B = "好的，那 0.1 + 0.2 + 0.3 == 0.6 是否成立？"
 SIGNATURE_IDENTITY_PROMPT = "Hi，请问你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"
@@ -5213,6 +5220,7 @@ async def create_claude_code_test(
         },
         probes,
     )
+    client_fingerprint = _claude_client_fingerprint_assessment(None)
     upstream_integrity = _claude_upstream_integrity_assessment(
         [],
         baseline_configured=bool(source_channel_id),
@@ -5248,6 +5256,7 @@ async def create_claude_code_test(
         **classification,
         **access_path,
         "resource_identity": resource_identity,
+        "client_fingerprint": client_fingerprint,
         "upstream_integrity": upstream_integrity,
         "fast_mode_assessment": fast_mode_assessment,
         "probes": probes,
@@ -5821,7 +5830,13 @@ def _claude_code_normalize_optional_probe(probe: dict[str, Any]) -> dict[str, An
     if section == "signature" and probe.get("status") == "fail" and _claude_probe_is_not_supported(probe):
         normalized = dict(probe)
         normalized["status"] = "warning"
-        normalized["labels"] = sorted(set(str(label) for label in (probe.get("labels") or [])) | {"signature_not_supported"})
+        normalized_labels = sorted(set(str(label) for label in (probe.get("labels") or [])) | {"signature_not_supported"})
+        explanations = label_explanations(normalized_labels)
+        normalized["labels"] = normalized_labels
+        normalized["label_explanations"] = explanations
+        normalized["reason"] = "；".join(item["description"] for item in explanations)
+        if probe.get("error_detail"):
+            normalized["reason"] += f" 上游原因：{probe['error_detail']}"
         return normalized
     return probe
 
@@ -6475,6 +6490,71 @@ def _claude_resource_identity_assessment(
             "Thinking signature、Claude Code headers、attribution 和模型发现不证明 Claude Code OAuth 资源来源。",
             "自定义网关后的 API Key、OAuth、云凭据和透明代理必须通过网关日志、账单或 request-id 回查确认。",
         ],
+    }
+
+
+def _claude_client_fingerprint_assessment(observed_request: dict[str, Any] | None) -> dict[str, Any]:
+    """Classify the caller only when a gateway captured the inbound request.
+
+    The existing fingerprint runner creates Claude Code-shaped probes itself, so
+    those probes are deliberately excluded from this assessment.
+    """
+    if not isinstance(observed_request, dict):
+        return {
+            "client_likelihood": "unobservable",
+            "client_confidence": "low",
+            "origin_verified": False,
+            "evidence_mode": "active_probe_only",
+            "evidence": [],
+            "reason": "当前检测器只发起主动探针，没有捕获被测请求的原始入站客户端信息。",
+            "limitations": ["请求头和请求序列可被客户端或网关伪造；来源仍需控制面或 request-id 回查。"],
+        }
+
+    header_names = {str(name).strip().lower() for name in observed_request.get("request_header_names") or []}
+    evidence: list[str] = []
+    if "x-claude-code-session-id" in header_names:
+        evidence.append("session_header")
+    if "x-claude-code-agent-id" in header_names or "x-claude-code-parent-agent-id" in header_names:
+        evidence.append("agent_headers")
+    beta_headers = bool(observed_request.get("claude_code_beta_headers")) or "anthropic-beta" in header_names
+    if beta_headers:
+        evidence.append("cli_beta_headers")
+    if observed_request.get("attribution_first") is True:
+        evidence.append("attribution_block")
+
+    sequence = [str(item).strip().lower() for item in observed_request.get("endpoint_sequence") or []]
+    if len(sequence) >= 2 and "messages" in sequence and any(item in sequence for item in ("count_tokens", "models")):
+        evidence.append("multi_request_sequence")
+    session_ids = [str(item) for item in observed_request.get("session_ids") or [] if str(item)]
+    if len(session_ids) >= 2 and len(set(session_ids)) == 1:
+        evidence.append("session_continuity")
+    if observed_request.get("tool_roundtrip") is True:
+        evidence.append("tool_roundtrip")
+    if observed_request.get("retry_after_error") is True:
+        evidence.append("cli_retry_pattern")
+
+    strong_count = sum(item in evidence for item in ("session_header", "attribution_block", "cli_beta_headers"))
+    sequence_count = sum(item in evidence for item in ("multi_request_sequence", "session_continuity", "tool_roundtrip", "cli_retry_pattern"))
+    if strong_count >= 2 and sequence_count >= 2:
+        likelihood, confidence = "claude_code_like", "high"
+        reason = "捕获到 Claude Code 专用头、attribution 及连续请求序列；这是高概率客户端指纹，不是来源认证。"
+    elif strong_count >= 1 and sequence_count >= 1:
+        likelihood, confidence = "claude_code_like", "medium"
+        reason = "捕获到部分 Claude Code 客户端特征；需要更多真实请求序列或控制面证据。"
+    elif sequence == ["messages"] or ("anthropic-version" in header_names and not strong_count):
+        likelihood, confidence = "api_direct_like", "medium"
+        reason = "只观察到普通 Messages API 请求特征，未观察到 Claude Code 专用客户端序列。"
+    else:
+        likelihood, confidence = "mixed_or_relay", "low"
+        reason = "请求特征不足或存在中转改写可能，无法稳定归类客户端。"
+    return {
+        "client_likelihood": likelihood,
+        "client_confidence": confidence,
+        "origin_verified": False,
+        "evidence_mode": "inbound_request_observed",
+        "evidence": evidence,
+        "reason": reason,
+        "limitations": ["请求头、attribution 和请求序列均可被代理或客户端伪造；来源仍需控制面或 request-id 回查。"],
     }
 
 
@@ -11409,6 +11489,36 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     source_endpoint = _anthropic_messages_url(source_credentials.get("base_url") or source.base_url)
     relay_endpoint = _anthropic_messages_url(relay_credentials.get("base_url") or relay.base_url)
     model = source_credentials.get("model") or source.model_name or "claude-opus-4-6"
+    relay_configured_model = str(relay_credentials.get("model") or relay.model_name or model)
+    if _signature_model_comparison_key(str(model)) != _signature_model_comparison_key(relay_configured_model):
+        reason = f"模型不可比：source={model}，relay={relay_configured_model}，未发送跨模型 Signature 互验请求"
+        steps = [
+            {
+                "name": "模型/协议可比性",
+                "status": "fail",
+                "detail": reason,
+                "excerpt": None,
+                "endpoint": relay_endpoint,
+            },
+            {"name": "最终判定", "status": "fail", "detail": reason, "excerpt": None},
+        ]
+        return await _signature_interop_result_with_identity(
+            ok=False,
+            reason=reason,
+            source=source,
+            relay=relay,
+            source_endpoint=source_endpoint,
+            relay_endpoint=relay_endpoint,
+            model=str(model),
+            response_a={},
+            response_b={"error": reason},
+            thinking_blocks=[],
+            steps=steps,
+            source_protocol_profile=claude_protocol_profile_for_model(str(model)),
+            relay_protocol_profile=claude_protocol_profile_for_model(relay_configured_model),
+            request_normalization_notes=[],
+            classification="not_comparable",
+        )
     steps: list[dict[str, Any]] = [
         {
             "name": "步骤 A：请求 Source thinking",
@@ -11575,7 +11685,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     )
 
     model = response_a.get("model") or model
-    relay_model = str(relay_credentials.get("model") or relay.model_name or model)
+    relay_model = relay_configured_model
     relay_payload, relay_protocol_profile, relay_normalization_notes = _signature_thinking_request_body(
         relay_model,
         [
@@ -11598,7 +11708,12 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     response_b, relay_meta = await _signature_messages_call(relay_endpoint, relay_credentials["api_key"], relay_payload)
     if not relay_meta.get("ok"):
         raw = str(relay_meta.get("error") or "")
-        reason = "signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败"
+        not_comparable = _signature_error_is_not_comparable(raw)
+        reason = (
+            "模型或渠道不可比：relay 无权访问 source 使用的模型，未进入 Signature 校验"
+            if not_comparable
+            else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败")
+        )
         steps[-1] = _signature_step_from_meta(
             "步骤 B：发送 Relay 复用请求",
             relay_meta,
@@ -11625,15 +11740,21 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
             raw_error=raw or None,
             error_http_status=relay_meta.get("http_status"),
             error_stage="relay",
+            classification="not_comparable" if not_comparable else None,
         )
 
     raw_b = json.dumps(response_b, ensure_ascii=False)
     has_error = response_b.get("type") == "error" or response_b.get("error") is True or isinstance(response_b.get("error"), dict)
-    ok = not has_error and SIGNATURE_INVALID_ERROR not in raw_b
+    not_comparable = _signature_error_is_not_comparable(_signature_payload_error_detail(response_b) or relay_meta.get("error") or raw_b)
+    ok = not has_error and SIGNATURE_INVALID_ERROR not in raw_b and not not_comparable
     reason = (
         "兼容：relay 成功接受 source 的 thinking block signature"
         if ok
-        else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw_b else "relay 请求失败")
+        else (
+            "模型或渠道不可比：relay 无权访问 source 使用的模型，未进入 Signature 校验"
+            if not_comparable
+            else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw_b else "relay 请求失败")
+        )
     )
     body_error = None if ok else (_signature_payload_error_detail(response_b) or relay_meta.get("error") or raw_b[:1200])
     relay_meta["ok"] = ok
@@ -11664,6 +11785,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         raw_error=(str(body_error).strip() or None) if body_error else None,
         error_http_status=relay_meta.get("http_status"),
         error_stage="relay" if not ok else None,
+        classification="not_comparable" if not_comparable else None,
     )
 
 
@@ -11754,13 +11876,13 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
                     for label in (result_payload.get("identity_labels") or [])
                     if str(label) in {"identity_mismatch", "kiro_identity_leak", "suspected_model_swap"}
                 ),
-                *([] if result_payload.get("ok") else ["signature_interop_failed"]),
+                *([] if result_payload.get("ok") or result_payload.get("classification") == "not_comparable" else ["signature_interop_failed"]),
             }
         ),
     )
     run.completed_jobs = 1
     run.finished_at = finished_at
-    run.status = "completed" if result_payload.get("ok") else "failed"
+    run.status = "completed" if result_payload.get("ok") or result_payload.get("classification") == "not_comparable" else "failed"
     db.add(result)
     db.commit()
     db.refresh(run)
@@ -11903,6 +12025,7 @@ async def _signature_interop_result_with_identity(
     raw_error: str | None = None,
     error_http_status: int | None = None,
     error_stage: str | None = None,
+    classification: str | None = None,
 ) -> dict[str, Any]:
     relay_credentials = _merged_channel_credentials(relay, {})
     identity_payload = {
@@ -11981,6 +12104,7 @@ async def _signature_interop_result_with_identity(
         raw_error=raw_error,
         error_http_status=error_http_status,
         error_stage=error_stage,
+        classification=classification,
     )
 
 
@@ -12093,6 +12217,16 @@ def _signature_payload_error_detail(payload: Any) -> str | None:
     return None
 
 
+def _signature_error_is_not_comparable(error: str | None) -> bool:
+    normalized = str(error or "").strip().lower()
+    return any(marker in normalized for marker in SIGNATURE_NOT_COMPARABLE_ERRORS)
+
+
+def _signature_model_comparison_key(model_name: str | None) -> str:
+    normalized = str(model_name or "").strip().lower()
+    return re.sub(r"-(?:low|medium|high|xhigh|max)$", "", normalized)
+
+
 def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
     events: list[str] = []
     message: dict[str, Any] = {"type": "message", "id": None, "content": []}
@@ -12193,6 +12327,7 @@ def _signature_interop_result(
     raw_error: str | None = None,
     error_http_status: int | None = None,
     error_stage: str | None = None,
+    classification: str | None = None,
 ) -> dict[str, Any]:
     relay_raw_excerpt = json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:3000]
     source_message_id = response_a.get("id")
@@ -12236,9 +12371,12 @@ def _signature_interop_result(
                     "response_excerpt": _signature_log_payload(response),
                 }
             )
+    resolved_classification = classification or ("pass" if ok else "fail")
+    resolved_status = "pass" if ok else ("not_comparable" if resolved_classification == "not_comparable" else "fail")
     return {
         "ok": ok,
-        "status": "pass" if ok else "fail",
+        "status": resolved_status,
+        "classification": resolved_classification,
         "reason": reason,
         "raw_error": (str(raw_error).strip() or None) if raw_error else None,
         "error_http_status": error_http_status,
@@ -12268,7 +12406,7 @@ def _signature_interop_result(
         "labels": sorted(
             {
                 *(str(label) for label in (identity_labels or []) if str(label)),
-                *([] if ok else ["signature_interop_failed"]),
+                *([] if ok or resolved_classification == "not_comparable" else ["signature_interop_failed"]),
             }
         ),
         "request_logs": request_logs,
@@ -13755,7 +13893,8 @@ LABEL_EXPLANATIONS = {
     "provider_request_failed": "请求因未知服务端、网络或超时错误失败，未获得可用于真伪判断的响应。",
     "image_url_not_supported": "URL 图片输入不被当前渠道支持，常见于 Bedrock、Vertex 或部分中转；作为能力参考跳过。",
     "document_block_not_supported": "document block 不被当前渠道支持；文本 fallback 仍可用于验证内容读取能力。",
-    "signature_not_supported": "当前链路不支持或未透传 Thinking Signature，说明 ClaudeCode 链路不可验证。",
+    "thinking_signature_missing": "观测：响应 content 中未发现带非空 signature 的 thinking block。影响：本轮无法验证 Thinking Signature 是否被模型生成并由网关完整透传；该项不单独证明非 Claude，也不能证明 Claude Code 资源来源。复核：查看原始响应的 content block 类型与 signature 字段，并确认当前模型、协议及网关是否支持 adaptive thinking。",
+    "signature_not_supported": "观测：上游拒绝了 Thinking Signature 探针，或当前链路未返回可验证的 signature。影响：Claude thinking 签名链路不可验证，但不单独影响普通 Claude 兼容性判断。复核：检查上游错误、请求中的 thinking/output_config，以及网关是否裁剪 thinking block。",
     "web_search_supported": "检测到 Anthropic server-side Web Search 调用、结果、引用或 usage 证据。",
     "web_search_tool_error": "Web Search 已被调用，但 server tool 返回了错误；需要结合错误码复核。",
     "web_search_not_supported": "server-side Web Search 工具不被当前渠道支持，作为能力参考跳过。",
@@ -13770,7 +13909,14 @@ def label_explanations(labels: list[str]) -> list[dict[str, str]]:
     explanations = []
     for label in labels:
         base_label = label.split(":", 1)[0] if ":" in label else label
-        explanations.append({"label": label, "description": LABEL_EXPLANATIONS.get(label) or LABEL_EXPLANATIONS.get(base_label) or "检测项返回异常，需要结合原始响应复核。"})
+        description = LABEL_EXPLANATIONS.get(label) or LABEL_EXPLANATIONS.get(base_label)
+        if not description:
+            description = (
+                f"观测：检测规则返回标签「{label}」，但当前版本未配置该标签的专用解释。"
+                "影响：暂不能仅凭此标签判断渠道真实性或能力范围。"
+                "复核：结合该探针的请求、原始响应、HTTP 状态和错误详情定位，并补充标签解释。"
+            )
+        explanations.append({"label": label, "description": description})
     return explanations
 
 

@@ -327,6 +327,7 @@ class SignatureInteropRequestLogRead(BaseModel):
 class SignatureInteropTestRead(BaseModel):
     ok: bool
     status: str
+    classification: str = "fail"
     reason: str
     run: "RunRead | None" = None
     result: "ResultRead | None" = None
@@ -774,6 +775,7 @@ class ClaudeCodeTestRead(BaseModel):
     access_path_caveat: str | None = None
     access_path_evidence: list[dict[str, Any]] = Field(default_factory=list)
     resource_identity: dict[str, Any] = Field(default_factory=dict)
+    client_fingerprint: dict[str, Any] = Field(default_factory=dict)
     upstream_integrity: dict[str, Any] = Field(default_factory=dict)
     fast_mode_assessment: dict[str, Any] = Field(default_factory=dict)
     capability_flags: dict[str, Any] = Field(default_factory=dict)
@@ -784,7 +786,7 @@ class ClaudeCodeTestRead(BaseModel):
     probes: list[ClaudeCodeProbeResultRead] = Field(default_factory=list)
     sections: list[ClaudeCodeSectionRead] = Field(default_factory=list)
 
-    @field_serializer("resource_identity", "upstream_integrity", "fast_mode_assessment")
+    @field_serializer("resource_identity", "client_fingerprint", "upstream_integrity", "fast_mode_assessment")
     def serialize_identity_evidence(self, value: Any) -> Any:
         return redact_signatures(redact_secrets(value))
 

@@ -6608,6 +6608,123 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
     assert "signature 不兼容" in payload["steps"][-1]["detail"]
 
 
+def test_signature_interop_marks_model_permission_error_not_comparable(monkeypatch) -> None:
+    reset_database()
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_source",
+                        "type": "message",
+                        "model": "claude-opus-5",
+                        "content": [{"type": "thinking", "thinking": "x", "signature": "sig-source"}],
+                    },
+                    request=request,
+                )
+            if calls == 2:
+                return httpx.Response(
+                    500,
+                    json={"type": "error", "error": {"message": "No permission to access model: claude-opus-5"}},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={"id": "msg_identity", "type": "message", "model": "claude-opus-5", "content": [{"type": "text", "text": "我是 Claude。"}]},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Signature Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-5", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Signature Relay", "provider_type": "anthropic", "base_url": "https://relay.example/v1", "model_name": "claude-opus-5", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+        response = client.post("/api/channels/signature-interop-test", json={"source_channel_id": source_id, "relay_channel_id": relay_id})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["classification"] == "not_comparable"
+    assert payload["status"] == "not_comparable"
+    assert payload["result"]["labels"] == []
+    assert "signature_interop_failed" not in payload["labels"]
+
+
+def test_signature_interop_skips_cross_model_signature_validation(monkeypatch) -> None:
+    reset_database()
+    calls: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            calls.append({"url": url, "json": json})
+            request = httpx.Request("POST", url)
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_source",
+                        "type": "message",
+                        "model": "claude-opus-5",
+                        "content": [{"type": "thinking", "thinking": "x", "signature": "sig-source"}],
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={"id": "msg_identity", "type": "message", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "我是 Claude。"}]},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Signature Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-5", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Signature Relay", "provider_type": "anthropic", "base_url": "https://relay.example/v1", "model_name": "claude-opus-4-7", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+        response = client.post("/api/channels/signature-interop-test", json={"source_channel_id": source_id, "relay_channel_id": relay_id})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["classification"] == "not_comparable"
+    assert payload["status"] == "not_comparable"
+    assert payload["result"]["labels"] == []
+    assert len(calls) == 1
+    assert calls[0]["json"]["messages"] == [{"role": "user", "content": "Hi，请问你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"}]
+
+
 def test_signature_interop_streaming_extracts_relay_message_id(monkeypatch) -> None:
     reset_database()
     calls: list[dict] = []
@@ -8158,6 +8275,64 @@ def test_claude_code_access_path_assessment_separates_origin_from_protocol(base_
     assert "response-only" in result["access_path_caveat"]
 
 
+def test_claude_client_fingerprint_requires_observed_inbound_request() -> None:
+    from app.services import _claude_client_fingerprint_assessment
+
+    result = _claude_client_fingerprint_assessment(None)
+
+    assert result["client_likelihood"] == "unobservable"
+    assert result["client_confidence"] == "low"
+    assert result["origin_verified"] is False
+    assert result["evidence_mode"] == "active_probe_only"
+
+
+def test_claude_client_fingerprint_classifies_observed_cli_sequence() -> None:
+    from app.services import _claude_client_fingerprint_assessment
+
+    result = _claude_client_fingerprint_assessment(
+        {
+            "request_header_names": [
+                "anthropic-version",
+                "anthropic-beta",
+                "x-claude-code-session-id",
+                "x-claude-code-agent-id",
+            ],
+            "attribution_first": True,
+            "endpoint_sequence": ["count_tokens", "messages", "models"],
+            "session_ids": ["cc-session-1", "cc-session-1", "cc-session-1"],
+            "tool_roundtrip": True,
+            "retry_after_error": True,
+        }
+    )
+
+    assert result["client_likelihood"] == "claude_code_like"
+    assert result["client_confidence"] == "high"
+    assert result["origin_verified"] is False
+    assert {
+        "session_header",
+        "attribution_block",
+        "cli_beta_headers",
+        "multi_request_sequence",
+        "session_continuity",
+    }.issubset(set(result["evidence"]))
+
+
+def test_claude_client_fingerprint_marks_plain_messages_as_api_like() -> None:
+    from app.services import _claude_client_fingerprint_assessment
+
+    result = _claude_client_fingerprint_assessment(
+        {
+            "request_header_names": ["anthropic-version"],
+            "endpoint_sequence": ["messages"],
+            "session_ids": [],
+        }
+    )
+
+    assert result["client_likelihood"] == "api_direct_like"
+    assert result["client_confidence"] == "medium"
+    assert result["origin_verified"] is False
+
+
 def test_claude_code_gateway_probe_configs_use_client_contract_without_secrets() -> None:
     from app.services import _claude_code_probe_configs
 
@@ -8845,6 +9020,49 @@ def test_claude_fingerprint_keeps_signature_support_separate_from_claude_code_re
     assert classification["capability_flags"]["signature_supported"] is True
     assert classification["capability_flags"]["is_claude_code_like"] is False
     assert classification["capability_flags"]["claude_code_gateway_compatible"] is False
+
+
+def test_claude_code_warning_explanations_state_observation_impact_and_review_action() -> None:
+    from app.services import label_explanations
+
+    descriptions = {
+        item["label"]: item["description"]
+        for item in label_explanations(["thinking_signature_missing", "signature_not_supported", "unknown_warning_label"])
+    }
+
+    assert "观测：" in descriptions["thinking_signature_missing"]
+    assert "影响：" in descriptions["thinking_signature_missing"]
+    assert "复核：" in descriptions["thinking_signature_missing"]
+    assert "不单独" in descriptions["signature_not_supported"]
+    assert "unknown_warning_label" in descriptions["unknown_warning_label"]
+    assert "未配置" in descriptions["unknown_warning_label"]
+
+
+def test_optional_signature_warning_refreshes_reason_after_adding_support_label() -> None:
+    from app.services import _claude_code_normalize_optional_probe
+
+    probe = _claude_code_normalize_optional_probe(
+        {
+            "key": "thinking_signature",
+            "title": "Thinking signature",
+            "section": "signature",
+            "severity": "core",
+            "status": "fail",
+            "score": 0,
+            "labels": ["thinking_signature_missing"],
+            "reason": "检测项返回异常，需要结合原始响应复核。",
+            "label_explanations": [],
+            "evidence_excerpt": "400 Bad Request: thinking signature not supported",
+            "error_detail": "thinking signature not supported",
+        }
+    )
+
+    assert probe["status"] == "warning"
+    assert probe["labels"] == ["signature_not_supported", "thinking_signature_missing"]
+    assert {item["label"] for item in probe["label_explanations"]} == set(probe["labels"])
+    assert "检测项返回异常" not in probe["reason"]
+    assert "观测：" in probe["reason"]
+    assert "影响：" in probe["reason"]
 
 
 def test_claude_code_gateway_compatibility_uses_current_cli_contract_without_session_header() -> None:
