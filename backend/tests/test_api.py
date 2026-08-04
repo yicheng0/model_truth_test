@@ -6465,6 +6465,7 @@ def test_signature_interop_uses_adaptive_thinking_for_opus_48(monkeypatch) -> No
     assert response.status_code == 200
     assert calls[0]["json"]["thinking"] == {"type": "adaptive"}
     assert calls[0]["json"]["output_config"] == {"effort": "high"}
+    assert "stream" not in calls[0]["json"]
     assert calls[1]["json"]["thinking"] == {"type": "adaptive"}
     assert calls[1]["json"]["output_config"] == {"effort": "medium"}
     assert "temperature" not in calls[0]["json"]
@@ -6472,6 +6473,38 @@ def test_signature_interop_uses_adaptive_thinking_for_opus_48(monkeypatch) -> No
     assert payload["source_protocol_profile"] == "claude_adaptive_thinking"
     assert payload["relay_protocol_profile"] == "claude_adaptive_thinking"
     assert any("4.7/4.8" in note for note in payload["request_normalization_notes"])
+
+
+def test_signature_interop_streams_source_thinking_when_stream_mode_enabled(monkeypatch) -> None:
+    reset_database()
+    calls: list[dict] = []
+    async def fake_signature_call(endpoint, api_key, payload):  # noqa: ANN001
+        calls.append({"endpoint": endpoint, "json": payload})
+        if len(calls) == 1:
+            return {"id": "msg_source", "type": "message", "model": "claude-opus-4-7", "content": [{"type": "thinking", "thinking": "x", "signature": "sig-source"}]}, {"ok": True, "http_status": 200, "message_id": "msg_source", "endpoint": endpoint}
+        if len(calls) == 2:
+            return {"id": "msg_relay", "type": "message", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "ok"}]}, {"ok": True, "http_status": 200, "message_id": "msg_relay", "endpoint": endpoint}
+        return {"id": "msg_identity", "type": "message", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "我是 Claude。"}]}, {"ok": True, "http_status": 200, "message_id": "msg_identity", "endpoint": endpoint}
+
+    monkeypatch.setattr("app.services._signature_messages_call", fake_signature_call)
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Stream Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-7", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Stream Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-7", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id, "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert calls[0]["json"]["stream"] is True
+    assert calls[1]["json"]["stream"] is True
 
 
 def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> None:

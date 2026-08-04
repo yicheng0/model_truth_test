@@ -11532,6 +11532,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     source_payload, source_protocol_profile, source_normalization_notes = _signature_thinking_request_body(
         str(model),
         [{"role": "user", "content": SIGNATURE_TEST_PROMPT_A}],
+        stream=stream,
     )
     response_a, source_meta = await _signature_messages_call(
         source_endpoint,
