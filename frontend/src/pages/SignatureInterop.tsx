@@ -4,6 +4,7 @@ import { Alert, Button, Card, Descriptions, Form, Popconfirm, Select, Space, Ste
 import { Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
+import { findRecommendedSignatureRelay, signatureModelsComparable } from '../signatureInterop';
 import { formatDateTime } from '../time';
 import type { Channel, SignatureInteropResult } from '../types';
 
@@ -74,7 +75,18 @@ function stepStatus(status: string): 'finish' | 'process' | 'error' | 'wait' {
 }
 
 function resultTone(result: SignatureInteropResult) {
+  if (signatureResultClassification(result) === 'not_comparable' || result.status === 'not_comparable') return 'warning';
   return result.ok ? 'success' : 'error';
+}
+
+function signatureResultClassification(result: SignatureInteropResult) {
+  return (result as SignatureInteropResult & { classification?: string | null }).classification;
+}
+
+function resultMessage(result: SignatureInteropResult) {
+  if (result.identity_labels?.includes('kiro_identity_leak')) return '[HIGH RISK] 疑似 Kiro 路由混入';
+  if (signatureResultClassification(result) === 'not_comparable' || result.status === 'not_comparable') return '[需调整] Source 与 Relay 模型不可比';
+  return result.ok ? '[PASS] Signature 互通与身份验证' : '[FAIL] Signature / 身份检测未通过';
 }
 
 function compactStepValue(value: string | number | null | undefined, suffix = '') {
@@ -141,6 +153,11 @@ export default function SignatureInterop() {
     value: channel.id,
     label: `${formatChannelDisplayName(channel)} · ${channel.model_name || '未配置模型'}`,
   }));
+  const selectedSourceId = Form.useWatch('source_channel_id', form);
+  const selectedRelayId = Form.useWatch('relay_channel_id', form);
+  const selectedSource = availableChannels.find((channel) => channel.id === selectedSourceId);
+  const selectedRelay = availableChannels.find((channel) => channel.id === selectedRelayId);
+  const modelsComparable = signatureModelsComparable(selectedSource, selectedRelay);
 
   function applySignatureResult(payload: SignatureInteropResult) {
     setRecoveryMessage(null);
@@ -232,9 +249,11 @@ export default function SignatureInterop() {
   }
 
   function fillDefaults() {
+    const source = availableChannels.find((channel) => channel.is_reference) ?? availableChannels[0];
+    const relay = findRecommendedSignatureRelay(availableChannels, source);
     form.setFieldsValue({
-      source_channel_id: availableChannels.find((channel) => channel.is_reference)?.id ?? availableChannels[0]?.id,
-      relay_channel_id: availableChannels.find((channel) => !channel.is_reference)?.id ?? availableChannels[1]?.id ?? availableChannels[0]?.id,
+      source_channel_id: source?.id,
+      relay_channel_id: relay?.id,
       stream: true,
     });
   }
@@ -281,6 +300,15 @@ export default function SignatureInterop() {
                 </Space>
               </Form.Item>
             </div>
+            {!modelsComparable ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="Source 与 Relay 模型不可直接互验"
+                description={`当前为 ${selectedSource?.model_name || '未知模型'} → ${selectedRelay?.model_name || '未知模型'}。请选择相同模型族；跨模型请求会被后端标记为“模型不可比”，不会发起 Signature 互验。`}
+                style={{ marginBottom: 16 }}
+              />
+            ) : null}
             <Space wrap>
               <Button type="primary" htmlType="submit" loading={signatureInterop.isPending} disabled={!availableChannels.length} icon={<Play size={16} />}>
                 开始检测
@@ -357,7 +385,7 @@ export default function SignatureInterop() {
           <Alert
             type={resultTone(result)}
             showIcon
-            message={result.identity_labels?.includes('kiro_identity_leak') ? '[HIGH RISK] 疑似 Kiro 路由混入' : result.ok ? '[PASS] Signature 互通与身份验证' : '[FAIL] Signature / 身份检测未通过'}
+            message={resultMessage(result)}
             description={result.reason}
           />
 
@@ -455,7 +483,15 @@ export default function SignatureInterop() {
           </Card>
 
           <Card title={result.ok ? 'Relay 原始响应摘要' : 'Relay 原始响应 / 错误摘要'} bordered={false}>
-            {!result.ok ? <Alert type="error" showIcon message="Signature 检测未通过" description={result.reason} style={{ marginBottom: 12 }} /> : null}
+            {!result.ok ? (
+              <Alert
+                type={signatureResultClassification(result) === 'not_comparable' || result.status === 'not_comparable' ? 'warning' : 'error'}
+                showIcon
+                message={signatureResultClassification(result) === 'not_comparable' || result.status === 'not_comparable' ? '模型不可比，未执行 Signature 互验' : 'Signature 检测未通过'}
+                description={result.reason}
+                style={{ marginBottom: 12 }}
+              />
+            ) : null}
             <pre className="output-drawer-pre">{result.relay_raw_excerpt}</pre>
           </Card>
         </Space>
