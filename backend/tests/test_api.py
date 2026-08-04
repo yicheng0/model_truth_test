@@ -8180,6 +8180,15 @@ def test_claude_code_probe_configs_include_stronger_relay_probes() -> None:
     assert "temperature" not in configs["basic_echo"]["request_params"]
 
 
+def test_claude_code_identity_probes_omit_temperature_for_deprecated_models() -> None:
+    from app.services import _claude_code_probe_configs
+
+    configs = {item["key"]: item for item in _claude_code_probe_configs(None)}
+
+    assert configs["identity_direct"]["request_params"] == {"max_tokens": 160}
+    assert configs["identity_greeting"]["request_params"] == {"max_tokens": 160}
+
+
 def test_claude_fingerprint_has_anthropic_stream_lifecycle_probe() -> None:
     from app.services import _claude_code_probe_configs
 
