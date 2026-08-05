@@ -10369,6 +10369,15 @@ def test_claude_code_signature_probe_requests_streaming_thinking(monkeypatch) ->
     assert captured == [True]
 
 
+def test_signature_prompts_use_multi_constraint_reasoning_tasks() -> None:
+    from app.services import SIGNATURE_TEST_PROMPT_A, SIGNATURE_TEST_PROMPT_B
+
+    assert "0.1 + 0.2" not in SIGNATURE_TEST_PROMPT_A
+    assert all(marker in SIGNATURE_TEST_PROMPT_A for marker in ("A", "B", "C", "D", "E", "唯一", "约束"))
+    assert "JSON" in SIGNATURE_TEST_PROMPT_A
+    assert all(marker in SIGNATURE_TEST_PROMPT_B for marker in ("新增", "重新验证", "调整", "changes"))
+
+
 def test_auto_protocol_falls_back_to_openai_compatible(monkeypatch) -> None:
     reset_database()
     calls: list[str] = []

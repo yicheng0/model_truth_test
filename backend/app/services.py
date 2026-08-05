@@ -1149,8 +1149,22 @@ SIGNATURE_NOT_COMPARABLE_ERRORS = (
     "model is unavailable",
     "unsupported model",
 )
-SIGNATURE_TEST_PROMPT_A = "请用中文解释：为什么 0.1 + 0.2 不等于 0.3？请展示完整推理过程。"
-SIGNATURE_TEST_PROMPT_B = "好的，那 0.1 + 0.2 + 0.3 == 0.6 是否成立？"
+SIGNATURE_TEST_PROMPT_A = """请解决下面的确定性约束推理任务。不要输出隐藏的完整思维链，只输出最终 JSON 和每条约束的一句简短校验说明。
+
+有 A、B、C、D、E 五个任务，分别安排在周一到周五，每天只能安排一个任务。请找出唯一可行的安排，并验证全部约束：
+1. A 必须早于 C；
+2. B 不能安排在周一或周五；
+3. D 必须紧接在 A 之后；
+4. E 必须早于 B；
+5. C 不能安排在周三；
+6. 周三必须安排 E。
+
+请至少进行四步依赖推导后再校验结果。最终严格输出：
+{"schedule":[{"day":"周一","task":"..."},{"day":"周二","task":"..."},{"day":"周三","task":"..."},{"day":"周四","task":"..."},{"day":"周五","task":"..."}],"checks":["约束1: ...","约束2: ...","约束3: ...","约束4: ...","约束5: ...","约束6: ..."]}"""
+SIGNATURE_TEST_PROMPT_B = """基于你刚才给出的 schedule 和 checks 继续推理，不要重新解释题目，也不要输出隐藏的完整思维链。现在增加两个需要重新验证的约束：周五必须安排 C，且 A 必须仍早于 C。
+
+请重新验证唯一可行安排，指出相对上一版需要调整的任务；如果无需调整，changes 必须为空数组。逐条验证全部 8 条约束。最终严格输出：
+{"schedule":[{"day":"周一","task":"..."},{"day":"周二","task":"..."},{"day":"周三","task":"..."},{"day":"周四","task":"..."},{"day":"周五","task":"..."}],"changes":["..."],"checks":["约束1: ...","约束2: ...","约束3: ...","约束4: ...","约束5: ...","约束6: ...","新增约束7: ...","新增约束8: ..."]}"""
 SIGNATURE_IDENTITY_PROMPT = "Hi，请问你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"
 SIGNATURE_FALLBACK_NOTE = """企业级 API 渠道（AWS/Vertex/Anthropic）
 优先 AWS，风控饱和则以 Vertex/Anthropic 兜底
@@ -4811,7 +4825,7 @@ def _claude_code_probe_configs(image_url: str | None, include_expensive_context:
             "title": "Thinking signature",
             "category": "signature",
             "severity": "core",
-            "prompt": "请用中文解释为什么 0.1 + 0.2 不等于 0.3，保持简短。",
+            "prompt": "请完成一个五项任务、六条约束的唯一排程推理，并严格输出 schedule 和 checks JSON；不要输出隐藏的完整思维链。",
             "request_params": {"max_tokens": 4000, "thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}},
             "scoring_rules": {"required_any": ["0.1", "0.2", "二进制", "浮点"]},
             "post_check": "thinking_signature",
