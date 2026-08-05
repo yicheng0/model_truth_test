@@ -6100,7 +6100,7 @@ async def _run_claude_code_signature_interop_probe(
         if credentials_override:
             channel.auth_config = {**channel.auth_config, **credentials_override}
         try:
-            payload = await test_signature_interop(source, channel, stream=False)
+            payload = await test_signature_interop(source, channel, stream=True)
         finally:
             if credentials_override:
                 channel.auth_config_encrypted = original_auth
@@ -12297,6 +12297,16 @@ def _parse_signature_stream_response(raw: str) -> dict[str, Any]:
                 existing_usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
                 message["usage"] = {**existing_usage, **usage}
             continue
+    if not events and not content_blocks:
+        try:
+            fallback = json.loads(raw)
+        except (TypeError, ValueError):
+            fallback = None
+        if isinstance(fallback, dict):
+            fallback["stream_events"] = []
+            fallback["raw_stream_excerpt"] = raw[:2000]
+            fallback["stream_evidence"] = _anthropic_stream_evidence(raw)
+            return fallback
     if content_blocks:
         message["content"] = [content_blocks[index] for index in sorted(content_blocks)]
     message["stream_events"] = events

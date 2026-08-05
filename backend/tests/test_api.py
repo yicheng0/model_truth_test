@@ -10331,6 +10331,44 @@ def test_create_claude_code_test_runs_deep_integrity_only_with_source(monkeypatc
     assert standard["upstream_integrity"]["classification"] == "insufficient_evidence"
 
 
+def test_claude_code_signature_probe_requests_streaming_thinking(monkeypatch) -> None:
+    from app.services import _run_claude_code_signature_interop_probe
+
+    reset_database()
+    captured: list[bool] = []
+
+    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001
+        captured.append(stream)
+        return {
+            "ok": True,
+            "status": "pass",
+            "reason": "",
+            "labels": [],
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "source_message_id": "msg_source",
+            "relay_message_id": "msg_relay",
+            "source_request_id": "req_source",
+            "relay_request_id": "req_relay",
+            "relay_endpoint": relay.base_url,
+            "identity_status": "ok",
+            "identity_response_text": "我是 Claude。",
+            "identity_message_id": "msg_identity",
+            "identity_request_id": "req_identity",
+            "identity_labels": [],
+        }
+
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
+    with SessionLocal() as db:
+        source = db.get(Channel, "anthropic_official")
+        relay = db.get(Channel, "third_party_demo")
+        assert source is not None and relay is not None
+        probe = asyncio.run(_run_claude_code_signature_interop_probe(db, relay, source.id))
+
+    assert probe["status"] == "pass"
+    assert captured == [True]
+
+
 def test_auto_protocol_falls_back_to_openai_compatible(monkeypatch) -> None:
     reset_database()
     calls: list[str] = []
