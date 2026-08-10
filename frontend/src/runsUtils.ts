@@ -101,6 +101,13 @@ export type ChannelResultOverview = {
   latestRun: Run | null;
 };
 
+const OVERVIEW_ANOMALY_LABELS = ['kiro_identity_leak', 'signature_interop_failed'] as const;
+
+export function extractOverviewAnomalyLabels(labels?: string[] | null): string[] {
+  const labelSet = new Set(labels ?? []);
+  return OVERVIEW_ANOMALY_LABELS.filter((label) => labelSet.has(label));
+}
+
 export function buildChannelResultOverview(channels: Channel[], reports: ReportSummary[], runs: Run[]): ChannelResultOverview[] {
   const latestReports = new Map<string, ReportSummary>();
   for (const report of reports) {

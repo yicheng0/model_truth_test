@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildChannelResultOverview, extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { buildChannelResultOverview, extractOverviewAnomalyLabels, extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -19,6 +19,17 @@ function run(id: string, scheduledTestId?: string | null): Run {
 }
 
 describe('runs utilities', () => {
+  it('keeps only reverse-routing anomalies for the channel overview', () => {
+    expect(extractOverviewAnomalyLabels(['patrol_probe_claude', 'kiro_identity_leak', 'signature_interop_failed', 'kiro_identity_leak'])).toEqual([
+      'kiro_identity_leak',
+      'signature_interop_failed',
+    ]);
+    expect(extractOverviewAnomalyLabels(['signature_chain_verified', 'patrol_probe_passed', 'operational_failure', 'provider_error_variant'])).toEqual([]);
+    expect(extractOverviewAnomalyLabels([])).toEqual([]);
+    expect(extractOverviewAnomalyLabels(null)).toEqual([]);
+    expect(extractOverviewAnomalyLabels(undefined)).toEqual([]);
+  });
+
   it('builds a latest-result overview for every channel', () => {
     const channels: Channel[] = [
       { id: 'ch_1', name: '渠道一', provider_type: 'anthropic', role: 'candidate', is_reference: false, enabled: true },

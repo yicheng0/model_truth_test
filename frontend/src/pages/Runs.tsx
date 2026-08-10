@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Empty, Popconfirm, Progress, Space, Spin
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, MonitorDot, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { buildChannelResultOverview, extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { buildChannelResultOverview, extractOverviewAnomalyLabels, extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Report, Run } from '../types';
 
@@ -713,9 +713,12 @@ export default function Runs() {
             {
               title: '异常标签',
               width: 250,
-              render: (_, item) => item.latestReport?.labels.length ? (
-                <Space wrap size={[4, 2]}>{item.latestReport.labels.slice(0, 3).map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space>
-              ) : <Typography.Text type="secondary">-</Typography.Text>,
+              render: (_, item) => {
+                const anomalyLabels = extractOverviewAnomalyLabels(item.latestReport?.labels);
+                return anomalyLabels.length ? (
+                  <Space wrap size={[4, 2]}>{anomalyLabels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space>
+                ) : <Typography.Text type="secondary">-</Typography.Text>;
+              },
             },
             {
               title: '最新任务状态',
