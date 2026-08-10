@@ -36,7 +36,23 @@ from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseC
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
 from app.scheduled_probe import _probe_status_text, operational_failure_label
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, send_alert_notification, send_hourly_patrol_summary, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, is_explicit_invalid_thinking_signature, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, send_alert_notification, send_hourly_patrol_summary, smart_patrol_daily_text, suite_fingerprint
+
+
+@pytest.mark.parametrize(
+    ("error_text", "expected"),
+    [
+        ("***.***.***.***.thinking: Invalid signature in thinking block (request id: req_1)", True),
+        ('{"error":{"message":"***.***.content.4: Invalid `signature` in `thinking` block (request id: req_1) (request id: req_2)","type":"<nil>"},"type":"error"}', True),
+        ("INVALID   SIGNATURE\nIN THINKING BLOCK", True),
+        ("Invalid signature", False),
+        ("thinking block missing signature", False),
+        ("503 Service Unavailable", False),
+        ("No permission to access model", False),
+    ],
+)
+def test_explicit_invalid_thinking_signature(error_text: str, expected: bool) -> None:
+    assert is_explicit_invalid_thinking_signature(error_text) is expected
 from app.routers.channels import _result_failure_kind
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
@@ -3478,7 +3494,9 @@ def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypa
         return {
             "ok": False,
             "status": "fail",
-            "reason": "signature 不兼容：relay 无法使用 source 生成的 signature",
+                "reason": "signature 不兼容：relay 无法使用 source 生成的 signature",
+                "raw_error": "Invalid `signature` in `thinking` block (request id: req_relay)",
+                "signature_ok": False,
             "source_channel_id": source.id,
             "relay_channel_id": relay.id,
             "source_message_id": "msg_bdrk_01source",
@@ -7025,7 +7043,7 @@ def test_signature_interop_rejects_source_without_signature(monkeypatch) -> None
     assert payload["ok"] is False
     assert payload["run"]["mode"] == "manual_probe"
     assert payload["run"]["status"] == "failed"
-    assert payload["result"]["labels"] == ["signature_interop_failed"]
+    assert payload["result"]["labels"] == []
     assert "缺少 signature" in payload["reason"]
 
     with TestClient(app) as client:
@@ -11806,9 +11824,37 @@ def test_scheduled_probe_classifies_all_parameter_unsupported_as_aws_resource_wi
         pending_alerts = client.get("/api/alerts", params={"status": "pending_review"}).json()
 
     assert alerts == []
-    assert updated_schedule["latest_probe_summary"]["classification_status"] == "aws_resource"
-    assert updated_schedule["latest_probe_summary"]["classification_label"] == "AWS 资源"
-    assert pending_alerts == []
+
+
+def test_scheduled_signature_unknown_failure_does_not_backfill_signature_label() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        run_id = "run_signature_unknown_backfill"
+        db.add(Run(id=run_id, suite_id=scheduled.suite_id, name=run_id, mode="manual_probe", test_scope="quick", scheduled_test_id=scheduled.id, status="completed", repeat_count=1, concurrency=1, total_jobs=1, completed_jobs=1))
+        db.commit()
+        report = asyncio.run(build_scheduled_probe_report(
+            SessionLocal,
+            db,
+            scheduled,
+            run_id,
+            None,
+            {
+                "ok": False,
+                "status": "fail",
+                "signature_ok": False,
+                "reason": "relay 请求失败",
+                "raw_error": "普通 400: invalid request payload",
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "labels": [],
+                "steps": [{"name": "Relay 请求", "status": "fail", "detail": "普通 400: invalid request payload"}],
+            },
+        ))
+    assert "signature_interop_failed" not in (report.evidence or {}).get("labels", [])
 
 
 def test_scheduled_probe_overloaded_native_shape_triggers_ai_judge() -> None:

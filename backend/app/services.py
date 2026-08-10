@@ -1142,6 +1142,7 @@ from the high barbacans: and at the meeting of their rays a cloud of
 coalsmoke and fumes of fried grease floated, turning.
 """.strip()
 SIGNATURE_INVALID_ERROR = "Invalid `signature` in `thinking` block"
+SIGNATURE_INVALID_ERROR_NORMALIZED = "invalid signature in thinking block"
 SIGNATURE_NOT_COMPARABLE_ERRORS = (
     "no permission to access model",
     "model not found",
@@ -1149,6 +1150,12 @@ SIGNATURE_NOT_COMPARABLE_ERRORS = (
     "model is unavailable",
     "unsupported model",
 )
+
+
+def is_explicit_invalid_thinking_signature(error_text: str | None) -> bool:
+    normalized = re.sub(r"\s+", " ", str(error_text or "").strip().lower())
+    normalized = normalized.replace("`", "")
+    return SIGNATURE_INVALID_ERROR_NORMALIZED in normalized
 SIGNATURE_TEST_PROMPT_A = """请解决下面的确定性约束推理任务。不要输出隐藏的完整思维链，只输出最终 JSON 和每条约束的一句简短校验说明。
 
 有 A、B、C、D、E 五个任务，分别安排在周一到周五，每天只能安排一个任务。请找出唯一可行的安排，并验证全部约束：
@@ -6152,11 +6159,14 @@ async def _run_claude_code_signature_interop_probe(
                 "raw_evidence": redact_secrets({"source_message_id": payload.get("source_message_id"), "relay_message_id": payload.get("relay_message_id")}),
                 "evidence_excerpt": error_excerpt[:1200],
             }
-        signature_ok = payload.get("signature_ok", ok)
+        signature_ok = payload.get("signature_ok")
+        explicit_signature_error = signature_ok is False and is_explicit_invalid_thinking_signature(
+            str(payload.get("raw_error") or payload.get("reason") or "")
+        )
         labels = sorted(
             {
-                *(str(label) for label in (payload.get("labels") or []) if str(label)),
-                *([] if signature_ok is not False else ["signature_interop_failed"]),
+                *(str(label) for label in (payload.get("labels") or []) if str(label) and str(label) != "signature_interop_failed"),
+                *(["signature_interop_failed"] if explicit_signature_error else []),
             }
         )
         primary_message_id = payload.get("identity_message_id") if "kiro_identity_leak" in labels else payload.get("relay_message_id") or payload.get("source_message_id")
@@ -6176,7 +6186,7 @@ async def _run_claude_code_signature_interop_probe(
             "request_protocol": None,
             "provider_endpoint": payload.get("relay_endpoint"),
             "http_status": None,
-            "error_type": None if ok else ("kiro_identity_leak" if "kiro_identity_leak" in labels else "signature_interop_failed"),
+            "error_type": None if ok else ("kiro_identity_leak" if "kiro_identity_leak" in labels else "signature_interop_failed" if explicit_signature_error else "signature_probe_failed"),
             "error_detail": None if ok else (error_excerpt or None),
             "response_excerpt": error_excerpt or None,
             "request_snapshot": {},
@@ -6194,11 +6204,7 @@ async def _run_claude_code_signature_interop_probe(
             "evidence_excerpt": error_excerpt[:1200],
         }
     except Exception as exc:
-        labels = ["signature_interop_failed"]
         probe = _claude_code_failed_probe(config, str(exc))
-        probe["labels"] = labels
-        probe["label_explanations"] = label_explanations(labels)
-        probe["reason"] = f"{label_explanations(labels)[0]['description']} 上游原因：{probe['error_detail']}"
         return _claude_code_normalize_optional_probe(probe)
 
 
@@ -8386,7 +8392,12 @@ def _attach_signature_interop_result_to_reports(
         labels = sorted(set(labels).union(str(label) for label in signature_result.get("labels", []) if isinstance(label, str)))
         if signature_operational_label:
             labels = [label for label in labels if label != "signature_interop_failed"]
-        if signature_result.get("status") != "skipped" and signature_result.get("signature_ok", signature_result.get("ok")) is False and not signature_operational_label and "signature_interop_failed" not in labels:
+        if (
+            signature_result.get("status") != "skipped"
+            and signature_result.get("signature_ok") is False
+            and is_explicit_invalid_thinking_signature(str(signature_result.get("raw_error") or signature_result.get("reason") or ""))
+            and "signature_interop_failed" not in labels
+        ):
             labels.append("signature_interop_failed")
         evidence["labels"] = sorted(labels)
         evidence["red_flags"] = sorted(set(labels).intersection(ALERT_RED_FLAGS))
@@ -8626,7 +8637,13 @@ async def build_scheduled_probe_report(
         labels.discard("signature_interop_failed")
         labels.add(signature_operational_label)
         signature_evidence["labels"] = [signature_operational_label]
-    if signature_result and signature_result.get("status") != "skipped" and signature_result.get("signature_ok", signature_result.get("ok")) is False and not signature_operational_label:
+    if (
+        signature_result
+        and signature_result.get("status") != "skipped"
+        and signature_result.get("signature_ok") is False
+        and is_explicit_invalid_thinking_signature(str(signature_result.get("raw_error") or signature_result.get("reason") or ""))
+        and not signature_operational_label
+    ):
         labels.add("signature_interop_failed")
     modules = scheduled_patrol_modules(scheduled)
     probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
@@ -11696,7 +11713,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": "source thinking block 缺少 signature 字段", "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
-            signature_ok=False,
+            signature_ok=None,
             reason=f"source thinking block 缺少 signature 字段，block 索引：{missing_signature}",
             source=source,
             relay=relay,
@@ -11744,11 +11761,12 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     response_b, relay_meta = await _signature_messages_call(relay_endpoint, relay_credentials["api_key"], relay_payload)
     if not relay_meta.get("ok"):
         raw = str(relay_meta.get("error") or "")
+        explicit_signature_error = is_explicit_invalid_thinking_signature(raw)
         not_comparable = _signature_error_is_not_comparable(raw)
         reason = (
             "模型或渠道不可比：relay 无权访问 source 使用的模型，未进入 Signature 校验"
             if not_comparable
-            else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw else "relay 请求失败")
+            else ("signature 不兼容：relay 无法使用 source 生成的 signature" if explicit_signature_error else "relay 请求失败")
         )
         steps[-1] = _signature_step_from_meta(
             "步骤 B：发送 Relay 复用请求",
@@ -11760,7 +11778,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": reason, "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
-            signature_ok=False if SIGNATURE_INVALID_ERROR in raw else None,
+            signature_ok=False if explicit_signature_error else None,
             reason=reason,
             source=source,
             relay=relay,
@@ -11782,15 +11800,17 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
 
     raw_b = json.dumps(response_b, ensure_ascii=False)
     has_error = response_b.get("type") == "error" or response_b.get("error") is True or isinstance(response_b.get("error"), dict)
-    not_comparable = _signature_error_is_not_comparable(_signature_payload_error_detail(response_b) or relay_meta.get("error") or raw_b)
-    ok = not has_error and SIGNATURE_INVALID_ERROR not in raw_b and not not_comparable
+    error_text = _signature_payload_error_detail(response_b) or relay_meta.get("error") or raw_b
+    explicit_signature_error = is_explicit_invalid_thinking_signature(error_text)
+    not_comparable = _signature_error_is_not_comparable(error_text)
+    ok = not has_error and not not_comparable
     reason = (
         "兼容：relay 成功接受 source 的 thinking block signature"
         if ok
         else (
             "模型或渠道不可比：relay 无权访问 source 使用的模型，未进入 Signature 校验"
             if not_comparable
-            else ("signature 不兼容：relay 无法使用 source 生成的 signature" if SIGNATURE_INVALID_ERROR in raw_b else "relay 请求失败")
+            else ("signature 不兼容：relay 无法使用 source 生成的 signature" if explicit_signature_error else "relay 请求失败")
         )
     )
     body_error = None if ok else (_signature_payload_error_detail(response_b) or relay_meta.get("error") or raw_b[:1200])
@@ -11806,7 +11826,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     steps.append({"name": "最终判定", "status": "ok" if ok else "fail", "detail": reason, "excerpt": None})
     return await _signature_interop_result_with_identity(
         ok=ok,
-        signature_ok=True if ok else False if SIGNATURE_INVALID_ERROR in raw_b else None,
+        signature_ok=True if ok else False if explicit_signature_error else None,
         reason=reason,
         source=source,
         relay=relay,
@@ -12471,11 +12491,7 @@ def _signature_interop_result(
         "labels": sorted(
             {
                 *(str(label) for label in (identity_labels or []) if str(label)),
-                *(
-                    []
-                    if signature_ok is not False or resolved_classification == "not_comparable" or signature_operational_label
-                    else ["signature_interop_failed"]
-                ),
+                *(["signature_interop_failed"] if signature_ok is False and is_explicit_invalid_thinking_signature(raw_error or reason) else []),
             }
         ),
         "request_logs": request_logs,
