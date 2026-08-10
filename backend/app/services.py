@@ -6076,17 +6076,25 @@ async def _run_claude_code_signature_interop_probe(
         "category": "signature",
         "severity": "supporting",
     }
-    source = db.get(Channel, source_channel_id) if source_channel_id else None
-    if not source:
-        source = db.scalar(
+    requested_relay = db.get(Channel, source_channel_id) if source_channel_id else None
+    official_relay = (
+        requested_relay
+        if requested_relay
+        and requested_relay.is_reference
+        and requested_relay.enabled
+        and requested_relay.id != channel.id
+        else None
+    )
+    if not official_relay:
+        official_relay = db.scalar(
             select(Channel)
             .where(Channel.is_reference.is_(True), Channel.enabled.is_(True), Channel.id != channel.id)
             .order_by(Channel.id)
             .limit(1)
         )
-    if not source:
+    if not official_relay:
         labels = ["signature_source_missing"]
-        reason = "未找到可用指纹源渠道，跳过互通检测。"
+        reason = "未找到可用的官方 Relay 渠道，跳过互通检测。"
         return {
             **config,
             "section": "signature",
@@ -6114,7 +6122,7 @@ async def _run_claude_code_signature_interop_probe(
         if credentials_override:
             channel.auth_config = {**channel.auth_config, **credentials_override}
         try:
-            payload = await test_signature_interop(source, channel, stream=True)
+            payload = await test_signature_interop(channel, official_relay, stream=True)
         finally:
             if credentials_override:
                 channel.auth_config_encrypted = original_auth
@@ -6144,10 +6152,11 @@ async def _run_claude_code_signature_interop_probe(
                 "raw_evidence": redact_secrets({"source_message_id": payload.get("source_message_id"), "relay_message_id": payload.get("relay_message_id")}),
                 "evidence_excerpt": error_excerpt[:1200],
             }
+        signature_ok = payload.get("signature_ok", ok)
         labels = sorted(
             {
                 *(str(label) for label in (payload.get("labels") or []) if str(label)),
-                *([] if ok else ["signature_interop_failed"]),
+                *([] if signature_ok is not False else ["signature_interop_failed"]),
             }
         )
         primary_message_id = payload.get("identity_message_id") if "kiro_identity_leak" in labels else payload.get("relay_message_id") or payload.get("source_message_id")
@@ -8256,18 +8265,19 @@ async def attach_signature_interop_to_scheduled_run(
         run = db.get(Run, run_id)
         if not scheduled or not run:
             return None
-        source = _signature_source_for_scheduled_test(db, scheduled)
-        relay = db.get(Channel, scheduled.channel_id)
+        source = db.get(Channel, scheduled.channel_id)
+        relay = _signature_relay_for_scheduled_test(db, scheduled)
         if not source or not relay:
             missing_result = {
                 "ok": False,
+                "signature_ok": None,
                 "status": "fail",
-                "reason": "未找到可用的参考 source 渠道，无法执行 Thinking Signature 互通检测",
+                "reason": "未找到待测 Source 或可用的官方 Relay，无法执行 Thinking Signature 互通检测",
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "source_channel_id": source.id if source else None,
                 "source_channel_name": source.name if source else None,
-                "relay_channel_id": relay.id if relay else scheduled.channel_id,
+                "relay_channel_id": relay.id if relay else None,
                 "relay_channel_name": relay.name if relay else None,
                 "fallback_note": SIGNATURE_FALLBACK_NOTE,
                 "source_protocol_profile": None,
@@ -8278,13 +8288,13 @@ async def attach_signature_interop_to_scheduled_run(
                     {
                         "name": "自动巡检 Signature 互通检测",
                         "status": "fail",
-                        "detail": "缺少启用状态的参考 source 渠道",
+                        "detail": "缺少待测 Source 或启用状态的官方 Relay",
                         "excerpt": None,
                     }
                 ],
             }
-            if relay:
-                _attach_signature_interop_result_to_reports(db, run_id, relay.id, missing_result)
+            if source:
+                _attach_signature_interop_result_to_reports(db, run_id, source.id, missing_result)
             return missing_result
         if scheduled.use_mock:
             skipped_result = {
@@ -8308,7 +8318,7 @@ async def attach_signature_interop_to_scheduled_run(
                     }
                 ],
             }
-            _attach_signature_interop_result_to_reports(db, run_id, relay.id, skipped_result)
+            _attach_signature_interop_result_to_reports(db, run_id, source.id, skipped_result)
             return skipped_result
         source_id = source.id
         relay_id = relay.id
@@ -8347,18 +8357,18 @@ async def attach_signature_interop_to_scheduled_run(
         }
 
     with session_factory() as db:
-        if relay_id:
-            _attach_signature_interop_result_to_reports(db, run_id, relay_id, signature_result)
+        if source_id:
+            _attach_signature_interop_result_to_reports(db, run_id, source_id, signature_result)
     return signature_result
 
 
 def _attach_signature_interop_result_to_reports(
     db: Session,
     run_id: str,
-    relay_channel_id: str,
+    source_channel_id: str,
     signature_result: dict[str, Any],
 ) -> None:
-    reports = db.scalars(select(Report).where(Report.run_id == run_id, Report.channel_id == relay_channel_id)).all()
+    reports = db.scalars(select(Report).where(Report.run_id == run_id, Report.channel_id == source_channel_id)).all()
     signature_operational_label = _signature_operational_failure_label(signature_result)
     if signature_operational_label:
         signature_result = {
@@ -8376,7 +8386,7 @@ def _attach_signature_interop_result_to_reports(
         labels = sorted(set(labels).union(str(label) for label in signature_result.get("labels", []) if isinstance(label, str)))
         if signature_operational_label:
             labels = [label for label in labels if label != "signature_interop_failed"]
-        if signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_operational_label and "signature_interop_failed" not in labels:
+        if signature_result.get("status") != "skipped" and signature_result.get("signature_ok", signature_result.get("ok")) is False and not signature_operational_label and "signature_interop_failed" not in labels:
             labels.append("signature_interop_failed")
         evidence["labels"] = sorted(labels)
         evidence["red_flags"] = sorted(set(labels).intersection(ALERT_RED_FLAGS))
@@ -8398,11 +8408,11 @@ def _attach_signature_interop_result_to_reports(
     db.commit()
 
 
-def _signature_source_for_scheduled_test(db: Session, scheduled: ScheduledChannelTest) -> Channel | None:
+def _signature_relay_for_scheduled_test(db: Session, scheduled: ScheduledChannelTest) -> Channel | None:
     snapshot = db.get(BaselineSnapshot, scheduled.baseline_snapshot_id)
     for channel_id in snapshot.channel_ids or [] if snapshot else []:
         channel = db.get(Channel, channel_id)
-        if channel and channel.enabled:
+        if channel and channel.enabled and channel.is_reference:
             return channel
     return db.scalar(select(Channel).where(Channel.is_reference.is_(True), Channel.enabled.is_(True)).limit(1))
 
@@ -8410,6 +8420,7 @@ def _signature_source_for_scheduled_test(db: Session, scheduled: ScheduledChanne
 def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": bool(result.get("ok")),
+        "signature_ok": result.get("signature_ok"),
         "status": result.get("status"),
         "reason": result.get("reason"),
         "raw_error": result.get("raw_error"),
@@ -8539,21 +8550,25 @@ async def execute_scheduled_probe_run(
                     signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
                 except Exception as exc:
                     logger.exception("scheduled_probe_signature_failed scheduled_id=%s run_id=%s", scheduled_id, run.id)
+                    official_relay = _signature_relay_for_scheduled_test(db, scheduled)
                     signature_result = {
                         "ok": False,
+                        "signature_ok": None,
                         "status": "fail",
                         "reason": f"Signature 后处理失败：{redact_text(str(exc))}",
-                        "source_channel_id": None,
-                        "relay_channel_id": scheduled.channel_id,
+                        "source_channel_id": scheduled.channel_id,
+                        "relay_channel_id": official_relay.id if official_relay else None,
                         "steps": [{"name": "Signature 后处理", "status": "fail", "detail": redact_text(str(exc)), "error": redact_text(str(exc))}],
-                        "labels": ["signature_interop_failed"],
+                        "labels": [PROVIDER_REQUEST_FAILED_LABEL],
                     }
             else:
                 signature_result = {
                     "ok": True,
+                    "signature_ok": None,
                     "status": "skipped",
                     "reason": "本计划未选择 Thinking Signature 互通模块",
-                    "relay_channel_id": scheduled.channel_id,
+                    "source_channel_id": scheduled.channel_id,
+                    "relay_channel_id": None,
                     "request_normalization_notes": [],
                     "signature_prefixes": [],
                     "steps": [{"name": "自动巡检 Signature 互通检测", "status": "skipped", "detail": "计划模块未启用", "excerpt": None}],
@@ -8611,7 +8626,7 @@ async def build_scheduled_probe_report(
         labels.discard("signature_interop_failed")
         labels.add(signature_operational_label)
         signature_evidence["labels"] = [signature_operational_label]
-    if signature_result and signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_operational_label:
+    if signature_result and signature_result.get("status") != "skipped" and signature_result.get("signature_ok", signature_result.get("ok")) is False and not signature_operational_label:
         labels.add("signature_interop_failed")
     modules = scheduled_patrol_modules(scheduled)
     probe_scores = [item.get("score") for item in model_requests if isinstance(item.get("score"), (int, float))]
@@ -8619,7 +8634,7 @@ async def build_scheduled_probe_report(
     if model_requests:
         classification = scheduled_probe_classification(model_requests, signature_evidence, sorted(labels), raw_score)
     else:
-        signature_ok = signature_evidence.get("status") == "skipped" or bool(signature_evidence.get("ok"))
+        signature_ok = signature_evidence.get("status") == "skipped" or signature_evidence.get("signature_ok", signature_evidence.get("ok")) is True
         if signature_operational_label:
             classification = scheduled_probe_classification(
                 [{"key": "signature_interop", "labels": [signature_operational_label], "error": signature_evidence.get("raw_error") or signature_evidence.get("reason")}],
@@ -9261,6 +9276,7 @@ def scheduled_test_probe_summary(db: Session, scheduled: ScheduledChannelTest) -
             ],
             "signature_interop": {
                 "status": signature.get("status"),
+                "signature_ok": signature.get("signature_ok"),
                 "reason": signature.get("reason"),
                 "raw_error": signature.get("raw_error"),
                 "error_http_status": signature.get("error_http_status"),
@@ -11518,6 +11534,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         ]
         return await _signature_interop_result_with_identity(
             ok=False,
+            signature_ok=None,
             reason=reason,
             source=source,
             relay=relay,
@@ -11581,6 +11598,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": "source 请求失败", "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
+            signature_ok=None,
             reason="source 请求失败",
             source=source,
             relay=relay,
@@ -11620,6 +11638,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": "source 响应缺少 content 数组", "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
+            signature_ok=False,
             reason="source 响应缺少 content 数组，无法进行 signature 互通检测",
             source=source,
             relay=relay,
@@ -11648,6 +11667,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": "source 响应中没有 thinking block", "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
+            signature_ok=False,
             reason="source 响应中没有 thinking block，无法进行 signature 互通检测",
             source=source,
             relay=relay,
@@ -11676,6 +11696,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": "source thinking block 缺少 signature 字段", "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
+            signature_ok=False,
             reason=f"source thinking block 缺少 signature 字段，block 索引：{missing_signature}",
             source=source,
             relay=relay,
@@ -11739,6 +11760,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": reason, "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
+            signature_ok=False if SIGNATURE_INVALID_ERROR in raw else None,
             reason=reason,
             source=source,
             relay=relay,
@@ -11784,6 +11806,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
     steps.append({"name": "最终判定", "status": "ok" if ok else "fail", "detail": reason, "excerpt": None})
     return await _signature_interop_result_with_identity(
         ok=ok,
+        signature_ok=True if ok else False if SIGNATURE_INVALID_ERROR in raw_b else None,
         reason=reason,
         source=source,
         relay=relay,
@@ -11856,7 +11879,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
             else result_payload.get("relay_message_id") or result_payload.get("source_message_id")
         ),
         "request_protocol": "anthropic_messages",
-        "provider_endpoint": result_payload.get("relay_endpoint"),
+        "provider_endpoint": result_payload.get("source_endpoint"),
         "provider_model": result_payload.get("model"),
         "signature_interop": result_payload,
     }
@@ -11864,7 +11887,7 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
         id=new_id("res"),
         run_id=run.id,
         test_case_id=case.id,
-        channel_id=relay.id,
+        channel_id=source.id,
         attempt_index=1,
         upstream_response_id=normalized.get("provider_message_id"),
         upstream_request_id=(
@@ -11891,7 +11914,11 @@ async def create_signature_interop_test(db: Session, source: Channel, relay: Cha
                     for label in (result_payload.get("identity_labels") or [])
                     if str(label) in {"identity_mismatch", "kiro_identity_leak", "suspected_model_swap"}
                 ),
-                *([] if result_payload.get("ok") or result_payload.get("classification") == "not_comparable" else ["signature_interop_failed"]),
+                *(
+                    []
+                    if result_payload.get("signature_ok") is not False or result_payload.get("classification") == "not_comparable"
+                    else ["signature_interop_failed"]
+                ),
             }
         ),
     )
@@ -11917,6 +11944,7 @@ def _signature_interop_error_result(source: Channel, relay: Channel, stream: boo
     relay_endpoint = _anthropic_messages_url(relay.base_url)
     return {
         "ok": False,
+        "signature_ok": None,
         "status": "fail",
         "reason": error,
         "source_channel_id": source.id,
@@ -11925,7 +11953,7 @@ def _signature_interop_error_result(source: Channel, relay: Channel, stream: boo
         "relay_channel_name": relay.name,
         "source_endpoint": source_endpoint,
         "relay_endpoint": relay_endpoint,
-        "model": relay.model_name or source.model_name or "claude-opus-4-6",
+        "model": source.model_name or relay.model_name or "claude-opus-4-6",
         "thinking_block_count": 0,
         "signature_prefixes": [],
         "source_message_id": None,
@@ -12024,6 +12052,7 @@ def _signature_identity_text(payload: Any) -> str:
 async def _signature_interop_result_with_identity(
     *,
     ok: bool,
+    signature_ok: bool | None,
     reason: str,
     source: Channel,
     relay: Channel,
@@ -12042,47 +12071,47 @@ async def _signature_interop_result_with_identity(
     error_stage: str | None = None,
     classification: str | None = None,
 ) -> dict[str, Any]:
-    relay_credentials = _merged_channel_credentials(relay, {})
+    source_credentials = _merged_channel_credentials(source, {})
     identity_payload = {
-        "model": str(relay_credentials.get("model") or relay.model_name or model),
+        "model": str(source_credentials.get("model") or source.model_name or model),
         "max_tokens": 120,
         "messages": [{"role": "user", "content": SIGNATURE_IDENTITY_PROMPT}],
     }
     identity_response, identity_meta = await _signature_messages_call(
-        relay_endpoint,
-        relay_credentials["api_key"],
+        source_endpoint,
+        source_credentials["api_key"],
         identity_payload,
     )
     identity_text = redact_text(_signature_identity_text(identity_response))[:4000]
     identity_labels: list[str] = []
     identity_status = "ok"
-    identity_detail = "Relay 身份回复未发现明确异常"
+    identity_detail = "Source 身份回复未发现明确异常"
     if not identity_meta.get("ok"):
         identity_status = "fail"
         identity_labels = ["identity_probe_failed"]
-        identity_detail = "Relay 身份请求失败"
+        identity_detail = "Source 身份请求失败"
         if ok:
             ok = False
-            reason = f"Relay 身份请求失败：{identity_meta.get('error') or '未获得有效响应'}"
+            reason = f"Source 身份请求失败：{identity_meta.get('error') or '未获得有效响应'}"
             raw_error = str(identity_meta.get("error") or raw_error or "") or None
             error_http_status = identity_meta.get("http_status")
-            error_stage = "relay_identity"
+            error_stage = "source_identity"
     elif "kiro" in identity_text.lower():
         identity_status = "fail"
         identity_labels = ["identity_mismatch", "kiro_identity_leak", "suspected_model_swap"]
         identity_detail = "身份探针命中 Kiro，疑似掺假/逆向路由"
         ok = False
         reason = identity_detail
-        error_stage = "relay_identity"
+        error_stage = "source_identity"
     elif not re.search(r"\b(?:claude|anthropic)\b", identity_text, flags=re.IGNORECASE):
         identity_status = "uncertain"
         identity_labels = ["identity_uncertain"]
-        identity_detail = "Relay 仅给出通用或不明确身份，作为辅助证据保留"
+        identity_detail = "Source 仅给出通用或不明确身份，作为辅助证据保留"
 
     final_step = steps.pop() if steps and steps[-1].get("name") == "最终判定" else None
     steps.append(
         _signature_step_from_meta(
-            "Relay 身份验证",
+            "Source 身份验证",
             {**identity_meta, "ok": identity_status != "fail", "excerpt": identity_text or identity_meta.get("excerpt")},
             success_detail=identity_detail,
             fail_detail=identity_detail,
@@ -12120,6 +12149,7 @@ async def _signature_interop_result_with_identity(
         error_http_status=error_http_status,
         error_stage=error_stage,
         classification=classification,
+        signature_ok=signature_ok,
     )
 
 
@@ -12353,6 +12383,7 @@ def _signature_interop_result(
     error_http_status: int | None = None,
     error_stage: str | None = None,
     classification: str | None = None,
+    signature_ok: bool | None = None,
 ) -> dict[str, Any]:
     relay_raw_excerpt = json.dumps(_redact_signature_payload(response_b), ensure_ascii=False)[:3000]
     source_message_id = response_a.get("id")
@@ -12363,7 +12394,7 @@ def _signature_interop_result(
     for stage, name in (
         ("source", "步骤 A：请求 Source thinking"),
         ("relay", "步骤 B：发送 Relay 复用请求"),
-        ("relay_identity", "Relay 身份验证"),
+        ("source_identity", "Source 身份验证"),
     ):
         step = next(
             (
@@ -12375,7 +12406,7 @@ def _signature_interop_result(
             None,
         )
         if step:
-            response = response_a if stage == "source" else identity_response if stage == "relay_identity" else response_b
+            response = response_a if stage == "source" else identity_response if stage == "source_identity" else response_b
             request_logs.append(
                 {
                     "stage": stage,
@@ -12398,8 +12429,17 @@ def _signature_interop_result(
             )
     resolved_classification = classification or ("pass" if ok else "fail")
     resolved_status = "pass" if ok else ("not_comparable" if resolved_classification == "not_comparable" else "fail")
+    signature_operational_label = _signature_operational_failure_label(
+        {
+            "reason": reason,
+            "raw_error": raw_error,
+            "error_http_status": error_http_status,
+            "steps": steps,
+        }
+    )
     return {
         "ok": ok,
+        "signature_ok": signature_ok,
         "status": resolved_status,
         "classification": resolved_classification,
         "reason": reason,
@@ -12431,7 +12471,11 @@ def _signature_interop_result(
         "labels": sorted(
             {
                 *(str(label) for label in (identity_labels or []) if str(label)),
-                *([] if ok or resolved_classification == "not_comparable" else ["signature_interop_failed"]),
+                *(
+                    []
+                    if signature_ok is not False or resolved_classification == "not_comparable" or signature_operational_label
+                    else ["signature_interop_failed"]
+                ),
             }
         ),
         "request_logs": request_logs,

@@ -2631,6 +2631,60 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
         assert identity["request_id"] == "req_identity_signature_only"
 
 
+def test_scheduled_signature_post_processing_failure_keeps_source_direction(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+
+    async def fake_attach_signature(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("signature post-processing crashed")
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
+        return {
+            "provider_message_id": "msg_identity_post_failure",
+            "content_text": "我是 Claude，由 Anthropic 开发。",
+            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
+            "raw_response": {
+                "id": "msg_identity_post_failure",
+                "type": "message",
+                "content": [{"type": "text", "text": "我是 Claude，由 Anthropic 开发。"}],
+                "usage": {"input_tokens": 20, "output_tokens": 10},
+            },
+            "usage": {"input_tokens": 20, "output_tokens": 10},
+            "request_protocol": "anthropic_messages",
+            "provider_endpoint": "https://candidate.example/v1/messages",
+            "error": None,
+        }
+
+    monkeypatch.setattr("app.services.attach_signature_interop_to_scheduled_run", fake_attach_signature)
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = client.post(
+            "/api/scheduled-tests",
+            json={
+                "name": "signature post-processing failure",
+                "channel_id": "third_party_demo",
+                "interval_minutes": 60,
+                "enabled": True,
+                "patrol_modules": ["signature_interop"],
+            },
+        ).json()
+
+    asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
+
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        payload = scheduled_channel_test_read(db, scheduled)
+
+    signature = payload["latest_probe_summary"]["signature_interop"]
+    labels = payload["latest_probe_summary"]["labels"]
+    assert signature["signature_ok"] is None
+    assert signature["source_channel_id"] == "third_party_demo"
+    assert signature["relay_channel_id"] == "anthropic_official"
+    assert "provider_request_failed" in labels
+    assert "signature_interop_failed" not in labels
+
+
 @pytest.mark.parametrize("text", ["我是 Kiro。", "我是Kiro。", "KIRO assistant by AWS"])
 def test_scheduled_identity_probe_flags_kiro_as_high_risk(text: str) -> None:
     channel = Channel(id="identity_candidate", name="Identity Candidate", provider_type="third_party_anthropic", role="candidate")
@@ -6187,6 +6241,7 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     latest_by_probe_payload = latest_by_probe_response.json()
     assert response.status_code == 200
     assert payload["ok"] is True
+    assert payload["signature_ok"] is True
     assert payload["status"] == "pass"
     assert payload["run"]["mode"] == "manual_probe"
     assert payload["run"]["status"] == "completed"
@@ -6204,7 +6259,7 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
         "步骤 A：请求 Source thinking",
         "Signature 校验",
         "步骤 B：发送 Relay 复用请求",
-        "Relay 身份验证",
+        "Source 身份验证",
         "最终判定",
     ]
     assert payload["steps"][0]["http_status"] == 200
@@ -6226,14 +6281,18 @@ def test_signature_interop_endpoint_passes_when_relay_accepts_signature(monkeypa
     assert latest_payload["source_request_id"] == "req_source_123"
     assert calls[0]["url"] == "https://source.example/v1/messages"
     assert calls[1]["url"] == "https://relay.example/v1/messages"
-    assert calls[2]["url"] == "https://relay.example/v1/messages"
+    assert calls[2]["url"] == "https://source.example/v1/messages"
+    assert calls[2]["json"]["model"] == "claude-opus-4-6"
+    assert calls[2]["headers"]["x-api-key"] == "source-key"
     assert calls[1]["json"]["messages"][1]["content"][0]["signature"] == "sig-source-compatible"
     assert calls[0]["json"]["thinking"] == {"type": "enabled", "budget_tokens": 2000}
     assert calls[1]["json"]["thinking"] == {"type": "enabled", "budget_tokens": 2000}
     assert "temperature" not in calls[2]["json"]
     with SessionLocal() as db:
         assert db.get(Run, payload["run"]["id"]) is not None
-        assert db.get(Result, payload["result"]["id"]) is not None
+        result = db.get(Result, payload["result"]["id"])
+        assert result is not None
+        assert result.channel_id == source_id
 
 
 def test_signature_interop_kiro_identity_overrides_signature_success(monkeypatch) -> None:
@@ -6323,6 +6382,7 @@ def test_signature_interop_kiro_identity_overrides_signature_success(monkeypatch
     payload = response.json()
     assert response.status_code == 200
     assert payload["ok"] is False
+    assert payload["signature_ok"] is True
     assert payload["status"] == "fail"
     assert "Kiro" in payload["reason"]
     assert payload["identity_status"] == "fail"
@@ -6331,17 +6391,20 @@ def test_signature_interop_kiro_identity_overrides_signature_success(monkeypatch
     assert payload["identity_request_id"] == "req_identity_header"
     assert {"identity_mismatch", "suspected_model_swap", "kiro_identity_leak"} <= set(payload["identity_labels"])
     assert {"identity_mismatch", "suspected_model_swap", "kiro_identity_leak"} <= set(payload["labels"])
+    assert "signature_interop_failed" not in payload["labels"]
     assert payload["result"]["score"] == 0
     assert {"identity_mismatch", "suspected_model_swap", "kiro_identity_leak"} <= set(payload["result"]["labels"])
+    assert "signature_interop_failed" not in payload["result"]["labels"]
     assert payload["result"]["upstream_response_id"] == "msg_01identity"
     assert payload["result"]["upstream_request_id"] == "req_identity_header"
     assert calls[2]["json"]["messages"] == [
         {"role": "user", "content": "Hi，请问你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"}
     ]
-    assert [step["name"] for step in payload["steps"]][-2:] == ["Relay 身份验证", "最终判定"]
+    assert calls[2]["url"] == "https://source.example/v1/messages"
+    assert [step["name"] for step in payload["steps"]][-2:] == ["Source 身份验证", "最终判定"]
     assert payload["steps"][-2]["status"] == "fail"
     assert payload["steps"][-1]["status"] == "fail"
-    assert any(log["stage"] == "relay_identity" and log["message_id"] == "msg_01identity" for log in payload["request_logs"])
+    assert any(log["stage"] == "source_identity" and log["message_id"] == "msg_01identity" for log in payload["request_logs"])
 
 
 @pytest.mark.parametrize(
@@ -6580,6 +6643,7 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
     payload = response.json()
     assert response.status_code == 200
     assert payload["ok"] is False
+    assert payload["signature_ok"] is False
     assert payload["status"] == "fail"
     assert payload["run"]["mode"] == "manual_probe"
     assert payload["run"]["status"] == "failed"
@@ -6632,7 +6696,7 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
             "response_excerpt": payload["request_logs"][1]["response_excerpt"],
         },
     ]
-    assert payload["request_logs"][2]["stage"] == "relay_identity"
+    assert payload["request_logs"][2]["stage"] == "source_identity"
     assert payload["request_logs"][2]["status"] == "fail"
     assert "Invalid `signature`" in payload["request_logs"][1]["error"]
     assert "req_123" in payload["request_logs"][1]["response_excerpt"]
@@ -7168,6 +7232,47 @@ def test_model_request_test_persists_missing_key_failure() -> None:
     assert "缺少 API Key" in payload["result"]["normalized_response"]["error"]
 
 
+def test_signature_interop_setup_failure_keeps_signature_unknown() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Signature Source Without Key",
+                "provider_type": "anthropic",
+                "base_url": "https://source.example",
+                "model_name": "claude-sonnet-4-6",
+                "enabled": True,
+            },
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={
+                "name": "Official Signature Relay",
+                "provider_type": "anthropic",
+                "base_url": "https://relay.example",
+                "model_name": "claude-opus-4-6",
+                "auth_config": {"api_key": "relay-key"},
+                "enabled": True,
+                "is_reference": True,
+            },
+        ).json()["id"]
+        response = client.post(
+            "/api/channels/signature-interop-test",
+            json={"source_channel_id": source_id, "relay_channel_id": relay_id},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["signature_ok"] is None
+    assert payload["model"] == "claude-sonnet-4-6"
+    assert payload["error_stage"] == "setup"
+    assert "signature_interop_failed" not in payload["labels"]
+    assert "signature_interop_failed" not in payload["result"]["labels"]
+    assert payload["result"]["raw_response"]["signature_ok"] is None
+
+
 
 
 def test_signature_interop_persists_source_http_failure(monkeypatch) -> None:
@@ -7210,6 +7315,9 @@ def test_signature_interop_persists_source_http_failure(monkeypatch) -> None:
     latest_payload = latest_response.json()
     assert response.status_code == 200
     assert payload["ok"] is False
+    assert payload["signature_ok"] is None
+    assert "signature_interop_failed" not in payload["labels"]
+    assert "signature_interop_failed" not in payload["result"]["labels"]
     assert payload["run"]["status"] == "failed"
     assert payload["steps"][0]["status"] == "fail"
     assert payload["steps"][0]["http_status"] == 502
@@ -7219,6 +7327,67 @@ def test_signature_interop_persists_source_http_failure(monkeypatch) -> None:
     assert latest_response.status_code == 200
     assert latest_payload["result"]["id"] == payload["result"]["id"]
     assert latest_payload["steps"][0]["http_status"] == 502
+
+
+def test_signature_interop_relay_operational_failure_keeps_signature_unknown(monkeypatch) -> None:
+    reset_database()
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_source",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "content": [{"type": "thinking", "thinking": "x", "signature": "sig-source"}],
+                    },
+                    request=request,
+                )
+            if calls == 2:
+                return httpx.Response(
+                    503,
+                    json={"type": "error", "error": {"message": "No available channel for model claude-opus-4-6"}},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={"id": "msg_identity", "type": "message", "content": [{"type": "text", "text": "我是 Claude。"}]},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+        response = client.post("/api/channels/signature-interop-test", json={"source_channel_id": source_id, "relay_channel_id": relay_id})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["signature_ok"] is None
+    assert "signature_interop_failed" not in payload["labels"]
+    assert "signature_interop_failed" not in payload["result"]["labels"]
 
 
 def test_signature_interop_latest_client_probe_id_does_not_return_old_same_channel_log() -> None:
@@ -7812,7 +7981,7 @@ def test_claude_code_test_endpoint_runs_isolated_probe_suite(monkeypatch) -> Non
 def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(monkeypatch) -> None:
     reset_database()
     seen_credentials: list[dict[str, object]] = []
-    seen_relay_auth: list[dict[str, object]] = []
+    seen_signature_channels: list[dict[str, object]] = []
 
     async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001
         seen_credentials.append(dict(credentials))
@@ -7869,7 +8038,14 @@ def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(
         }
 
     async def fake_signature(source, relay, stream=False):  # noqa: ANN001
-        seen_relay_auth.append(dict(relay.auth_config))
+        seen_signature_channels.append(
+            {
+                "source_id": source.id,
+                "source_auth": dict(source.auth_config),
+                "relay_id": relay.id,
+                "relay_is_reference": relay.is_reference,
+            }
+        )
         return {
             "ok": True,
             "reason": "runtime signature ok",
@@ -7898,7 +8074,11 @@ def test_ephemeral_claude_code_test_uses_runtime_credentials_without_persisting(
     payload = response.json()
     assert response.status_code == 200
     assert seen_credentials
-    assert seen_relay_auth and seen_relay_auth[-1]["api_key"] == "sk-runtime-secret"
+    assert seen_signature_channels
+    assert seen_signature_channels[-1]["source_id"] == "ephemeral_claude_code_test"
+    assert seen_signature_channels[-1]["source_auth"]["api_key"] == "sk-runtime-secret"
+    assert seen_signature_channels[-1]["relay_id"] != "ephemeral_claude_code_test"
+    assert seen_signature_channels[-1]["relay_is_reference"] is True
     assert payload["probes"]
     assert all(probe["run_id"] is None and probe["result_id"] is None for probe in payload["probes"])
     assert "sk-runtime-secret" not in json.dumps(payload, ensure_ascii=False)
@@ -10335,10 +10515,10 @@ def test_claude_code_signature_probe_requests_streaming_thinking(monkeypatch) ->
     from app.services import _run_claude_code_signature_interop_probe
 
     reset_database()
-    captured: list[bool] = []
+    captured: list[tuple[str, str, bool]] = []
 
     async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001
-        captured.append(stream)
+        captured.append((source.id, relay.id, stream))
         return {
             "ok": True,
             "status": "pass",
@@ -10360,13 +10540,57 @@ def test_claude_code_signature_probe_requests_streaming_thinking(monkeypatch) ->
 
     monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
     with SessionLocal() as db:
-        source = db.get(Channel, "anthropic_official")
-        relay = db.get(Channel, "third_party_demo")
+        relay = db.get(Channel, "anthropic_official")
+        source = db.get(Channel, "third_party_demo")
         assert source is not None and relay is not None
-        probe = asyncio.run(_run_claude_code_signature_interop_probe(db, relay, source.id))
+        probe = asyncio.run(_run_claude_code_signature_interop_probe(db, source, relay.id))
 
     assert probe["status"] == "pass"
-    assert captured == [True]
+    assert captured == [("third_party_demo", "anthropic_official", True)]
+
+
+@pytest.mark.parametrize("requested_relay", ["negative_sample", "disabled_reference", "third_party_demo"])
+def test_claude_code_signature_probe_rejects_invalid_explicit_relay(monkeypatch, requested_relay) -> None:  # noqa: ANN001
+    from app.services import _run_claude_code_signature_interop_probe
+
+    reset_database()
+    captured: list[tuple[str, str]] = []
+
+    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
+        captured.append((source.id, relay.id))
+        return {
+            "ok": True,
+            "signature_ok": True,
+            "status": "pass",
+            "reason": "accepted",
+            "labels": [],
+            "source_channel_id": source.id,
+            "relay_channel_id": relay.id,
+            "relay_endpoint": relay.base_url,
+        }
+
+    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
+    with SessionLocal() as db:
+        source = db.get(Channel, "third_party_demo")
+        assert source is not None
+        db.add(
+            Channel(
+                id="disabled_reference",
+                name="Disabled Reference",
+                provider_type="anthropic",
+                role="official_cloud",
+                base_url="https://disabled.example",
+                model_name=source.model_name,
+                auth_config={"api_key": "disabled-key"},
+                is_reference=True,
+                enabled=False,
+            )
+        )
+        db.commit()
+        probe = asyncio.run(_run_claude_code_signature_interop_probe(db, source, requested_relay))
+
+    assert probe["status"] == "pass"
+    assert captured == [("third_party_demo", "anthropic_official")]
 
 
 def test_signature_prompts_use_multi_constraint_reasoning_tasks() -> None:
@@ -11208,9 +11432,10 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert "response_id" in summary["model_request"]
     assert "message_id" in summary["model_request"]
     assert "status" in summary["signature_interop"]
-    assert summary["signature_interop"]["source_channel_id"]
-    assert summary["signature_interop"]["relay_channel_id"] == "negative_sample"
-    assert summary["signature_interop"]["relay_channel_name"] == "Negative Sample"
+    assert summary["signature_interop"]["source_channel_id"] == "negative_sample"
+    assert summary["signature_interop"]["source_channel_name"] == "Negative Sample"
+    assert summary["signature_interop"]["relay_channel_id"] == "anthropic_official"
+    assert summary["signature_interop"]["relay_channel_name"] == "Anthropic Official"
     assert "source_message_id" in summary["signature_interop"]
     assert "relay_message_id" in summary["signature_interop"]
     assert summary["labels"]
@@ -11695,7 +11920,7 @@ def test_scheduled_probe_clear_three_parameter_unsupported_does_not_trigger_ai_j
     ) is False
 
 
-def test_scheduled_signature_source_uses_fingerprint_source_channel(monkeypatch) -> None:
+def test_scheduled_signature_uses_candidate_source_and_reference_relay(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     captured: dict[str, str] = {}
 
@@ -11741,11 +11966,11 @@ def test_scheduled_signature_source_uses_fingerprint_source_channel(monkeypatch)
         payload = client.get(f"/api/scheduled-tests/{schedule['id']}").json()
 
     signature = payload["latest_probe_summary"]["signature_interop"]
-    assert captured == {"source_id": "aws_bedrock", "relay_id": "negative_sample"}
-    assert signature["source_channel_id"] == "aws_bedrock"
-    assert signature["source_channel_name"] == "AWS Bedrock Claude"
-    assert signature["relay_channel_id"] == "negative_sample"
-    assert signature["relay_channel_name"] == "Negative Sample"
+    assert captured == {"source_id": "negative_sample", "relay_id": "aws_bedrock"}
+    assert signature["source_channel_id"] == "negative_sample"
+    assert signature["source_channel_name"] == "Negative Sample"
+    assert signature["relay_channel_id"] == "aws_bedrock"
+    assert signature["relay_channel_name"] == "AWS Bedrock Claude"
     assert signature["source_message_id"] == "msg_bdrk_01source"
     assert signature["relay_message_id"] == "msg_01relay"
 
@@ -11778,8 +12003,99 @@ def test_scheduled_signature_source_missing_creates_alert(monkeypatch) -> None:
 
     summary = payload["latest_probe_summary"]
     assert summary["signature_interop"]["status"] == "fail"
+    assert summary["signature_interop"]["signature_ok"] is None
+    assert summary["signature_interop"]["source_channel_id"] == "negative_sample"
+    assert summary["signature_interop"]["relay_channel_id"] is None
     assert "signature_source_missing" in summary["labels"]
     assert any("signature_source_missing" in (alert.get("trigger_labels") or []) for alert in alerts)
+
+
+def test_scheduled_signature_kiro_identity_only_downgrades_source_report() -> None:
+    from app.services import _attach_signature_interop_result_to_reports
+
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="negative_sample")
+    run_id = create_report_for_schedule(schedule, grade="A", score=96, labels=[])
+    with SessionLocal() as db:
+        source_report = db.scalar(select(Report).where(Report.run_id == run_id, Report.channel_id == "negative_sample"))
+        relay = db.get(Channel, "anthropic_official")
+        assert source_report is not None and relay is not None
+        source_report.evidence = {
+            "labels": [],
+            "red_flags": [],
+            "avg_gold_similarity": 96.0,
+            "avg_official_cloud_similarity": 95.0,
+            "comparison_count": 1,
+        }
+        db.add(
+            Report(
+                id="rep_official_relay_unchanged",
+                run_id=run_id,
+                channel_id=relay.id,
+                final_score=98,
+                grade="A",
+                summary="official relay report",
+                evidence={"labels": []},
+                markdown="# official relay report",
+            )
+        )
+        db.commit()
+        _attach_signature_interop_result_to_reports(
+            db,
+            run_id,
+            "negative_sample",
+            {
+                "ok": False,
+                "signature_ok": True,
+                "status": "fail",
+                "reason": "身份探针命中 Kiro",
+                "source_channel_id": "negative_sample",
+                "relay_channel_id": relay.id,
+                "identity_status": "fail",
+                "identity_response_text": "我是 Kiro。",
+                "identity_labels": ["identity_mismatch", "kiro_identity_leak", "suspected_model_swap"],
+                "labels": ["identity_mismatch", "kiro_identity_leak", "suspected_model_swap"],
+                "steps": [],
+            },
+        )
+        source_report = db.scalar(select(Report).where(Report.run_id == run_id, Report.channel_id == "negative_sample"))
+        relay_report = db.get(Report, "rep_official_relay_unchanged")
+
+    assert source_report is not None
+    assert source_report.grade == "E"
+    assert source_report.final_score == 0
+    assert source_report.evidence["signature_interop"]["signature_ok"] is True
+    assert "kiro_identity_leak" in source_report.evidence["labels"]
+    assert "signature_interop_failed" not in source_report.evidence["labels"]
+    assert relay_report is not None
+    assert relay_report.grade == "A"
+    assert relay_report.final_score == 98
+    assert relay_report.evidence == {"labels": []}
+
+
+def test_scheduled_signature_ignores_non_reference_channels_in_baseline_snapshot() -> None:
+    from app.services import _signature_relay_for_scheduled_test
+
+    reset_database()
+    with TestClient(app) as client:
+        schedule_id = client.post(
+            "/api/scheduled-tests",
+            json={"name": "official relay selection", "channel_id": "negative_sample", "interval_minutes": 60, "enabled": True},
+        ).json()["id"]
+    with SessionLocal() as db:
+        scheduled = db.get(ScheduledChannelTest, schedule_id)
+        snapshot = db.get(BaselineSnapshot, "scheduled_probe_baseline")
+        candidate = db.get(Channel, "third_party_demo")
+        official = db.get(Channel, "anthropic_official")
+        assert scheduled is not None and snapshot is not None and candidate is not None and official is not None
+        snapshot.channel_ids = [candidate.id, official.id]
+        db.commit()
+
+        relay = _signature_relay_for_scheduled_test(db, scheduled)
+
+    assert relay is not None
+    assert relay.id == official.id
 
 
 def test_scheduled_probe_request_id_and_time_are_saved_in_evidence() -> None:

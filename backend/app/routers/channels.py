@@ -977,7 +977,7 @@ def latest_channel_signature_interop_test(
     rows = list(
         db.scalars(
             select(Result)
-            .where(Result.channel_id == relay_channel_id)
+            .where(Result.channel_id.in_([source_channel_id, relay_channel_id]))
             .order_by(Result.created_at.desc(), Result.id.desc())
             .limit(200)
         ).all()

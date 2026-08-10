@@ -347,7 +347,9 @@ export type NewApiSyncResult = {
 
 export type SignatureInteropResult = {
   ok: boolean;
+  signature_ok?: boolean | null;
   status: 'pass' | 'fail' | string;
+  classification?: string | null;
   reason: string;
   run?: Run | null;
   result?: Result | null;

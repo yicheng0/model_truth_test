@@ -4,7 +4,7 @@ import { Alert, Button, Card, Descriptions, Form, Popconfirm, Select, Space, Ste
 import { Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { formatChannelDisplayName } from '../channelCredentials';
-import { findRecommendedSignatureRelay, signatureModelsComparable } from '../signatureInterop';
+import { findRecommendedSignaturePair, isReverseSignaturePair, signatureModelsComparable, signatureResultMessage } from '../signatureInterop';
 import { formatDateTime } from '../time';
 import type { Channel, SignatureInteropResult } from '../types';
 
@@ -16,7 +16,7 @@ const defaultSteps: DisplayStep[] = [
   { name: '步骤 A：请求 Source thinking', status: 'wait', detail: '等待开始检测', excerpt: null },
   { name: 'Signature 校验', status: 'wait', detail: '等待 source 返回 thinking block 后校验 signature', excerpt: null },
   { name: '步骤 B：发送 Relay 复用请求', status: 'wait', detail: '等待发送包含 source assistant content 的 relay 请求', excerpt: null },
-  { name: 'Relay 身份验证', status: 'wait', detail: '固定询问 Relay 身份；命中 Kiro 将直接判定高风险', excerpt: null },
+  { name: 'Source 身份验证', status: 'wait', detail: '固定询问待测 Source 身份；命中 Kiro 将直接判定高风险', excerpt: null },
   { name: '最终判定', status: 'wait', detail: '等待 relay 响应后判断是否互通', excerpt: null },
 ];
 
@@ -75,18 +75,8 @@ function stepStatus(status: string): 'finish' | 'process' | 'error' | 'wait' {
 }
 
 function resultTone(result: SignatureInteropResult) {
-  if (signatureResultClassification(result) === 'not_comparable' || result.status === 'not_comparable') return 'warning';
+  if (result.classification === 'not_comparable' || result.status === 'not_comparable' || result.signature_ok == null) return 'warning';
   return result.ok ? 'success' : 'error';
-}
-
-function signatureResultClassification(result: SignatureInteropResult) {
-  return (result as SignatureInteropResult & { classification?: string | null }).classification;
-}
-
-function resultMessage(result: SignatureInteropResult) {
-  if (result.identity_labels?.includes('kiro_identity_leak')) return '[HIGH RISK] 疑似 Kiro 路由混入';
-  if (signatureResultClassification(result) === 'not_comparable' || result.status === 'not_comparable') return '[需调整] Source 与 Relay 模型不可比';
-  return result.ok ? '[PASS] Signature 互通与身份验证' : '[FAIL] Signature / 身份检测未通过';
 }
 
 function compactStepValue(value: string | number | null | undefined, suffix = '') {
@@ -122,9 +112,9 @@ function requestRows(result: SignatureInteropResult) {
       error: relayStep?.error,
     },
     {
-      key: 'relay_identity',
-      label: 'Relay 身份请求',
-      endpoint: identityStep?.endpoint || result.relay_endpoint,
+      key: 'source_identity',
+      label: 'Source 身份请求',
+      endpoint: identityStep?.endpoint || result.source_endpoint,
       status: identityStep?.status || result.identity_status,
       http_status: identityStep?.http_status,
       request_id: identityStep?.request_id || result.identity_request_id,
@@ -158,6 +148,7 @@ export default function SignatureInterop() {
   const selectedSource = availableChannels.find((channel) => channel.id === selectedSourceId);
   const selectedRelay = availableChannels.find((channel) => channel.id === selectedRelayId);
   const modelsComparable = signatureModelsComparable(selectedSource, selectedRelay);
+  const reversePair = isReverseSignaturePair(selectedSource, selectedRelay);
 
   function applySignatureResult(payload: SignatureInteropResult) {
     setRecoveryMessage(null);
@@ -188,7 +179,7 @@ export default function SignatureInterop() {
           },
           { ...defaultSteps[1], status: 'running', detail: '等待后端日志写入后恢复 Signature 校验证据' },
           { ...defaultSteps[2], status: 'running', detail: '等待后端日志写入后恢复 Relay Signature 请求证据' },
-          { ...defaultSteps[3], status: 'running', detail: '等待后端日志写入后恢复 Relay 身份证据' },
+          { ...defaultSteps[3], status: 'running', detail: '等待后端日志写入后恢复 Source 身份证据' },
           { ...defaultSteps[4], status: 'running', detail: `原始同步错误：${detail}`, error: detail },
         ]);
         for (let attempt = 1; attempt <= 45; attempt += 1) {
@@ -249,8 +240,7 @@ export default function SignatureInterop() {
   }
 
   function fillDefaults() {
-    const source = availableChannels.find((channel) => channel.is_reference) ?? availableChannels[0];
-    const relay = findRecommendedSignatureRelay(availableChannels, source);
+    const { source, relay } = findRecommendedSignaturePair(availableChannels);
     form.setFieldsValue({
       source_channel_id: source?.id,
       relay_channel_id: relay?.id,
@@ -265,7 +255,7 @@ export default function SignatureInterop() {
           <Typography.Text className="section-kicker">SIGNATURE INTEROP</Typography.Text>
           <Typography.Title level={2}>Thinking Signature 互通检测</Typography.Title>
           <Typography.Paragraph>
-            用 source 渠道生成带 signature 的 thinking block，再以流式请求发送给 relay 渠道验证跨渠道复用；同时固定询问 Relay 身份，回复命中 Kiro 时直接判定为疑似掺假/逆向路由。
+            用待测 Source 生成带 signature 的 thinking block，再发送给官方可信 Relay 验证是否接受；身份探针单独请求待测 Source。通过只表示该 Signature 被所选官方 Relay 接受，不代表官方直连或来源已验证。
           </Typography.Paragraph>
         </div>
         <Tag color="blue">可检测渠道 {availableChannels.length}</Tag>
@@ -288,15 +278,15 @@ export default function SignatureInterop() {
           >
             <div className="signature-config-grid">
               <Form.Item name="source_channel_id" label="Source 渠道" rules={[{ required: true, message: '请选择 source 渠道' }]}>
-                <Select options={channelOptions} loading={channels.isLoading} placeholder="选择生成 signature 的渠道" />
+                <Select options={channelOptions} loading={channels.isLoading} placeholder="选择待测、负责生成 signature 的渠道" />
               </Form.Item>
               <Form.Item name="relay_channel_id" label="Relay 渠道" rules={[{ required: true, message: '请选择 relay 渠道' }]}>
-                <Select options={channelOptions} loading={channels.isLoading} placeholder="选择复用 signature 的渠道" />
+                <Select options={channelOptions} loading={channels.isLoading} placeholder="选择官方可信、负责验证 signature 的渠道" />
               </Form.Item>
               <Form.Item label="请求模式">
                 <Space wrap>
                   <Tag color="blue">已默认启用流式</Tag>
-                  <Tag color="purple">强制 Relay 身份探针：Hi + 你是谁</Tag>
+                  <Tag color="purple">强制 Source 身份探针：Hi + 你是谁</Tag>
                 </Space>
               </Form.Item>
             </div>
@@ -306,6 +296,15 @@ export default function SignatureInterop() {
                 showIcon
                 message="Source 与 Relay 模型不可直接互验"
                 description={`当前为 ${selectedSource?.model_name || '未知模型'} → ${selectedRelay?.model_name || '未知模型'}。请选择相同模型族；跨模型请求会被后端标记为“模型不可比”，不会发起 Signature 互验。`}
+                style={{ marginBottom: 16 }}
+              />
+            ) : null}
+            {reversePair ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="当前检测方向与待测资源验证目标相反"
+                description="当前为官方参考 Source → 非官方 Relay，只能验证非官方渠道是否接受官方签名。建议交换为待测 Source → 官方 Relay。"
                 style={{ marginBottom: 16 }}
               />
             ) : null}
@@ -385,7 +384,7 @@ export default function SignatureInterop() {
           <Alert
             type={resultTone(result)}
             showIcon
-            message={resultMessage(result)}
+              message={signatureResultMessage(result)}
             description={result.reason}
           />
 
@@ -402,6 +401,11 @@ export default function SignatureInterop() {
               <Descriptions.Item label="完成时间">{formatDateTime(result.completed_at ?? result.run?.finished_at)}</Descriptions.Item>
               <Descriptions.Item label="模型">{result.model}</Descriptions.Item>
               <Descriptions.Item label="Thinking blocks">{result.thinking_block_count}</Descriptions.Item>
+              <Descriptions.Item label="Signature 验证">
+                <Tag color={result.signature_ok === true ? 'green' : result.signature_ok === false ? 'red' : 'default'}>
+                  {result.signature_ok === true ? '官方 Relay 已接受' : result.signature_ok === false ? '官方 Relay 未接受' : '不可比或未执行'}
+                </Tag>
+              </Descriptions.Item>
               <Descriptions.Item label="Source Message ID">
                 {result.source_message_id || '-'} · {result.source_message_channel_type}
               </Descriptions.Item>
@@ -414,7 +418,7 @@ export default function SignatureInterop() {
               <Descriptions.Item label="Relay Request ID">
                 {result.relay_request_id || '-'}
               </Descriptions.Item>
-              <Descriptions.Item label="身份结论">
+              <Descriptions.Item label="Source 身份结论">
                 <Tag color={result.identity_status === 'fail' ? 'red' : result.identity_status === 'uncertain' ? 'orange' : 'green'}>{result.identity_status || '-'}</Tag>
                 {result.identity_labels?.length ? ` ${result.identity_labels.join(', ')}` : ''}
               </Descriptions.Item>
@@ -485,9 +489,9 @@ export default function SignatureInterop() {
           <Card title={result.ok ? 'Relay 原始响应摘要' : 'Relay 原始响应 / 错误摘要'} bordered={false}>
             {!result.ok ? (
               <Alert
-                type={signatureResultClassification(result) === 'not_comparable' || result.status === 'not_comparable' ? 'warning' : 'error'}
+                type={result.classification === 'not_comparable' || result.status === 'not_comparable' || result.signature_ok == null ? 'warning' : 'error'}
                 showIcon
-                message={signatureResultClassification(result) === 'not_comparable' || result.status === 'not_comparable' ? '模型不可比，未执行 Signature 互验' : 'Signature 检测未通过'}
+                message={result.classification === 'not_comparable' || result.status === 'not_comparable' ? '模型不可比，未执行 Signature 互验' : result.signature_ok == null ? 'Signature 未完成验证' : 'Signature 检测未通过'}
                 description={result.reason}
                 style={{ marginBottom: 12 }}
               />

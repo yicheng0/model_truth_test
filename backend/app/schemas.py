@@ -326,6 +326,7 @@ class SignatureInteropRequestLogRead(BaseModel):
 
 class SignatureInteropTestRead(BaseModel):
     ok: bool
+    signature_ok: bool | None = None
     status: str
     classification: str = "fail"
     reason: str

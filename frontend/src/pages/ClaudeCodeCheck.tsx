@@ -1086,8 +1086,8 @@ export default function ClaudeCodeCheck() {
                       ]}
                     />
                   </Form.Item>
-                  <Form.Item name="source_channel_id" label="Signature Source 渠道">
-                    <Select allowClear loading={sources.isLoading} placeholder="可选；不选则自动找参考渠道" options={referenceOptions} />
+                  <Form.Item name="source_channel_id" label="Signature 官方 Relay / 基线">
+                    <Select allowClear loading={sources.isLoading} placeholder="可选；不选则自动找官方参考 Relay" options={referenceOptions} />
                   </Form.Item>
                   <Form.Item name="image_url" label="图片 URL">
                     <Input placeholder="可选；留空使用默认红色测试图" />
@@ -1134,7 +1134,7 @@ export default function ClaudeCodeCheck() {
                   </Button>
                   <Typography.Text type="secondary">API Key 只随本次请求发送，后端不写入渠道配置。</Typography.Text>
                   <Typography.Text type="secondary">检测完成后会自动保存为右侧历史证据。</Typography.Text>
-                  <Typography.Text type="secondary">深度模式为串行高请求量检测，需要 Signature Source；没有可比基线时会返回“证据不足”，不会误判失败。</Typography.Text>
+                  <Typography.Text type="secondary">深度模式为串行高请求量检测，待测渠道作为 Source、所选官方基线作为 Relay；没有可比基线时会返回“证据不足”，不会误判失败。</Typography.Text>
                   <Typography.Text type="secondary">Fast mode 未公开稳定请求字段；仅在显式提供 Beta 或 Body 配置时采样，结果不计入 Claude 真伪得分。</Typography.Text>
                 </Space>
               </Form>
