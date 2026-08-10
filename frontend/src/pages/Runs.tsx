@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Empty, Popconfirm, Progress, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Empty, Popconfirm, Progress, Select, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, MonitorDot, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { buildChannelResultOverview, extractOverviewAnomalyLabels, extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildChannelResultOverview, buildPatrolChannelFilterOptions, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Report, Run } from '../types';
 
@@ -463,6 +463,7 @@ export default function Runs() {
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [selectedNormalRowKeys, setSelectedNormalRowKeys] = useState<Key[]>([]);
   const [selectedPatrolRowKeys, setSelectedPatrolRowKeys] = useState<Key[]>([]);
+  const [selectedPatrolChannel, setSelectedPatrolChannel] = useState(ALL_PATROL_CHANNELS);
   const runs = useQuery({
     queryKey: ['runs'],
     queryFn: () => api.runs(),
@@ -540,6 +541,11 @@ export default function Runs() {
   const highRiskChannelCount = channelOverview.filter((item) => item.latestReport?.grade === 'D' || item.latestReport?.grade === 'E').length;
   const pendingChannelCount = channelOverview.length - testedChannelCount;
   const normalRunGroups = useMemo(() => groupRunsByChannel(normalRuns), [normalRuns]);
+  const patrolChannelOptions = useMemo(() => buildPatrolChannelFilterOptions(patrolRuns), [patrolRuns]);
+  const filteredPatrolRuns = useMemo(
+    () => filterPatrolRunsByChannel(patrolRuns, selectedPatrolChannel),
+    [patrolRuns, selectedPatrolChannel],
+  );
   const selectedNormalRuns = useMemo(
     () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
     [normalRuns, selectedNormalRowKeys],
@@ -549,8 +555,8 @@ export default function Runs() {
   const allNormalRunsSelected = selectableNormalRunIds.length > 0 && selectableNormalRunIds.every((id) => selectedNormalRowKeys.includes(id));
   const someNormalRunsSelected = selectableNormalRunIds.some((id) => selectedNormalRowKeys.includes(id));
   const selectedPatrolRuns = useMemo(
-    () => patrolRuns.filter((run) => selectedPatrolRowKeys.includes(run.id)),
-    [patrolRuns, selectedPatrolRowKeys],
+    () => filteredPatrolRuns.filter((run) => selectedPatrolRowKeys.includes(run.id)),
+    [filteredPatrolRuns, selectedPatrolRowKeys],
   );
   const deletableSelectedPatrolRuns = selectedPatrolRuns.filter((run) => isTerminalRun(run.status));
   const deletablePatrolRuns = useMemo(
@@ -560,10 +566,10 @@ export default function Runs() {
 
   useEffect(() => {
     const normalIds = new Set(normalRuns.map((run) => run.id));
-    const patrolIds = new Set(patrolRuns.map((run) => run.id));
+    const patrolIds = new Set(filteredPatrolRuns.map((run) => run.id));
     setSelectedNormalRowKeys((keys) => keys.filter((key) => normalIds.has(String(key))));
     setSelectedPatrolRowKeys((keys) => keys.filter((key) => patrolIds.has(String(key))));
-  }, [normalRuns, patrolRuns]);
+  }, [filteredPatrolRuns, normalRuns]);
 
   function deleteSelectedNormalRuns() {
     if (!selectedNormalRowKeys.length) {
@@ -911,6 +917,15 @@ export default function Runs() {
         title={<span className="card-title-with-icon"><CalendarClock size={18} />自动巡检日志</span>}
         extra={(
           <Space wrap>
+            <Select
+              allowClear
+              value={selectedPatrolChannel}
+              onChange={(value) => setSelectedPatrolChannel(value ?? ALL_PATROL_CHANNELS)}
+              placeholder="全部渠道"
+              options={patrolChannelOptions}
+              style={{ width: 190 }}
+              aria-label="自动巡检日志渠道筛选"
+            />
             <Popconfirm
               title="删除已选巡检日志"
               description={`将删除 ${deletableSelectedPatrolRuns.length} 条已选已结束日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
@@ -946,14 +961,21 @@ export default function Runs() {
           rowKey="id"
           size="small"
           loading={runs.isLoading}
-          dataSource={patrolRuns}
+          dataSource={filteredPatrolRuns}
           rowSelection={{
             selectedRowKeys: selectedPatrolRowKeys,
             onChange: setSelectedPatrolRowKeys,
             getCheckboxProps: (run) => ({ disabled: !isTerminalRun(run.status) }),
             preserveSelectedRowKeys: true,
           }}
-          locale={{ emptyText: <Empty description="暂无自动巡检日志" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+          locale={{
+            emptyText: (
+              <Empty
+                description={selectedPatrolChannel === ALL_PATROL_CHANNELS ? '暂无自动巡检日志' : '当前筛选条件下无自动巡检日志'}
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              />
+            ),
+          }}
           pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
           scroll={{ x: 1160 }}
           expandable={{

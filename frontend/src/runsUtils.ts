@@ -101,6 +101,17 @@ export type ChannelResultOverview = {
   latestRun: Run | null;
 };
 
+export const ALL_PATROL_CHANNELS = '__all_patrol_channels__';
+export const UNKNOWN_PATROL_CHANNEL = '__unknown_patrol_channel__';
+const PATROL_CHANNEL_NAME_PREFIX = '__patrol_channel_name__:';
+const ALL_PATROL_CHANNELS_LABEL = '全部渠道';
+const UNKNOWN_PATROL_CHANNEL_LABEL = '未识别渠道';
+
+export type PatrolChannelFilterOption = {
+  value: string;
+  label: string;
+};
+
 const OVERVIEW_ANOMALY_LABELS = ['kiro_identity_leak', 'signature_interop_failed'] as const;
 
 export function extractOverviewAnomalyLabels(labels?: string[] | null): string[] {
@@ -150,6 +161,47 @@ export function splitRunsByPatrol(runs: Run[]) {
     normalRuns: runs.filter((run) => !run.scheduled_test_id),
     patrolRuns: runs.filter((run) => Boolean(run.scheduled_test_id)),
   };
+}
+
+function patrolRunChannel(run: Run) {
+  const id = run.patrol_channel_id?.trim() || null;
+  const name = run.patrol_channel_name?.trim() || null;
+  const label = formatPatrolChannel(
+    {
+      id,
+      name,
+      providerType: run.patrol_channel_provider_type,
+      accountType: run.patrol_channel_account_type,
+    },
+    id,
+  );
+  return {
+    value: id ?? (name ? `${PATROL_CHANNEL_NAME_PREFIX}${name}` : UNKNOWN_PATROL_CHANNEL),
+    label: label && label !== '-' ? label : (name || id || UNKNOWN_PATROL_CHANNEL_LABEL),
+    isUnknown: !id && !name,
+  };
+}
+
+export function buildPatrolChannelFilterOptions(runs: Run[]): PatrolChannelFilterOption[] {
+  const options = new Map<string, PatrolChannelFilterOption>();
+  for (const run of runs) {
+    const channel = patrolRunChannel(run);
+    if (!options.has(channel.value)) {
+      options.set(channel.value, {
+        value: channel.value,
+        label: channel.isUnknown ? UNKNOWN_PATROL_CHANNEL_LABEL : channel.label,
+      });
+    }
+  }
+  return [
+    { value: ALL_PATROL_CHANNELS, label: ALL_PATROL_CHANNELS_LABEL },
+    ...Array.from(options.values()).sort((left, right) => left.label.localeCompare(right.label, 'zh-CN')),
+  ];
+}
+
+export function filterPatrolRunsByChannel(runs: Run[], selectedChannel: string): Run[] {
+  if (!selectedChannel || selectedChannel === ALL_PATROL_CHANNELS) return [...runs];
+  return runs.filter((run) => patrolRunChannel(run).value === selectedChannel);
 }
 
 export function selectableRunIds(runs: Run[]) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildChannelResultOverview, extractOverviewAnomalyLabels, extractPatrolEvidence, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -87,6 +87,39 @@ describe('runs utilities', () => {
 
     expect(normalRuns.map((item) => item.id)).toEqual(['manual_1', 'manual_2']);
     expect(patrolRuns.map((item) => item.id)).toEqual(['patrol_1', 'patrol_2']);
+  });
+
+  it('builds stable deduplicated patrol channel options', () => {
+    const input: Run[] = [
+      { ...run('patrol_1', 'sched_1'), patrol_channel_id: 'ch_2', patrol_channel_name: '渠道乙' },
+      { ...run('patrol_2', 'sched_2'), patrol_channel_id: 'ch_1', patrol_channel_name: '渠道甲' },
+      { ...run('patrol_3', 'sched_3'), patrol_channel_id: 'ch_1', patrol_channel_name: '渠道甲旧名称' },
+      { ...run('patrol_unknown', 'sched_4'), patrol_channel_id: null, patrol_channel_name: null },
+    ];
+    const snapshot = [...input];
+
+    expect(buildPatrolChannelFilterOptions(input)).toEqual([
+      { value: ALL_PATROL_CHANNELS, label: '全部渠道' },
+      { value: 'ch_1', label: '渠道甲' },
+      { value: 'ch_2', label: '渠道乙' },
+      { value: UNKNOWN_PATROL_CHANNEL, label: '未识别渠道' },
+    ]);
+    expect(input).toEqual(snapshot);
+  });
+
+  it('filters patrol logs by channel without changing their order', () => {
+    const input: Run[] = [
+      { ...run('patrol_1', 'sched_1'), patrol_channel_id: 'ch_1', patrol_channel_name: '渠道甲' },
+      { ...run('patrol_2', 'sched_2'), patrol_channel_id: 'ch_2', patrol_channel_name: '渠道乙' },
+      { ...run('patrol_3', 'sched_3'), patrol_channel_id: 'ch_1', patrol_channel_name: '渠道甲' },
+      { ...run('patrol_unknown', 'sched_4'), patrol_channel_id: null, patrol_channel_name: null },
+    ];
+
+    expect(filterPatrolRunsByChannel(input, 'ch_1').map((item) => item.id)).toEqual(['patrol_1', 'patrol_3']);
+    expect(filterPatrolRunsByChannel(input, UNKNOWN_PATROL_CHANNEL).map((item) => item.id)).toEqual(['patrol_unknown']);
+    expect(filterPatrolRunsByChannel(input, ALL_PATROL_CHANNELS).map((item) => item.id)).toEqual(input.map((item) => item.id));
+    expect(filterPatrolRunsByChannel(input, 'missing')).toEqual([]);
+    expect(filterPatrolRunsByChannel([], 'ch_1')).toEqual([]);
   });
 
   it('extracts patrol report evidence from run results', () => {
