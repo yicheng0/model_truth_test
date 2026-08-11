@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type Key } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Empty, Popconfirm, Progress, Select, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress, Select, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, MonitorDot, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, paginateRuns, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Report, Run } from '../types';
 
@@ -555,6 +555,10 @@ export default function Runs() {
     () => clampPage(patrolPage, filteredPatrolRuns.length, patrolPageSize),
     [filteredPatrolRuns.length, patrolPage, patrolPageSize],
   );
+  const visiblePatrolRuns = useMemo(
+    () => paginateRuns(filteredPatrolRuns, patrolCurrentPage, patrolPageSize),
+    [filteredPatrolRuns, patrolCurrentPage, patrolPageSize],
+  );
   const selectedNormalRuns = useMemo(
     () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
     [normalRuns, selectedNormalRowKeys],
@@ -981,7 +985,7 @@ export default function Runs() {
           rowKey="id"
           size="small"
           loading={runs.isLoading}
-          dataSource={filteredPatrolRuns}
+          dataSource={visiblePatrolRuns}
           rowSelection={{
             selectedRowKeys: selectedPatrolRowKeys,
             onChange: setSelectedPatrolRowKeys,
@@ -996,17 +1000,7 @@ export default function Runs() {
               />
             ),
           }}
-          pagination={{
-            current: patrolCurrentPage,
-            pageSize: patrolPageSize,
-            total: filteredPatrolRuns.length,
-            showSizeChanger: true,
-            onChange: (page, pageSize) => {
-              setPatrolPageSize(pageSize);
-              setPatrolPage(pageSize !== patrolPageSize ? 1 : page);
-            },
-            showTotal: (total) => `共 ${total} 条`,
-          }}
+          pagination={false}
           scroll={{ x: 1160 }}
           expandable={{
             expandedRowRender: (run) => <PatrolEvidenceDetail runId={run.id} />,
@@ -1093,6 +1087,19 @@ export default function Runs() {
               )
             },
           ]}
+        />
+        <Pagination
+          className="patrol-log-pagination"
+          current={patrolCurrentPage}
+          pageSize={patrolPageSize}
+          total={filteredPatrolRuns.length}
+          showSizeChanger
+          pageSizeOptions={[10, 20, 50, 100]}
+          showTotal={(total) => `共 ${total} 条`}
+          onChange={(page, pageSize) => {
+            setPatrolPageSize(pageSize);
+            setPatrolPage(pageSize !== patrolPageSize ? 1 : page);
+          }}
         />
       </Card>
     </div>

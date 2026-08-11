@@ -4233,7 +4233,6 @@ async def create_cache_hit_rate_test(db: Session, channel: Channel, data: CacheH
     ]
     request_params = {
         "max_tokens": 4096,
-        "temperature": 0,
         "system_content": system_content,
     }
     case = _manual_probe_case(
