@@ -36,7 +36,7 @@ from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseC
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
 from app.scheduled_probe import _probe_status_text, operational_failure_label
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, is_explicit_invalid_thinking_signature, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, send_alert_notification, send_hourly_patrol_summary, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, _signature_interop_result, _signature_operational_failure_label, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, is_explicit_invalid_thinking_signature, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, send_alert_notification, send_hourly_patrol_summary, smart_patrol_daily_text, suite_fingerprint
 
 
 @pytest.mark.parametrize(
@@ -46,6 +46,8 @@ from app.services import _anthropic_compatible_call, _anthropic_messages_url, _a
         ('{"error":{"message":"***.***.content.4: Invalid `signature` in `thinking` block (request id: req_1) (request id: req_2)","type":"<nil>"},"type":"error"}', True),
         ("INVALID   SIGNATURE\nIN THINKING BLOCK", True),
         ("Invalid signature", False),
+        ("network error while validating signature", False),
+        ("signature validation timed out", False),
         ("thinking block missing signature", False),
         ("503 Service Unavailable", False),
         ("No permission to access model", False),
@@ -53,6 +55,45 @@ from app.services import _anthropic_compatible_call, _anthropic_messages_url, _a
 )
 def test_explicit_invalid_thinking_signature(error_text: str, expected: bool) -> None:
     assert is_explicit_invalid_thinking_signature(error_text) is expected
+
+
+def test_signature_result_does_not_label_operational_error_as_signature_failure() -> None:
+    source = Channel(id="source", name="Source", provider_type="anthropic", model_name="claude-opus-4-6")
+    relay = Channel(id="relay", name="Relay", provider_type="anthropic", model_name="claude-opus-4-6")
+
+    result = _signature_interop_result(
+        ok=False,
+        signature_ok=False,
+        reason="network error while validating signature",
+        raw_error="network error while validating signature",
+        error_http_status=502,
+        error_stage="relay",
+        source=source,
+        relay=relay,
+        source_endpoint="https://source.example/v1/messages",
+        relay_endpoint="https://relay.example/v1/messages",
+        model="claude-opus-4-6",
+        response_a={},
+        response_b={"error": "network error while validating signature"},
+        thinking_blocks=[],
+        steps=[],
+    )
+
+    assert result["signature_ok"] is None
+    assert "signature_interop_failed" not in result["labels"]
+
+
+def test_signature_operational_label_prefers_existing_provider_failure_label() -> None:
+    assert _signature_operational_failure_label({
+        "labels": ["provider_request_failed", "signature_interop_failed"],
+        "reason": "请求因未知服务端、网络或超时错误失败，未获得可用于真伪判断的响应。",
+    }) == "provider_request_failed"
+
+
+def test_signature_operational_label_uses_fixed_priority_for_multiple_labels() -> None:
+    assert _signature_operational_failure_label({
+        "labels": ["provider_request_failed", "provider_temporarily_unavailable", "provider_quota_or_balance_exhausted"],
+    }) == "provider_quota_or_balance_exhausted"
 from app.routers.channels import _result_failure_kind
 
 _backfill_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "8c2e7db1f4a3_scheduled_tests_schema_backfill.py"
@@ -3235,6 +3276,20 @@ def test_next_scheduled_run_at_respects_run_window() -> None:
     assert next_scheduled_run_at(base, 600, "09:00", "18:00") == datetime.fromisoformat("2026-05-16T01:00:00+00:00")
     assert next_scheduled_run_at(base, 60, "22:00", "02:00") == datetime.fromisoformat("2026-05-15T14:00:00+00:00")
     assert next_scheduled_run_at(datetime.fromisoformat("2026-05-15T16:30:00+00:00"), 30, "22:00", "02:00") == datetime.fromisoformat("2026-05-15T17:00:00+00:00")
+
+
+def test_next_scheduled_run_at_randomizes_five_minute_patrols_with_injected_seconds() -> None:
+    base = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
+
+    assert next_scheduled_run_at(base, 5, random_seconds=1) == base + timedelta(seconds=1)
+    assert next_scheduled_run_at(base, 5, random_seconds=300) == base + timedelta(seconds=300)
+    assert next_scheduled_run_at(base, 5, random_seconds=137) == base + timedelta(seconds=137)
+
+
+def test_next_scheduled_run_at_keeps_longer_intervals_deterministic() -> None:
+    base = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
+
+    assert next_scheduled_run_at(base, 60, random_seconds=1) == base + timedelta(minutes=60)
 
 
 def test_refresh_active_scheduled_test_locks_extends_only_current_instance_locks(monkeypatch) -> None:

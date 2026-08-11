@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import socket
 import time
@@ -27,6 +28,7 @@ from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, Chann
 from .redaction import merge_redacted_config, redact_secrets, redact_signatures, redact_text
 from .scheduled_probe import (
     OPERATIONAL_FAILURE_LABELS,
+    OPERATIONAL_FAILURE_LABEL_PRIORITY,
     PROVIDER_QUOTA_EXHAUSTED_LABEL,
     PROVIDER_REQUEST_FAILED_LABEL,
     PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL,
@@ -118,10 +120,17 @@ def next_scheduled_run_at(
     interval_minutes: int,
     run_window_start: str | None = None,
     run_window_end: str | None = None,
+    *,
+    random_seconds: int | None = None,
 ) -> datetime:
     """Return the next automatic run timestamp in UTC."""
     base_utc = base_at if base_at.tzinfo else base_at.replace(tzinfo=timezone.utc)
-    candidate_utc = base_utc.astimezone(timezone.utc) + timedelta(minutes=max(5, interval_minutes))
+    if interval_minutes <= 5:
+        max_random_seconds = min(max(5, interval_minutes) * 60, 300)
+        delay_seconds = random.randint(1, max_random_seconds) if random_seconds is None else min(max(1, int(random_seconds)), max_random_seconds)
+        candidate_utc = base_utc.astimezone(timezone.utc) + timedelta(seconds=delay_seconds)
+    else:
+        candidate_utc = base_utc.astimezone(timezone.utc) + timedelta(minutes=interval_minutes)
     if not run_window_start or not run_window_end:
         return candidate_utc
 
@@ -8216,7 +8225,7 @@ async def execute_scheduled_channel_test(
                 scheduled.locked_by = SCHEDULER_INSTANCE_ID
                 scheduled.locked_until = _lock_expiry()
                 if advance_next_run and attempt_index == 0:
-                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
+                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled, datetime.now(timezone.utc))
                 db.commit()
             logger.info("scheduled_run_executing scheduled_id=%s run_id=%s channel=%s", scheduled_id, run_id, channel.name)
 
@@ -8228,12 +8237,16 @@ async def execute_scheduled_channel_test(
                 if not scheduled or not run:
                     return run
                 if run.status == "completed":
+                    if scheduled.enabled:
+                        scheduled.next_run_at = next_run_for_scheduled_test(scheduled, datetime.now(timezone.utc))
                     finish_patrol_job_attempt(db, job_id, attempt_id, status="completed", run_id=run.id)
                     release_scheduled_test_lock(db, scheduled, status=run.status, error=None)
                     await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
                     await create_alerts_for_run(session_factory, run.id, scheduled.id)
                     return run
                 if run.status != "failed" or attempt_index >= max_retries:
+                    if scheduled.enabled:
+                        scheduled.next_run_at = next_run_for_scheduled_test(scheduled, datetime.now(timezone.utc))
                     finish_patrol_job_attempt(db, job_id, attempt_id, status=run.status, run_id=run.id, error=None if run.status != "failed" else "Run finished with status failed")
                     release_scheduled_test_lock(db, scheduled, status=run.status, error=f"Run finished with status {run.status}")
                     if run.status == "failed":
@@ -8251,8 +8264,8 @@ async def execute_scheduled_channel_test(
         with session_factory() as db:
             scheduled = db.get(ScheduledChannelTest, scheduled_id)
             if scheduled:
-                if advance_next_run:
-                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
+                if scheduled.enabled:
+                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled, datetime.now(timezone.utc))
                 finish_patrol_job_attempt(db, job_id, attempt_id, status="failed", run_id=run_id, error=str(exc))
                 release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc))
                 logger.exception("scheduled_test_failed scheduled_id=%s run_id=%s", scheduled_id, run_id)
@@ -8474,6 +8487,10 @@ def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]
 def _signature_operational_failure_label(result: dict[str, Any] | None) -> str | None:
     if not isinstance(result, dict):
         return None
+    existing_labels = {str(label) for label in (result.get("labels") or []) if isinstance(label, str)}
+    existing_operational_labels = existing_labels.intersection(OPERATIONAL_FAILURE_LABELS)
+    if existing_operational_labels:
+        return next(label for label in OPERATIONAL_FAILURE_LABEL_PRIORITY if label in existing_operational_labels)
     text_parts = [
         str(result.get("reason") or ""),
         str(result.get("raw_error") or ""),
@@ -8518,7 +8535,7 @@ async def execute_scheduled_probe_run(
         if not channel:
             raise ValueError("Channel not found")
         if advance_next_run:
-            scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
+            scheduled.next_run_at = next_run_for_scheduled_test(scheduled, datetime.now(timezone.utc))
         scheduled.last_status = "running"
         scheduled.last_error = None
         scheduled.last_started_at = datetime.now(timezone.utc)
@@ -8590,6 +8607,8 @@ async def execute_scheduled_probe_run(
                 run.completed_jobs = run.total_jobs
                 run.finished_at = datetime.now(timezone.utc)
                 db.flush()
+            if scheduled.enabled:
+                scheduled.next_run_at = next_run_for_scheduled_test(scheduled, datetime.now(timezone.utc))
             finish_patrol_job_attempt(db, job_id, attempt_id, status="completed", run_id=run.id)
             release_scheduled_test_lock(db, scheduled, status="completed", error=None)
             db.refresh(run)
@@ -8603,8 +8622,8 @@ async def execute_scheduled_probe_run(
         with session_factory() as db:
             scheduled = db.get(ScheduledChannelTest, scheduled_id)
             if scheduled:
-                if advance_next_run:
-                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled)
+                if scheduled.enabled:
+                    scheduled.next_run_at = next_run_for_scheduled_test(scheduled, datetime.now(timezone.utc))
                 finish_patrol_job_attempt(db, job_id, attempt_id, status="failed", run_id=run.id if run else None, error=str(exc))
                 release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc))
         return None
@@ -11655,7 +11674,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": "source 响应缺少 content 数组", "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
-            signature_ok=False,
+            signature_ok=None,
             reason="source 响应缺少 content 数组，无法进行 signature 互通检测",
             source=source,
             relay=relay,
@@ -11684,7 +11703,7 @@ async def test_signature_interop(source: Channel, relay: Channel, stream: bool =
         steps.append({"name": "最终判定", "status": "fail", "detail": "source 响应中没有 thinking block", "excerpt": None})
         return await _signature_interop_result_with_identity(
             ok=False,
-            signature_ok=False,
+            signature_ok=None,
             reason="source 响应中没有 thinking block，无法进行 signature 互通检测",
             source=source,
             relay=relay,
@@ -12457,9 +12476,10 @@ def _signature_interop_result(
             "steps": steps,
         }
     )
+    effective_signature_ok = None if signature_operational_label else signature_ok
     return {
         "ok": ok,
-        "signature_ok": signature_ok,
+        "signature_ok": effective_signature_ok,
         "status": resolved_status,
         "classification": resolved_classification,
         "reason": reason,
@@ -12491,7 +12511,7 @@ def _signature_interop_result(
         "labels": sorted(
             {
                 *(str(label) for label in (identity_labels or []) if str(label)),
-                *(["signature_interop_failed"] if signature_ok is False and is_explicit_invalid_thinking_signature(raw_error or reason) else []),
+                *(["signature_interop_failed"] if effective_signature_ok is False and is_explicit_invalid_thinking_signature(raw_error or reason) else []),
             }
         ),
         "request_logs": request_logs,

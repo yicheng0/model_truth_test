@@ -23,6 +23,11 @@ OPERATIONAL_FAILURE_LABELS = {
     PROVIDER_QUOTA_EXHAUSTED_LABEL,
     PROVIDER_REQUEST_FAILED_LABEL,
 }
+OPERATIONAL_FAILURE_LABEL_PRIORITY = (
+    PROVIDER_QUOTA_EXHAUSTED_LABEL,
+    PROVIDER_TEMPORARILY_UNAVAILABLE_LABEL,
+    PROVIDER_REQUEST_FAILED_LABEL,
+)
 TEMPORARY_PROVIDER_UNAVAILABLE_PATTERN = re.compile(
     r"\b503\b|service unavailable|no available channel|overloaded|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|资源池暂无可用|暂无可用通道",
     re.IGNORECASE,
@@ -70,7 +75,7 @@ def operational_failure_label_for_item(item: dict[str, Any]) -> str | None:
     labels = {str(label) for label in (item.get("labels") or []) if isinstance(label, str)}
     matched = labels.intersection(OPERATIONAL_FAILURE_LABELS)
     if matched:
-        return next(label for label in OPERATIONAL_FAILURE_LABELS if label in matched)
+        return next(label for label in OPERATIONAL_FAILURE_LABEL_PRIORITY if label in matched)
     error_text = " ".join(
         str(item.get(field) or "")
         for field in ("error", "reason", "raw_error", "evidence_excerpt")
