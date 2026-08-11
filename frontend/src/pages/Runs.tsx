@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Empty, Popconfirm, Progress, Select, Spa
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, MonitorDot, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildChannelResultOverview, buildPatrolChannelFilterOptions, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Report, Run } from '../types';
 
@@ -464,6 +464,8 @@ export default function Runs() {
   const [selectedNormalRowKeys, setSelectedNormalRowKeys] = useState<Key[]>([]);
   const [selectedPatrolRowKeys, setSelectedPatrolRowKeys] = useState<Key[]>([]);
   const [selectedPatrolChannel, setSelectedPatrolChannel] = useState(ALL_PATROL_CHANNELS);
+  const [patrolPage, setPatrolPage] = useState(1);
+  const [patrolPageSize, setPatrolPageSize] = useState(10);
   const runs = useQuery({
     queryKey: ['runs'],
     queryFn: () => api.runs(),
@@ -503,6 +505,9 @@ export default function Runs() {
     onSuccess: (result, requestedIds) => {
       const failed = Object.keys(result.failed).length;
       message.success(failed ? `已删除 ${result.deleted} 条日志，${failed} 条删除失败` : `已删除 ${result.deleted} 条日志`);
+      if (failed) {
+        message.warning(`未删除原因：${Object.entries(result.failed).map(([id, reason]) => `${id}: ${reason}`).join('；')}`);
+      }
       setSelectedPatrolRowKeys([]);
       queryClient.setQueryData<Run[]>(['runs'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
       void Promise.all([
@@ -546,6 +551,10 @@ export default function Runs() {
     () => filterPatrolRunsByChannel(patrolRuns, selectedPatrolChannel),
     [patrolRuns, selectedPatrolChannel],
   );
+  const patrolCurrentPage = useMemo(
+    () => clampPage(patrolPage, filteredPatrolRuns.length, patrolPageSize),
+    [filteredPatrolRuns.length, patrolPage, patrolPageSize],
+  );
   const selectedNormalRuns = useMemo(
     () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
     [normalRuns, selectedNormalRowKeys],
@@ -560,8 +569,12 @@ export default function Runs() {
   );
   const deletableSelectedPatrolRuns = selectedPatrolRuns.filter((run) => isTerminalRun(run.status));
   const deletablePatrolRuns = useMemo(
-    () => patrolRuns.filter((run) => isTerminalRun(run.status)),
-    [patrolRuns],
+    () => filteredPatrolRuns.filter((run) => isTerminalRun(run.status)),
+    [filteredPatrolRuns],
+  );
+  const selectedPatrolChannelLabel = useMemo(
+    () => patrolChannelOptions.find((option) => option.value === selectedPatrolChannel)?.label ?? '当前渠道',
+    [patrolChannelOptions, selectedPatrolChannel],
   );
 
   useEffect(() => {
@@ -570,6 +583,10 @@ export default function Runs() {
     setSelectedNormalRowKeys((keys) => keys.filter((key) => normalIds.has(String(key))));
     setSelectedPatrolRowKeys((keys) => keys.filter((key) => patrolIds.has(String(key))));
   }, [filteredPatrolRuns, normalRuns]);
+
+  useEffect(() => {
+    setPatrolPage((page) => clampPage(page, filteredPatrolRuns.length, patrolPageSize));
+  }, [filteredPatrolRuns.length, patrolPageSize]);
 
   function deleteSelectedNormalRuns() {
     if (!selectedNormalRowKeys.length) {
@@ -604,7 +621,7 @@ export default function Runs() {
       message.warning('暂无可删除的巡检日志');
       return;
     }
-    deletePatrolRuns.mutate(deletablePatrolRuns.map((run) => run.id));
+    deletePatrolRuns.mutate(deletablePatrolRunIds(filteredPatrolRuns));
   }
 
   const actionColumn = {
@@ -920,7 +937,10 @@ export default function Runs() {
             <Select
               allowClear
               value={selectedPatrolChannel}
-              onChange={(value) => setSelectedPatrolChannel(value ?? ALL_PATROL_CHANNELS)}
+              onChange={(value) => {
+                setSelectedPatrolChannel(value ?? ALL_PATROL_CHANNELS);
+                setPatrolPage(1);
+              }}
               placeholder="全部渠道"
               options={patrolChannelOptions}
               style={{ width: 190 }}
@@ -940,16 +960,16 @@ export default function Runs() {
               </Button>
             </Popconfirm>
             <Popconfirm
-              title="删除全部已结束巡检日志"
-              description={`将删除全部 ${deletablePatrolRuns.length} 条已结束巡检日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
-              okText="删除全部"
+              title={selectedPatrolChannel === ALL_PATROL_CHANNELS ? '删除全部已结束巡检日志' : `删除渠道「${selectedPatrolChannelLabel}」的已结束巡检日志`}
+              description={`将删除${selectedPatrolChannel === ALL_PATROL_CHANNELS ? '全部渠道' : `渠道「${selectedPatrolChannelLabel}」`}的 ${deletablePatrolRuns.length} 条已结束巡检日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
+              okText={selectedPatrolChannel === ALL_PATROL_CHANNELS ? '删除全部' : '删除该渠道'}
               okButtonProps={{ danger: true }}
               cancelText="取消"
               disabled={!deletablePatrolRuns.length}
               onConfirm={deleteAllPatrolRuns}
             >
               <Button size="small" danger icon={<Trash2 size={14} />} disabled={!deletablePatrolRuns.length} loading={deletePatrolRuns.isPending}>
-                删除全部已结束
+                {selectedPatrolChannel === ALL_PATROL_CHANNELS ? '删除全部已结束' : '删除该渠道已结束'}
               </Button>
             </Popconfirm>
           </Space>
@@ -976,7 +996,17 @@ export default function Runs() {
               />
             ),
           }}
-          pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
+          pagination={{
+            current: patrolCurrentPage,
+            pageSize: patrolPageSize,
+            total: filteredPatrolRuns.length,
+            showSizeChanger: true,
+            onChange: (page, pageSize) => {
+              setPatrolPageSize(pageSize);
+              setPatrolPage(pageSize !== patrolPageSize ? 1 : page);
+            },
+            showTotal: (total) => `共 ${total} 条`,
+          }}
           scroll={{ x: 1160 }}
           expandable={{
             expandedRowRender: (run) => <PatrolEvidenceDetail runId={run.id} />,

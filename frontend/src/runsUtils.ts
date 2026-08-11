@@ -204,6 +204,25 @@ export function filterPatrolRunsByChannel(runs: Run[], selectedChannel: string):
   return runs.filter((run) => patrolRunChannel(run).value === selectedChannel);
 }
 
+export function clampPage(current: number, total: number, pageSize: number): number {
+  const safePageSize = Math.max(1, Math.floor(pageSize));
+  const maxPage = Math.max(1, Math.ceil(Math.max(0, total) / safePageSize));
+  return Math.min(Math.max(1, Math.floor(current)), maxPage);
+}
+
+export function paginateRuns(runs: Run[], current: number, pageSize: number): Run[] {
+  const safePageSize = Math.max(1, Math.floor(pageSize));
+  const safeCurrent = clampPage(current, runs.length, safePageSize);
+  const start = (safeCurrent - 1) * safePageSize;
+  return runs.slice(start, start + safePageSize);
+}
+
+export function deletablePatrolRunIds(runs: Run[]): string[] {
+  return runs
+    .filter((run) => run.status !== 'pending' && run.status !== 'running')
+    .map((run) => run.id);
+}
+
 export function selectableRunIds(runs: Run[]) {
   return runs.filter((run) => run.status !== 'pending' && run.status !== 'running').map((run) => run.id);
 }

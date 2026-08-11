@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, paginateRuns, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -120,6 +120,31 @@ describe('runs utilities', () => {
     expect(filterPatrolRunsByChannel(input, ALL_PATROL_CHANNELS).map((item) => item.id)).toEqual(input.map((item) => item.id));
     expect(filterPatrolRunsByChannel(input, 'missing')).toEqual([]);
     expect(filterPatrolRunsByChannel([], 'ch_1')).toEqual([]);
+  });
+
+  it('paginates patrol logs without changing input order', () => {
+    const input = [run('run_1'), run('run_2'), run('run_3'), run('run_4'), run('run_5')];
+
+    expect(paginateRuns(input, 1, 2).map((item) => item.id)).toEqual(['run_1', 'run_2']);
+    expect(paginateRuns(input, 2, 2).map((item) => item.id)).toEqual(['run_3', 'run_4']);
+    expect(paginateRuns(input, 1, 3).map((item) => item.id)).toEqual(['run_1', 'run_2', 'run_3']);
+    expect(input.map((item) => item.id)).toEqual(['run_1', 'run_2', 'run_3', 'run_4', 'run_5']);
+  });
+
+  it('clamps patrol page to the valid range', () => {
+    expect(clampPage(2, 25, 10)).toBe(2);
+    expect(clampPage(9, 25, 10)).toBe(3);
+    expect(clampPage(0, 25, 10)).toBe(1);
+    expect(clampPage(4, 0, 10)).toBe(1);
+  });
+
+  it('selects only terminal patrol logs from the current channel scope', () => {
+    const channelA = { ...run('patrol_a_completed', 'sched_a'), patrol_channel_id: 'ch_a' };
+    const channelARunning = { ...run('patrol_a_running', 'sched_a'), patrol_channel_id: 'ch_a', status: 'running' as const };
+    const channelB = { ...run('patrol_b_failed', 'sched_b'), patrol_channel_id: 'ch_b', status: 'failed' as const };
+
+    expect(deletablePatrolRunIds([channelA, channelARunning])).toEqual(['patrol_a_completed']);
+    expect(deletablePatrolRunIds([channelA, channelB])).toEqual(['patrol_a_completed', 'patrol_b_failed']);
   });
 
   it('extracts patrol report evidence from run results', () => {
