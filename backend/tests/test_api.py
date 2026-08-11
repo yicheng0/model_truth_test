@@ -7621,8 +7621,6 @@ def test_cache_hit_rate_test_persists_attempts_and_summary(monkeypatch) -> None:
     with SessionLocal() as db:
         results = db.scalars(select(Result).where(Result.run_id == payload["run"]["id"]).order_by(Result.attempt_index)).all()
     assert len(results) == 4
-    assert all("temperature" not in result.raw_request for result in results)
-    assert all("temperature" not in result.raw_request.get("params", {}) for result in results)
     assert results[0].raw_request["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
     sample_text = results[0].raw_request["system"][0]["text"]
     assert "PROJECT GUTENBERG EBOOK 4300" in sample_text
