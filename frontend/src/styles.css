@@ -548,6 +548,51 @@ textarea:focus-visible,
   min-height: 50px !important;
 }
 
+.patrol-log-card .ant-card-head-wrapper {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.patrol-log-card .ant-card-head-title {
+  flex: 0 0 auto;
+}
+
+.patrol-log-card .ant-card-extra {
+  flex: 1 1 620px;
+  min-width: 0;
+}
+
+.patrol-log-toolbar,
+.patrol-log-toolbar-filters,
+.patrol-log-toolbar-delete {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.patrol-log-toolbar {
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.patrol-log-toolbar-delete .ant-btn,
+.patrol-delete-button-help {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.patrol-delete-button-help {
+  display: inline-flex;
+  border-radius: 6px;
+  outline: none;
+}
+
+.patrol-delete-button-help:focus-visible {
+  box-shadow: 0 0 0 2px rgb(22 119 255 / 20%);
+}
+
 .patrol-log-card .ant-card-body {
   padding: 12px 16px 16px;
 }

@@ -67,4 +67,16 @@ describe('claudeFingerprintHistory', () => {
     expect(probeDiagnosticText({ status: 'warning', reason: '具体判定原因', evidence_excerpt: '旧摘要' })).toBe('具体判定原因');
     expect(probeDiagnosticText({ status: 'warning', labels: [], evidence_excerpt: 'legacy warning' })).toBe('legacy warning');
   });
+
+  it('replaces legacy generic warnings with the mapped label explanation', () => {
+    const text = probeDiagnosticText({
+      status: 'warning',
+      labels: ['thinking_signature_missing'],
+      reason: '检测项返回异常，需要结合原始响应复核。',
+    });
+
+    expect(text).toContain('观测：');
+    expect(text).toContain('影响：');
+    expect(text).toContain('复核：');
+  });
 });

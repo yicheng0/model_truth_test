@@ -37,6 +37,13 @@ export const CLAUDE_RESOURCE_IDENTITY_META: Record<string, { label: string; colo
   insufficient_evidence: { label: '资源来源证据不足', color: 'default', description: '响应和网关兼容证据不能独立确认 Claude Code OAuth 或 API 账号来源。' },
 };
 
+export const CLAUDE_CLIENT_FINGERPRINT_META: Record<string, { label: string; color: string }> = {
+  claude_code_like: { label: '高概率 Claude Code 客户端', color: 'purple' },
+  api_direct_like: { label: '普通 Messages API 客户端', color: 'blue' },
+  mixed_or_relay: { label: '混合或中转改写特征', color: 'orange' },
+  unobservable: { label: '未捕获原始客户端', color: 'default' },
+};
+
 export const UPSTREAM_INTEGRITY_META: Record<UpstreamIntegrityClassification, { label: string; color: string; description: string }> = {
   signature_chain_verified: { label: 'Signature 链路已验证', color: 'green', description: '双向 signature 与篡改对照通过；证明 Claude signature 链路，不等于官方直连。' },
   mixed_routing_suspected: { label: '疑似混合路由', color: 'red', description: '重复采样出现关联硬协议特征切换或 signature 验证间歇变化。' },

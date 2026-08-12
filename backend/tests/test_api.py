@@ -849,9 +849,10 @@ def test_patrol_query_performance_returns_lightweight_paginated_summaries() -> N
         response = client.get("/api/runs/patrol?page=1&page_size=10")
         assert response.status_code == 200
         payload = response.json()
-        assert set(payload) == {"items", "total", "error_count", "page", "page_size"}
+        assert set(payload) == {"items", "total", "error_count", "deletable_count", "page", "page_size"}
         assert payload["total"] == 25
         assert payload["error_count"] == 4
+        assert payload["deletable_count"] == 25
         assert payload["page"] == 1
         assert payload["page_size"] == 10
         assert len(payload["items"]) == 10
@@ -873,6 +874,81 @@ def test_patrol_query_performance_returns_lightweight_paginated_summaries() -> N
         ).json()
         assert channel_errors["total"] == 3
         assert all(item["patrol_channel_id"] == "negative_sample" for item in channel_errors["items"])
+
+
+def test_patrol_delete_button_usability_returns_filtered_deletable_count() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        fixtures = [
+            ("complete_error_a", "completed", "third_party_demo", True),
+            ("failed_ok_a", "failed", "third_party_demo", False),
+            ("complete_ok_a", "completed", "third_party_demo", False),
+            ("pending_error_b", "pending", "negative_sample", True),
+            ("running_ok_b", "running", "negative_sample", False),
+            ("complete_error_b", "completed", "negative_sample", True),
+        ]
+        for index, (suffix, status, channel_id, is_error) in enumerate(fixtures):
+            run = Run(
+                id=f"patrol_delete_{suffix}",
+                suite_id=suite_id,
+                name=f"patrol delete {suffix}",
+                test_scope="scheduled_probe",
+                status=status,
+                repeat_count=1,
+                concurrency=1,
+                total_jobs=1,
+                completed_jobs=1 if status in {"completed", "failed"} else 0,
+                created_at=datetime(2026, 8, 12, tzinfo=timezone.utc) + timedelta(minutes=index),
+            )
+            db.add(run)
+            db.add(
+                RunChannel(
+                    id=f"patrol_delete_rc_{index}",
+                    run_id=run.id,
+                    channel_id=channel_id,
+                    role_in_run="candidate",
+                )
+            )
+            db.add(
+                Report(
+                    id=f"patrol_delete_report_{index}",
+                    run_id=run.id,
+                    channel_id=channel_id,
+                    final_score=50 if is_error else 95,
+                    grade="E" if is_error else "A",
+                    summary="error summary" if is_error else "ok summary",
+                    evidence={
+                        "test_scope": "scheduled_probe",
+                        "labels": ["protocol_mismatch"] if is_error else ["patrol_probe_passed"],
+                        "classification_status": "anomaly" if is_error else "claude",
+                    },
+                )
+            )
+        db.commit()
+
+    with TestClient(app) as client:
+        all_runs = client.get("/api/runs/patrol?page=1&page_size=10").json()
+        assert all_runs["total"] == 6
+        assert all_runs["deletable_count"] == 4
+
+        channel_b = client.get("/api/runs/patrol?channel_id=negative_sample&page=1&page_size=10").json()
+        assert channel_b["total"] == 3
+        assert channel_b["deletable_count"] == 1
+
+        errors = client.get("/api/runs/patrol?errors_only=true&page=1&page_size=10").json()
+        assert errors["total"] == 3
+        assert errors["deletable_count"] == 2
+
+        channel_b_errors = client.get(
+            "/api/runs/patrol?channel_id=negative_sample&errors_only=true&page=1&page_size=10"
+        ).json()
+        assert channel_b_errors["total"] == 2
+        assert channel_b_errors["deletable_count"] == 1
+
+        empty = client.get("/api/runs/patrol?channel_id=missing_channel&page=1&page_size=10").json()
+        assert empty["total"] == 0
+        assert empty["deletable_count"] == 0
 
 
 def test_startup_seed_preserves_custom_default_cases_without_crashing() -> None:
@@ -12681,6 +12757,45 @@ def test_running_run_must_be_canceled_before_delete() -> None:
     assert blocked.status_code == 409
     assert canceled.status_code == 200
     assert canceled.json()["status"] == "canceled"
+
+
+def test_unfinished_runs_must_be_canceled_before_single_or_bulk_delete() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        pending = create_run(db, RunCreate(name="pending delete protection", suite_id=suite_id, use_mock=True))
+        running = create_run(db, RunCreate(name="running delete protection", suite_id=suite_id, use_mock=True))
+        completed = create_run(db, RunCreate(name="completed delete protection", suite_id=suite_id, use_mock=True))
+        pending.status = "pending"
+        running.status = "running"
+        completed.status = "completed"
+        db.commit()
+        pending_id = pending.id
+        running_id = running.id
+        completed_id = completed.id
+
+    with TestClient(app) as client:
+        pending_single = client.delete(f"/api/runs/{pending_id}", headers=ADMIN_HEADERS)
+        bulk = client.post(
+            "/api/runs/bulk-delete",
+            headers=ADMIN_HEADERS,
+            json={"ids": [pending_id, running_id, completed_id]},
+        )
+
+    assert pending_single.status_code == 409
+    assert bulk.status_code == 200
+    assert bulk.json() == {
+        "deleted": 1,
+        "missing": [],
+        "failed": {
+            pending_id: "Unfinished runs must be canceled before deletion",
+            running_id: "Unfinished runs must be canceled before deletion",
+        },
+    }
+    with SessionLocal() as db:
+        assert db.get(Run, pending_id) is not None
+        assert db.get(Run, running_id) is not None
+        assert db.get(Run, completed_id) is None
 
 
 def test_cancel_run_is_idempotent_and_does_not_reopen_terminal_runs() -> None:

@@ -1194,11 +1194,19 @@ def list_patrol_runs(
     else:
         total = int(db.scalar(select(func.count()).select_from(Run).where(patrol_condition)) or 0)
         if not total:
-            return PatrolRunListRead(items=[], total=0, error_count=0, page=page, page_size=page_size)
+            return PatrolRunListRead(items=[], total=0, error_count=0, deletable_count=0, page=page, page_size=page_size)
         candidate_runs = list(db.scalars(select(Run).where(patrol_condition).order_by(Run.created_at.desc(), Run.id.desc()).offset((page - 1) * page_size).limit(page_size)).all())
     if not candidate_runs and errors_only:
-        return PatrolRunListRead(items=[], total=0, error_count=0, page=page, page_size=page_size)
+        return PatrolRunListRead(items=[], total=0, error_count=0, deletable_count=0, page=page, page_size=page_size)
     total = len(candidate_runs) if errors_only else total
+    deletable_count = 0 if errors_only else int(
+        db.scalar(
+            select(func.count()).select_from(Run).where(
+                patrol_condition,
+                Run.status.notin_({"pending", "running"}),
+            )
+        ) or 0
+    )
     all_run_ids = [row[0] for row in db.execute(select(Run.id).where(patrol_condition)).all()] if not errors_only else [run.id for run in candidate_runs]
     runs = candidate_runs
     run_ids = [run.id for run in runs]
@@ -1232,8 +1240,16 @@ def list_patrol_runs(
     if errors_only:
         summaries = [item for item in summaries if item.display_state == "error" or item.needs_review]
         total = len(summaries)
+        deletable_count = sum(item.status not in {"pending", "running"} for item in summaries)
         summaries = summaries[(page - 1) * page_size:page * page_size]
-    return PatrolRunListRead(items=summaries, total=total, error_count=error_count, page=page, page_size=page_size)
+    return PatrolRunListRead(
+        items=summaries,
+        total=total,
+        error_count=error_count,
+        deletable_count=deletable_count,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @app.post("/api/runs", response_model=RunRead)
@@ -1888,8 +1904,8 @@ def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True) -> 
     run = db.get(Run, run_id)
     if not run:
         return False
-    if run.status == "running":
-        raise HTTPException(status_code=409, detail="Running runs must be canceled before deletion")
+    if run.status in {"pending", "running"}:
+        raise HTTPException(status_code=409, detail="Unfinished runs must be canceled before deletion")
     source_snapshots = _baseline_snapshots_for_deletable_runs(db, {run_id})
     for snapshot in source_snapshots:
         conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
@@ -1965,8 +1981,8 @@ def _preflight_deletable_run_ids(db: Session, run_ids: list[str]) -> tuple[set[s
         if not run:
             missing.append(run_id)
             continue
-        if run.status == "running":
-            failed[run_id] = "Running runs must be canceled before deletion"
+        if run.status in {"pending", "running"}:
+            failed[run_id] = "Unfinished runs must be canceled before deletion"
             continue
         if run_id in blocked_by_baseline:
             failed[run_id] = blocked_by_baseline[run_id]

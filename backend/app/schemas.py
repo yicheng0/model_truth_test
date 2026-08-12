@@ -1006,6 +1006,7 @@ class PatrolRunListRead(BaseModel):
     items: list[PatrolRunSummaryRead] = Field(default_factory=list)
     total: int = 0
     error_count: int = 0
+    deletable_count: int = 0
     page: int = 1
     page_size: int = 10
 

@@ -6,7 +6,7 @@ import { History, Play, ShieldCheck, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { claudeFingerprintAlertLevel, claudeFingerprintVerdicts, fastModeStatusMeta, labelText, labelTooltip, topRiskLabels } from '../claudeCodeDiagnostics';
 import { groupClaudeFingerprintHistory, localDayRangeIso, probeDiagnosticText } from '../claudeFingerprintHistory';
-import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_EVIDENCE_TIERS, CLAUDE_RESOURCE_IDENTITY_META, UPSTREAM_INTEGRITY_META, type UpstreamIntegrityClassification } from '../claudeFingerprintSpec';
+import { CLAUDE_ACCESS_PATHS, CLAUDE_CHANNEL_DIFFERENCES, CLAUDE_CLIENT_FINGERPRINT_META, CLAUDE_EVIDENCE_TIERS, CLAUDE_RESOURCE_IDENTITY_META, UPSTREAM_INTEGRITY_META, type UpstreamIntegrityClassification } from '../claudeFingerprintSpec';
 import { formatChannelDisplayName } from '../channelCredentials';
 import { formatDateTime } from '../time';
 import type { ClaudeCodeCheckStatus, ClaudeCodeHistoryDetail, ClaudeCodeHistoryItem, ClaudeCodeJobProbe, ClaudeCodeJobStatus, ClaudeCodeProbeResult, ClaudeCodeRelayTestCreate, ClaudeCodeSection, ClaudeCodeSourceChannel, ClaudeCodeTestResult, FastModeAssessment } from '../types';
@@ -151,6 +151,8 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
   const gateway = integrity.gateway_fingerprint;
   const gatewayContract = integrity.gateway_contract;
   const resourceIdentity = result.resource_identity;
+  const clientFingerprint = result.client_fingerprint;
+  const clientMeta = clientFingerprint?.client_likelihood ? CLAUDE_CLIENT_FINGERPRINT_META[clientFingerprint.client_likelihood] : null;
   const resourceMeta = resourceIdentity?.classification ? CLAUDE_RESOURCE_IDENTITY_META[resourceIdentity.classification] : null;
   const meta = UPSTREAM_INTEGRITY_META[integrity.classification as UpstreamIntegrityClassification] ?? {
     label: integrity.classification,
@@ -167,6 +169,14 @@ function UpstreamIntegrityPanel({ result }: { result: ClaudeCodeTestResult }) {
             showIcon
             message={<Space wrap><span>{resourceMeta?.label || resourceIdentity.classification}</span><Tag color={resourceMeta?.color || 'default'}>置信度 {resourceIdentity.confidence || 'low'}</Tag><Tag>OAuth 未由远程探针确认</Tag></Space>}
             description={resourceIdentity.reason || resourceMeta?.description}
+          />
+        ) : null}
+        {clientFingerprint?.client_likelihood ? (
+          <Alert
+            type={clientFingerprint.client_likelihood === 'claude_code_like' ? 'info' : clientFingerprint.client_likelihood === 'unobservable' ? 'info' : 'warning'}
+            showIcon
+            message={<Space wrap><span>{clientMeta?.label || clientFingerprint.client_likelihood}</span><Tag color={clientMeta?.color || 'default'}>置信度 {clientFingerprint.client_confidence || 'low'}</Tag><Tag>来源未验证</Tag></Space>}
+            description={clientFingerprint.reason || '客户端指纹只在捕获原始入站请求时有效。'}
           />
         ) : null}
         <Alert

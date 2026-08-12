@@ -777,6 +777,15 @@ export type ClaudeCodeTestResult = {
     evidence_refs?: string[];
     limitations?: string[];
   } | null;
+  client_fingerprint?: {
+    client_likelihood?: 'claude_code_like' | 'api_direct_like' | 'mixed_or_relay' | 'unobservable' | string;
+    client_confidence?: 'low' | 'medium' | 'high' | string;
+    origin_verified?: boolean;
+    evidence_mode?: 'active_probe_only' | 'inbound_request_observed' | string;
+    evidence?: string[];
+    reason?: string | null;
+    limitations?: string[];
+  } | null;
   upstream_integrity?: {
     classification: 'signature_chain_verified' | 'mixed_routing_suspected' | 'protocol_reconstruction_suspected' | 'model_swap_suspected' | 'insufficient_evidence' | 'operationally_inconclusive' | string;
     confidence: 'low' | 'medium' | 'high' | string;
@@ -1134,6 +1143,7 @@ export type PatrolRunList = {
   items: PatrolRunSummary[];
   total: number;
   error_count: number;
+  deletable_count: number;
   page: number;
   page_size: number;
 };

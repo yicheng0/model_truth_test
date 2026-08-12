@@ -226,7 +226,7 @@ const LABELS: Record<string, LabelInfo> = {
   },
   thinking_signature_missing: {
     text: 'Signature 缺失',
-    description: 'Thinking block 没有 signature，Claude thinking 协议连续性不足；这不是 Claude Code 资源来源证据。',
+    description: '观测：响应 content 中未发现带非空 signature 的 thinking block。影响：本轮无法验证 Thinking Signature 是否由模型生成并被网关完整透传；该项不单独证明非 Claude，也不能证明 Claude Code 资源来源。复核：查看原始响应的 content block 类型与 signature 字段，并确认模型、协议和网关是否支持 adaptive thinking。',
     priority: 88,
   },
   signature_interop_failed: {
@@ -316,7 +316,7 @@ const LABELS: Record<string, LabelInfo> = {
   },
   signature_not_supported: {
     text: 'Signature 不支持',
-    description: '当前链路不支持或未透传 Thinking Signature，说明 Claude thinking 协议连续性不可验证，不代表 Claude Code 资源来源。',
+    description: '观测：上游拒绝了 Thinking Signature 探针，或当前链路未返回可验证的 signature。影响：Claude thinking 签名链路不可验证，但不单独影响普通 Claude 兼容性判断。复核：检查上游错误、请求中的 thinking/output_config，以及网关是否裁剪 thinking block。',
     priority: 46,
   },
   provider_error_variant: {

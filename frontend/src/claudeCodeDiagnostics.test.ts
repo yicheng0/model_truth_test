@@ -18,6 +18,9 @@ describe('claudeCodeDiagnostics', () => {
     expect(labelDescription('upstream_error_rewrapped')).toContain('错误 envelope');
     expect(labelDescription('stream_buffered_by_gateway')).toContain('首事件');
     expect(labelDescription('gateway_model_alias_capability_mismatch')).toContain('alias');
+    expect(labelDescription('thinking_signature_missing')).toContain('观测：');
+    expect(labelDescription('thinking_signature_missing')).toContain('影响：');
+    expect(labelDescription('thinking_signature_missing')).toContain('复核：');
   });
 
   it('prioritizes high-risk probe diagnosis labels', () => {

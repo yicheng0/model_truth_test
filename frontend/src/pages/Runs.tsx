@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress,
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
 
@@ -562,13 +562,20 @@ export default function Runs() {
     [filteredPatrolRuns, selectedPatrolRowKeys],
   );
   const deletableSelectedPatrolRuns = selectedPatrolRuns.filter((run) => isTerminalRun(run.status));
-  const deletablePatrolRuns = useMemo(
-    () => filteredPatrolRuns.filter((run) => isTerminalRun(run.status)),
-    [filteredPatrolRuns],
-  );
   const selectedPatrolChannelLabel = useMemo(
     () => patrolChannelOptions.find((option) => option.value === selectedPatrolChannel)?.label ?? '当前渠道',
     [patrolChannelOptions, selectedPatrolChannel],
+  );
+  const patrolDeleteSummary = useMemo(
+    () => buildPatrolDeleteSummary({
+      selectedRuns: selectedPatrolRuns,
+      selectedRowCount: selectedPatrolRowKeys.length,
+      filteredDeletableCount: patrolQuery.data?.deletable_count ?? 0,
+      selectedChannel: selectedPatrolChannel,
+      selectedChannelLabel: selectedPatrolChannelLabel,
+      onlyErrors: onlyPatrolErrors,
+    }),
+    [onlyPatrolErrors, patrolQuery.data?.deletable_count, selectedPatrolChannel, selectedPatrolChannelLabel, selectedPatrolRowKeys.length, selectedPatrolRuns],
   );
 
   useEffect(() => {
@@ -585,8 +592,9 @@ export default function Runs() {
   }, [filteredPatrolRuns, normalRuns]);
 
   useEffect(() => {
+    if (!patrolQuery.data) return;
     setPatrolPage((page) => clampPage(page, patrolQuery.data?.total ?? 0, patrolPageSize));
-  }, [patrolQuery.data?.total, patrolPageSize]);
+  }, [patrolQuery.data, patrolPageSize]);
 
   function deleteSelectedNormalRuns() {
     if (!selectedNormalRowKeys.length) {
@@ -617,15 +625,18 @@ export default function Runs() {
   }
 
   async function deleteAllPatrolRuns() {
-    let allFilteredRuns = allPatrolRuns.filter((run) => selectedPatrolChannel === ALL_PATROL_CHANNELS || run.patrol_channel_id === selectedPatrolChannel);
-    if (onlyPatrolErrors) {
-      const firstPage = await api.patrolRuns({ page: 1, page_size: 100, channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel, errors_only: true });
-      allFilteredRuns = [...firstPage.items];
-      for (let page = 2; allFilteredRuns.length < firstPage.total; page += 1) {
-        const nextPage = await api.patrolRuns({ page, page_size: 100, channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel, errors_only: true });
-        allFilteredRuns.push(...nextPage.items);
-        if (!nextPage.items.length) break;
-      }
+    const query = {
+      page: 1,
+      page_size: 100,
+      channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel,
+      errors_only: onlyPatrolErrors,
+    };
+    const firstPage = await api.patrolRuns(query);
+    const allFilteredRuns = [...firstPage.items];
+    for (let page = 2; allFilteredRuns.length < firstPage.total; page += 1) {
+      const nextPage = await api.patrolRuns({ ...query, page });
+      allFilteredRuns.push(...nextPage.items);
+      if (!nextPage.items.length) break;
     }
     const deletable = deletablePatrolRunIds(allFilteredRuns);
     if (!deletable.length) {
@@ -851,59 +862,86 @@ export default function Runs() {
         className="patrol-log-card"
         title={<span className="card-title-with-icon"><CalendarClock size={18} />自动巡检日志</span>}
         extra={(
-          <Space wrap>
-            <Select
-              allowClear
-              value={selectedPatrolChannel}
-              onChange={(value) => {
-                setSelectedPatrolChannel(value ?? ALL_PATROL_CHANNELS);
-                setPatrolPage(1);
-              }}
-              placeholder="全部渠道"
-              options={patrolChannelOptions}
-              style={{ width: 190 }}
-              aria-label="自动巡检日志渠道筛选"
-            />
-            <Button
-              size="small"
-              type={onlyPatrolErrors ? 'primary' : 'default'}
-              danger={onlyPatrolErrors}
-              onClick={() => {
-                setOnlyPatrolErrors((value) => !value);
-                setPatrolPage(1);
-              }}
-              aria-pressed={onlyPatrolErrors}
-              aria-label="只看错误"
-            >
-              只看错误（{errorPatrolRunCount}）
-            </Button>
-            <Popconfirm
-              title="删除已选巡检日志"
-              description={`将删除 ${deletableSelectedPatrolRuns.length} 条已选已结束日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
-              okText="删除"
-              okButtonProps={{ danger: true }}
-              cancelText="取消"
-              disabled={!deletableSelectedPatrolRuns.length}
-              onConfirm={deleteSelectedPatrolRuns}
-            >
-              <Button size="small" danger icon={<Trash2 size={14} />} disabled={!deletableSelectedPatrolRuns.length} loading={deletePatrolRuns.isPending}>
-                删除已选
+          <div className="patrol-log-toolbar">
+            <div className="patrol-log-toolbar-filters">
+              <Select
+                allowClear
+                value={selectedPatrolChannel}
+                onChange={(value) => {
+                  setSelectedPatrolChannel(value ?? ALL_PATROL_CHANNELS);
+                  setPatrolPage(1);
+                }}
+                placeholder="全部渠道"
+                options={patrolChannelOptions}
+                style={{ width: 190 }}
+                aria-label="自动巡检日志渠道筛选"
+              />
+              <Button
+                size="small"
+                type={onlyPatrolErrors ? 'primary' : 'default'}
+                danger={onlyPatrolErrors}
+                onClick={() => {
+                  setOnlyPatrolErrors((value) => !value);
+                  setPatrolPage(1);
+                }}
+                aria-pressed={onlyPatrolErrors}
+                aria-label="只看错误"
+              >
+                只看错误（{errorPatrolRunCount}）
               </Button>
-            </Popconfirm>
-            <Popconfirm
-              title={selectedPatrolChannel === ALL_PATROL_CHANNELS ? '删除全部已结束巡检日志' : `删除渠道「${selectedPatrolChannelLabel}」的已结束巡检日志`}
-              description={`将删除${selectedPatrolChannel === ALL_PATROL_CHANNELS ? '全部渠道' : `渠道「${selectedPatrolChannelLabel}」`}的 ${deletablePatrolRuns.length} 条已结束巡检日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
-              okText={selectedPatrolChannel === ALL_PATROL_CHANNELS ? '删除全部' : '删除该渠道'}
-              okButtonProps={{ danger: true }}
-              cancelText="取消"
-              disabled={!deletablePatrolRuns.length}
-              onConfirm={deleteAllPatrolRuns}
-            >
-              <Button size="small" danger icon={<Trash2 size={14} />} disabled={!deletablePatrolRuns.length} loading={deletePatrolRuns.isPending}>
-                {selectedPatrolChannel === ALL_PATROL_CHANNELS ? '删除全部已结束' : '删除该渠道已结束'}
-              </Button>
-            </Popconfirm>
-          </Space>
+            </div>
+            <div className="patrol-log-toolbar-delete">
+              <Tooltip title={patrolDeleteSummary.selectedDisabledReason}>
+                <span
+                  className="patrol-delete-button-help"
+                  data-testid="patrol-delete-selected-help"
+                  aria-label={patrolDeleteSummary.selectedDisabledReason ?? undefined}
+                  tabIndex={patrolDeleteSummary.selectedDisabledReason ? 0 : -1}
+                >
+                  <Popconfirm
+                    title="删除已选巡检日志"
+                    description={`将删除 ${patrolDeleteSummary.selectedDeletableCount} 条已选已结束日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
+                    okText="删除"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                    disabled={!patrolDeleteSummary.selectedDeletableCount}
+                    onConfirm={deleteSelectedPatrolRuns}
+                  >
+                    <Button
+                      size="small"
+                      danger
+                      icon={<Trash2 size={14} />}
+                      aria-label={`删除已选巡检日志（${patrolDeleteSummary.selectedDeletableCount}）`}
+                      disabled={!patrolDeleteSummary.selectedDeletableCount}
+                      loading={deletePatrolRuns.isPending}
+                    >
+                      删除已选（{patrolDeleteSummary.selectedDeletableCount}）
+                    </Button>
+                  </Popconfirm>
+                </span>
+              </Tooltip>
+              <Popconfirm
+                title={`删除${patrolDeleteSummary.deleteScopeLabel}中的已结束巡检日志`}
+                description={`将删除${patrolDeleteSummary.deleteScopeLabel}中的 ${patrolDeleteSummary.filteredDeletableCount} 条已结束巡检日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}
+                okText="删除当前范围"
+                okButtonProps={{ danger: true }}
+                cancelText="取消"
+                disabled={!patrolDeleteSummary.filteredDeletableCount}
+                onConfirm={deleteAllPatrolRuns}
+              >
+                <Button
+                  size="small"
+                  danger
+                  icon={<Trash2 size={14} />}
+                  aria-label={`删除当前范围（${patrolDeleteSummary.filteredDeletableCount}）`}
+                  disabled={!patrolDeleteSummary.filteredDeletableCount}
+                  loading={deletePatrolRuns.isPending}
+                >
+                  删除当前范围（{patrolDeleteSummary.filteredDeletableCount}）
+                </Button>
+              </Popconfirm>
+            </div>
+          </div>
         )}
         bordered={false}
       >
@@ -996,7 +1034,7 @@ export default function Runs() {
                       okText="删除"
                       cancelText="取消"
                       okButtonProps={{ danger: true }}
-                      disabled={run.status === 'running'}
+                      disabled={!isTerminalRun(run.status)}
                       onConfirm={() => deleteRun(run)}
                     >
                       <Button
@@ -1004,7 +1042,7 @@ export default function Runs() {
                         danger
                         icon={<Trash2 size={14} />}
                         loading={deletingId === run.id}
-                        disabled={run.status === 'running'}
+                        disabled={!isTerminalRun(run.status)}
                       >
                         删除
                       </Button>

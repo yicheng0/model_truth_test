@@ -476,6 +476,49 @@ export function deletablePatrolRunIds(runs: Run[]): string[] {
     .map((run) => run.id);
 }
 
+export type PatrolDeleteSummary = {
+  selectedDeletableCount: number;
+  filteredDeletableCount: number;
+  hasSelectedRows: boolean;
+  selectedDisabledReason: string | null;
+  deleteScopeLabel: string;
+};
+
+export function buildPatrolDeleteSummary({
+  selectedRuns,
+  selectedRowCount,
+  filteredDeletableCount,
+  selectedChannel,
+  selectedChannelLabel,
+  onlyErrors,
+}: {
+  selectedRuns: Run[];
+  selectedRowCount: number;
+  filteredDeletableCount: number;
+  selectedChannel: string;
+  selectedChannelLabel: string;
+  onlyErrors: boolean;
+}): PatrolDeleteSummary {
+  const selectedDeletableCount = deletablePatrolRunIds(selectedRuns).length;
+  const hasSelectedRows = selectedRowCount > 0;
+  const selectedDisabledReason = selectedDeletableCount > 0
+    ? null
+    : hasSelectedRows
+      ? '未结束的巡检日志不能删除'
+      : '请先勾选已结束日志';
+  const channelScope = selectedChannel === ALL_PATROL_CHANNELS
+    ? '全部渠道'
+    : `渠道「${selectedChannelLabel}」`;
+
+  return {
+    selectedDeletableCount,
+    filteredDeletableCount: Math.max(0, Math.floor(filteredDeletableCount)),
+    hasSelectedRows,
+    selectedDisabledReason,
+    deleteScopeLabel: onlyErrors ? `${channelScope}的错误日志` : channelScope,
+  };
+}
+
 export function selectableRunIds(runs: Run[]) {
   return runs.filter((run) => run.status !== 'pending' && run.status !== 'running').map((run) => run.id);
 }

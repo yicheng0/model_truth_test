@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolSignatureDisplayState, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolSignatureDisplayState, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -976,5 +976,78 @@ describe('runs utilities', () => {
     expect(filterPatrolRunsByError(input, false, states).map((item) => item.id)).toEqual(['ok_1', 'error_1', 'unknown_1', 'error_2']);
     expect(filterPatrolRunsByError(input, true, states).map((item) => item.id)).toEqual(['error_1', 'error_2']);
     expect(filterPatrolRunsByError([], true, states)).toEqual([]);
+  });
+
+  it('explains why patrol selection cannot be deleted and counts only terminal runs', () => {
+    const completed = run('completed', 'sched_1');
+    const failed = { ...run('failed', 'sched_1'), status: 'failed' as const };
+    const pending = { ...run('pending', 'sched_1'), status: 'pending' as const };
+    const running = { ...run('running', 'sched_1'), status: 'running' as const };
+
+    expect(buildPatrolDeleteSummary({
+      selectedRuns: [],
+      selectedRowCount: 0,
+      filteredDeletableCount: 8,
+      selectedChannel: ALL_PATROL_CHANNELS,
+      selectedChannelLabel: '全部渠道',
+      onlyErrors: false,
+    })).toMatchObject({
+      selectedDeletableCount: 0,
+      hasSelectedRows: false,
+      selectedDisabledReason: '请先勾选已结束日志',
+      deleteScopeLabel: '全部渠道',
+    });
+
+    expect(buildPatrolDeleteSummary({
+      selectedRuns: [pending, running],
+      selectedRowCount: 2,
+      filteredDeletableCount: 8,
+      selectedChannel: ALL_PATROL_CHANNELS,
+      selectedChannelLabel: '全部渠道',
+      onlyErrors: false,
+    })).toMatchObject({
+      selectedDeletableCount: 0,
+      hasSelectedRows: true,
+      selectedDisabledReason: '未结束的巡检日志不能删除',
+    });
+
+    expect(buildPatrolDeleteSummary({
+      selectedRuns: [completed, failed, pending],
+      selectedRowCount: 3,
+      filteredDeletableCount: 8,
+      selectedChannel: ALL_PATROL_CHANNELS,
+      selectedChannelLabel: '全部渠道',
+      onlyErrors: false,
+    })).toMatchObject({
+      selectedDeletableCount: 2,
+      hasSelectedRows: true,
+      selectedDisabledReason: null,
+      filteredDeletableCount: 8,
+    });
+  });
+
+  it('builds patrol delete scope labels for channel and error filters', () => {
+    const base = {
+      selectedRuns: [] as Run[],
+      selectedRowCount: 0,
+      filteredDeletableCount: 3,
+      selectedChannelLabel: '渠道 A',
+    };
+
+    expect(buildPatrolDeleteSummary({
+      ...base,
+      selectedChannel: ALL_PATROL_CHANNELS,
+      onlyErrors: true,
+    }).deleteScopeLabel).toBe('全部渠道的错误日志');
+    expect(buildPatrolDeleteSummary({
+      ...base,
+      selectedChannel: 'channel_a',
+      onlyErrors: false,
+    }).deleteScopeLabel).toBe('渠道「渠道 A」');
+    expect(buildPatrolDeleteSummary({
+      ...base,
+      selectedChannel: 'channel_a',
+      onlyErrors: true,
+    }).deleteScopeLabel).toBe('渠道「渠道 A」的错误日志');
   });
 });

@@ -1,5 +1,6 @@
 import type { Dayjs } from 'dayjs';
 import dayjs from 'dayjs';
+import { labelDescription } from './claudeCodeDiagnostics';
 import type { ClaudeCodeHistoryFilters, ClaudeCodeHistoryItem } from './types';
 
 export type ClaudeCodeHistoryDayGroup = {
@@ -61,7 +62,13 @@ export function groupClaudeFingerprintHistory(items: ClaudeCodeHistoryItem[]): C
 }
 
 export function probeDiagnosticText(probe: ClaudeCodeProbeLike): string {
-  if (probe.reason?.trim()) return probe.reason.trim();
+  const reason = probe.reason?.trim();
+  const legacyGenericReason = reason === '检测项返回异常，需要结合原始响应复核。'
+    || reason === '暂无完整判定原因，请结合标签和原始证据复核。';
+  if (reason && !legacyGenericReason) return reason;
+  if (legacyGenericReason && probe.labels?.length) {
+    return probe.labels.map(labelDescription).join('；');
+  }
   if (probe.error_detail?.trim()) return probe.error_detail.trim();
   if (probe.evidence_excerpt?.trim()) return probe.evidence_excerpt.trim();
   if (probe.detail?.trim()) return probe.detail.trim();

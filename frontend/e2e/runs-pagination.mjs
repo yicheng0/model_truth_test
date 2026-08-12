@@ -13,7 +13,7 @@ const runs = Array.from({ length: 26 }, (_, index) => ({
   scheduled_test_id: 'schedule_1',
   patrol_channel_id: index % 2 === 0 ? 'channel_a' : 'channel_b',
   patrol_channel_name: index % 2 === 0 ? '渠道 A' : '渠道 B',
-  status: 'completed',
+  status: index === 24 ? 'pending' : index === 25 ? 'running' : 'completed',
   repeat_count: 1,
   concurrency: 1,
   total_jobs: 1,
@@ -103,16 +103,20 @@ try {
   await waitForServer();
   const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
   browser = await chromium.launch({ headless: true, executablePath });
-  const page = await browser.newPage();
+  const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   const detailRequests = [];
+  const patrolRequests = [];
+  const deleteRequests = [];
+  const deletedRunIds = new Set();
   await page.route('**/api/runs/patrol**', async (route) => {
     const url = new URL(route.request().url());
     const pageNumber = Number(url.searchParams.get('page') ?? '1');
     const pageSize = Number(url.searchParams.get('page_size') ?? '10');
     const channelId = url.searchParams.get('channel_id');
     const errorsOnly = url.searchParams.get('errors_only') === 'true';
+    patrolRequests.push(`${pageNumber}:${pageSize}:${channelId ?? 'all'}:${errorsOnly}`);
     const errorIds = new Set(['patrol_01', 'patrol_03', 'patrol_05', 'patrol_06']);
-    const filtered = runs.filter((run) => (!channelId || run.patrol_channel_id === channelId) && (!errorsOnly || errorIds.has(run.id)));
+    const filtered = runs.filter((run) => !deletedRunIds.has(run.id) && (!channelId || run.patrol_channel_id === channelId) && (!errorsOnly || errorIds.has(run.id)));
     const start = (pageNumber - 1) * pageSize;
     const items = filtered.slice(start, start + pageSize).map((run) => ({
       ...run,
@@ -120,9 +124,18 @@ try {
       needs_review: errorIds.has(run.id),
       has_evidence: true,
     }));
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, total: filtered.length, error_count: runs.filter((run) => errorIds.has(run.id)).length, page: pageNumber, page_size: pageSize }) });
+    const deletableCount = filtered.filter((run) => run.status !== 'pending' && run.status !== 'running').length;
+    const channelErrorCount = runs.filter((run) => !deletedRunIds.has(run.id) && (!channelId || run.patrol_channel_id === channelId) && errorIds.has(run.id)).length;
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, total: filtered.length, error_count: channelErrorCount, deletable_count: deletableCount, page: pageNumber, page_size: pageSize }) });
   });
-  await page.route('**/api/runs', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runs) }));
+  await page.route('**/api/runs/bulk-delete', async (route) => {
+    const payload = JSON.parse(route.request().postData() ?? '{}');
+    const ids = Array.isArray(payload.ids) ? payload.ids : [];
+    deleteRequests.push(ids);
+    ids.forEach((id) => deletedRunIds.add(id));
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ deleted: ids.length, missing: [], failed: {} }) });
+  });
+  await page.route('**/api/runs', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runs.filter((run) => !deletedRunIds.has(run.id)) ) }));
   await page.route('**/api/channels**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   await page.route('**/api/reports/summary', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   await page.route('**/api/runs/*/results', (route) => {
@@ -146,6 +159,46 @@ try {
   }
   const firstPageIds = await tableRows.allTextContents();
   assert.equal(firstPageIds.length, 10, '第一页应显示 10 条巡检日志');
+  const deleteSelected = page.getByRole('button', { name: '删除已选巡检日志（0）' });
+  const deleteRange = page.getByRole('button', { name: '删除当前范围（24）' });
+  await deleteSelected.waitFor();
+  await deleteRange.waitFor();
+  assert.equal(await deleteSelected.isDisabled(), true, '未选择日志时删除已选应禁用');
+  const deleteHelp = page.getByTestId('patrol-delete-selected-help');
+  assert.equal(await deleteHelp.getAttribute('aria-label'), '请先勾选已结束日志', '键盘和读屏应能获知禁用原因');
+  await deleteHelp.hover();
+  await page.getByText('请先勾选已结束日志', { exact: true }).waitFor();
+  const toolbar = page.locator('.patrol-log-toolbar');
+  const patrolCard = page.locator('.patrol-log-card');
+  const toolbarBox = await toolbar.boundingBox();
+  const cardBox = await patrolCard.boundingBox();
+  const selectedBox = await deleteSelected.boundingBox();
+  const rangeBox = await deleteRange.boundingBox();
+  assert.ok(toolbarBox && cardBox && selectedBox && rangeBox, '删除工具栏、卡片和按钮应可见');
+  assert.ok(selectedBox.x + selectedBox.width <= toolbarBox.x + toolbarBox.width + 1, '删除已选按钮不应被工具栏裁切');
+  assert.ok(rangeBox.x + rangeBox.width <= toolbarBox.x + toolbarBox.width + 1, '删除当前范围按钮不应被工具栏裁切');
+  assert.ok(toolbarBox.x >= cardBox.x && toolbarBox.x + toolbarBox.width <= cardBox.x + cardBox.width + 1, '工具栏整体不应溢出巡检卡片');
+  assert.ok(cardBox.x + cardBox.width <= 1001, '巡检卡片不应溢出窄视口');
+  for (const control of [
+    page.getByRole('combobox', { name: '自动巡检日志渠道筛选' }),
+    page.getByRole('button', { name: /只看错误/ }),
+    deleteSelected,
+    deleteRange,
+  ]) {
+    assert.equal(await control.isVisible(), true, '窄视口下筛选和删除控件均应可见');
+  }
+  for (const button of [deleteSelected, deleteRange]) {
+    const isTextClipped = await button.evaluate((element) => element.scrollWidth > element.clientWidth + 1);
+    assert.equal(isTextClipped, false, '删除按钮文字不应被裁切');
+  }
+
+  const firstRowCheckbox = page.locator('.patrol-log-table .ant-table-tbody > tr:not(.ant-table-measure-row)').first().locator('.ant-checkbox-wrapper');
+  await firstRowCheckbox.click();
+  const oneSelected = page.getByRole('button', { name: '删除已选巡检日志（1）' });
+  await oneSelected.click();
+  await page.getByText('将删除 1 条已选已结束日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？', { exact: true }).waitFor();
+  await page.locator('.ant-popover button:visible').first().click();
+  await firstRowCheckbox.click();
   const errorFilter = page.getByRole('button', { name: /只看错误/ });
   assert.equal(await errorFilter.getAttribute('aria-pressed'), 'false', '只看错误默认关闭');
   assert.match(await errorFilter.textContent(), /只看错误（4）/, '错误数量不应统计正确和运营故障日志');
@@ -159,18 +212,30 @@ try {
   assert.match(errorText, /巡检日志 1|巡检日志 3|巡检日志 5|巡检日志 6/);
   assert.doesNotMatch(errorText, /巡检日志 2|巡检日志 4/);
 
-  await page.getByRole('combobox', { name: '自动巡检日志渠道筛选' }).click();
-  await page.getByText('渠道 B', { exact: true }).click();
+  await page.getByRole('combobox', { name: '自动巡检日志渠道筛选' }).locator('..').locator('..').click();
+  await page.locator('.ant-select-dropdown:visible .ant-select-item-option-content').filter({ hasText: '渠道 B' }).click();
   await page.waitForTimeout(250);
   assert.equal(await errorRows.count(), 1, '渠道 B + 只看错误应只保留渠道 B 的异常日志');
   assert.match((await errorRows.allTextContents()).join('\n'), /巡检日志 6/);
+  await page.getByRole('button', { name: '删除当前范围（1）' }).click();
+  await page.getByText('删除渠道「渠道 B」的错误日志中的已结束巡检日志', { exact: true }).waitFor();
+  await page.locator('.ant-popover button:visible').first().click();
 
   await errorFilter.click();
   await page.waitForTimeout(250);
   assert.equal(await errorFilter.getAttribute('aria-pressed'), 'false');
   assert.equal(await errorRows.count(), 10, '关闭只看错误后应恢复渠道 B 的全部第一页日志');
 
-  await page.getByRole('listitem', { name: '2' }).click();
+  await page.getByRole('combobox', { name: '自动巡检日志渠道筛选' }).locator('..').locator('..').click();
+  await page.locator('.ant-select-dropdown:visible .ant-select-item-option-content').filter({ hasText: '全部渠道' }).click();
+  await page.waitForTimeout(250);
+  assert.equal(await tableRows.count(), 10, '切回全部渠道后应恢复全量第一页日志');
+
+  await page.locator('.patrol-log-pagination .ant-pagination-item-2 a').click();
+  await page.waitForTimeout(500);
+  assert.ok(patrolRequests.some((request) => request.startsWith('2:10:all:false')), `点击第 2 页应请求 page=2，实际：${patrolRequests.join(', ')}`);
+  const pageTwoTableText = await page.locator('.patrol-log-table').innerText();
+  assert.match(pageTwoTableText, /巡检日志 11/, `第 2 页应显示巡检日志 11；请求：${patrolRequests.join(', ')}；表格：${pageTwoTableText}`);
   const secondPageIds = await tableRows.allTextContents();
   assert.equal(secondPageIds.length, 10, '第二页应显示 10 条巡检日志');
   assert.notDeepEqual(secondPageIds, firstPageIds, '第二页日志必须与第一页不同');
@@ -182,10 +247,22 @@ try {
   const twentyPageIds = await tableRows.allTextContents();
   assert.equal(twentyPageIds.length, 20, '选择 20 条/页后应显示 20 条日志');
 
-  const expandableRow = page.locator('.patrol-log-table .ant-table-tbody > tr').first();
+  const expandableRow = page.locator('.patrol-log-table .ant-table-tbody > tr:not(.ant-table-measure-row)').first();
   await expandableRow.locator('.ant-table-row-expand-icon').click();
   await page.waitForTimeout(250);
   assert.deepEqual(detailRequests, ['patrol_01'], '展开行只应请求对应日志的完整结果');
+
+  const deleteTargetRow = tableRows.filter({ has: page.getByText('巡检日志 1', { exact: true }) });
+  await deleteTargetRow.locator('.ant-checkbox-wrapper').click();
+  await page.getByRole('button', { name: '删除已选巡检日志（1）' }).click();
+  await page.locator('.ant-popover').filter({ hasText: '删除已选巡检日志' }).last().locator('button:visible').last().click();
+  await page.waitForTimeout(500);
+  assert.deepEqual(deleteRequests, [['patrol_01']], '确认删除已选只应提交选中的已结束日志');
+  assert.equal(await page.getByText('巡检日志 1', { exact: true }).count(), 0, '删除成功后目标日志应从列表消失');
+  await page.getByRole('button', { name: '删除已选巡检日志（0）' }).waitFor();
+  await page.getByRole('button', { name: '删除当前范围（23）' }).waitFor();
+  assert.equal(deletedRunIds.has('patrol_25'), false, 'pending 日志不得进入删除集合');
+  assert.equal(deletedRunIds.has('patrol_26'), false, 'running 日志不得进入删除集合');
 } finally {
   await browser?.close();
   try {
