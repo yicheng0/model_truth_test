@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, paginateRuns, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, paginateRuns, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -19,6 +19,46 @@ function run(id: string, scheduledTestId?: string | null): Run {
 }
 
 describe('runs utilities', () => {
+  it('extracts only explicit HTTP 400 invalid thinking signature errors', () => {
+    const results = [
+      {
+        ...({ ...run('sig_1') }),
+        upstream_request_id: 'req_1',
+        normalized_response: { status_code: 400, error: 'Invalid `signature` in `thinking` block' },
+      },
+      {
+        ...({ ...run('sig_2') }),
+        raw_response: { status_code: 400, detail: 'INVALID `SIGNATURE` IN `THINKING` BLOCK', request_id: 'req_2' },
+      },
+      {
+        ...({ ...run('sig_3') }),
+        metrics: { http_status: 400 },
+        normalized_response: { error: 'Invalid `signature` in `thinking` block' },
+      },
+      {
+        ...({ ...run('not_400') }),
+        upstream_request_id: 'req_3',
+        normalized_response: { status_code: 422, error: 'Invalid `signature` in `thinking` block' },
+      },
+      {
+        ...({ ...run('other_error') }),
+        normalized_response: { status_code: 400, error: 'temperature is deprecated for this model' },
+      },
+    ] as unknown as RunResults['results'];
+
+    expect(extractInvalidThinkingSignatureErrors(results)).toEqual({ requestIds: ['req_1', 'req_2'], count: 3 });
+    expect(extractInvalidThinkingSignatureErrors([])).toBeNull();
+  });
+
+  it('does not invent request ids for signature errors without ids', () => {
+    const results = [{
+      ...run('sig_no_id'),
+      normalized_response: { status_code: 400, error: 'Invalid `signature` in `thinking` block' },
+    }] as unknown as RunResults['results'];
+
+    expect(extractInvalidThinkingSignatureErrors(results)).toEqual({ requestIds: [], count: 1 });
+  });
+
   it('keeps only reverse-routing anomalies for the channel overview', () => {
     expect(extractOverviewAnomalyLabels(['patrol_probe_claude', 'kiro_identity_leak', 'signature_interop_failed', 'kiro_identity_leak'])).toEqual([
       'kiro_identity_leak',

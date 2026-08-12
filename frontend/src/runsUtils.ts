@@ -119,6 +119,44 @@ export function extractOverviewAnomalyLabels(labels?: string[] | null): string[]
   return OVERVIEW_ANOMALY_LABELS.filter((label) => labelSet.has(label));
 }
 
+const INVALID_THINKING_SIGNATURE_PATTERN = /invalid\s+[`'“”]?signature[`'“”]?\s+in\s+[`'“”]?thinking[`'”’']?\s+block/i;
+
+export type InvalidThinkingSignatureSummary = {
+  requestIds: string[];
+  count: number;
+};
+
+export function extractInvalidThinkingSignatureErrors(results: Result[]): InvalidThinkingSignatureSummary | null {
+  const requestIds: string[] = [];
+  const seenRequestIds = new Set<string>();
+  let count = 0;
+
+  for (const result of results) {
+    const normalized = asRecord(result.normalized_response);
+    const raw = asRecord(result.raw_response);
+    const metrics = asRecord(result.metrics);
+    const statusCode = [normalized, raw, metrics]
+      .map((payload) => asNullableNumber(payload?.status_code) ?? asNullableNumber(payload?.http_status))
+      .find((value) => value !== null);
+    if (statusCode !== 400) continue;
+
+    const errorText = [normalized, raw]
+      .flatMap((payload) => payload ? [payload.error, payload.detail, payload.message, payload.error_detail] : [])
+      .map((value) => typeof value === 'string' ? value : stringifyJson(value) ?? '')
+      .join(' ');
+    if (!INVALID_THINKING_SIGNATURE_PATTERN.test(errorText)) continue;
+
+    count += 1;
+    const requestId = result.upstream_request_id ?? requestIdFromPayload(normalized) ?? requestIdFromPayload(raw);
+    if (requestId && !seenRequestIds.has(requestId)) {
+      seenRequestIds.add(requestId);
+      requestIds.push(requestId);
+    }
+  }
+
+  return count ? { requestIds, count } : null;
+}
+
 export function buildChannelResultOverview(channels: Channel[], reports: ReportSummary[], runs: Run[]): ChannelResultOverview[] {
   const latestReports = new Map<string, ReportSummary>();
   for (const report of reports) {
