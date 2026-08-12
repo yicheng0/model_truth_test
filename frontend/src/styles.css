@@ -606,6 +606,30 @@ textarea:focus-visible,
   white-space: nowrap;
 }
 
+.patrol-inline-error {
+  display: -webkit-box;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11px !important;
+  line-height: 1.35 !important;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.patrol-inline-error-operational {
+  color: #ad6800 !important;
+}
+
+.patrol-inline-error-signature,
+.patrol-inline-error-probe,
+.patrol-inline-error-load {
+  color: #cf1322 !important;
+}
+
 .patrol-evidence-detail {
   padding: 2px 0;
 }

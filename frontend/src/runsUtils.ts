@@ -17,6 +17,7 @@ export type PatrolModelRequestEvidence = {
   providerEndpoint?: string | null;
   createdAt?: string | null;
   completedAt?: string | null;
+  httpStatus?: number | null;
   labels: string[];
   error?: string | null;
   responseText?: string | null;
@@ -121,6 +122,132 @@ export function extractOverviewAnomalyLabels(labels?: string[] | null): string[]
 
 const INVALID_THINKING_SIGNATURE_PATTERN = /invalid\s+[`'“”]?signature[`'“”]?\s+in\s+[`'“”]?thinking[`'”’']?\s+block/i;
 
+const OPERATIONAL_FAILURE_LABELS = new Set([
+  'provider_temporarily_unavailable',
+  'provider_quota_or_balance_exhausted',
+  'provider_request_failed',
+]);
+const OPERATIONAL_FAILURE_TEXT_PATTERN = /\b5\d\d\b|internal server error|service unavailable|bad gateway|gateway timeout|request timeout|timed out|connection (?:failed|error|reset)|network error|no available channel|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|额度不足|余额不足|quota(?:\s+or\s+balance)?\s+(?:is\s+)?(?:exhausted|insufficient|exceeded)|insufficient\s+(?:quota|balance|credit)/i;
+
+export type PatrolOperationalFailureInput = {
+  status?: string | null;
+  labels?: string[] | null;
+  error?: string | null;
+  reason?: string | null;
+  rawError?: string | null;
+  responseText?: string | null;
+  rawResponseText?: string | null;
+  httpStatus?: number | null;
+  errorHttpStatus?: number | null;
+};
+
+export function isPatrolOperationalFailure(item?: PatrolOperationalFailureInput | null): boolean {
+  if (!item) return false;
+  const errorText = [item.error, item.reason, item.rawError, item.responseText, item.rawResponseText].filter(Boolean).join(' ');
+  if (item.errorHttpStatus === 400 && INVALID_THINKING_SIGNATURE_PATTERN.test(errorText)) return false;
+  if ((item.httpStatus ?? item.errorHttpStatus ?? null) !== null && (item.httpStatus ?? item.errorHttpStatus)! >= 500) return true;
+  if ((item.labels ?? []).some((label) => OPERATIONAL_FAILURE_LABELS.has(label))) return true;
+  return OPERATIONAL_FAILURE_TEXT_PATTERN.test(errorText);
+}
+
+export type PatrolEvidenceDisplayState = {
+  displayState: 'ok' | 'error';
+  isOperationalFailure: boolean;
+  hasRealAnomaly: boolean;
+};
+
+export type PatrolInlineError = {
+  kind: 'operational' | 'signature' | 'probe';
+  text: string;
+  fullText: string;
+  source: 'model_request' | 'signature' | 'classification' | 'summary' | 'label';
+};
+
+function normalizedPatrolErrorText(value?: string | null): string | null {
+  const text = value?.replace(/\s+/g, ' ').trim();
+  return text || null;
+}
+
+function patrolErrorKind(item: PatrolOperationalFailureInput, text: string): PatrolInlineError['kind'] {
+  if (isPatrolOperationalFailure(item)) return 'operational';
+  if (INVALID_THINKING_SIGNATURE_PATTERN.test(text)) return 'signature';
+  return 'probe';
+}
+
+export function patrolInlineError(evidence: PatrolEvidence): PatrolInlineError | null {
+  for (const item of evidence.modelRequests) {
+    if (item.status === 'ok' && !item.error && !item.labels.length) continue;
+    const fullText = normalizedPatrolErrorText(item.error ?? item.responseText ?? item.rawResponseText);
+    if (!fullText) continue;
+    return {
+      kind: patrolErrorKind(item, fullText),
+      text: fullText,
+      fullText,
+      source: 'model_request',
+    };
+  }
+
+  const signature = evidence.signature;
+  if (signature && (signature.status === 'fail' || signature.status === 'error' || signature.rawError || signature.reason)) {
+    const fullText = normalizedPatrolErrorText(signature.rawError ?? signature.reason);
+    if (fullText) {
+      return {
+        kind: patrolErrorKind(signature, fullText),
+        text: fullText,
+        fullText,
+        source: 'signature',
+      };
+    }
+  }
+
+  const classification = normalizedPatrolErrorText(evidence.classificationReason);
+  if (classification && patrolEvidenceDisplayState(evidence).hasRealAnomaly) {
+    return { kind: 'probe', text: classification, fullText: classification, source: 'classification' };
+  }
+  const summary = normalizedPatrolErrorText(evidence.summary);
+  if (summary && patrolEvidenceDisplayState(evidence).hasRealAnomaly) {
+    return { kind: 'probe', text: summary, fullText: summary, source: 'summary' };
+  }
+  for (const label of evidence.labels) {
+    if (label === 'patrol_probe_passed') continue;
+    const explanation = normalizedPatrolErrorText(evidence.labelExplanations[label]);
+    if (!explanation) continue;
+    return {
+      kind: OPERATIONAL_FAILURE_LABELS.has(label) ? 'operational' : 'probe',
+      text: explanation,
+      fullText: explanation,
+      source: 'label',
+    };
+  }
+  return null;
+}
+
+export function patrolEvidenceDisplayState(evidence: PatrolEvidence): PatrolEvidenceDisplayState {
+  const modelOperational = evidence.modelRequests.map((item) => isPatrolOperationalFailure(item));
+  const signatureOperational = isPatrolOperationalFailure(evidence.signature);
+  const hasOperationalEvidence = modelOperational.some(Boolean) || signatureOperational
+    || evidence.classificationStatus === 'operational_issue'
+    || evidence.labels.some((label) => OPERATIONAL_FAILURE_LABELS.has(label));
+  const hasKiro = evidence.labels.includes('kiro_identity_leak')
+    || evidence.modelRequests.some((item) => item.labels.includes('kiro_identity_leak'));
+  const hasExplicitSignatureFailure = (!signatureOperational && evidence.labels.includes('signature_interop_failed'))
+    || (evidence.signature?.status === 'fail' || evidence.signature?.status === 'error') && !signatureOperational;
+  const hasOtherAnomalyLabel = evidence.labels.some((label) => !OPERATIONAL_FAILURE_LABELS.has(label) && !['patrol_probe_passed', 'provider_error_variant', 'identity_probe_failed', 'identity_uncertain'].includes(label));
+  const hasOtherModelAnomaly = evidence.modelRequests.some((item, index) => {
+    if (modelOperational[index]) return false;
+    if (isPatrolNativeParameterRejection(item)) return false;
+    return (item.status === 'error' || item.status === 'fail' || Boolean(item.error) || item.labels.some((label) => label !== 'provider_error_variant'));
+  });
+  const hasUnclassifiedIdentityFailure = evidence.labels.includes('identity_probe_failed')
+    && !hasOperationalEvidence;
+  const hasRealAnomaly = hasKiro || hasExplicitSignatureFailure || hasOtherAnomalyLabel || hasOtherModelAnomaly || hasUnclassifiedIdentityFailure;
+  return {
+    displayState: hasRealAnomaly ? 'error' : 'ok',
+    isOperationalFailure: hasOperationalEvidence,
+    hasRealAnomaly,
+  };
+}
+
 export type InvalidThinkingSignatureSummary = {
   requestIds: string[];
   count: number;
@@ -155,6 +282,58 @@ export function extractInvalidThinkingSignatureErrors(results: Result[]): Invali
   }
 
   return count ? { requestIds, count } : null;
+}
+
+const KIRO_SELF_REPORT_PATTERNS = [
+  /(?:^|[，。！？,.!?\s])我(?:叫|是)\s*kiro\b/i,
+  /\bi\s+am\s+kiro\b/i,
+  /\bi['’]m\s+kiro\b/i,
+];
+const KIRO_SELF_REPORT_NEGATIONS = [
+  /我不(?:叫|是)\s*kiro\b/i,
+  /\bi(?:\s+am|'m|’m)\s+not\s+kiro\b/i,
+];
+
+export type KiroIdentityLeakSummary = {
+  requestIds: string[];
+  count: number;
+};
+
+export function extractKiroIdentityLeaks(results: Result[]): KiroIdentityLeakSummary | null {
+  const requestIds: string[] = [];
+  const seenRequestIds = new Set<string>();
+  let count = 0;
+
+  for (const result of results) {
+    const normalized = asRecord(result.normalized_response);
+    const raw = asRecord(result.raw_response);
+    const labeled = (result.labels ?? []).includes('kiro_identity_leak');
+    const responseText = [responseContentText(normalized), responseContentText(raw)].filter(Boolean).join(' ');
+    const explicitSelfReport = Boolean(responseText)
+      && !KIRO_SELF_REPORT_NEGATIONS.some((pattern) => pattern.test(responseText))
+      && KIRO_SELF_REPORT_PATTERNS.some((pattern) => pattern.test(responseText));
+    if (!labeled && !explicitSelfReport) continue;
+
+    count += 1;
+    const requestId = result.upstream_request_id ?? requestIdFromPayload(normalized) ?? requestIdFromPayload(raw);
+    if (requestId && !seenRequestIds.has(requestId)) {
+      seenRequestIds.add(requestId);
+      requestIds.push(requestId);
+    }
+  }
+
+  return count ? { requestIds, count } : null;
+}
+
+function responseContentText(payload: Record<string, unknown> | null): string {
+  if (!payload) return '';
+  const direct = asNullableString(payload.content_text);
+  if (direct) return direct;
+  if (!Array.isArray(payload.content)) return '';
+  return payload.content
+    .map((block) => asNullableString(asRecord(block)?.text) ?? '')
+    .filter(Boolean)
+    .join(' ');
 }
 
 export function buildChannelResultOverview(channels: Channel[], reports: ReportSummary[], runs: Run[]): ChannelResultOverview[] {
@@ -387,6 +566,7 @@ function normalizeModelRequest(value: unknown): PatrolModelRequestEvidence | nul
     providerEndpoint: asNullableString(item.provider_endpoint),
     createdAt: asNullableString(item.created_at),
     completedAt: asNullableString(item.completed_at),
+    httpStatus: asNullableNumber(item.http_status) ?? asNullableNumber(item.status_code) ?? asNullableNumber(item.error_http_status),
     labels,
     error,
   };
@@ -508,12 +688,14 @@ export function isPatrolNativeParameterRejection(item?: Pick<PatrolModelRequestE
 
 export function patrolProbeStatusText(item?: Pick<PatrolModelRequestEvidence, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'> | null) {
   if (item?.status === 'ok') return '正确';
+  if (isPatrolOperationalFailure(item)) return '正常';
   if (isPatrolNativeParameterRejection(item)) return '参数不支持';
   return '异常';
 }
 
 export function patrolProbeStatusColor(item?: Pick<PatrolModelRequestEvidence, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'> | null) {
   if (item?.status === 'ok') return 'green';
+  if (isPatrolOperationalFailure(item)) return 'green';
   if (isPatrolNativeParameterRejection(item)) return 'gold';
   return 'red';
 }

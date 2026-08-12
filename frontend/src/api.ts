@@ -234,7 +234,14 @@ export const api = {
     return request<Run[]>(`/api/runs${qs}`);
   },
   run: (runId: string) => request<Run>(`/api/runs/${runId}`),
-  runResults: (runId: string) => request<RunResults>(`/api/runs/${runId}/results`),
+  runResults: async (runId: string) => {
+    try {
+      return await request<RunResults>(`/api/runs/${runId}/results`);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      return request<RunResults>(`/api/eval-runs/${runId}/results`);
+    }
+  },
   runSummary: (runId: string) => request<RunSummary>(`/api/runs/${runId}/summary`),
   startRun: (payload: RunCreate) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
   samplePlan: (payload: SamplePlanCreate) => request<SamplePlan>('/api/runs/sample-plan', { method: 'POST', body: JSON.stringify(payload) }),

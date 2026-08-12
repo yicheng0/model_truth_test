@@ -20,6 +20,44 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('falls back to the legacy run results route when the alias is unavailable', async () => {
+    const payload = {
+      run: { id: 'run_1' },
+      run_channels: [],
+      results: [],
+      comparisons: [],
+      reports: [],
+      baseline_results: [],
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'Not Found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+
+    await expect(api.runResults('run_1')).resolves.toEqual(payload);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/runs/run_1/results', expect.any(Object));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/eval-runs/run_1/results', expect.any(Object));
+    fetchMock.mockRestore();
+  });
+
+  it('does not hide non-404 run results failures behind the legacy route', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'Database unavailable' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await expect(api.runResults('run_2')).rejects.toMatchObject({ status: 503, message: 'Database unavailable' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockRestore();
+  });
+
   it('normalizes unknown thrown values', () => {
     expect(getErrorMessage('bad')).toBe('请求失败，请稍后重试');
     expect(getErrorMessage(new ApiError('Forbidden', 403))).toBe('Forbidden');

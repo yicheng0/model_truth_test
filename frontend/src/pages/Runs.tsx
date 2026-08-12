@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress,
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, paginateRuns, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
 
@@ -82,7 +82,7 @@ function PatrolIdText({ value }: { value?: string | null }) {
   return value && shortValue !== value ? <Tooltip title={value}>{content}</Tooltip> : content;
 }
 
-function InvalidThinkingSignatureAlert({ runs }: { runs: Run[] }) {
+function RunAnomalySummary({ runs }: { runs: Run[] }) {
   const runResults = useQueries({
     queries: runs.map((run) => ({
       queryKey: ['runResults', run.id],
@@ -94,21 +94,35 @@ function InvalidThinkingSignatureAlert({ runs }: { runs: Run[] }) {
     () => runResults.flatMap((query) => query.data?.results ?? []),
     [runResults],
   );
-  const summary = useMemo(
+  const kiroSummary = useMemo(
+    () => extractKiroIdentityLeaks(results),
+    [results],
+  );
+  const signatureSummary = useMemo(
     () => extractInvalidThinkingSignatureErrors(results),
     [results],
   );
 
-  if (!summary) return null;
-  const requestIdText = summary.requestIds.length ? ` Request ID：${summary.requestIds.join('、')}` : '';
+  if (!kiroSummary && !signatureSummary) return null;
   return (
-    <Alert
-      type="error"
-      showIcon
-      message="Thinking Signature 无效"
-      description={`检测到 ${summary.count} 条 HTTP 400：Invalid signature in thinking block。${requestIdText}`}
-      style={{ marginBottom: 12 }}
-    />
+    <Space direction="vertical" size={8} style={{ width: '100%', marginBottom: 12 }}>
+      {kiroSummary ? (
+        <Alert
+          type="error"
+          showIcon
+          message="Kiro 身份泄漏"
+          description={`检测到 ${kiroSummary.count} 条明确 Kiro 身份自报，疑似逆向或路由混入。${kiroSummary.requestIds.length ? ` Request ID：${kiroSummary.requestIds.join('、')}` : ''}`}
+        />
+      ) : null}
+      {signatureSummary ? (
+        <Alert
+          type="error"
+          showIcon
+          message="Thinking Signature 无效"
+          description={`检测到 ${signatureSummary.count} 条 HTTP 400：Invalid signature in thinking block。${signatureSummary.requestIds.length ? ` Request ID：${signatureSummary.requestIds.join('、')}` : ''}`}
+        />
+      ) : null}
+    </Space>
   );
 }
 
@@ -173,13 +187,7 @@ function preferredDetailRun(runs: Run[]) {
 }
 
 function patrolResultState(evidence: PatrolEvidence) {
-  if (evidence.classificationStatus === 'claude' || evidence.classificationStatus === 'aws_resource') {
-    return 'ok';
-  }
-  const blockingLabels = evidence.labels.filter((label) => label !== 'patrol_probe_passed' && label !== 'provider_error_variant');
-  const hasModelError = evidence.modelRequests.some((item) => item.status === 'error' || item.status === 'fail' || Boolean(item.error) || item.labels.some((label) => label !== 'provider_error_variant'));
-  const hasSignatureError = evidence.signature?.status === 'fail' || evidence.signature?.status === 'error';
-  return blockingLabels.length || hasModelError || hasSignatureError ? 'error' : 'ok';
+  return patrolEvidenceDisplayState(evidence).displayState;
 }
 
 // Per-probe sub-status chips so a row shows at a glance which module failed.
@@ -188,7 +196,8 @@ type PatrolProbeChip = { key: string; label: string; state: 'ok' | 'error'; deta
 function patrolProbeChips(evidence: PatrolEvidence): PatrolProbeChip[] {
   const chips: PatrolProbeChip[] = [];
   if (evidence.signature) {
-    const failed = evidence.signature.status === 'fail' || evidence.signature.status === 'error';
+    const failed = (evidence.signature.status === 'fail' || evidence.signature.status === 'error')
+      && !isPatrolOperationalFailure(evidence.signature);
     chips.push({
       key: 'signature',
       label: 'Signature',
@@ -197,8 +206,8 @@ function patrolProbeChips(evidence: PatrolEvidence): PatrolProbeChip[] {
     });
   }
   for (const item of evidence.modelRequests) {
-    const failed = item.status === 'error' || item.status === 'fail' || Boolean(item.error)
-      || item.labels.some((label) => label !== 'provider_error_variant');
+    const failed = !isPatrolOperationalFailure(item) && (item.status === 'error' || item.status === 'fail' || Boolean(item.error)
+      || item.labels.some((label) => label !== 'provider_error_variant'));
     chips.push({
       key: item.key ?? item.resultId ?? item.title ?? `probe-${chips.length}`,
       label: item.title ?? item.key ?? '真实请求',
@@ -212,19 +221,24 @@ function patrolProbeChips(evidence: PatrolEvidence): PatrolProbeChip[] {
 // Concise human-readable reason for an abnormal patrol result.
 function patrolFailureReason(evidence: PatrolEvidence): string {
   const reasons: string[] = [];
-  if (evidence.signature?.status === 'fail' || evidence.signature?.status === 'error') {
+  if ((evidence.signature?.status === 'fail' || evidence.signature?.status === 'error') && !isPatrolOperationalFailure(evidence.signature)) {
     reasons.push(evidence.signature.reason ?? 'Signature 互通检测未通过');
   }
   for (const item of evidence.modelRequests) {
-    const failed = item.status === 'error' || item.status === 'fail' || Boolean(item.error)
-      || item.labels.some((label) => label !== 'provider_error_variant');
+    const failed = !isPatrolOperationalFailure(item) && (item.status === 'error' || item.status === 'fail' || Boolean(item.error)
+      || item.labels.some((label) => label !== 'provider_error_variant'));
     if (!failed) continue;
     const title = item.title ?? item.key ?? '真实请求探针';
     const detail = item.error ?? item.responseText ?? item.rawResponseText
       ?? (item.labels.length ? item.labels.filter((label) => label !== 'provider_error_variant').join('、') : '');
     reasons.push(detail ? `${title}：${detail}` : `${title} 异常`);
   }
-  const blockingLabels = evidence.labels.filter((label) => label !== 'patrol_probe_passed' && label !== 'provider_error_variant');
+  const blockingLabels = evidence.labels.filter((label) => {
+    if (label === 'patrol_probe_passed' || label === 'provider_error_variant') return false;
+    if (isPatrolOperationalFailure({ labels: [label] })) return false;
+    if (label === 'identity_probe_failed' && patrolEvidenceDisplayState(evidence).isOperationalFailure) return false;
+    return true;
+  });
   for (const label of blockingLabels) {
     reasons.push(evidence.labelExplanations[label] ?? label);
   }
@@ -275,10 +289,16 @@ function PatrolEvidenceCell({ run }: { run: Run }) {
     );
   }
   if (runResults.isError) {
+    const errorMessage = getErrorMessage(runResults.error);
     return (
-      <Tooltip title={getErrorMessage(runResults.error)}>
+      <Space direction="vertical" size={2} style={{ width: '100%' }}>
         <Tag color="red">日志加载失败</Tag>
-      </Tooltip>
+        <Tooltip title={errorMessage}>
+          <Typography.Text type="danger" className="patrol-inline-error patrol-inline-error-load">
+            {errorMessage}
+          </Typography.Text>
+        </Tooltip>
+      </Space>
     );
   }
   if (!evidence) {
@@ -326,21 +346,34 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
     const primaryLabel = classification || (resultState === 'ok' ? '正确' : '异常');
     const chips = patrolProbeChips(evidence);
     const reason = resultState === 'error' ? patrolFailureReason(evidence) : '';
+    const inlineError = patrolInlineError(evidence);
     return (
-      <Tooltip title={reason || '点开展开行或查看巡检详情查看探针日志'}>
-        <Space size={[4, 2]} wrap>
-          <Tag color={resultState === 'ok' ? 'green' : 'red'} style={{ marginInlineEnd: 0 }}>{primaryLabel}</Tag>
-          {chips.map((chip) => (
-            <Tag
-              key={chip.key}
-              color={chip.state === 'ok' ? 'green' : 'red'}
-              style={{ marginInlineEnd: 0 }}
+      <Space direction="vertical" size={2} style={{ width: '100%' }}>
+        <Tooltip title={reason || '点开展开行或查看巡检详情查看探针日志'}>
+          <Space size={[4, 2]} wrap>
+            <Tag color={resultState === 'ok' ? 'green' : 'red'} style={{ marginInlineEnd: 0 }}>{primaryLabel}</Tag>
+            {chips.map((chip) => (
+              <Tag
+                key={chip.key}
+                color={chip.state === 'ok' ? 'green' : 'red'}
+                style={{ marginInlineEnd: 0 }}
+              >
+                {chip.label} {chip.state === 'ok' ? '✓' : '✗'}
+              </Tag>
+            ))}
+          </Space>
+        </Tooltip>
+        {inlineError ? (
+          <Tooltip title={inlineError.fullText}>
+            <Typography.Text
+              type={inlineError.kind === 'operational' ? 'warning' : 'danger'}
+              className={`patrol-inline-error patrol-inline-error-${inlineError.kind}`}
             >
-              {chip.label} {chip.state === 'ok' ? '✓' : '✗'}
-            </Tag>
-          ))}
-        </Space>
-      </Tooltip>
+              {inlineError.text}
+            </Typography.Text>
+          </Tooltip>
+        ) : null}
+      </Space>
     );
   }
   const classification = patrolClassificationLabel(evidence);
@@ -348,7 +381,7 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
     <Space direction="vertical" size={4} style={{ width: '100%' }}>
       <Space wrap>
         <Tag color={resultState === 'ok' ? 'green' : 'red'}>{classification || (resultState === 'ok' ? '正确' : '异常')}</Tag>
-        {signature ? <Tag color={evidenceStatusColor(signature.status)}>Signature {signature.status ?? '待确认'}</Tag> : null}
+        {signature ? <Tag color={isPatrolOperationalFailure(signature) ? 'green' : evidenceStatusColor(signature.status)}>Signature {isPatrolOperationalFailure(signature) ? '正常' : signature.status ?? '待确认'}</Tag> : null}
       </Space>
       {primaryRequest ? (
         <Typography.Text type="secondary">
@@ -751,7 +784,7 @@ export default function Runs() {
           expandable={{
             expandedRowRender: (group) => (
               <>
-                <InvalidThinkingSignatureAlert runs={group.runs} />
+                <RunAnomalySummary runs={group.runs} />
                 <Table
                   rowKey="id"
                   size="small"

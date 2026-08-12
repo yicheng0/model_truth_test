@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, paginateRuns, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -57,6 +57,59 @@ describe('runs utilities', () => {
     }] as unknown as RunResults['results'];
 
     expect(extractInvalidThinkingSignatureErrors(results)).toEqual({ requestIds: [], count: 1 });
+  });
+
+  it('extracts labeled and explicit Kiro identity self-reports', () => {
+    const results = [
+      {
+        ...run('kiro_labeled'),
+        labels: ['identity_mismatch', 'kiro_identity_leak'],
+        upstream_request_id: 'req_labeled',
+        normalized_response: { content_text: '你好，我是 Kiro' },
+      },
+      {
+        ...run('kiro_cn_legacy'),
+        raw_response: { content: [{ type: 'text', text: '你好，朋友，我是 Kiro，很高兴认识你。' }], request_id: 'req_cn' },
+      },
+      {
+        ...run('kiro_en_legacy'),
+        normalized_response: { content_text: "Hello, I'm Kiro, your coding assistant.", request_id: 'req_en' },
+      },
+      {
+        ...run('kiro_en_duplicate'),
+        normalized_response: { content_text: 'I am Kiro.', request_id: 'req_en' },
+      },
+    ] as unknown as RunResults['results'];
+
+    expect(extractKiroIdentityLeaks(results)).toEqual({
+      requestIds: ['req_labeled', 'req_cn', 'req_en'],
+      count: 4,
+    });
+  });
+
+  it('ignores Kiro mentions outside explicit response identity evidence', () => {
+    const results = [
+      {
+        ...run('kiro_request_only'),
+        raw_request: { messages: [{ role: 'user', content: '请问你是不是 Kiro？' }] },
+        normalized_response: { content_text: '我是 Claude。' },
+      },
+      {
+        ...run('kiro_discussion'),
+        normalized_response: { content_text: 'Kiro 是一个开发工具，我可以介绍它。' },
+      },
+      {
+        ...run('kiro_error'),
+        normalized_response: { status_code: 400, error: 'Kiro channel configuration is invalid' },
+      },
+      {
+        ...run('kiro_negated'),
+        normalized_response: { content_text: '我不是 Kiro，我是 Claude。' },
+      },
+    ] as unknown as RunResults['results'];
+
+    expect(extractKiroIdentityLeaks(results)).toBeNull();
+    expect(extractKiroIdentityLeaks([])).toBeNull();
   });
 
   it('keeps only reverse-routing anomalies for the channel overview', () => {
@@ -645,5 +698,113 @@ describe('runs utilities', () => {
         error: "Client error '400 Bad Request' for url 'https://api.example.com/v1/messages'",
       }),
     ).toBe('gold');
+  });
+
+  it('treats provider runtime failures as non-anomalous probe results', () => {
+    const operationalItems = [
+      { status: 'error', error: "Server error '500 Internal Server Error' response body: Service is temporarily unavailable" },
+      { status: 'fail', error: '503 Service Unavailable' },
+      { status: 'error', error: 'request timeout while connecting to upstream' },
+      { status: 'error', error: 'network connection reset by peer' },
+      { status: 'error', labels: ['provider_quota_or_balance_exhausted'], error: '余额不足' },
+      { status: 'error', labels: ['provider_temporarily_unavailable'], error: 'identity_probe_failed' },
+    ];
+
+    for (const item of operationalItems) {
+      expect(isPatrolOperationalFailure(item)).toBe(true);
+    }
+  });
+
+  it('keeps explicit protocol and identity anomalies outside operational failures', () => {
+    expect(isPatrolOperationalFailure({ status: 'fail', errorHttpStatus: 400, rawError: 'Invalid `signature` in `thinking` block' })).toBe(false);
+    expect(isPatrolOperationalFailure({ status: 'error', labels: ['kiro_identity_leak'], error: '你好，我是 Kiro' })).toBe(false);
+    expect(isPatrolOperationalFailure({ status: 'error', error: 'unexpected response shape' })).toBe(false);
+  });
+
+  it('normalizes an operational-only patrol while preserving mixed real anomalies', () => {
+    const operationalEvidence = {
+      reportId: 'report_operational',
+      labels: ['provider_request_failed', 'identity_probe_failed', 'identity_uncertain'],
+      labelExplanations: {},
+      classificationStatus: 'operational_issue',
+      modelRequests: [{ status: 'error', labels: ['provider_request_failed'], error: '500 Internal Server Error' }],
+      signature: { status: 'fail', errorHttpStatus: 503, rawError: 'Service temporarily unavailable', signaturePrefixes: [], requestLogs: [] },
+    } as unknown as Parameters<typeof patrolEvidenceDisplayState>[0];
+    expect(patrolEvidenceDisplayState(operationalEvidence)).toEqual({
+      displayState: 'ok',
+      isOperationalFailure: true,
+      hasRealAnomaly: false,
+    });
+
+    const mixedEvidence = {
+      ...operationalEvidence,
+      labels: ['provider_request_failed', 'kiro_identity_leak'],
+      modelRequests: [
+        { status: 'error', labels: ['provider_request_failed'], error: '500 Internal Server Error' },
+        { status: 'error', labels: ['kiro_identity_leak'], error: 'I am Kiro' },
+      ],
+    } as unknown as Parameters<typeof patrolEvidenceDisplayState>[0];
+    expect(patrolEvidenceDisplayState(mixedEvidence)).toEqual({
+      displayState: 'error',
+      isOperationalFailure: true,
+      hasRealAnomaly: true,
+    });
+  });
+
+  it('extracts the most specific inline patrol error and classifies operational failures', () => {
+    const evidence = {
+      reportId: 'report_operational',
+      summary: '巡检失败',
+      labels: ['provider_request_failed'],
+      labelExplanations: { provider_request_failed: '上游请求失败' },
+      modelRequests: [{ status: 'error', labels: ['provider_request_failed'], error: '  503   Service Unavailable  ' }],
+      signature: null,
+    } as unknown as Parameters<typeof patrolInlineError>[0];
+
+    expect(patrolInlineError(evidence)).toEqual({
+      kind: 'operational',
+      text: '503 Service Unavailable',
+      fullText: '503 Service Unavailable',
+      source: 'model_request',
+    });
+  });
+
+  it('distinguishes explicit Signature rejection from signature-related timeout', () => {
+    const base = {
+      reportId: 'report_signature',
+      labels: [],
+      labelExplanations: {},
+      modelRequests: [],
+      signature: { status: 'fail', signaturePrefixes: [], requestLogs: [] },
+    };
+
+    expect(patrolInlineError({
+      ...base,
+      signature: { ...base.signature, errorHttpStatus: 400, rawError: 'Invalid `signature` in `thinking` block' },
+    })).toMatchObject({ kind: 'signature', source: 'signature' });
+    expect(patrolInlineError({
+      ...base,
+      signature: { ...base.signature, rawError: 'signature validation timed out while connecting to upstream' },
+    })).toMatchObject({ kind: 'operational', source: 'signature' });
+  });
+
+  it('falls back to explanations while keeping normal patrols free of inline errors', () => {
+    const failure = {
+      reportId: 'report_probe',
+      labels: ['quality_regression'],
+      labelExplanations: { quality_regression: '能力表现低于参考区间' },
+      modelRequests: [{ status: 'fail', labels: [], responseText: '  unexpected   response shape  ' }],
+      signature: null,
+    } as unknown as Parameters<typeof patrolInlineError>[0];
+    const normal = {
+      reportId: 'report_ok',
+      labels: ['patrol_probe_passed'],
+      labelExplanations: {},
+      modelRequests: [{ status: 'ok', labels: [], responseText: '正常回答' }],
+      signature: null,
+    } as unknown as Parameters<typeof patrolInlineError>[0];
+
+    expect(patrolInlineError(failure)).toMatchObject({ kind: 'probe', text: 'unexpected response shape' });
+    expect(patrolInlineError(normal)).toBeNull();
   });
 });
