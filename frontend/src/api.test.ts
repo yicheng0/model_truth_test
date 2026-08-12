@@ -2,6 +2,23 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError, api, getAdminApiKey, getErrorMessage, setAdminApiKey } from './api';
 
 describe('api request handling', () => {
+  it('encodes patrol list pagination and filters', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ items: [], total: 0, error_count: 0, page: 2, page_size: 20 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await api.patrolRuns({ page: 2, page_size: 20, channel_id: 'channel_a', errors_only: true });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/runs/patrol?page=2&page_size=20&channel_id=channel_a&errors_only=true',
+      expect.any(Object),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('uses readable FastAPI detail messages for failures', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ detail: 'Run not found' }), {

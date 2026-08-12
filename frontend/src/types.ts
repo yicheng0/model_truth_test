@@ -1119,6 +1119,23 @@ export type Run = {
   started_at?: string | null;
   finished_at?: string | null;
   created_at?: string | null;
+  display_state?: 'ok' | 'error';
+  needs_review?: boolean;
+  has_evidence?: boolean;
+};
+
+export type PatrolRunSummary = Run & {
+  display_state: 'ok' | 'error';
+  needs_review: boolean;
+  has_evidence: boolean;
+};
+
+export type PatrolRunList = {
+  items: PatrolRunSummary[];
+  total: number;
+  error_count: number;
+  page: number;
+  page_size: number;
 };
 
 export type RunCreate = {

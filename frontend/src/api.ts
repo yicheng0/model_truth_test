@@ -44,6 +44,7 @@ import type {
   ReportSummary,
   Result,
   Run,
+  PatrolRunList,
   RunCreate,
   RunLogCleanupResult,
   RunMode,
@@ -232,6 +233,15 @@ export const api = {
   runs: (params?: { scheduled_test_id?: string }) => {
     const qs = params?.scheduled_test_id ? `?scheduled_test_id=${encodeURIComponent(params.scheduled_test_id)}` : '';
     return request<Run[]>(`/api/runs${qs}`);
+  },
+  patrolRuns: (params?: { page?: number; page_size?: number; channel_id?: string; errors_only?: boolean }) => {
+    const search = new URLSearchParams();
+    if (params?.page !== undefined) search.set('page', String(params.page));
+    if (params?.page_size !== undefined) search.set('page_size', String(params.page_size));
+    if (params?.channel_id) search.set('channel_id', params.channel_id);
+    if (params?.errors_only) search.set('errors_only', 'true');
+    const query = search.toString();
+    return request<PatrolRunList>(`/api/runs/patrol${query ? `?${query}` : ''}`);
   },
   run: (runId: string) => request<Run>(`/api/runs/${runId}`),
   runResults: async (runId: string) => {

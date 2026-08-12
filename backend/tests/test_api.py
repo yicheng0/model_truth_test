@@ -805,6 +805,76 @@ def test_scheduled_tests_list_tolerates_bad_probe_evidence() -> None:
     assert schedule_payload["latest_probe_summary"] is not None
 
 
+def test_patrol_query_performance_returns_lightweight_paginated_summaries() -> None:
+    """The patrol list must page and filter without serializing full evidence."""
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        channel_ids = ["third_party_demo", "negative_sample"]
+        for index in range(25):
+            run = Run(
+                id=f"patrol_perf_run_{index:02d}",
+                suite_id=suite_id,
+                name=f"patrol performance {index}",
+                test_scope="scheduled_probe",
+                status="completed",
+                repeat_count=1,
+                concurrency=1,
+                total_jobs=1,
+                completed_jobs=1,
+                created_at=datetime(2026, 8, 12, tzinfo=timezone.utc) + timedelta(minutes=index),
+            )
+            channel_id = channel_ids[index % 2]
+            db.add(run)
+            db.add(RunChannel(id=f"patrol_perf_rc_{index:02d}", run_id=run.id, channel_id=channel_id, role_in_run="candidate"))
+            is_error = index in {3, 7, 14, 21}
+            db.add(
+                Report(
+                    id=f"patrol_perf_report_{index:02d}",
+                    run_id=run.id,
+                    channel_id=channel_id,
+                    final_score=50 if is_error else 95,
+                    grade="E" if is_error else "A",
+                    summary="error summary" if is_error else "ok summary",
+                    evidence={
+                        "test_scope": "scheduled_probe",
+                        "labels": ["protocol_mismatch"] if is_error else ["patrol_probe_passed"],
+                        "classification_status": "anomaly" if is_error else "claude",
+                    },
+                )
+            )
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/runs/patrol?page=1&page_size=10")
+        assert response.status_code == 200
+        payload = response.json()
+        assert set(payload) == {"items", "total", "error_count", "page", "page_size"}
+        assert payload["total"] == 25
+        assert payload["error_count"] == 4
+        assert payload["page"] == 1
+        assert payload["page_size"] == 10
+        assert len(payload["items"]) == 10
+        assert not {"results", "comparisons", "reports", "baseline_results"}.intersection(payload["items"][0])
+        assert payload["items"][0]["display_state"] in {"ok", "error"}
+        assert {"needs_review", "has_evidence", "patrol_channel_id"}.issubset(payload["items"][0])
+
+        second_page = client.get("/api/runs/patrol?page=2&page_size=10").json()
+        assert second_page["page"] == 2
+        assert second_page["items"][0]["id"] != payload["items"][0]["id"]
+
+        errors = client.get("/api/runs/patrol?page=1&page_size=10&errors_only=true").json()
+        assert errors["total"] == 4
+        assert errors["error_count"] == 4
+        assert all(item["display_state"] == "error" or item["needs_review"] for item in errors["items"])
+
+        channel_errors = client.get(
+            "/api/runs/patrol?page=1&page_size=10&errors_only=true&channel_id=negative_sample"
+        ).json()
+        assert channel_errors["total"] == 3
+        assert all(item["patrol_channel_id"] == "negative_sample" for item in channel_errors["items"])
+
+
 def test_startup_seed_preserves_custom_default_cases_without_crashing() -> None:
     reset_database()
     with SessionLocal() as db:

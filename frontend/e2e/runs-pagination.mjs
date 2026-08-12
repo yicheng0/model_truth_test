@@ -104,11 +104,30 @@ try {
   const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
   browser = await chromium.launch({ headless: true, executablePath });
   const page = await browser.newPage();
-  await page.route('**/api/runs**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runs) }));
+  const detailRequests = [];
+  await page.route('**/api/runs/patrol**', async (route) => {
+    const url = new URL(route.request().url());
+    const pageNumber = Number(url.searchParams.get('page') ?? '1');
+    const pageSize = Number(url.searchParams.get('page_size') ?? '10');
+    const channelId = url.searchParams.get('channel_id');
+    const errorsOnly = url.searchParams.get('errors_only') === 'true';
+    const errorIds = new Set(['patrol_01', 'patrol_03', 'patrol_05', 'patrol_06']);
+    const filtered = runs.filter((run) => (!channelId || run.patrol_channel_id === channelId) && (!errorsOnly || errorIds.has(run.id)));
+    const start = (pageNumber - 1) * pageSize;
+    const items = filtered.slice(start, start + pageSize).map((run) => ({
+      ...run,
+      display_state: errorIds.has(run.id) ? 'error' : 'ok',
+      needs_review: errorIds.has(run.id),
+      has_evidence: true,
+    }));
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, total: filtered.length, error_count: runs.filter((run) => errorIds.has(run.id)).length, page: pageNumber, page_size: pageSize }) });
+  });
+  await page.route('**/api/runs', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runs) }));
   await page.route('**/api/channels**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   await page.route('**/api/reports/summary', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   await page.route('**/api/runs/*/results', (route) => {
     const runId = new URL(route.request().url()).pathname.split('/').at(-2);
+    detailRequests.push(runId);
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runResultsPayload(runId)) });
   });
   await page.route('**/apipro-logo.svg', (route) => route.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" />' }));
@@ -119,6 +138,9 @@ try {
   await page.getByText('自动巡检日志', { exact: true }).waitFor({ timeoutMs: 5000 });
   const tableRows = page.locator('.patrol-log-table .ant-table-tbody > tr:not(.ant-table-measure-row)');
   await page.waitForTimeout(1000);
+  assert.equal(detailRequests.length, 0, '列表首屏不应请求任何完整巡检结果');
+  const initialBodyText = await page.locator('.patrol-log-table').innerText();
+  assert.doesNotMatch(initialBodyText, /兼容：|relay 请求失败|Server error|Internal Server Error/, '默认巡检列表不应展示错误说明正文');
   if (await tableRows.count() === 0) {
     throw new Error(`巡检日志行未渲染：${await page.locator('body').innerText()}`);
   }
@@ -159,6 +181,11 @@ try {
   await page.getByText('20 条/页', { exact: true }).click();
   const twentyPageIds = await tableRows.allTextContents();
   assert.equal(twentyPageIds.length, 20, '选择 20 条/页后应显示 20 条日志');
+
+  const expandableRow = page.locator('.patrol-log-table .ant-table-tbody > tr').first();
+  await expandableRow.locator('.ant-table-row-expand-icon').click();
+  await page.waitForTimeout(250);
+  assert.deepEqual(detailRequests, ['patrol_01'], '展开行只应请求对应日志的完整结果');
 } finally {
   await browser?.close();
   try {

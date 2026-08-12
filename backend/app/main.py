@@ -16,7 +16,7 @@ from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Quer
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from .admin import require_admin, require_admin_if_configured, require_configured_admin
@@ -62,6 +62,8 @@ from .schemas import (
     RunChannelRead,
     RunCreate,
     RunRead,
+    PatrolRunListRead,
+    PatrolRunSummaryRead,
     RunResultsRead,
     RunSummaryRead,
     SamplePlanCreate,
@@ -1123,6 +1125,115 @@ def list_runs(scheduled_test_id: str | None = None, db: Session = Depends(get_db
 @app.get("/api/runs", response_model=list[RunRead])
 def list_runs_alias(scheduled_test_id: str | None = None, db: Session = Depends(get_db)) -> list[RunRead]:
     return list_runs(scheduled_test_id, db)
+
+
+def _patrol_summary_read(
+    db: Session,
+    run: Run,
+    run_channels: list[RunChannel],
+    channel_by_id: dict[str, Channel],
+    report: Report | None,
+) -> PatrolRunSummaryRead:
+    payload = PatrolRunSummaryRead.model_validate(run)
+    payload.channels = [
+        {
+            "channel_id": item.channel_id,
+            "channel_name": channel_by_id[item.channel_id].name if item.channel_id in channel_by_id else None,
+            "role_in_run": item.role_in_run,
+        }
+        for item in run_channels
+    ]
+    patrol_channel = channel_by_id.get(report.channel_id) if report else None
+    if patrol_channel is None and run_channels:
+        patrol_channel = channel_by_id.get(run_channels[0].channel_id)
+    if patrol_channel:
+        payload.patrol_channel_id = patrol_channel.id
+        payload.patrol_channel_name = patrol_channel.name
+        payload.patrol_channel_provider_type = patrol_channel.provider_type
+        payload.patrol_channel_account_type = (patrol_channel.auth_config or {}).get("account_type")
+    labels = set()
+    classification_status = None
+    if report:
+        evidence = report.evidence if isinstance(report.evidence, dict) else {}
+        labels = {str(label) for label in evidence.get("labels", []) if isinstance(label, str)}
+        classification_status = evidence.get("classification_status")
+    needs_review = _patrol_needs_review(report, labels, classification_status)
+    display_state = "error" if needs_review else "ok"
+    payload.display_state = display_state
+    payload.needs_review = needs_review
+    payload.has_evidence = report is not None
+    return payload
+
+
+def _patrol_needs_review(report: Report | None, labels: set[str], classification_status: str | None) -> bool:
+    operational_only = bool(labels) and labels.issubset({
+        "provider_request_failed", "provider_temporarily_unavailable", "provider_quota_or_balance_exhausted",
+        "provider_timeout", "network_error", "request_failed",
+    })
+    return bool(report and (report.grade in {"D", "E"} or labels)) and not (
+        classification_status in {"claude", "aws_resource", "claude_signature", "operational_issue"} or operational_only
+    )
+
+
+@app.get("/api/runs/patrol", response_model=PatrolRunListRead)
+def list_patrol_runs(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    channel_id: str | None = Query(default=None),
+    errors_only: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> PatrolRunListRead:
+    patrol_condition = or_(Run.scheduled_test_id.is_not(None), Run.test_scope == "scheduled_probe")
+    if channel_id:
+        patrol_condition = patrol_condition & or_(
+            exists(select(RunChannel.id).where(RunChannel.run_id == Run.id, RunChannel.channel_id == channel_id)),
+            exists(select(Report.id).where(Report.run_id == Run.id, Report.channel_id == channel_id)),
+        )
+    if errors_only:
+        candidate_runs = list(db.scalars(select(Run).where(patrol_condition).order_by(Run.created_at.desc(), Run.id.desc())).all())
+    else:
+        total = int(db.scalar(select(func.count()).select_from(Run).where(patrol_condition)) or 0)
+        if not total:
+            return PatrolRunListRead(items=[], total=0, error_count=0, page=page, page_size=page_size)
+        candidate_runs = list(db.scalars(select(Run).where(patrol_condition).order_by(Run.created_at.desc(), Run.id.desc()).offset((page - 1) * page_size).limit(page_size)).all())
+    if not candidate_runs and errors_only:
+        return PatrolRunListRead(items=[], total=0, error_count=0, page=page, page_size=page_size)
+    total = len(candidate_runs) if errors_only else total
+    all_run_ids = [row[0] for row in db.execute(select(Run.id).where(patrol_condition)).all()] if not errors_only else [run.id for run in candidate_runs]
+    runs = candidate_runs
+    run_ids = [run.id for run in runs]
+    run_channels_all = list(db.scalars(select(RunChannel).where(RunChannel.run_id.in_(run_ids))).all())
+    channels_by_run: dict[str, list[RunChannel]] = defaultdict(list)
+    channel_ids = set()
+    for item in run_channels_all:
+        channels_by_run[item.run_id].append(item)
+        channel_ids.add(item.channel_id)
+    reports = list(db.scalars(select(Report).where(Report.run_id.in_(all_run_ids)).order_by(Report.created_at.desc())).all())
+    latest_report_by_run: dict[str, Report] = {}
+    for report in reports:
+        latest_report_by_run.setdefault(report.run_id, report)
+        channel_ids.add(report.channel_id)
+    channel_by_id = {channel.id: channel for channel in db.scalars(select(Channel).where(Channel.id.in_(channel_ids))).all()} if channel_ids else {}
+    error_count = 0
+    latest_for_count: dict[str, Report] = {}
+    for report in reports:
+        latest_for_count.setdefault(report.run_id, report)
+    for report in latest_for_count.values():
+        evidence = report.evidence if isinstance(report.evidence, dict) else {}
+        labels = {str(label) for label in evidence.get("labels", []) if isinstance(label, str)}
+        status = evidence.get("classification_status")
+        if _patrol_needs_review(report, labels, status):
+            error_count += 1
+    page_reports = {run_id: report for run_id, report in latest_report_by_run.items() if run_id in run_ids}
+    summaries = [
+        _patrol_summary_read(db, run, channels_by_run.get(run.id, []), channel_by_id, page_reports.get(run.id))
+        for run in runs
+    ]
+    if errors_only:
+        summaries = [item for item in summaries if item.display_state == "error" or item.needs_review]
+        total = len(summaries)
+        summaries = summaries[(page - 1) * page_size:page * page_size]
+    return PatrolRunListRead(items=summaries, total=total, error_count=error_count, page=page, page_size=page_size)
 
 
 @app.post("/api/runs", response_model=RunRead)

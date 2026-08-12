@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress,
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
 
@@ -270,65 +270,20 @@ function patrolChannelAndTask(run: Run) {
 }
 
 function PatrolEvidenceCell({ run }: { run: Run }) {
-  const runResults = useQuery({
-    queryKey: ['runResults', run.id],
-    queryFn: () => api.runResults(run.id),
-    enabled: run.status === 'completed' || run.status === 'failed',
-  });
-  const evidence = useMemo(() => runResults.data ? extractPatrolEvidence(runResults.data) : null, [runResults.data]);
-
   if (run.status === 'pending' || run.status === 'running') {
     return <Typography.Text type="secondary">等待巡检完成</Typography.Text>;
   }
-  if (runResults.isLoading) {
-    return (
-      <Space size={6}>
-        <Spin size="small" />
-        <Typography.Text type="secondary">加载中</Typography.Text>
-      </Space>
-    );
-  }
-  if (runResults.isError) {
-    return (
-      <Tooltip title={getErrorMessage(runResults.error)}>
-        <Tag color="red">日志加载失败</Tag>
-      </Tooltip>
-    );
-  }
-  if (!evidence) {
+  if (!run.has_evidence) {
     return <Typography.Text type="secondary">暂无巡检证据</Typography.Text>;
   }
-
-  return <PatrolEvidenceSummary evidence={evidence} compact />;
+  return <Tag color={run.display_state === 'error' ? 'red' : 'green'}>{run.display_state === 'error' ? '异常' : '正常'}</Tag>;
 }
 
 function PatrolReviewCell({ run }: { run: Run }) {
-  const runResults = useQuery({
-    queryKey: ['runResults', run.id],
-    queryFn: () => api.runResults(run.id),
-    enabled: run.status === 'completed' || run.status === 'failed',
-  });
-  const evidence = useMemo(() => runResults.data ? extractPatrolEvidence(runResults.data) : null, [runResults.data]);
-
   if (run.status === 'pending' || run.status === 'running') {
     return <Tag color="default">-</Tag>;
   }
-  if (runResults.isLoading) {
-    return <Spin size="small" />;
-  }
-  if (runResults.isError || !evidence) {
-    return run.status === 'failed' ? <Tag color="red">需要复审</Tag> : <Tag color="default">-</Tag>;
-  }
-  const classification = patrolClassificationLabel(evidence);
-  if (classification) return <Tag color="green">{classification}</Tag>;
-  if (patrolResultState(evidence) === 'error') {
-    return (
-      <Tooltip title={patrolFailureReason(evidence)}>
-        <Tag color="red">需要复审</Tag>
-      </Tooltip>
-    );
-  }
-  return <Tag color="default">-</Tag>;
+  return run.needs_review ? <Tag color="red">需要复审</Tag> : <Tag color="default">-</Tag>;
 }
 
 function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = true }: { evidence: PatrolEvidence; compact?: boolean; showProbeDetails?: boolean }) {
@@ -508,6 +463,16 @@ export default function Runs() {
     queryFn: () => api.runs(),
     refetchInterval: (query) => (query.state.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
   });
+  const patrolQuery = useQuery({
+    queryKey: ['patrolRuns', patrolPage, patrolPageSize, selectedPatrolChannel, onlyPatrolErrors],
+    queryFn: () => api.patrolRuns({
+      page: patrolPage,
+      page_size: patrolPageSize,
+      channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel,
+      errors_only: onlyPatrolErrors,
+    }),
+    refetchInterval: (query) => (query.state.data?.items.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
+  });
 
   const remove = useMutation({
     mutationFn: api.deleteRun,
@@ -516,6 +481,7 @@ export default function Runs() {
       setSelectedNormalRowKeys((keys) => keys.filter((key) => key !== runId));
       setSelectedPatrolRowKeys((keys) => keys.filter((key) => key !== runId));
       await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['patrolRuns'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
@@ -530,6 +496,7 @@ export default function Runs() {
       queryClient.setQueryData<Run[]>(['runs'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ['runs'] }),
+        queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
         queryClient.invalidateQueries({ queryKey: ['reports'] }),
       ]);
     },
@@ -547,6 +514,7 @@ export default function Runs() {
       queryClient.setQueryData<Run[]>(['runs'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ['runs'] }),
+        queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
         queryClient.invalidateQueries({ queryKey: ['reports'] }),
       ]);
     },
@@ -557,6 +525,7 @@ export default function Runs() {
     onSuccess: async () => {
       message.success('任务已取消');
       await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['patrolRuns'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
     onSettled: () => setCancelingId(null),
@@ -572,45 +541,14 @@ export default function Runs() {
     cancel.mutate(run.id);
   }
 
-  const { normalRuns, patrolRuns } = useMemo(() => splitRunsByPatrol(runs.data ?? []), [runs.data]);
+  const { normalRuns, patrolRuns: allPatrolRuns } = useMemo(() => splitRunsByPatrol(runs.data ?? []), [runs.data]);
+  const patrolRuns = patrolQuery.data?.items ?? [];
   const normalRunGroups = useMemo(() => groupRunsByChannel(normalRuns), [normalRuns]);
-  const patrolChannelOptions = useMemo(() => buildPatrolChannelFilterOptions(patrolRuns), [patrolRuns]);
-  const patrolEvidenceQueries = useQueries({
-    queries: patrolRuns.map((run) => ({
-      queryKey: ['runResults', run.id],
-      queryFn: () => api.runResults(run.id),
-      enabled: run.status === 'completed' || run.status === 'failed',
-    })),
-  });
-  const patrolErrorStateByRunId = useMemo(() => {
-    const states = new Map<string, 'ok' | 'error'>();
-    patrolRuns.forEach((run, index) => {
-      const payload = patrolEvidenceQueries[index]?.data;
-      const evidence = payload ? extractPatrolEvidence(payload) : null;
-      if (evidence) states.set(run.id, patrolEvidenceDisplayState(evidence).displayState);
-    });
-    return states;
-  }, [patrolEvidenceQueries, patrolRuns]);
-  const channelFilteredPatrolRuns = useMemo(
-    () => filterPatrolRunsByChannel(patrolRuns, selectedPatrolChannel),
-    [patrolRuns, selectedPatrolChannel],
-  );
-  const filteredPatrolRuns = useMemo(
-    () => filterPatrolRunsByError(channelFilteredPatrolRuns, onlyPatrolErrors, patrolErrorStateByRunId),
-    [channelFilteredPatrolRuns, onlyPatrolErrors, patrolErrorStateByRunId],
-  );
-  const errorPatrolRunCount = useMemo(
-    () => channelFilteredPatrolRuns.filter((run) => patrolErrorStateByRunId.get(run.id) === 'error').length,
-    [channelFilteredPatrolRuns, patrolErrorStateByRunId],
-  );
-  const patrolCurrentPage = useMemo(
-    () => clampPage(patrolPage, filteredPatrolRuns.length, patrolPageSize),
-    [filteredPatrolRuns.length, patrolPage, patrolPageSize],
-  );
-  const visiblePatrolRuns = useMemo(
-    () => paginateRuns(filteredPatrolRuns, patrolCurrentPage, patrolPageSize),
-    [filteredPatrolRuns, patrolCurrentPage, patrolPageSize],
-  );
+  const patrolChannelOptions = useMemo(() => buildPatrolChannelFilterOptions(allPatrolRuns), [allPatrolRuns]);
+  const filteredPatrolRuns = patrolRuns;
+  const errorPatrolRunCount = patrolQuery.data?.error_count ?? 0;
+  const patrolCurrentPage = patrolQuery.data?.page ?? patrolPage;
+  const visiblePatrolRuns = patrolRuns;
   const selectedNormalRuns = useMemo(
     () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
     [normalRuns, selectedNormalRowKeys],
@@ -647,8 +585,8 @@ export default function Runs() {
   }, [filteredPatrolRuns, normalRuns]);
 
   useEffect(() => {
-    setPatrolPage((page) => clampPage(page, filteredPatrolRuns.length, patrolPageSize));
-  }, [filteredPatrolRuns.length, patrolPageSize]);
+    setPatrolPage((page) => clampPage(page, patrolQuery.data?.total ?? 0, patrolPageSize));
+  }, [patrolQuery.data?.total, patrolPageSize]);
 
   function deleteSelectedNormalRuns() {
     if (!selectedNormalRowKeys.length) {
@@ -678,12 +616,23 @@ export default function Runs() {
     deletePatrolRuns.mutate(deletableSelectedPatrolRuns.map((run) => run.id));
   }
 
-  function deleteAllPatrolRuns() {
-    if (!deletablePatrolRuns.length) {
+  async function deleteAllPatrolRuns() {
+    let allFilteredRuns = allPatrolRuns.filter((run) => selectedPatrolChannel === ALL_PATROL_CHANNELS || run.patrol_channel_id === selectedPatrolChannel);
+    if (onlyPatrolErrors) {
+      const firstPage = await api.patrolRuns({ page: 1, page_size: 100, channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel, errors_only: true });
+      allFilteredRuns = [...firstPage.items];
+      for (let page = 2; allFilteredRuns.length < firstPage.total; page += 1) {
+        const nextPage = await api.patrolRuns({ page, page_size: 100, channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel, errors_only: true });
+        allFilteredRuns.push(...nextPage.items);
+        if (!nextPage.items.length) break;
+      }
+    }
+    const deletable = deletablePatrolRunIds(allFilteredRuns);
+    if (!deletable.length) {
       message.warning('暂无可删除的巡检日志');
       return;
     }
-    deletePatrolRuns.mutate(deletablePatrolRunIds(filteredPatrolRuns));
+    deletePatrolRuns.mutate(deletable);
   }
 
   const actionColumn = {
@@ -962,7 +911,7 @@ export default function Runs() {
           className="patrol-log-table"
           rowKey="id"
           size="small"
-          loading={runs.isLoading}
+          loading={patrolQuery.isLoading}
           dataSource={visiblePatrolRuns}
           rowSelection={{
             selectedRowKeys: selectedPatrolRowKeys,
@@ -1066,11 +1015,21 @@ export default function Runs() {
             },
           ]}
         />
+        {patrolQuery.isError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="自动巡检日志加载失败"
+            description={getErrorMessage(patrolQuery.error)}
+            action={<Button onClick={() => patrolQuery.refetch()}>重试</Button>}
+            style={{ marginTop: 12 }}
+          />
+        ) : null}
         <Pagination
           className="patrol-log-pagination"
           current={patrolCurrentPage}
           pageSize={patrolPageSize}
-          total={filteredPatrolRuns.length}
+          total={patrolQuery.data?.total ?? 0}
           showSizeChanger
           pageSizeOptions={[10, 20, 50, 100]}
           showTotal={(total) => `共 ${total} 条`}

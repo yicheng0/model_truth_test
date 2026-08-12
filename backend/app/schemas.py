@@ -996,6 +996,20 @@ class RunRead(BaseModel):
     created_at: datetime | None = None
 
 
+class PatrolRunSummaryRead(RunRead):
+    display_state: Literal["ok", "error"] = "ok"
+    needs_review: bool = False
+    has_evidence: bool = False
+
+
+class PatrolRunListRead(BaseModel):
+    items: list[PatrolRunSummaryRead] = Field(default_factory=list)
+    total: int = 0
+    error_count: int = 0
+    page: int = 1
+    page_size: int = 10
+
+
 class SystemUsageRead(BaseModel):
     disk_path: str
     disk_total_bytes: int
