@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolSignatureDisplayState, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -719,6 +719,167 @@ describe('runs utilities', () => {
     expect(isPatrolOperationalFailure({ status: 'fail', errorHttpStatus: 400, rawError: 'Invalid `signature` in `thinking` block' })).toBe(false);
     expect(isPatrolOperationalFailure({ status: 'error', labels: ['kiro_identity_leak'], error: '你好，我是 Kiro' })).toBe(false);
     expect(isPatrolOperationalFailure({ status: 'error', error: 'unexpected response shape' })).toBe(false);
+  });
+
+  it('preserves unknown signature state from patrol evidence', () => {
+    const results = {
+      run: run('signature_unknown_run', 'signature_unknown_schedule'),
+      channels: [],
+      results: [],
+      comparisons: [],
+      reports: [{
+        id: 'signature_unknown_report',
+        run_id: 'signature_unknown_run',
+        channel_id: 'channel_1',
+        summary: '检测未完成',
+        evidence: {
+          test_scope: 'scheduled_probe',
+          labels: ['provider_request_failed'],
+          classification_status: 'operational_issue',
+          signature_interop: {
+            status: 'fail',
+            signature_ok: null,
+            raw_error: 'Upstream access forbidden, please contact administrator',
+            error_http_status: 500,
+            error_stage: 'source_identity',
+            request_logs: [{ stage: 'source_identity', status: 'fail', http_status: 500, request_id: 'req_forbidden' }],
+          },
+        },
+      }],
+      baseline_results: [],
+    } as unknown as RunResults;
+
+    expect(extractPatrolEvidence(results)?.signature).toMatchObject({
+      signatureOk: null,
+      status: 'fail',
+      rawError: 'Upstream access forbidden, please contact administrator',
+      errorHttpStatus: 500,
+      errorStage: 'source_identity',
+    });
+  });
+
+  it('suppresses signature and AI failure cards for operational access errors', () => {
+    const sourceForbidden = {
+      reportId: 'report_source_forbidden',
+      labels: ['provider_request_failed', 'identity_probe_failed'],
+      labelExplanations: {},
+      classificationStatus: 'operational_issue',
+      aiJudge: { classification_status: 'anomaly', classification_label: '检测失败' },
+      modelRequests: [],
+      signature: {
+        status: 'fail',
+        signatureOk: null,
+        errorHttpStatus: 500,
+        errorStage: 'source_identity',
+        rawError: 'Upstream access forbidden, please contact administrator',
+        signaturePrefixes: [],
+        requestLogs: [],
+      },
+    } as unknown as Parameters<typeof patrolSignatureDisplayState>[0];
+    const relayNotAllowed = {
+      ...sourceForbidden,
+      reportId: 'report_relay_not_allowed',
+      signature: {
+        ...sourceForbidden.signature,
+        errorHttpStatus: 400,
+        errorStage: 'relay',
+        rawError: 'ValidationException: models is not allowed for this account',
+      },
+    } as unknown as Parameters<typeof patrolSignatureDisplayState>[0];
+
+    expect(patrolSignatureDisplayState(sourceForbidden)).toEqual({
+      state: 'unknown',
+      label: '未完成验证',
+      color: 'default',
+      showFailureAlert: false,
+      showAiJudge: false,
+    });
+    expect(patrolSignatureDisplayState(relayNotAllowed)).toEqual({
+      state: 'unknown',
+      label: '未完成验证',
+      color: 'default',
+      showFailureAlert: false,
+      showAiJudge: false,
+    });
+    expect(patrolSignatureDisplayState(sourceForbidden).showFailureAlert).toBe(false);
+  });
+
+  it('shows only explicit signature rejection and preserves Kiro review', () => {
+    const rejected = {
+      reportId: 'report_rejected',
+      labels: ['signature_interop_failed'],
+      labelExplanations: {},
+      aiJudge: { classification_status: 'anomaly' },
+      modelRequests: [],
+      signature: {
+        status: 'fail',
+        signatureOk: false,
+        errorHttpStatus: 400,
+        errorStage: 'relay',
+        rawError: 'Invalid `signature` in `thinking` block',
+        signaturePrefixes: [],
+        requestLogs: [],
+      },
+    } as unknown as Parameters<typeof patrolSignatureDisplayState>[0];
+    const kiroWithOperationalSignature = {
+      ...rejected,
+      reportId: 'report_kiro',
+      labels: ['kiro_identity_leak', 'provider_request_failed'],
+      signature: {
+        ...rejected.signature,
+        signatureOk: null,
+        errorHttpStatus: 500,
+        errorStage: 'source_identity',
+        rawError: 'Upstream access forbidden',
+      },
+    } as unknown as Parameters<typeof patrolSignatureDisplayState>[0];
+
+    expect(patrolSignatureDisplayState(rejected)).toMatchObject({
+      state: 'rejected',
+      label: 'Signature 失败',
+      color: 'red',
+      showFailureAlert: true,
+      showAiJudge: true,
+    });
+    expect(patrolSignatureDisplayState(kiroWithOperationalSignature)).toMatchObject({
+      state: 'unknown',
+      showFailureAlert: false,
+      showAiJudge: true,
+    });
+  });
+
+  it('keeps historical explicit signature rejection without signature_ok', () => {
+    const results = {
+      run: run('historical_signature_rejection', 'historical_signature_schedule'),
+      channels: [],
+      results: [],
+      comparisons: [],
+      reports: [{
+        id: 'historical_signature_report',
+        run_id: 'historical_signature_rejection',
+        channel_id: 'channel_1',
+        summary: 'Signature rejected',
+        evidence: {
+          test_scope: 'scheduled_probe',
+          labels: ['signature_interop_failed'],
+          classification_status: 'anomaly',
+          signature_interop: {
+            status: 'fail',
+            raw_error: 'Invalid `signature` in `thinking` block',
+            error_http_status: 400,
+            error_stage: 'relay',
+          },
+        },
+      }],
+      baseline_results: [],
+    } as unknown as RunResults;
+    const evidence = extractPatrolEvidence(results);
+
+    expect(evidence?.signature?.signatureOk).toBeUndefined();
+    expect(patrolSignatureDisplayState(evidence!)).toMatchObject({
+      state: 'rejected',
+      showFailureAlert: true,
+    });
   });
 
   it('normalizes an operational-only patrol while preserving mixed real anomalies', () => {

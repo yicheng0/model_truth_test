@@ -26,6 +26,7 @@ export type PatrolModelRequestEvidence = {
 
 export type PatrolSignatureEvidence = {
   status?: string | null;
+  signatureOk?: boolean | null;
   reason?: string | null;
   rawError?: string | null;
   errorHttpStatus?: number | null;
@@ -127,7 +128,7 @@ const OPERATIONAL_FAILURE_LABELS = new Set([
   'provider_quota_or_balance_exhausted',
   'provider_request_failed',
 ]);
-const OPERATIONAL_FAILURE_TEXT_PATTERN = /\b5\d\d\b|internal server error|service unavailable|bad gateway|gateway timeout|request timeout|timed out|connection (?:failed|error|reset)|network error|no available channel|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|额度不足|余额不足|quota(?:\s+or\s+balance)?\s+(?:is\s+)?(?:exhausted|insufficient|exceeded)|insufficient\s+(?:quota|balance|credit)/i;
+const OPERATIONAL_FAILURE_TEXT_PATTERN = /\b5\d\d\b|internal server error|service unavailable|bad gateway|gateway timeout|request timeout|timed out|connection (?:failed|error|reset)|network error|no available channel|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|access forbidden|not allowed for this account|not allowed for (?:this|the) (?:account|model)|permission denied|access denied|额度不足|余额不足|quota(?:\s+or\s+balance)?\s+(?:is\s+)?(?:exhausted|insufficient|exceeded)|insufficient\s+(?:quota|balance|credit)/i;
 
 export type PatrolOperationalFailureInput = {
   status?: string | null;
@@ -154,6 +155,14 @@ export type PatrolEvidenceDisplayState = {
   displayState: 'ok' | 'error';
   isOperationalFailure: boolean;
   hasRealAnomaly: boolean;
+};
+
+export type PatrolSignatureDisplayState = {
+  state: 'passed' | 'rejected' | 'unknown';
+  label: string;
+  color: 'green' | 'red' | 'default';
+  showFailureAlert: boolean;
+  showAiJudge: boolean;
 };
 
 export type PatrolInlineError = {
@@ -245,6 +254,24 @@ export function patrolEvidenceDisplayState(evidence: PatrolEvidence): PatrolEvid
     displayState: hasRealAnomaly ? 'error' : 'ok',
     isOperationalFailure: hasOperationalEvidence,
     hasRealAnomaly,
+  };
+}
+
+export function patrolSignatureDisplayState(evidence: PatrolEvidence): PatrolSignatureDisplayState {
+  const signature = evidence.signature;
+  const signatureErrorText = [signature?.rawError, signature?.reason].filter(Boolean).join(' ');
+  const signatureRejected = signature?.signatureOk !== null
+    && signature?.signatureOk !== true
+    && signature?.errorHttpStatus === 400
+    && INVALID_THINKING_SIGNATURE_PATTERN.test(signatureErrorText);
+  const signaturePassed = signature?.signatureOk === true;
+  const displayState = patrolEvidenceDisplayState(evidence);
+  return {
+    state: signatureRejected ? 'rejected' : signaturePassed ? 'passed' : 'unknown',
+    label: signatureRejected ? 'Signature 失败' : signaturePassed ? '验证通过' : '未完成验证',
+    color: signatureRejected ? 'red' : signaturePassed ? 'green' : 'default',
+    showFailureAlert: signatureRejected,
+    showAiJudge: Boolean(evidence.aiJudge) && (!displayState.isOperationalFailure || displayState.hasRealAnomaly),
   };
 }
 
@@ -583,8 +610,14 @@ function normalizeModelRequest(value: unknown): PatrolModelRequestEvidence | nul
 
 function normalizeSignature(item: Record<string, unknown> | null): PatrolSignatureEvidence | null {
   if (!item) return null;
+  const signatureOk = typeof item.signature_ok === 'boolean'
+    ? item.signature_ok
+    : Object.prototype.hasOwnProperty.call(item, 'signature_ok')
+      ? null
+      : undefined;
   return {
     status: asNullableString(item.status),
+    signatureOk,
     reason: asNullableString(item.reason),
     rawError: asNullableString(item.raw_error),
     errorHttpStatus: asNullableNumber(item.error_http_status),
