@@ -3447,6 +3447,277 @@ def test_refresh_active_scheduled_test_locks_extends_only_current_instance_locks
     assert foreign.locked_until == now.replace(tzinfo=None)
 
 
+def test_recover_stale_scheduled_tests_recovers_foreign_future_lock_and_related_records(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.setattr("app.services.SCHEDULER_INSTANCE_ID", "current-scheduler-instance")
+    now = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
+    secret = "sk-ant-secret-value"
+    with SessionLocal() as db:
+        run = Run(
+            id="foreign_restart_run",
+            suite_id="manual_model_request_probe",
+            name="foreign restart run",
+            mode="candidate_eval",
+            test_scope="scheduled_probe",
+            scheduled_test_id="foreign_restart_schedule",
+            status="running",
+            repeat_count=1,
+            concurrency=1,
+        )
+        schedule = ScheduledChannelTest(
+            id="foreign_restart_schedule",
+            channel_id="third_party_demo",
+            suite_id="manual_model_request_probe",
+            baseline_snapshot_id="scheduled_probe_baseline",
+            name="foreign restart schedule",
+            enabled=True,
+            last_status="running",
+            last_run_id=run.id,
+            locked_by="previous-scheduler-instance",
+            locked_until=now + timedelta(hours=6),
+        )
+        job = PatrolJob(
+            id="foreign_restart_job",
+            scheduled_test_id=schedule.id,
+            channel_id="third_party_demo",
+            status="running",
+            claimed_by="previous-scheduler-instance",
+            claimed_until=now + timedelta(hours=6),
+            run_id=run.id,
+            last_error=secret,
+        )
+        attempt = PatrolJobAttempt(
+            id="foreign_restart_attempt",
+            job_id=job.id,
+            attempt_index=0,
+            worker_id="previous-scheduler-instance",
+            status="running",
+            run_id=run.id,
+            started_at=now - timedelta(minutes=1),
+        )
+        db.add_all([run, schedule, job, attempt])
+        db.commit()
+
+    from app import services as services_module
+
+    with SessionLocal() as db:
+        first_recovered = services_module.recover_stale_scheduled_tests(db, now=now, recover_foreign_locks=True)
+    with SessionLocal() as db:
+        second_recovered = services_module.recover_stale_scheduled_tests(db, now=now, recover_foreign_locks=True)
+        schedule = db.get(ScheduledChannelTest, "foreign_restart_schedule")
+        run = db.get(Run, "foreign_restart_run")
+        job = db.get(PatrolJob, "foreign_restart_job")
+        attempt = db.get(PatrolJobAttempt, "foreign_restart_attempt")
+
+    assert first_recovered >= 4
+    assert second_recovered == 0
+    assert schedule is not None and schedule.last_status == "failed"
+    assert schedule.locked_by is None and schedule.locked_until is None
+    assert schedule.next_run_at is not None
+    assert schedule.next_run_at <= now.replace(tzinfo=None)
+    assert "部署重启中断" in (schedule.last_error or "")
+    assert secret not in (schedule.last_error or "")
+    assert run is not None and run.status == "interrupted"
+    assert run.finished_at is not None
+    assert job is not None and job.status == "failed"
+    assert "部署重启中断" in (job.last_error or "")
+    assert secret not in (job.last_error or "")
+    assert attempt is not None and attempt.status == "failed"
+    assert attempt.error_type == "scheduler_restart"
+    assert "部署重启中断" in (attempt.error_message or "")
+
+
+def test_recover_stale_scheduled_tests_preserves_current_instance_future_lock(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.setattr("app.services.SCHEDULER_INSTANCE_ID", "current-scheduler-instance")
+    now = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
+    locked_until = now + timedelta(hours=6)
+    with SessionLocal() as db:
+        schedule = ScheduledChannelTest(
+            id="current_restart_schedule",
+            channel_id="third_party_demo",
+            suite_id="manual_model_request_probe",
+            baseline_snapshot_id="scheduled_probe_baseline",
+            name="current restart schedule",
+            enabled=True,
+            last_status="running",
+            locked_by="current-scheduler-instance",
+            locked_until=locked_until,
+        )
+        db.add(schedule)
+        db.commit()
+
+    from app import services as services_module
+
+    with SessionLocal() as db:
+        recovered = services_module.recover_stale_scheduled_tests(db, now=now, recover_foreign_locks=True)
+        schedule = db.get(ScheduledChannelTest, "current_restart_schedule")
+
+    assert recovered == 0
+    assert schedule is not None and schedule.last_status == "running"
+    assert schedule.locked_by == "current-scheduler-instance"
+    assert schedule.locked_until == locked_until.replace(tzinfo=None)
+
+
+def test_recover_stale_scheduled_tests_does_not_recover_foreign_future_lock_during_tick(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.setattr("app.services.SCHEDULER_INSTANCE_ID", "current-scheduler-instance")
+    now = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
+    with SessionLocal() as db:
+        db.add(
+            ScheduledChannelTest(
+                id="foreign_tick_schedule",
+                channel_id="third_party_demo",
+                suite_id="manual_model_request_probe",
+                baseline_snapshot_id="scheduled_probe_baseline",
+                name="foreign tick schedule",
+                enabled=True,
+                last_status="running",
+                locked_by="still-live-scheduler-instance",
+                locked_until=now + timedelta(hours=6),
+            )
+        )
+        db.commit()
+
+    from app import services as services_module
+
+    with SessionLocal() as db:
+        recovered = services_module.recover_stale_scheduled_tests(db, now=now)
+        schedule = db.get(ScheduledChannelTest, "foreign_tick_schedule")
+
+    assert recovered == 0
+    assert schedule is not None and schedule.last_status == "running"
+    assert schedule.locked_by == "still-live-scheduler-instance"
+
+
+def test_recover_stale_scheduled_tests_preserves_disabled_foreign_schedule_on_startup(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.setattr("app.services.SCHEDULER_INSTANCE_ID", "current-scheduler-instance")
+    now = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
+    with SessionLocal() as db:
+        db.add(
+            ScheduledChannelTest(
+                id="disabled_foreign_schedule",
+                channel_id="third_party_demo",
+                suite_id="manual_model_request_probe",
+                baseline_snapshot_id="scheduled_probe_baseline",
+                name="disabled foreign schedule",
+                enabled=False,
+                last_status="running",
+                locked_by="previous-scheduler-instance",
+                locked_until=now + timedelta(hours=6),
+            )
+        )
+        db.commit()
+
+    from app import services as services_module
+
+    with SessionLocal() as db:
+        recovered = services_module.recover_stale_scheduled_tests(db, now=now, recover_foreign_locks=True)
+        schedule = db.get(ScheduledChannelTest, "disabled_foreign_schedule")
+
+    assert recovered == 0
+    assert schedule is not None and schedule.last_status == "running"
+    assert schedule.locked_by == "previous-scheduler-instance"
+
+
+def test_recover_stale_scheduled_tests_recovers_running_attempt_for_completed_job(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.setattr("app.services.SCHEDULER_INSTANCE_ID", "current-scheduler-instance")
+    now = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
+    with SessionLocal() as db:
+        run = Run(
+            id="orphan_attempt_run",
+            suite_id="manual_model_request_probe",
+            name="orphan attempt run",
+            mode="candidate_eval",
+            test_scope="scheduled_probe",
+            scheduled_test_id="orphan_attempt_schedule",
+            status="running",
+            repeat_count=1,
+            concurrency=1,
+        )
+        schedule = ScheduledChannelTest(
+            id="orphan_attempt_schedule",
+            channel_id="third_party_demo",
+            suite_id="manual_model_request_probe",
+            baseline_snapshot_id="scheduled_probe_baseline",
+            name="orphan attempt schedule",
+            enabled=True,
+            last_status="running",
+            last_run_id=run.id,
+            locked_by="previous-scheduler-instance",
+            locked_until=now + timedelta(hours=6),
+        )
+        job = PatrolJob(
+            id="orphan_attempt_job",
+            scheduled_test_id=schedule.id,
+            channel_id="third_party_demo",
+            status="completed",
+            run_id=run.id,
+            finished_at=now - timedelta(minutes=1),
+        )
+        attempt = PatrolJobAttempt(
+            id="orphan_running_attempt",
+            job_id=job.id,
+            attempt_index=0,
+            worker_id="previous-scheduler-instance",
+            status="running",
+            run_id=run.id,
+            started_at=now - timedelta(minutes=2),
+        )
+        db.add_all([run, schedule, job, attempt])
+        db.commit()
+
+    from app import services as services_module
+
+    with SessionLocal() as db:
+        recovered = services_module.recover_stale_scheduled_tests(db, now=now, recover_foreign_locks=True)
+        job = db.get(PatrolJob, "orphan_attempt_job")
+        attempt = db.get(PatrolJobAttempt, "orphan_running_attempt")
+        run = db.get(Run, "orphan_attempt_run")
+
+    assert recovered >= 3
+    assert job is not None and job.status == "completed"
+    assert attempt is not None and attempt.status == "failed"
+    assert attempt.error_type == "scheduler_restart"
+    assert run is not None and run.status == "interrupted"
+
+
+def test_foreign_lock_recovery_failure_is_retried_by_next_scheduler_tick(monkeypatch) -> None:
+    reset_database()
+    from app import services as services_module
+
+    monkeypatch.setattr(services_module, "SCHEDULER_FOREIGN_RECOVERY_PENDING", False, raising=False)
+
+    class FailingSession:
+        def scalars(self, statement):  # noqa: ANN001, ARG002
+            raise RuntimeError("temporary database failure")
+
+    with pytest.raises(RuntimeError, match="temporary database failure"):
+        services_module.recover_stale_scheduled_tests(FailingSession(), recover_foreign_locks=True)
+    assert services_module.SCHEDULER_FOREIGN_RECOVERY_PENDING is True
+
+    captured: list[bool] = []
+
+    def successful_recovery(db, *, now=None, recover_foreign_locks=False):  # noqa: ANN001, ARG001
+        captured.append(recover_foreign_locks)
+        services_module.SCHEDULER_FOREIGN_RECOVERY_PENDING = False
+        return 0
+
+    async def no_report(session_factory, **kwargs):  # noqa: ANN001, ARG001
+        return {"ok": False, "status": "skipped", "message": "skip"}
+
+    monkeypatch.setattr(services_module, "recover_stale_scheduled_tests", successful_recovery)
+    monkeypatch.setattr(services_module, "send_hourly_patrol_summary", no_report)
+    monkeypatch.setattr(services_module, "send_daily_patrol_report", no_report)
+
+    asyncio.run(services_module.scheduled_test_tick(SessionLocal, available_slots=0))
+
+    assert captured == [True]
+    assert services_module.SCHEDULER_FOREIGN_RECOVERY_PENDING is False
+
+
 def test_recover_stale_scheduled_tests_marks_running_job_attempt_failed() -> None:
     reset_database()
     stale_started = datetime.now(timezone.utc) - timedelta(seconds=7200)

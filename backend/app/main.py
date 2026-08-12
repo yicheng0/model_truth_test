@@ -166,7 +166,7 @@ async def lifespan(_app: FastAPI):
     with SessionLocal() as db:
         try:
             seed_demo_data(db)
-            recovered = recover_stale_scheduled_tests(db)
+            recovered = recover_stale_scheduled_tests(db, recover_foreign_locks=True)
             if recovered:
                 logger.warning("Recovered stale scheduled tests on startup count=%d", recovered)
             logger.info("Seed data initialized successfully")

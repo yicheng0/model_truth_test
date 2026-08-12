@@ -79,6 +79,7 @@ PATROL_DISPATCH_WINDOW_SECONDS = 180
 SCHEDULER_ACTIVE_TASK_COUNT = 0
 SCHEDULER_LAST_RECOVERY_COUNT = 0
 SCHEDULER_LAST_RECOVERY_ERROR: str | None = None
+SCHEDULER_FOREIGN_RECOVERY_PENDING = False
 SCHEDULER_LAST_TICK_AT: datetime | None = None
 if not logging.getLogger().handlers and not logging.getLogger("claude_eval").handlers:
     logging.basicConfig(
@@ -288,7 +289,15 @@ def claim_scheduled_test(
     return scheduled
 
 
-def _recover_patrol_job(db: Session, job: PatrolJob | None, *, now: datetime, status: str, error: str) -> int:
+def _recover_patrol_job(
+    db: Session,
+    job: PatrolJob | None,
+    *,
+    now: datetime,
+    status: str,
+    error: str,
+    error_type: str = "scheduler_recovery",
+) -> int:
     recovered = 0
     safe_error = redact_text(error)
     if job and job.status in {"queued", "running"}:
@@ -301,14 +310,110 @@ def _recover_patrol_job(db: Session, job: PatrolJob | None, *, now: datetime, st
         for attempt in attempts:
             attempt.status = status
             attempt.finished_at = now
-            attempt.error_type = "scheduler_recovery"
+            attempt.error_type = error_type
             attempt.error_message = safe_error
             recovered += 1
     return recovered
 
 
-def recover_stale_scheduled_tests(db: Session, *, now: datetime | None = None) -> int:
+def recover_stale_scheduled_tests(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    recover_foreign_locks: bool = False,
+) -> int:
+    global SCHEDULER_FOREIGN_RECOVERY_PENDING
     now = now or datetime.now(timezone.utc)
+    if recover_foreign_locks:
+        SCHEDULER_FOREIGN_RECOVERY_PENDING = True
+    recovered = 0
+    restart_error = "部署重启中断了旧实例巡检，已自动恢复"
+
+    # A container restart can leave a valid future lock owned by an instance
+    # that no longer exists. Recover those records immediately instead of
+    # waiting for the lock lease to expire.
+    foreign_schedules = db.scalars(
+        select(ScheduledChannelTest)
+        .where(
+            ScheduledChannelTest.enabled.is_(True),
+            ScheduledChannelTest.last_status.in_(["queued", "running"]),
+            ScheduledChannelTest.locked_by.is_not(None),
+            ScheduledChannelTest.locked_by != SCHEDULER_INSTANCE_ID,
+        )
+        .order_by(ScheduledChannelTest.updated_at, ScheduledChannelTest.id)
+    ).all() if recover_foreign_locks else []
+    for scheduled in foreign_schedules:
+        observed_owner = scheduled.locked_by
+        claimed = db.execute(
+            update(ScheduledChannelTest)
+            .where(
+                ScheduledChannelTest.id == scheduled.id,
+                ScheduledChannelTest.enabled.is_(True),
+                ScheduledChannelTest.last_status.in_(["queued", "running"]),
+                ScheduledChannelTest.locked_by == observed_owner,
+            )
+            .values(locked_by=SCHEDULER_INSTANCE_ID)
+        )
+        if claimed.rowcount != 1:
+            continue
+        db.flush()
+        current = db.get(ScheduledChannelTest, scheduled.id)
+
+        run_ids: set[str] = set()
+        if current.last_run_id:
+            run_ids.add(current.last_run_id)
+        jobs = db.scalars(
+            select(PatrolJob).where(
+                PatrolJob.scheduled_test_id == current.id,
+                PatrolJob.status.in_(["queued", "running"]),
+            )
+        ).all()
+        for job in jobs:
+            if job.run_id:
+                run_ids.add(job.run_id)
+            recovered += _recover_patrol_job(
+                db,
+                job,
+                now=now,
+                status="failed",
+                error=restart_error,
+                error_type="scheduler_restart",
+            )
+            attempts = db.scalars(select(PatrolJobAttempt).where(PatrolJobAttempt.job_id == job.id)).all()
+            for attempt in attempts:
+                if attempt.run_id:
+                    run_ids.add(attempt.run_id)
+        attempts = db.scalars(
+            select(PatrolJobAttempt)
+            .join(PatrolJob, PatrolJob.id == PatrolJobAttempt.job_id)
+            .where(
+                PatrolJob.scheduled_test_id == current.id,
+                PatrolJobAttempt.status == "running",
+            )
+        ).all()
+        for attempt in attempts:
+            if attempt.run_id:
+                run_ids.add(attempt.run_id)
+            attempt.status = "failed"
+            attempt.finished_at = now
+            attempt.error_type = "scheduler_restart"
+            attempt.error_message = redact_text(restart_error)
+            recovered += 1
+        if run_ids:
+            runs = db.scalars(select(Run).where(Run.id.in_(run_ids))).all()
+            for run in runs:
+                if run.status in {"pending", "running"}:
+                    run.status = "interrupted"
+                    run.finished_at = now
+                    recovered += 1
+        current.last_status = "failed"
+        current.last_error = redact_text(restart_error)
+        current.last_finished_at = now
+        current.locked_by = None
+        current.locked_until = None
+        current.next_run_at = _naive_utc(now)
+        recovered += 1
+
     stale = db.scalars(
         select(ScheduledChannelTest)
         .where(
@@ -318,7 +423,6 @@ def recover_stale_scheduled_tests(db: Session, *, now: datetime | None = None) -
         )
         .order_by(ScheduledChannelTest.locked_until)
     ).all()
-    recovered = 0
     stale_error = "自动巡检任务锁已过期，系统已恢复调度"
     for scheduled in stale:
         run = db.get(Run, scheduled.last_run_id) if scheduled.last_run_id else None
@@ -370,6 +474,8 @@ def recover_stale_scheduled_tests(db: Session, *, now: datetime | None = None) -
 
     if recovered:
         db.commit()
+    if recover_foreign_locks:
+        SCHEDULER_FOREIGN_RECOVERY_PENDING = False
     return recovered
 
 
@@ -10374,7 +10480,11 @@ async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids
         if not get_auto_patrol_enabled(db):
             return due_ids
         try:
-            recover_stale_scheduled_tests(db, now=now)
+            recover_stale_scheduled_tests(
+                db,
+                now=now,
+                recover_foreign_locks=SCHEDULER_FOREIGN_RECOVERY_PENDING,
+            )
         except Exception:
             db.rollback()
             logger.exception("scheduler_recover_stale_failed")
