@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -806,5 +806,14 @@ describe('runs utilities', () => {
 
     expect(patrolInlineError(failure)).toMatchObject({ kind: 'probe', text: 'unexpected response shape' });
     expect(patrolInlineError(normal)).toBeNull();
+  });
+
+  it('filters patrol runs to only explicit error states while preserving order', () => {
+    const input = [run('ok_1', 'sched_1'), run('error_1', 'sched_1'), run('unknown_1', 'sched_1'), run('error_2', 'sched_1')];
+    const states = new Map([['ok_1', 'ok'], ['error_1', 'error'], ['error_2', 'error']] as const);
+
+    expect(filterPatrolRunsByError(input, false, states).map((item) => item.id)).toEqual(['ok_1', 'error_1', 'unknown_1', 'error_2']);
+    expect(filterPatrolRunsByError(input, true, states).map((item) => item.id)).toEqual(['error_1', 'error_2']);
+    expect(filterPatrolRunsByError([], true, states)).toEqual([]);
   });
 });

@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress,
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, filterPatrolRunsByChannel, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Run } from '../types';
 
@@ -289,16 +289,10 @@ function PatrolEvidenceCell({ run }: { run: Run }) {
     );
   }
   if (runResults.isError) {
-    const errorMessage = getErrorMessage(runResults.error);
     return (
-      <Space direction="vertical" size={2} style={{ width: '100%' }}>
+      <Tooltip title={getErrorMessage(runResults.error)}>
         <Tag color="red">日志加载失败</Tag>
-        <Tooltip title={errorMessage}>
-          <Typography.Text type="danger" className="patrol-inline-error patrol-inline-error-load">
-            {errorMessage}
-          </Typography.Text>
-        </Tooltip>
-      </Space>
+      </Tooltip>
     );
   }
   if (!evidence) {
@@ -346,34 +340,21 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
     const primaryLabel = classification || (resultState === 'ok' ? '正确' : '异常');
     const chips = patrolProbeChips(evidence);
     const reason = resultState === 'error' ? patrolFailureReason(evidence) : '';
-    const inlineError = patrolInlineError(evidence);
     return (
-      <Space direction="vertical" size={2} style={{ width: '100%' }}>
-        <Tooltip title={reason || '点开展开行或查看巡检详情查看探针日志'}>
-          <Space size={[4, 2]} wrap>
-            <Tag color={resultState === 'ok' ? 'green' : 'red'} style={{ marginInlineEnd: 0 }}>{primaryLabel}</Tag>
-            {chips.map((chip) => (
-              <Tag
-                key={chip.key}
-                color={chip.state === 'ok' ? 'green' : 'red'}
-                style={{ marginInlineEnd: 0 }}
-              >
-                {chip.label} {chip.state === 'ok' ? '✓' : '✗'}
-              </Tag>
-            ))}
-          </Space>
-        </Tooltip>
-        {inlineError ? (
-          <Tooltip title={inlineError.fullText}>
-            <Typography.Text
-              type={inlineError.kind === 'operational' ? 'warning' : 'danger'}
-              className={`patrol-inline-error patrol-inline-error-${inlineError.kind}`}
+      <Tooltip title={reason || '点开展开行或查看巡检详情查看探针日志'}>
+        <Space size={[4, 2]} wrap>
+          <Tag color={resultState === 'ok' ? 'green' : 'red'} style={{ marginInlineEnd: 0 }}>{primaryLabel}</Tag>
+          {chips.map((chip) => (
+            <Tag
+              key={chip.key}
+              color={chip.state === 'ok' ? 'green' : 'red'}
+              style={{ marginInlineEnd: 0 }}
             >
-              {inlineError.text}
-            </Typography.Text>
-          </Tooltip>
-        ) : null}
-      </Space>
+              {chip.label} {chip.state === 'ok' ? '✓' : '✗'}
+            </Tag>
+          ))}
+        </Space>
+      </Tooltip>
     );
   }
   const classification = patrolClassificationLabel(evidence);
@@ -519,6 +500,7 @@ export default function Runs() {
   const [selectedNormalRowKeys, setSelectedNormalRowKeys] = useState<Key[]>([]);
   const [selectedPatrolRowKeys, setSelectedPatrolRowKeys] = useState<Key[]>([]);
   const [selectedPatrolChannel, setSelectedPatrolChannel] = useState(ALL_PATROL_CHANNELS);
+  const [onlyPatrolErrors, setOnlyPatrolErrors] = useState(false);
   const [patrolPage, setPatrolPage] = useState(1);
   const [patrolPageSize, setPatrolPageSize] = useState(10);
   const runs = useQuery({
@@ -593,9 +575,33 @@ export default function Runs() {
   const { normalRuns, patrolRuns } = useMemo(() => splitRunsByPatrol(runs.data ?? []), [runs.data]);
   const normalRunGroups = useMemo(() => groupRunsByChannel(normalRuns), [normalRuns]);
   const patrolChannelOptions = useMemo(() => buildPatrolChannelFilterOptions(patrolRuns), [patrolRuns]);
-  const filteredPatrolRuns = useMemo(
+  const patrolEvidenceQueries = useQueries({
+    queries: patrolRuns.map((run) => ({
+      queryKey: ['runResults', run.id],
+      queryFn: () => api.runResults(run.id),
+      enabled: run.status === 'completed' || run.status === 'failed',
+    })),
+  });
+  const patrolErrorStateByRunId = useMemo(() => {
+    const states = new Map<string, 'ok' | 'error'>();
+    patrolRuns.forEach((run, index) => {
+      const payload = patrolEvidenceQueries[index]?.data;
+      const evidence = payload ? extractPatrolEvidence(payload) : null;
+      if (evidence) states.set(run.id, patrolEvidenceDisplayState(evidence).displayState);
+    });
+    return states;
+  }, [patrolEvidenceQueries, patrolRuns]);
+  const channelFilteredPatrolRuns = useMemo(
     () => filterPatrolRunsByChannel(patrolRuns, selectedPatrolChannel),
     [patrolRuns, selectedPatrolChannel],
+  );
+  const filteredPatrolRuns = useMemo(
+    () => filterPatrolRunsByError(channelFilteredPatrolRuns, onlyPatrolErrors, patrolErrorStateByRunId),
+    [channelFilteredPatrolRuns, onlyPatrolErrors, patrolErrorStateByRunId],
+  );
+  const errorPatrolRunCount = useMemo(
+    () => channelFilteredPatrolRuns.filter((run) => patrolErrorStateByRunId.get(run.id) === 'error').length,
+    [channelFilteredPatrolRuns, patrolErrorStateByRunId],
   );
   const patrolCurrentPage = useMemo(
     () => clampPage(patrolPage, filteredPatrolRuns.length, patrolPageSize),
@@ -630,8 +636,14 @@ export default function Runs() {
   useEffect(() => {
     const normalIds = new Set(normalRuns.map((run) => run.id));
     const patrolIds = new Set(filteredPatrolRuns.map((run) => run.id));
-    setSelectedNormalRowKeys((keys) => keys.filter((key) => normalIds.has(String(key))));
-    setSelectedPatrolRowKeys((keys) => keys.filter((key) => patrolIds.has(String(key))));
+    setSelectedNormalRowKeys((keys) => {
+      const next = keys.filter((key) => normalIds.has(String(key)));
+      return next.length === keys.length ? keys : next;
+    });
+    setSelectedPatrolRowKeys((keys) => {
+      const next = keys.filter((key) => patrolIds.has(String(key)));
+      return next.length === keys.length ? keys : next;
+    });
   }, [filteredPatrolRuns, normalRuns]);
 
   useEffect(() => {
@@ -903,6 +915,19 @@ export default function Runs() {
               style={{ width: 190 }}
               aria-label="自动巡检日志渠道筛选"
             />
+            <Button
+              size="small"
+              type={onlyPatrolErrors ? 'primary' : 'default'}
+              danger={onlyPatrolErrors}
+              onClick={() => {
+                setOnlyPatrolErrors((value) => !value);
+                setPatrolPage(1);
+              }}
+              aria-pressed={onlyPatrolErrors}
+              aria-label="只看错误"
+            >
+              只看错误（{errorPatrolRunCount}）
+            </Button>
             <Popconfirm
               title="删除已选巡检日志"
               description={`将删除 ${deletableSelectedPatrolRuns.length} 条已选已结束日志及其结果、报告和关联告警。未结束日志会跳过。确定删除吗？`}

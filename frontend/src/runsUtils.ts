@@ -421,6 +421,15 @@ export function filterPatrolRunsByChannel(runs: Run[], selectedChannel: string):
   return runs.filter((run) => patrolRunChannel(run).value === selectedChannel);
 }
 
+export function filterPatrolRunsByError(
+  runs: Run[],
+  onlyErrors: boolean,
+  stateByRunId: ReadonlyMap<string, PatrolEvidenceDisplayState['displayState']>,
+): Run[] {
+  if (!onlyErrors) return [...runs];
+  return runs.filter((run) => stateByRunId.get(run.id) === 'error');
+}
+
 export function clampPage(current: number, total: number, pageSize: number): number {
   const safePageSize = Math.max(1, Math.floor(pageSize));
   const maxPage = Math.max(1, Math.ceil(Math.max(0, total) / safePageSize));

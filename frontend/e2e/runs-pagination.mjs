@@ -48,6 +48,10 @@ const evidenceByRunId = {
       error: `upstream payload ${'request_id_without_spaces_'.repeat(18)} end`,
     }],
   },
+  patrol_06: {
+    labels: ['quality_regression'],
+    model_requests: [{ status: 'fail', labels: [], error: 'context constraint was not followed' }],
+  },
 };
 
 function runResultsPayload(runId) {
@@ -120,26 +124,29 @@ try {
   }
   const firstPageIds = await tableRows.allTextContents();
   assert.equal(firstPageIds.length, 10, '第一页应显示 10 条巡检日志');
-  await page.getByText('unexpected response shape from upstream', { exact: true }).waitFor();
-  await page.getByText('503 Service Unavailable', { exact: true }).waitFor();
-  await page.getByText('Invalid `signature` in `thinking` block', { exact: true }).waitFor();
-  await page.getByText('signature validation timed out while connecting to upstream', { exact: true }).waitFor();
-  assert.equal(await page.locator('.patrol-inline-error').count(), 5, '第一页应直接显示 5 条固定错误正文');
-  assert.equal(await page.locator('.patrol-inline-error-signature').count(), 1, '只有明确 Signature 拒绝使用 Signature 错误样式');
-  assert.equal(await page.locator('.patrol-inline-error-operational').count(), 2, '503 和 Signature 超时应使用运营错误样式');
-  const longError = page.locator('.patrol-inline-error').filter({ hasText: 'request_id_without_spaces_' });
-  const longErrorLayout = await longError.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return {
-      clientHeight: element.clientHeight,
-      lineHeight: Number.parseFloat(style.lineHeight),
-      overflow: style.overflow,
-      scrollHeight: element.scrollHeight,
-    };
-  });
-  assert.ok(longErrorLayout.clientHeight <= longErrorLayout.lineHeight * 2 + 2, '超长错误正文可见高度应限制为两行');
-  assert.equal(longErrorLayout.overflow, 'hidden', '超长错误正文应隐藏溢出内容');
-  assert.ok(longErrorLayout.scrollHeight > longErrorLayout.clientHeight, '固定超长错误应实际触发截断');
+  const errorFilter = page.getByRole('button', { name: /只看错误/ });
+  assert.equal(await errorFilter.getAttribute('aria-pressed'), 'false', '只看错误默认关闭');
+  assert.match(await errorFilter.textContent(), /只看错误（4）/, '错误数量不应统计正确和运营故障日志');
+
+  await errorFilter.click();
+  await page.waitForTimeout(250);
+  assert.equal(await errorFilter.getAttribute('aria-pressed'), 'true', '只看错误点击后应开启');
+  const errorRows = page.locator('.patrol-log-table .ant-table-tbody > tr:not(.ant-table-measure-row)');
+  assert.equal(await errorRows.count(), 4, '只看错误应只显示 4 条真实异常日志');
+  const errorText = (await errorRows.allTextContents()).join('\n');
+  assert.match(errorText, /巡检日志 1|巡检日志 3|巡检日志 5|巡检日志 6/);
+  assert.doesNotMatch(errorText, /巡检日志 2|巡检日志 4/);
+
+  await page.getByRole('combobox', { name: '自动巡检日志渠道筛选' }).click();
+  await page.getByText('渠道 B', { exact: true }).click();
+  await page.waitForTimeout(250);
+  assert.equal(await errorRows.count(), 1, '渠道 B + 只看错误应只保留渠道 B 的异常日志');
+  assert.match((await errorRows.allTextContents()).join('\n'), /巡检日志 6/);
+
+  await errorFilter.click();
+  await page.waitForTimeout(250);
+  assert.equal(await errorFilter.getAttribute('aria-pressed'), 'false');
+  assert.equal(await errorRows.count(), 10, '关闭只看错误后应恢复渠道 B 的全部第一页日志');
 
   await page.getByRole('listitem', { name: '2' }).click();
   const secondPageIds = await tableRows.allTextContents();
