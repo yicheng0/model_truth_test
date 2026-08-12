@@ -75,6 +75,7 @@ SCHEDULER_LOCK_MINUTES = int(os.getenv("SCHEDULER_LOCK_MINUTES", "30") or "30")
 SCHEDULED_TEST_TASK_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_TEST_TASK_TIMEOUT_SECONDS", "21600") or "21600")
 SCHEDULER_LOCK_GRACE_SECONDS = int(os.getenv("SCHEDULER_LOCK_GRACE_SECONDS", "300") or "300")
 SCHEDULER_MAX_CONCURRENT_TASKS = int(os.getenv("SCHEDULER_MAX_CONCURRENT_TASKS", "3") or "3")
+PATROL_DISPATCH_WINDOW_SECONDS = 180
 SCHEDULER_ACTIVE_TASK_COUNT = 0
 SCHEDULER_LAST_RECOVERY_COUNT = 0
 SCHEDULER_LAST_RECOVERY_ERROR: str | None = None
@@ -125,12 +126,7 @@ def next_scheduled_run_at(
 ) -> datetime:
     """Return the next automatic run timestamp in UTC."""
     base_utc = base_at if base_at.tzinfo else base_at.replace(tzinfo=timezone.utc)
-    if interval_minutes <= 5:
-        max_random_seconds = min(max(5, interval_minutes) * 60, 300)
-        delay_seconds = random.randint(1, max_random_seconds) if random_seconds is None else min(max(1, int(random_seconds)), max_random_seconds)
-        candidate_utc = base_utc.astimezone(timezone.utc) + timedelta(seconds=delay_seconds)
-    else:
-        candidate_utc = base_utc.astimezone(timezone.utc) + timedelta(minutes=interval_minutes)
+    candidate_utc = base_utc.astimezone(timezone.utc) + timedelta(minutes=max(5, interval_minutes))
     if not run_window_start or not run_window_end:
         return candidate_utc
 
@@ -144,6 +140,15 @@ def next_scheduled_run_at(
     if candidate_local < window_start:
         return window_start.astimezone(timezone.utc)
     return (window_start + timedelta(days=1)).astimezone(timezone.utc)
+
+
+def dispatch_due_at(base_at: datetime, *, random_seconds: int | None = None) -> datetime:
+    """Return the actual start time for an automatic run's jitter window."""
+    base_utc = base_at if base_at.tzinfo else base_at.replace(tzinfo=timezone.utc)
+    offset = random.randint(1, PATROL_DISPATCH_WINDOW_SECONDS) if random_seconds is None else min(
+        max(1, int(random_seconds)), PATROL_DISPATCH_WINDOW_SECONDS
+    )
+    return base_utc.astimezone(timezone.utc) + timedelta(seconds=offset)
 
 
 def next_run_for_scheduled_test(scheduled: ScheduledChannelTest, base_at: datetime | None = None) -> datetime:
@@ -468,13 +473,20 @@ def scheduled_tests_health(db: Session) -> dict[str, Any]:
     }
 
 
-def create_patrol_job_for_schedule(db: Session, scheduled: ScheduledChannelTest) -> PatrolJob:
+def create_patrol_job_for_schedule(
+    db: Session,
+    scheduled: ScheduledChannelTest,
+    *,
+    due_at: datetime | None = None,
+) -> PatrolJob:
+    queued_at = _as_utc(scheduled.last_queued_at or datetime.now(timezone.utc))
+    dispatch_at = _as_utc(due_at or queued_at)
     job = PatrolJob(
         id=new_id("pjob"),
         scheduled_test_id=scheduled.id,
         channel_id=scheduled.channel_id,
         status="queued",
-        due_at=datetime.now(timezone.utc),
+        due_at=dispatch_at,
         claimed_by=SCHEDULER_INSTANCE_ID,
         claimed_until=scheduled.locked_until,
         job_metadata={
@@ -482,6 +494,7 @@ def create_patrol_job_for_schedule(db: Session, scheduled: ScheduledChannelTest)
             "patrol_modules": scheduled_patrol_modules(scheduled),
             "interval_minutes": scheduled.interval_minutes,
             "source": "scheduled_test_execution",
+            "dispatch_jitter_seconds": max(0, int((dispatch_at - queued_at).total_seconds())),
         },
     )
     db.add(job)
@@ -10302,6 +10315,45 @@ async def _run_scheduled_test_with_timeout(
                 release_scheduled_test_lock(db, scheduled, status="failed", error=str(exc), finished_at=now)
 
 
+async def _run_scheduled_test_after_due(
+    session_factory: sessionmaker[Session],
+    scheduled_id: str,
+    *,
+    timeout_seconds: int,
+) -> None:
+    with session_factory() as db:
+        scheduled = db.get(ScheduledChannelTest, scheduled_id)
+        job = db.scalar(
+            select(PatrolJob)
+            .where(
+                PatrolJob.scheduled_test_id == scheduled_id,
+                PatrolJob.status == "queued",
+                PatrolJob.run_id.is_(None),
+            )
+            .order_by(PatrolJob.created_at.desc(), PatrolJob.id.desc())
+            .limit(1)
+        )
+        due_at = job.due_at if job else None
+    if not scheduled or not job:
+        return
+    due_utc = _as_utc(due_at) if due_at else datetime.now(timezone.utc)
+    delay = (due_utc - datetime.now(timezone.utc)).total_seconds()
+    try:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await _run_scheduled_test_with_timeout(session_factory, scheduled_id, timeout_seconds=timeout_seconds)
+    except asyncio.CancelledError:
+        now = datetime.now(timezone.utc)
+        with session_factory() as db:
+            scheduled = db.get(ScheduledChannelTest, scheduled_id)
+            job = db.get(PatrolJob, job.id)
+            if scheduled and job and job.status == "queued":
+                _recover_patrol_job(db, job, now=now, status="canceled", error="自动巡检派发等待被取消")
+                scheduled.next_run_at = next_run_for_scheduled_test(scheduled, now)
+                release_scheduled_test_lock(db, scheduled, status="canceled", error="自动巡检派发等待被取消", finished_at=now)
+        raise
+
+
 async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids: set[str] | None = None, available_slots: int | None = None) -> list[str]:
     try:
         await send_hourly_patrol_summary(session_factory)
@@ -10345,7 +10397,7 @@ async def scheduled_test_tick(session_factory: sessionmaker[Session], active_ids
                 logger.exception("scheduler_claim_failed scheduled_id=%s", scheduled.id)
                 continue
             if claimed:
-                create_patrol_job_for_schedule(db, claimed)
+                create_patrol_job_for_schedule(db, claimed, due_at=dispatch_due_at(now))
                 db.commit()
                 due_ids.append(claimed.id)
                 claimed_count += 1
@@ -10388,7 +10440,7 @@ async def scheduled_test_loop(session_factory: sessionmaker[Session], poll_secon
                 due_ids = await scheduled_test_tick(session_factory, active_ids, available_slots=available_slots)
                 for sid in due_ids:
                     task = asyncio.create_task(
-                        _run_scheduled_test_with_timeout(
+                        _run_scheduled_test_after_due(
                             session_factory,
                             sid,
                             timeout_seconds=SCHEDULED_TEST_TASK_TIMEOUT_SECONDS,

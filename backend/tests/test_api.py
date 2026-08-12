@@ -36,7 +36,7 @@ from app.schemas import BaselineBuildCreate, ChannelCreate, RunCreate, TestCaseC
 from app.restored_seed import restored_seed_data
 from app.suite_seed import default_cases
 from app.scheduled_probe import _probe_status_text, operational_failure_label
-from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, _signature_interop_result, _signature_operational_failure_label, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, is_explicit_invalid_thinking_signature, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, send_alert_notification, send_hourly_patrol_summary, smart_patrol_daily_text, suite_fingerprint
+from app.services import _anthropic_compatible_call, _anthropic_messages_url, _aws_bedrock_messages_call, _live_call, _merged_channel_credentials, _openai_compatible_call, _result_from_normalized, _signature_interop_result, _signature_operational_failure_label, apply_repeat_consistency_scores, build_raw_request, build_scheduled_probe_report, build_smart_patrol_report, channel_alert_read, channel_fingerprint, classify_claude_message_id, create_alerts_for_run, create_baseline_build, create_case, create_channel, create_run, create_suite, default_channel_templates, dispatch_due_at, execute_run, execute_scheduled_channel_test, feishu_text_payload, finalize_baseline_from_run, get_or_create_feishu_setting, get_auto_patrol_enabled, set_auto_patrol_enabled, invoke_channel, is_explicit_invalid_thinking_signature, next_scheduled_run_at, refresh_active_scheduled_test_locks, request_fingerprint, scheduled_channel_test_read, scheduled_probe_classification, scheduled_probe_needs_ai_judge, scheduled_test_loop, scheduled_test_tick, scheduler_enabled, score_result, seed_demo_data, seed_restored_fixture_data, send_alert_notification, send_hourly_patrol_summary, smart_patrol_daily_text, suite_fingerprint
 
 
 @pytest.mark.parametrize(
@@ -3067,6 +3067,50 @@ def test_scheduled_test_tick_claims_overdue_schedule_and_advances_next_run(monke
         assert job.run_id is None
 
 
+def test_scheduled_test_tick_assigns_independent_dispatch_times_and_deduplicates(monkeypatch) -> None:
+    reset_database()
+    monkeypatch.setattr("app.services.send_daily_patrol_report", lambda *args, **kwargs: None)
+    dispatch_times = iter([datetime.now(timezone.utc) + timedelta(seconds=11), datetime.now(timezone.utc) + timedelta(seconds=137)])
+    monkeypatch.setattr("app.services.dispatch_due_at", lambda base_at, **kwargs: next(dispatch_times))
+    with SessionLocal() as db:
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db.add_all([
+            ScheduledChannelTest(
+                id="jitter_schedule_one",
+                channel_id="third_party_demo",
+                suite_id="manual_model_request_probe",
+                baseline_snapshot_id="scheduled_probe_baseline",
+                name="jitter one",
+                enabled=True,
+                interval_minutes=5,
+                next_run_at=now,
+                last_status="idle",
+            ),
+            ScheduledChannelTest(
+                id="jitter_schedule_two",
+                channel_id="third_party_demo",
+                suite_id="manual_model_request_probe",
+                baseline_snapshot_id="scheduled_probe_baseline",
+                name="jitter two",
+                enabled=True,
+                interval_minutes=5,
+                next_run_at=now,
+                last_status="idle",
+            ),
+        ])
+        db.commit()
+
+    assert set(asyncio.run(scheduled_test_tick(SessionLocal))) == {"jitter_schedule_one", "jitter_schedule_two"}
+    with SessionLocal() as db:
+        jobs = db.scalars(select(PatrolJob).where(PatrolJob.scheduled_test_id.in_(["jitter_schedule_one", "jitter_schedule_two"]))).all()
+        first_due = {job.scheduled_test_id: job.due_at for job in jobs}
+    assert len(first_due) == 2
+    assert first_due["jitter_schedule_one"] != first_due["jitter_schedule_two"]
+    assert asyncio.run(scheduled_test_tick(SessionLocal)) == []
+    with SessionLocal() as db:
+        assert db.query(PatrolJob).filter(PatrolJob.scheduled_test_id.in_(["jitter_schedule_one", "jitter_schedule_two"])).count() == 2
+
+
 def test_scheduled_channel_test_supports_simplified_probe_create() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -3278,12 +3322,15 @@ def test_next_scheduled_run_at_respects_run_window() -> None:
     assert next_scheduled_run_at(datetime.fromisoformat("2026-05-15T16:30:00+00:00"), 30, "22:00", "02:00") == datetime.fromisoformat("2026-05-15T17:00:00+00:00")
 
 
-def test_next_scheduled_run_at_randomizes_five_minute_patrols_with_injected_seconds() -> None:
+def test_next_scheduled_run_at_keeps_five_minute_period_and_dispatch_due_at_is_jittered() -> None:
     base = datetime.fromisoformat("2026-05-15T00:00:00+00:00")
 
-    assert next_scheduled_run_at(base, 5, random_seconds=1) == base + timedelta(seconds=1)
-    assert next_scheduled_run_at(base, 5, random_seconds=300) == base + timedelta(seconds=300)
-    assert next_scheduled_run_at(base, 5, random_seconds=137) == base + timedelta(seconds=137)
+    assert next_scheduled_run_at(base, 5, random_seconds=1) == base + timedelta(minutes=5)
+    assert next_scheduled_run_at(base, 5, random_seconds=300) == base + timedelta(minutes=5)
+    assert next_scheduled_run_at(base, 5, random_seconds=137) == base + timedelta(minutes=5)
+    assert dispatch_due_at(base, random_seconds=1) == base + timedelta(seconds=1)
+    assert dispatch_due_at(base, random_seconds=180) == base + timedelta(seconds=180)
+    assert dispatch_due_at(base, random_seconds=181) == base + timedelta(seconds=180)
 
 
 def test_next_scheduled_run_at_keeps_longer_intervals_deterministic() -> None:
@@ -3403,6 +3450,7 @@ def test_scheduled_test_loop_starts_due_tasks_without_waiting_for_completion(mon
 
     monkeypatch.setattr("app.services.execute_scheduled_channel_test", slow_execute)
     monkeypatch.setattr("app.services.send_daily_patrol_report", no_daily_report)
+    monkeypatch.setattr("app.services.dispatch_due_at", lambda base_at, **kwargs: base_at)
     with SessionLocal() as db:
         now = datetime.now(timezone.utc) - timedelta(minutes=1)
         db.add_all([
