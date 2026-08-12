@@ -7035,6 +7035,7 @@ def test_signature_interop_streams_source_thinking_when_stream_mode_enabled(monk
 def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> None:
     reset_database()
     calls = 0
+    full_signature = "sig_" + "source-signature-" * 12
 
     class FakeClient:
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
@@ -7058,7 +7059,7 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
                         "id": "msg_01source",
                         "type": "message",
                         "model": "claude-opus-4-6",
-                        "content": [{"type": "thinking", "thinking": "source thinking", "signature": "sig-bad"}],
+                        "content": [{"type": "thinking", "thinking": "source thinking", "signature": full_signature}],
                     },
                     request=request,
                 )
@@ -7110,6 +7111,12 @@ def test_signature_interop_endpoint_reports_invalid_signature(monkeypatch) -> No
     assert payload["run"]["mode"] == "manual_probe"
     assert payload["run"]["status"] == "failed"
     assert payload["result"]["labels"] == ["signature_interop_failed"]
+    logs = payload["request_logs"]
+    source_log = next(item for item in logs if item["stage"] == "source")
+    relay_log = next(item for item in logs if item["stage"] == "relay")
+    assert full_signature in source_log["response_excerpt"]
+    assert full_signature in relay_log["request_excerpt"]
+    assert payload["signature_prefixes"] == [full_signature[:50]]
     assert payload["created_at"]
     assert payload["completed_at"]
     assert "signature 不兼容" in payload["reason"]
@@ -10370,6 +10377,33 @@ def test_upstream_integrity_payload_redacts_complete_signatures_and_credentials(
 
     assert secret_signature not in payload
     assert "sk-secret" not in payload
+
+
+def test_signature_interop_full_signature_evidence_preserves_complete_value_and_redacts_credentials() -> None:
+    from app.services import _redact_signature_payload, _signature_log_payload
+
+    signature = "sig_" + "abcdefghijklmnopqrstuvwxyz0123456789" * 4
+    payload = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": "thinking", "signature": signature}],
+            }
+        ],
+        "authorization": "Bearer test-signature-secret",
+        "api_key": "test-signature-api-key",
+    }
+
+    evidence = _signature_log_payload(payload)
+
+    assert signature in evidence
+    assert f"{signature}..." not in evidence
+    assert "test-signature-secret" not in evidence
+    assert "test-signature-api-key" not in evidence
+
+    compact = json.dumps(_redact_signature_payload(payload), ensure_ascii=False)
+    assert signature[:50] in compact
+    assert signature[50:] not in compact
 
 
 def test_upstream_integrity_stream_evidence_preserves_delta_order_and_tool_json() -> None:

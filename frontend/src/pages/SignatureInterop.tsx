@@ -482,6 +482,43 @@ export default function SignatureInterop() {
             />
           </Card>
 
+          {result.request_logs?.length ? (
+            <Card title="原始请求 / 响应证据" bordered={false}>
+              <Table
+                rowKey={(row, index) => String(row.stage ?? row.started_at ?? index)}
+                size="small"
+                pagination={false}
+                dataSource={result.request_logs}
+                expandable={{
+                  expandedRowRender: (row) => (
+                    <div className="patrol-probe-detail">
+                      {row.request_excerpt ? (
+                        <div className="patrol-probe-detail-row full">
+                          <span>脱敏原始请求（Signature 完整）</span>
+                          <pre className="patrol-probe-response">{row.request_excerpt}</pre>
+                        </div>
+                      ) : null}
+                      {row.response_excerpt ? (
+                        <div className="patrol-probe-detail-row full">
+                          <span>脱敏原始响应（Signature 完整）</span>
+                          <pre className="patrol-probe-response">{row.response_excerpt}</pre>
+                        </div>
+                      ) : null}
+                    </div>
+                  ),
+                }}
+                columns={[
+                  { title: '阶段', dataIndex: 'stage', width: 150, render: (value: string | null) => value || '-' },
+                  { title: '状态', dataIndex: 'status', width: 90, render: (value: string | null) => <Tag color={value === 'ok' ? 'green' : 'red'}>{value || '-'}</Tag> },
+                  { title: 'HTTP', dataIndex: 'http_status', width: 90, render: (value: number | null) => compactStepValue(value) },
+                  { title: 'Request ID', dataIndex: 'request_id', width: 190, render: (value: string | null) => value || '-' },
+                  { title: 'Message ID', dataIndex: 'message_id', width: 220, render: (value: string | null) => value || '-' },
+                ]}
+                scroll={{ x: 740 }}
+              />
+            </Card>
+          ) : null}
+
           <Card title="兜底渠道说明" bordered={false}>
             <pre className="signature-note">{result.fallback_note}</pre>
           </Card>

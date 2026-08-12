@@ -25,7 +25,7 @@ from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelGroup, ChannelGroupMember, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
-from .redaction import merge_redacted_config, redact_secrets, redact_signatures, redact_text
+from .redaction import is_sensitive_key, merge_redacted_config, redact_secret, redact_secrets, redact_signatures, redact_text
 from .scheduled_probe import (
     OPERATIONAL_FAILURE_LABELS,
     OPERATIONAL_FAILURE_LABEL_PRIORITY,
@@ -12205,8 +12205,8 @@ def _signature_response_excerpt(payload: Any) -> str:
 
 def _signature_log_payload(payload: Any) -> str:
     if isinstance(payload, dict):
-        return json.dumps(_redact_signature_payload(payload), ensure_ascii=False)[:20000]
-    return redact_text(str(payload or ""))[:20000]
+        return json.dumps(_redact_signature_evidence_payload(payload), ensure_ascii=False)
+    return redact_text(str(payload or ""))
 
 
 def _signature_step_from_meta(
@@ -12697,6 +12697,30 @@ def _redact_signature_payload(value: Any) -> Any:
         return redacted
     if isinstance(value, list):
         return [_redact_signature_payload(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
+def _redact_signature_evidence_payload(value: Any) -> Any:
+    """Redact raw Signature evidence without truncating protocol signatures."""
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key).strip().lower()
+            if normalized_key == "signature" and isinstance(item, str):
+                redacted[key] = item
+            elif is_sensitive_key(key):
+                redacted[key] = redact_secret(item)
+            elif normalized_key == "thinking" and isinstance(item, str):
+                redacted[key] = f"{redact_text(item[:500])}..." if len(item) > 500 else redact_text(item)
+            else:
+                redacted[key] = _redact_signature_evidence_payload(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_signature_evidence_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_signature_evidence_payload(item) for item in value]
     if isinstance(value, str):
         return redact_text(value)
     return value
