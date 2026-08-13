@@ -12839,8 +12839,8 @@ def test_unfinished_runs_must_be_canceled_before_single_or_bulk_delete() -> None
         "deleted": 1,
         "missing": [],
         "failed": {
-            pending_id: "Unfinished runs must be canceled before deletion",
-            running_id: "Unfinished runs must be canceled before deletion",
+            pending_id: "Pending runs must be canceled before deletion",
+            running_id: "Running runs must be canceled before deletion",
         },
     }
     with SessionLocal() as db:
