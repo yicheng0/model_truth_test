@@ -1,4 +1,4 @@
-import type { Channel, PatrolAiJudgeEvidence, ReportSummary, Result, Run, RunResults } from './types';
+import type { Channel, PatrolAiJudgeEvidence, PatrolAnomalyEntry, PatrolAnomalySummary, PatrolRunList, ReportSummary, Result, Run, RunResults } from './types';
 import { formatChannelDisplayName } from './channelCredentials';
 
 export type PatrolModelRequestEvidence = {
@@ -113,6 +113,65 @@ export type PatrolChannelFilterOption = {
   value: string;
   label: string;
 };
+
+export type PatrolTopErrorKind = 'kiro_identity_leak' | 'invalid_thinking_signature' | 'patrol_error';
+
+export type PatrolTopErrorItem = {
+  runId: string;
+  runName: string;
+  channelId?: string | null;
+  channelName?: string | null;
+  createdAt?: string | null;
+  kind: PatrolTopErrorKind;
+  priority: number;
+};
+
+export type PatrolTopErrorSummary = {
+  total: number;
+  items: PatrolTopErrorItem[];
+};
+
+function anomalyTopError(item: PatrolAnomalyEntry, kind: Exclude<PatrolTopErrorKind, 'patrol_error'>, priority: number): PatrolTopErrorItem {
+  return {
+    runId: item.run_id,
+    runName: item.run_name,
+    channelId: item.channel_id,
+    channelName: item.channel_name,
+    createdAt: item.created_at,
+    kind,
+    priority,
+  };
+}
+
+export function buildPatrolTopErrorSummary(
+  errorPage?: PatrolRunList,
+  anomalies?: PatrolAnomalySummary,
+  limit = 10,
+): PatrolTopErrorSummary {
+  const kiroItems = (anomalies?.kiro_identity_leak.items ?? [])
+    .map((item) => anomalyTopError(item, 'kiro_identity_leak', 1));
+  const signatureItems = (anomalies?.invalid_thinking_signature.items ?? [])
+    .map((item) => anomalyTopError(item, 'invalid_thinking_signature', 2));
+  const patrolItems = [...(errorPage?.items ?? [])]
+    .sort((left, right) => (Date.parse(right.created_at ?? '') || 0) - (Date.parse(left.created_at ?? '') || 0))
+    .map<PatrolTopErrorItem>((item) => ({
+      runId: item.id,
+      runName: item.name,
+      channelId: item.patrol_channel_id,
+      channelName: item.patrol_channel_name,
+      createdAt: item.created_at,
+      kind: 'patrol_error',
+      priority: 3,
+    }));
+  const seenRunIds = new Set<string>();
+  const items = [...kiroItems, ...signatureItems, ...patrolItems].filter((item) => {
+    if (seenRunIds.has(item.runId)) return false;
+    seenRunIds.add(item.runId);
+    return true;
+  }).slice(0, Math.max(0, limit));
+
+  return { total: errorPage?.total ?? 0, items };
+}
 
 const OVERVIEW_ANOMALY_LABELS = ['kiro_identity_leak', 'signature_interop_failed'] as const;
 
