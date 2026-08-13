@@ -548,6 +548,26 @@ textarea:focus-visible,
   min-height: 50px !important;
 }
 
+.patrol-top-error-summary {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.patrol-top-error-heading {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.patrol-top-error-table .ant-table-thead > tr > th,
+.patrol-top-error-table .ant-table-tbody > tr > td {
+  padding-block: 7px;
+}
+
 .patrol-log-card .ant-card-head-wrapper {
   flex-wrap: wrap;
   gap: 8px 16px;
