@@ -4,9 +4,9 @@ import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress,
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
-import type { PatrolAnomalyGroup, Run } from '../types';
+import type { Channel, PatrolAnomalyGroup, Run } from '../types';
 
 type RunChannelGroup = {
   key: string;
@@ -487,8 +487,8 @@ export default function Runs() {
   const [patrolPage, setPatrolPage] = useState(1);
   const [patrolPageSize, setPatrolPageSize] = useState(10);
   const runs = useQuery({
-    queryKey: ['runs'],
-    queryFn: () => api.runs(),
+    queryKey: ['runs', 'normal-only'],
+    queryFn: () => api.runs({ exclude_patrol: true }),
     refetchInterval: (query) => (query.state.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
   });
   const patrolQuery = useQuery({
@@ -501,6 +501,19 @@ export default function Runs() {
     }),
     refetchInterval: (query) => (query.state.data?.items.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
   });
+  const patrolAnomaliesQuery = useQuery({
+    queryKey: ['patrolAnomalies', selectedPatrolChannel],
+    queryFn: () => api.patrolAnomalies({
+      channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel,
+    }),
+    staleTime: 60 * 1000,
+    refetchInterval: 60 * 1000,
+  });
+  const channelsQuery = useQuery({
+    queryKey: ['channels'],
+    queryFn: () => api.channels(),
+    staleTime: 5 * 60 * 1000,
+  });
 
   const remove = useMutation({
     mutationFn: api.deleteRun,
@@ -508,8 +521,9 @@ export default function Runs() {
       message.success('任务已删除');
       setSelectedNormalRowKeys((keys) => keys.filter((key) => key !== runId));
       setSelectedPatrolRowKeys((keys) => keys.filter((key) => key !== runId));
-      await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolRuns'] });
+      await queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
@@ -521,10 +535,11 @@ export default function Runs() {
       const failed = Object.keys(result.failed).length;
       message.success(failed ? `已删除 ${result.deleted} 条任务，${failed} 条删除失败` : `已删除 ${result.deleted} 条任务`);
       setSelectedNormalRowKeys([]);
-      queryClient.setQueryData<Run[]>(['runs'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
+      queryClient.setQueryData<Run[]>(['runs', 'normal-only'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
       void Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['runs'] }),
+        queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] }),
         queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
+        queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] }),
         queryClient.invalidateQueries({ queryKey: ['reports'] }),
       ]);
     },
@@ -539,10 +554,11 @@ export default function Runs() {
         message.warning(`未删除原因：${Object.entries(result.failed).map(([id, reason]) => `${id}: ${reason}`).join('；')}`);
       }
       setSelectedPatrolRowKeys([]);
-      queryClient.setQueryData<Run[]>(['runs'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
+      queryClient.setQueryData<Run[]>(['runs', 'normal-only'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
       void Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['runs'] }),
+        queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] }),
         queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
+        queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] }),
         queryClient.invalidateQueries({ queryKey: ['reports'] }),
       ]);
     },
@@ -552,8 +568,9 @@ export default function Runs() {
     mutationFn: api.cancelRun,
     onSuccess: async () => {
       message.success('任务已取消');
-      await queryClient.invalidateQueries({ queryKey: ['runs'] });
+      await queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolRuns'] });
+      await queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
     onSettled: () => setCancelingId(null),
@@ -569,10 +586,16 @@ export default function Runs() {
     cancel.mutate(run.id);
   }
 
-  const { normalRuns, patrolRuns: allPatrolRuns } = useMemo(() => splitRunsByPatrol(runs.data ?? []), [runs.data]);
+  const normalRuns = runs.data ?? [];
   const patrolRuns = patrolQuery.data?.items ?? [];
   const normalRunGroups = useMemo(() => groupRunsByChannel(normalRuns), [normalRuns]);
-  const patrolChannelOptions = useMemo(() => buildPatrolChannelFilterOptions(allPatrolRuns), [allPatrolRuns]);
+  const patrolChannelOptions = useMemo(() => {
+    const options = (channelsQuery.data ?? []).map((channel: Channel) => ({
+      value: channel.id,
+      label: formatPatrolChannel({ id: channel.id, name: channel.name, providerType: channel.provider_type, accountType: channel.auth_config?.account_type }, channel.id) || channel.name,
+    }));
+    return [{ value: ALL_PATROL_CHANNELS, label: '全部渠道' }, ...options.sort((left, right) => left.label.localeCompare(right.label, 'zh-CN'))];
+  }, [channelsQuery.data]);
   const filteredPatrolRuns = patrolRuns;
   const errorPatrolRunCount = patrolQuery.data?.error_count ?? 0;
   const visiblePatrolRuns = patrolRuns;
@@ -979,8 +1002,8 @@ export default function Runs() {
         bordered={false}
       >
         <Space direction="vertical" size={8} style={{ width: '100%', marginBottom: 12 }}>
-          <PatrolGlobalAnomalyAlert title="Kiro 身份泄漏" group={patrolQuery.data?.anomaly_summary?.kiro_identity_leak} />
-          <PatrolGlobalAnomalyAlert title="Thinking Signature 无效" group={patrolQuery.data?.anomaly_summary?.invalid_thinking_signature} />
+          <PatrolGlobalAnomalyAlert title="Kiro 身份泄漏" group={patrolAnomaliesQuery.data?.kiro_identity_leak} />
+          <PatrolGlobalAnomalyAlert title="Thinking Signature 无效" group={patrolAnomaliesQuery.data?.invalid_thinking_signature} />
         </Space>
         <Table
           className="patrol-log-table"

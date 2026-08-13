@@ -19,6 +19,23 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('loads patrol anomalies independently from the paginated list', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await api.patrolAnomalies({ channel_id: 'channel_a' });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/runs/patrol/anomalies?channel_id=channel_a',
+      expect.any(Object),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('uses readable FastAPI detail messages for failures', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ detail: 'Run not found' }), {

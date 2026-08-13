@@ -44,6 +44,7 @@ import type {
   ReportSummary,
   Result,
   Run,
+  PatrolAnomalySummary,
   PatrolRunList,
   RunCreate,
   RunLogCleanupResult,
@@ -230,8 +231,12 @@ export const api = {
   createCase: (payload: TestCaseCreate) => request<TestCase>('/api/test-cases', { method: 'POST', body: JSON.stringify(payload) }),
   updateCase: (id: string, payload: Partial<TestCaseCreate>) => request<TestCase>(`/api/test-cases/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCase: (id: string) => request<{ deleted: boolean }>(`/api/test-cases/${id}`, { method: 'DELETE', headers: adminHeaders() }),
-  runs: (params?: { scheduled_test_id?: string }) => {
-    const qs = params?.scheduled_test_id ? `?scheduled_test_id=${encodeURIComponent(params.scheduled_test_id)}` : '';
+  runs: (params?: { scheduled_test_id?: string; exclude_patrol?: boolean }) => {
+    const search = new URLSearchParams();
+    if (params?.scheduled_test_id) search.set('scheduled_test_id', params.scheduled_test_id);
+    if (params?.exclude_patrol) search.set('exclude_patrol', 'true');
+    const query = search.toString();
+    const qs = query ? `?${query}` : '';
     return request<Run[]>(`/api/runs${qs}`);
   },
   patrolRuns: (params?: { page?: number; page_size?: number; channel_id?: string; errors_only?: boolean }) => {
@@ -242,6 +247,12 @@ export const api = {
     if (params?.errors_only) search.set('errors_only', 'true');
     const query = search.toString();
     return request<PatrolRunList>(`/api/runs/patrol${query ? `?${query}` : ''}`);
+  },
+  patrolAnomalies: (params?: { channel_id?: string }) => {
+    const search = new URLSearchParams();
+    if (params?.channel_id) search.set('channel_id', params.channel_id);
+    const query = search.toString();
+    return request<PatrolAnomalySummary>(`/api/runs/patrol/anomalies${query ? `?${query}` : ''}`);
   },
   run: (runId: string) => request<Run>(`/api/runs/${runId}`),
   runResults: async (runId: string) => {
