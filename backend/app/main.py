@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 import asyncio
 import logging
+import re
 import uuid
 import os
 import inspect
@@ -62,6 +63,9 @@ from .schemas import (
     RunChannelRead,
     RunCreate,
     RunRead,
+    PatrolAnomalyEntryRead,
+    PatrolAnomalyGroupRead,
+    PatrolAnomalySummaryRead,
     PatrolRunListRead,
     PatrolRunSummaryRead,
     RunResultsRead,
@@ -1175,6 +1179,106 @@ def _patrol_needs_review(report: Report | None, labels: set[str], classification
     )
 
 
+_INVALID_THINKING_SIGNATURE_RE = re.compile(r"invalid\s+[`'\"“”]?signature[`'\"“”]?\s+in\s+[`'\"“”]?thinking[`'\"“”]?\s+block", re.IGNORECASE)
+_KIRO_IDENTITY_RE = re.compile(r"(?:我是\s*Kiro\b|\bI\s+(?:am|'m|’m)\s+Kiro\b)", re.IGNORECASE)
+_KIRO_NEGATION_RE = re.compile(r"(?:我不(?:叫|是)\s*Kiro\b|\bI\s+(?:am|'m|’m)\s+not\s+Kiro\b)", re.IGNORECASE)
+_PATROL_ANOMALY_ITEM_LIMIT = 5
+
+
+def _patrol_evidence_dict(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _patrol_request_ids(evidence: dict[str, object], *, signature: bool) -> list[str]:
+    values: list[str] = []
+    candidates: list[object] = []
+    if signature:
+        signature_evidence = _patrol_evidence_dict(evidence.get("signature_interop"))
+        candidates.extend([signature_evidence.get("relay_request_id"), signature_evidence.get("source_request_id"), signature_evidence.get("identity_request_id")])
+        logs = signature_evidence.get("request_logs")
+        if isinstance(logs, list):
+            candidates.extend(item.get("request_id") for item in logs if isinstance(item, dict))
+    else:
+        requests = evidence.get("model_requests")
+        if isinstance(requests, list):
+            candidates.extend(
+                item.get("request_id")
+                for item in requests
+                if isinstance(item, dict)
+                and (item.get("key") == "identity_self_report" or "kiro_identity_leak" in (item.get("labels") or []))
+            )
+        signature_evidence = _patrol_evidence_dict(evidence.get("signature_interop"))
+        candidates.append(signature_evidence.get("identity_request_id"))
+    for value in candidates:
+        if isinstance(value, str) and value and value not in values:
+            values.append(redact_text(value)[:160])
+        if len(values) >= 3:
+            break
+    return values
+
+
+def _patrol_has_kiro_identity(evidence: dict[str, object], labels: set[str]) -> bool:
+    if "kiro_identity_leak" in labels:
+        return True
+    texts: list[str] = []
+    signature = _patrol_evidence_dict(evidence.get("signature_interop"))
+    identity_text = signature.get("identity_response_text")
+    if isinstance(identity_text, str):
+        texts.append(identity_text)
+    requests = evidence.get("model_requests")
+    if isinstance(requests, list):
+        for item in requests:
+            if not isinstance(item, dict) or item.get("key") != "identity_self_report":
+                continue
+            for key in ("response_text", "raw_response_text"):
+                if isinstance(item.get(key), str):
+                    texts.append(item[key])
+    return any(_KIRO_IDENTITY_RE.search(text) and not _KIRO_NEGATION_RE.search(text) for text in texts)
+
+
+def _patrol_signature_rejection(evidence: dict[str, object], labels: set[str]) -> tuple[bool, int | None, str | None]:
+    signature = _patrol_evidence_dict(evidence.get("signature_interop"))
+    signature_ok = signature.get("signature_ok")
+    http_status = signature.get("error_http_status")
+    text = " ".join(str(signature.get(key) or "") for key in ("raw_error", "reason"))
+    explicit = http_status == 400 and bool(_INVALID_THINKING_SIGNATURE_RE.search(text))
+    if signature_ok is None and "signature_ok" in signature:
+        return False, None, None
+    if not explicit:
+        return False, None, None
+    if signature_ok is False or "signature_interop_failed" in labels or "signature_ok" not in signature:
+        return True, 400, str(signature.get("error_stage") or "relay")
+    return False, None, None
+
+
+def _patrol_anomaly_summary(
+    runs_by_id: dict[str, tuple[str, datetime | None]],
+    reports: list[Report],
+    channel_by_id: dict[str, Channel],
+    selected_channel_id: str | None = None,
+) -> PatrolAnomalySummaryRead:
+    groups: dict[str, list[PatrolAnomalyEntryRead]] = {"kiro_identity_leak": [], "invalid_thinking_signature": []}
+    for report in reports:
+        if selected_channel_id and report.channel_id != selected_channel_id:
+            continue
+        run = runs_by_id.get(report.run_id)
+        if run is None:
+            continue
+        run_name, run_created_at = run
+        evidence = _patrol_evidence_dict(report.evidence)
+        labels = {str(label) for label in evidence.get("labels", []) if isinstance(label, str)} if isinstance(evidence.get("labels"), list) else set()
+        channel = channel_by_id.get(report.channel_id)
+        if _patrol_has_kiro_identity(evidence, labels):
+            groups["kiro_identity_leak"].append(PatrolAnomalyEntryRead(run_id=report.run_id, run_name=run_name, channel_id=report.channel_id, channel_name=channel.name if channel else None, created_at=report.created_at or run_created_at, request_ids=_patrol_request_ids(evidence, signature=False), stage="identity_self_report"))
+        rejected, http_status, stage = _patrol_signature_rejection(evidence, labels)
+        if rejected:
+            groups["invalid_thinking_signature"].append(PatrolAnomalyEntryRead(run_id=report.run_id, run_name=run_name, channel_id=report.channel_id, channel_name=channel.name if channel else None, created_at=report.created_at or run_created_at, request_ids=_patrol_request_ids(evidence, signature=True), http_status=http_status, stage=stage))
+    return PatrolAnomalySummaryRead(**{
+        key: PatrolAnomalyGroupRead(count=len(items), items=items[:_PATROL_ANOMALY_ITEM_LIMIT], truncated=len(items) > _PATROL_ANOMALY_ITEM_LIMIT)
+        for key, items in groups.items()
+    })
+
+
 @app.get("/api/runs/patrol", response_model=PatrolRunListRead)
 def list_patrol_runs(
     page: int = Query(default=1, ge=1),
@@ -1196,8 +1300,6 @@ def list_patrol_runs(
         if not total:
             return PatrolRunListRead(items=[], total=0, error_count=0, deletable_count=0, page=page, page_size=page_size)
         candidate_runs = list(db.scalars(select(Run).where(patrol_condition).order_by(Run.created_at.desc(), Run.id.desc()).offset((page - 1) * page_size).limit(page_size)).all())
-    if not candidate_runs and errors_only:
-        return PatrolRunListRead(items=[], total=0, error_count=0, deletable_count=0, page=page, page_size=page_size)
     total = len(candidate_runs) if errors_only else total
     deletable_count = 0 if errors_only else int(
         db.scalar(
@@ -1207,7 +1309,9 @@ def list_patrol_runs(
             )
         ) or 0
     )
-    all_run_ids = [row[0] for row in db.execute(select(Run.id).where(patrol_condition)).all()] if not errors_only else [run.id for run in candidate_runs]
+    run_meta_rows = db.execute(select(Run.id, Run.name, Run.created_at).where(patrol_condition)).all()
+    all_run_ids = [row.id for row in run_meta_rows]
+    runs_by_id = {row.id: (row.name, row.created_at) for row in run_meta_rows}
     runs = candidate_runs
     run_ids = [run.id for run in runs]
     run_channels_all = list(db.scalars(select(RunChannel).where(RunChannel.run_id.in_(run_ids))).all())
@@ -1216,7 +1320,10 @@ def list_patrol_runs(
     for item in run_channels_all:
         channels_by_run[item.run_id].append(item)
         channel_ids.add(item.channel_id)
-    reports = list(db.scalars(select(Report).where(Report.run_id.in_(all_run_ids)).order_by(Report.created_at.desc())).all())
+    report_query = select(Report).where(Report.run_id.in_(all_run_ids))
+    if channel_id:
+        report_query = report_query.where(Report.channel_id == channel_id)
+    reports = list(db.scalars(report_query.order_by(Report.created_at.desc())).all())
     latest_report_by_run: dict[str, Report] = {}
     for report in reports:
         latest_report_by_run.setdefault(report.run_id, report)
@@ -1233,6 +1340,7 @@ def list_patrol_runs(
         if _patrol_needs_review(report, labels, status):
             error_count += 1
     page_reports = {run_id: report for run_id, report in latest_report_by_run.items() if run_id in run_ids}
+    anomaly_summary = _patrol_anomaly_summary(runs_by_id, list(latest_report_by_run.values()), channel_by_id, channel_id)
     summaries = [
         _patrol_summary_read(db, run, channels_by_run.get(run.id, []), channel_by_id, page_reports.get(run.id))
         for run in runs
@@ -1247,6 +1355,7 @@ def list_patrol_runs(
         total=total,
         error_count=error_count,
         deletable_count=deletable_count,
+        anomaly_summary=anomaly_summary,
         page=page,
         page_size=page_size,
     )

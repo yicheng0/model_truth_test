@@ -4,9 +4,9 @@ import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress,
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
-import type { Run } from '../types';
+import type { PatrolAnomalyGroup, Run } from '../types';
 
 type RunChannelGroup = {
   key: string;
@@ -123,6 +123,34 @@ function RunAnomalySummary({ runs }: { runs: Run[] }) {
         />
       ) : null}
     </Space>
+  );
+}
+
+function PatrolGlobalAnomalyAlert({
+  title,
+  group,
+}: {
+  title: string;
+  group?: PatrolAnomalyGroup;
+}) {
+  if (!group?.count) return null;
+  const remaining = Math.max(0, group.count - group.items.length);
+  return (
+    <Alert
+      type="error"
+      showIcon
+      message={`${title}（${group.count}）`}
+      description={(
+        <Space wrap size={[12, 4]}>
+          {group.items.map((item) => (
+            <Link key={item.run_id} to={`/runs/${item.run_id}`}>
+              {item.run_name}{item.channel_name ? ` · ${item.channel_name}` : ''}
+            </Link>
+          ))}
+          {remaining ? <Typography.Text type="secondary">另有 {remaining} 条</Typography.Text> : null}
+        </Space>
+      )}
+    />
   );
 }
 
@@ -547,7 +575,6 @@ export default function Runs() {
   const patrolChannelOptions = useMemo(() => buildPatrolChannelFilterOptions(allPatrolRuns), [allPatrolRuns]);
   const filteredPatrolRuns = patrolRuns;
   const errorPatrolRunCount = patrolQuery.data?.error_count ?? 0;
-  const patrolCurrentPage = patrolQuery.data?.page ?? patrolPage;
   const visiblePatrolRuns = patrolRuns;
   const selectedNormalRuns = useMemo(
     () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
@@ -593,8 +620,14 @@ export default function Runs() {
 
   useEffect(() => {
     if (!patrolQuery.data) return;
-    setPatrolPage((page) => clampPage(page, patrolQuery.data?.total ?? 0, patrolPageSize));
-  }, [patrolQuery.data, patrolPageSize]);
+    setPatrolPage((page) => resolvePatrolPage({
+      requestedPage: page,
+      responsePage: patrolQuery.data.page,
+      total: patrolQuery.data.total,
+      pageSize: patrolPageSize,
+      isFetching: patrolQuery.isFetching,
+    }));
+  }, [patrolPageSize, patrolQuery.data, patrolQuery.isFetching]);
 
   function deleteSelectedNormalRuns() {
     if (!selectedNormalRowKeys.length) {
@@ -945,6 +978,10 @@ export default function Runs() {
         )}
         bordered={false}
       >
+        <Space direction="vertical" size={8} style={{ width: '100%', marginBottom: 12 }}>
+          <PatrolGlobalAnomalyAlert title="Kiro 身份泄漏" group={patrolQuery.data?.anomaly_summary?.kiro_identity_leak} />
+          <PatrolGlobalAnomalyAlert title="Thinking Signature 无效" group={patrolQuery.data?.anomaly_summary?.invalid_thinking_signature} />
+        </Space>
         <Table
           className="patrol-log-table"
           rowKey="id"
@@ -1065,7 +1102,7 @@ export default function Runs() {
         ) : null}
         <Pagination
           className="patrol-log-pagination"
-          current={patrolCurrentPage}
+          current={patrolPage}
           pageSize={patrolPageSize}
           total={patrolQuery.data?.total ?? 0}
           showSizeChanger

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolSignatureDisplayState, removeBulkDeletedRuns, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -19,6 +19,13 @@ function run(id: string, scheduledTestId?: string | null): Run {
 }
 
 describe('runs utilities', () => {
+  it('keeps the requested patrol page while stale responses are in flight', () => {
+    expect(resolvePatrolPage({ requestedPage: 6, responsePage: 1, total: 289, pageSize: 10, isFetching: true })).toBe(6);
+    expect(resolvePatrolPage({ requestedPage: 6, responsePage: 1, total: 289, pageSize: 10, isFetching: false })).toBe(6);
+    expect(resolvePatrolPage({ requestedPage: 6, responsePage: 6, total: 289, pageSize: 10, isFetching: false })).toBe(6);
+    expect(resolvePatrolPage({ requestedPage: 6, responsePage: 6, total: 49, pageSize: 10, isFetching: false })).toBe(5);
+    expect(resolvePatrolPage({ requestedPage: 6, responsePage: 6, total: 0, pageSize: 10, isFetching: false })).toBe(1);
+  });
   it('extracts only explicit HTTP 400 invalid thinking signature errors', () => {
     const results = [
       {

@@ -1002,11 +1002,34 @@ class PatrolRunSummaryRead(RunRead):
     has_evidence: bool = False
 
 
+class PatrolAnomalyEntryRead(BaseModel):
+    run_id: str
+    run_name: str
+    channel_id: str | None = None
+    channel_name: str | None = None
+    created_at: datetime | None = None
+    request_ids: list[str] = Field(default_factory=list)
+    http_status: int | None = None
+    stage: str | None = None
+
+
+class PatrolAnomalyGroupRead(BaseModel):
+    count: int = 0
+    items: list[PatrolAnomalyEntryRead] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class PatrolAnomalySummaryRead(BaseModel):
+    kiro_identity_leak: PatrolAnomalyGroupRead = Field(default_factory=PatrolAnomalyGroupRead)
+    invalid_thinking_signature: PatrolAnomalyGroupRead = Field(default_factory=PatrolAnomalyGroupRead)
+
+
 class PatrolRunListRead(BaseModel):
     items: list[PatrolRunSummaryRead] = Field(default_factory=list)
     total: int = 0
     error_count: int = 0
     deletable_count: int = 0
+    anomaly_summary: PatrolAnomalySummaryRead = Field(default_factory=PatrolAnomalySummaryRead)
     page: int = 1
     page_size: int = 10
 
