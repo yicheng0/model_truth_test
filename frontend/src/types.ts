@@ -1139,11 +1139,34 @@ export type PatrolRunSummary = Run & {
   has_evidence: boolean;
 };
 
+export type PatrolAnomalyEntry = {
+  run_id: string;
+  run_name: string;
+  channel_id?: string | null;
+  channel_name?: string | null;
+  created_at?: string | null;
+  request_ids: string[];
+  http_status?: number | null;
+  stage?: string | null;
+};
+
+export type PatrolAnomalyGroup = {
+  count: number;
+  items: PatrolAnomalyEntry[];
+  truncated: boolean;
+};
+
+export type PatrolAnomalySummary = {
+  kiro_identity_leak: PatrolAnomalyGroup;
+  invalid_thinking_signature: PatrolAnomalyGroup;
+};
+
 export type PatrolRunList = {
   items: PatrolRunSummary[];
   total: number;
   error_count: number;
   deletable_count: number;
+  anomaly_summary: PatrolAnomalySummary;
   page: number;
   page_size: number;
 };

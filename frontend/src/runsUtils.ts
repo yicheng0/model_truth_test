@@ -463,6 +463,24 @@ export function clampPage(current: number, total: number, pageSize: number): num
   return Math.min(Math.max(1, Math.floor(current)), maxPage);
 }
 
+export function resolvePatrolPage({
+  requestedPage,
+  responsePage,
+  total,
+  pageSize,
+  isFetching,
+}: {
+  requestedPage: number;
+  responsePage?: number | null;
+  total: number;
+  pageSize: number;
+  isFetching: boolean;
+}): number {
+  const requested = Math.max(1, Math.floor(requestedPage));
+  if (isFetching || responsePage !== requested) return requested;
+  return clampPage(requested, total, pageSize);
+}
+
 export function paginateRuns(runs: Run[], current: number, pageSize: number): Run[] {
   const safePageSize = Math.max(1, Math.floor(pageSize));
   const safeCurrent = clampPage(current, runs.length, safePageSize);

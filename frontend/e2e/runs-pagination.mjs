@@ -4,7 +4,7 @@ import { chromium } from 'playwright';
 
 const port = 4174;
 const baseUrl = `http://127.0.0.1:${port}`;
-const runs = Array.from({ length: 26 }, (_, index) => ({
+const runs = Array.from({ length: 65 }, (_, index) => ({
   id: `patrol_${String(index + 1).padStart(2, '0')}`,
   suite_id: 'suite_1',
   name: `巡检日志 ${index + 1}`,
@@ -13,7 +13,7 @@ const runs = Array.from({ length: 26 }, (_, index) => ({
   scheduled_test_id: 'schedule_1',
   patrol_channel_id: index % 2 === 0 ? 'channel_a' : 'channel_b',
   patrol_channel_name: index % 2 === 0 ? '渠道 A' : '渠道 B',
-  status: index === 24 ? 'pending' : index === 25 ? 'running' : 'completed',
+  status: index === 63 ? 'pending' : index === 64 ? 'running' : 'completed',
   repeat_count: 1,
   concurrency: 1,
   total_jobs: 1,
@@ -126,7 +126,17 @@ try {
     }));
     const deletableCount = filtered.filter((run) => run.status !== 'pending' && run.status !== 'running').length;
     const channelErrorCount = runs.filter((run) => !deletedRunIds.has(run.id) && (!channelId || run.patrol_channel_id === channelId) && errorIds.has(run.id)).length;
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, total: filtered.length, error_count: channelErrorCount, deletable_count: deletableCount, page: pageNumber, page_size: pageSize }) });
+    const anomalyItems = {
+      kiro: [{ run_id: 'patrol_52', run_name: '巡检日志 52', channel_id: 'channel_b', channel_name: '渠道 B', request_ids: ['req-kiro-52'], stage: 'identity_self_report' }],
+      signature: [{ run_id: 'patrol_03', run_name: '巡检日志 3', channel_id: 'channel_a', channel_name: '渠道 A', request_ids: ['req-signature-3'], http_status: 400, stage: 'relay' }],
+    };
+    const kiroItems = anomalyItems.kiro.filter((item) => !channelId || item.channel_id === channelId);
+    const signatureItems = anomalyItems.signature.filter((item) => !channelId || item.channel_id === channelId);
+    const anomaly_summary = {
+      kiro_identity_leak: { count: kiroItems.length, items: kiroItems, truncated: false },
+      invalid_thinking_signature: { count: signatureItems.length, items: signatureItems, truncated: false },
+    };
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, total: filtered.length, error_count: channelErrorCount, deletable_count: deletableCount, anomaly_summary, page: pageNumber, page_size: pageSize }) });
   });
   await page.route('**/api/runs/bulk-delete', async (route) => {
     const payload = JSON.parse(route.request().postData() ?? '{}');
@@ -160,7 +170,7 @@ try {
   const firstPageIds = await tableRows.allTextContents();
   assert.equal(firstPageIds.length, 10, '第一页应显示 10 条巡检日志');
   const deleteSelected = page.getByRole('button', { name: '删除已选巡检日志（0）' });
-  const deleteRange = page.getByRole('button', { name: '删除当前范围（24）' });
+  const deleteRange = page.getByRole('button', { name: '删除当前范围（63）' });
   await deleteSelected.waitFor();
   await deleteRange.waitFor();
   assert.equal(await deleteSelected.isDisabled(), true, '未选择日志时删除已选应禁用');
@@ -202,6 +212,10 @@ try {
   const errorFilter = page.getByRole('button', { name: /只看错误/ });
   assert.equal(await errorFilter.getAttribute('aria-pressed'), 'false', '只看错误默认关闭');
   assert.match(await errorFilter.textContent(), /只看错误（4）/, '错误数量不应统计正确和运营故障日志');
+  await page.getByText(/Kiro 身份泄漏（1）/).first().waitFor();
+  await page.getByText(/Thinking Signature 无效（1）/).first().waitFor();
+  assert.equal(await page.getByRole('link', { name: /巡检日志 52/ }).getAttribute('href'), '/runs/patrol_52', 'Kiro 摘要应链接到跨页命中详情');
+  assert.equal(await page.getByRole('link', { name: /巡检日志 3/ }).getAttribute('href'), '/runs/patrol_03', 'Signature 摘要应链接到命中详情');
 
   await errorFilter.click();
   await page.waitForTimeout(250);
@@ -217,6 +231,8 @@ try {
   await page.waitForTimeout(250);
   assert.equal(await errorRows.count(), 1, '渠道 B + 只看错误应只保留渠道 B 的异常日志');
   assert.match((await errorRows.allTextContents()).join('\n'), /巡检日志 6/);
+  await page.getByText(/Kiro 身份泄漏（1）/).first().waitFor();
+  assert.equal(await page.getByText(/Thinking Signature 无效（1）/).count(), 0, '渠道 B 不应显示渠道 A 的 Signature 摘要');
   await page.getByRole('button', { name: '删除当前范围（1）' }).click();
   await page.getByText('删除渠道「渠道 B」的错误日志中的已结束巡检日志', { exact: true }).waitFor();
   await page.locator('.ant-popover button:visible').first().click();
@@ -230,6 +246,25 @@ try {
   await page.locator('.ant-select-dropdown:visible .ant-select-item-option-content').filter({ hasText: '全部渠道' }).click();
   await page.waitForTimeout(250);
   assert.equal(await tableRows.count(), 10, '切回全部渠道后应恢复全量第一页日志');
+
+  await page.locator('.patrol-log-pagination .ant-pagination-item-6 a').click();
+  await page.waitForTimeout(500);
+  assert.ok(patrolRequests.some((request) => request.startsWith('6:10:all:false')), `点击第 6 页应请求 page=6，实际：${patrolRequests.join(', ')}`);
+  assert.equal(await page.locator('.patrol-log-pagination .ant-pagination-item-active').textContent(), '6', '分页器应稳定选中第 6 页');
+  const pageSixText = await page.locator('.patrol-log-table').innerText();
+  assert.match(pageSixText, /巡检日志 51/, '第 6 页应显示第 51 条记录');
+  await page.waitForTimeout(750);
+  assert.equal(await page.locator('.patrol-log-pagination .ant-pagination-item-active').textContent(), '6', '等待查询后不应跳回第 1 页');
+
+  await page.locator('.patrol-log-pagination .ant-pagination-prev button').click();
+  await page.waitForTimeout(250);
+  assert.equal(await page.locator('.patrol-log-pagination .ant-pagination-item-active').textContent(), '5');
+  await page.locator('.patrol-log-pagination .ant-pagination-next button').click();
+  await page.waitForTimeout(250);
+  assert.equal(await page.locator('.patrol-log-pagination .ant-pagination-item-active').textContent(), '6');
+
+  await page.locator('.patrol-log-pagination .ant-pagination-item-1 a').click();
+  await page.waitForTimeout(250);
 
   await page.locator('.patrol-log-pagination .ant-pagination-item-2 a').click();
   await page.waitForTimeout(500);
@@ -260,9 +295,9 @@ try {
   assert.deepEqual(deleteRequests, [['patrol_01']], '确认删除已选只应提交选中的已结束日志');
   assert.equal(await page.getByText('巡检日志 1', { exact: true }).count(), 0, '删除成功后目标日志应从列表消失');
   await page.getByRole('button', { name: '删除已选巡检日志（0）' }).waitFor();
-  await page.getByRole('button', { name: '删除当前范围（23）' }).waitFor();
-  assert.equal(deletedRunIds.has('patrol_25'), false, 'pending 日志不得进入删除集合');
-  assert.equal(deletedRunIds.has('patrol_26'), false, 'running 日志不得进入删除集合');
+  await page.getByRole('button', { name: '删除当前范围（62）' }).waitFor();
+  assert.equal(deletedRunIds.has('patrol_64'), false, 'pending 日志不得进入删除集合');
+  assert.equal(deletedRunIds.has('patrol_65'), false, 'running 日志不得进入删除集合');
 } finally {
   await browser?.close();
   try {

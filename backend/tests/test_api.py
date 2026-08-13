@@ -849,7 +849,7 @@ def test_patrol_query_performance_returns_lightweight_paginated_summaries() -> N
         response = client.get("/api/runs/patrol?page=1&page_size=10")
         assert response.status_code == 200
         payload = response.json()
-        assert set(payload) == {"items", "total", "error_count", "deletable_count", "page", "page_size"}
+        assert set(payload) == {"items", "total", "error_count", "deletable_count", "anomaly_summary", "page", "page_size"}
         assert payload["total"] == 25
         assert payload["error_count"] == 4
         assert payload["deletable_count"] == 25
@@ -874,6 +874,57 @@ def test_patrol_query_performance_returns_lightweight_paginated_summaries() -> N
         ).json()
         assert channel_errors["total"] == 3
         assert all(item["patrol_channel_id"] == "negative_sample" for item in channel_errors["items"])
+
+
+def test_patrol_query_preserves_real_total_on_out_of_range_page_and_returns_anomaly_summary() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        for index in range(21):
+            run = Run(
+                id=f"patrol_summary_run_{index:02d}",
+                suite_id=suite_id,
+                name=f"patrol summary {index}",
+                test_scope="scheduled_probe",
+                status="completed",
+                repeat_count=1,
+                concurrency=1,
+                total_jobs=1,
+                completed_jobs=1,
+                created_at=datetime(2026, 8, 13, tzinfo=timezone.utc) + timedelta(minutes=index),
+            )
+            db.add(run)
+            channel_id = "third_party_demo" if index % 2 == 0 else "negative_sample"
+            db.add(RunChannel(id=f"patrol_summary_rc_{index:02d}", run_id=run.id, channel_id=channel_id, role_in_run="candidate"))
+            labels = ["patrol_probe_passed"]
+            evidence = {"test_scope": "scheduled_probe", "labels": labels, "classification_status": "claude"}
+            if index in {2, 13}:
+                evidence = {"test_scope": "scheduled_probe", "labels": ["kiro_identity_leak"], "classification_status": "anomaly", "model_requests": [{"key": "identity_self_report", "response_text": "I am Kiro", "request_id": f"req-kiro-{index}"}]}
+            elif index in {4, 15}:
+                evidence = {"test_scope": "scheduled_probe", "labels": ["signature_interop_failed"], "classification_status": "anomaly", "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 400, "error_stage": "relay", "raw_error": "Invalid `signature` in `thinking` block", "request_logs": [{"stage": "relay", "http_status": 400, "request_id": f"req-sig-{index}"}]}}
+            elif index == 6:
+                evidence = {"test_scope": "scheduled_probe", "labels": ["provider_request_failed"], "classification_status": "operational_issue", "signature_interop": {"status": "fail", "signature_ok": None, "error_http_status": 500, "raw_error": "Upstream access forbidden"}}
+            db.add(Report(id=f"patrol_summary_report_{index:02d}", run_id=run.id, channel_id=channel_id, final_score=50 if labels != ["patrol_probe_passed"] else 95, grade="E" if labels != ["patrol_probe_passed"] else "A", summary="summary", evidence=evidence))
+        db.commit()
+
+    with TestClient(app) as client:
+        first = client.get("/api/runs/patrol?page=1&page_size=10").json()
+        assert first["total"] == 21
+        assert first["page"] == 1
+        assert first["anomaly_summary"]["kiro_identity_leak"]["count"] == 2
+        assert first["anomaly_summary"]["invalid_thinking_signature"]["count"] == 2
+        assert all(item["run_id"] for item in first["anomaly_summary"]["kiro_identity_leak"]["items"])
+        assert all(item["run_id"] for item in first["anomaly_summary"]["invalid_thinking_signature"]["items"])
+
+        out_of_range = client.get("/api/runs/patrol?page=4&page_size=10").json()
+        assert out_of_range["items"] == []
+        assert out_of_range["total"] == 21
+        assert out_of_range["page"] == 4
+        assert out_of_range["anomaly_summary"]["kiro_identity_leak"]["count"] == 2
+
+        channel = client.get("/api/runs/patrol?page=1&page_size=10&channel_id=negative_sample&errors_only=true").json()
+        assert channel["anomaly_summary"]["kiro_identity_leak"]["count"] == 1
+        assert channel["anomaly_summary"]["invalid_thinking_signature"]["count"] == 1
 
 
 def test_patrol_delete_button_usability_returns_filtered_deletable_count() -> None:
@@ -12788,8 +12839,8 @@ def test_unfinished_runs_must_be_canceled_before_single_or_bulk_delete() -> None
         "deleted": 1,
         "missing": [],
         "failed": {
-            pending_id: "Unfinished runs must be canceled before deletion",
-            running_id: "Unfinished runs must be canceled before deletion",
+            pending_id: "Pending runs must be canceled before deletion",
+            running_id: "Running runs must be canceled before deletion",
         },
     }
     with SessionLocal() as db:
