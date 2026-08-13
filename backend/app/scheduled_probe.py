@@ -29,7 +29,7 @@ OPERATIONAL_FAILURE_LABEL_PRIORITY = (
     PROVIDER_REQUEST_FAILED_LABEL,
 )
 TEMPORARY_PROVIDER_UNAVAILABLE_PATTERN = re.compile(
-    r"\b503\b|service unavailable|no available channel|overloaded|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|资源池暂无可用|暂无可用通道",
+    r"\b503\b|service unavailable|no available channel|no available accounts?|overloaded|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|资源池暂无可用|暂无可用通道|暂无可用账号",
     re.IGNORECASE,
 )
 PROVIDER_QUOTA_EXHAUSTED_PATTERN = re.compile(
@@ -37,7 +37,7 @@ PROVIDER_QUOTA_EXHAUSTED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 PROVIDER_REQUEST_FAILED_PATTERN = re.compile(
-    r"\b5\d\d\b|internal server error|gateway timeout|bad gateway|request timeout|timed out|connection (?:failed|error|reset)|network error",
+    r"\b5\d\d\b|internal server error|gateway timeout|bad gateway|request timeout|timed out|connection (?:failed|error|reset)|network error|upstream access forbidden|access forbidden|permission denied|access denied|not allowed for (?:this|the) (?:account|model)|please contact administrator",
     re.IGNORECASE,
 )
 BLOCKING_SCHEDULED_PROBE_LABELS = {

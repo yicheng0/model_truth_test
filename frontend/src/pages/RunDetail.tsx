@@ -7,7 +7,7 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTool
 import { api, getErrorMessage } from '../api';
 import { accountTypeLabel, formatChannelDisplayName } from '../channelCredentials';
 import { providerTypeLabel, roleColor } from '../channelTaxonomy';
-import { extractPatrolEvidence, formatPatrolChannel, patrolEvidenceDisplayState, patrolSignatureDisplayState, type PatrolEvidence, type PatrolModelRequestEvidence, type PatrolSignatureRequestLog } from '../runsUtils';
+import { extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolReportedLabels, patrolSignatureDisplayState, type PatrolEvidence, type PatrolModelRequestEvidence, type PatrolSignatureRequestLog } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunResults, RunSummary, TestCase } from '../types';
 import { isComboManualProbeRun, manualProbeSummaryRows } from './runDetailManualProbe';
@@ -111,6 +111,7 @@ function SignatureIdText({ value, missingHint }: { value?: string | null; missin
 
 function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
   const responseText = item.responseText ?? item.rawResponseText ?? item.error ?? '-';
+  const operational = isPatrolOperationalFailure(item);
   return (
     <div className="patrol-probe-detail">
       <div className="patrol-probe-meta-grid">
@@ -135,14 +136,14 @@ function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
         <span>标签</span>
         <div>
           {item.labels.length ? (
-            <Space wrap size={4}>{item.labels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}</Space>
+            <Space wrap size={4}>{item.labels.map((label) => <Tag color={isPatrolOperationalFailure(item) ? 'default' : 'red'} key={label}>{label}</Tag>)}</Space>
           ) : (
             <Typography.Text type="secondary">-</Typography.Text>
           )}
         </div>
       </div>
       <div className="patrol-probe-detail-row">
-        <span>错误</span>
+        <span>{operational ? '运营信息' : '错误'}</span>
         <Typography.Text>{item.error || '-'}</Typography.Text>
       </div>
       <div className="patrol-probe-detail-row full">
@@ -154,6 +155,7 @@ function PatrolProbeDetail({ item }: { item: PatrolModelRequestEvidence }) {
 }
 
 function SignatureRequestLogDetail({ item }: { item: PatrolSignatureRequestLog }) {
+  const operational = isPatrolOperationalFailure(item);
   return (
     <div className="patrol-probe-detail">
       <div className="patrol-probe-meta-grid">
@@ -166,8 +168,8 @@ function SignatureRequestLogDetail({ item }: { item: PatrolSignatureRequestLog }
         <div className="full"><span>Endpoint</span><Typography.Text copyable={item.endpoint ? { text: item.endpoint } : false}>{item.endpoint || '-'}</Typography.Text></div>
       </div>
       <div className="patrol-probe-detail-row">
-        <span>错误</span>
-        <Typography.Text type={item.error ? 'danger' : undefined}>{item.error || '-'}</Typography.Text>
+        <span>{operational ? '运营信息' : '错误'}</span>
+        <Typography.Text type={item.error && !operational ? 'danger' : undefined}>{item.error || '-'}</Typography.Text>
       </div>
       <div className="patrol-probe-detail-row full">
         <span>脱敏请求体</span>
@@ -222,6 +224,7 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
   const signature = evidence.signature;
   const signatureDisplay = patrolSignatureDisplayState(evidence);
   const evidenceDisplay = patrolEvidenceDisplayState(evidence);
+  const reportedLabels = patrolReportedLabels(evidence);
   const signatureRequestLogs = signature?.requestLogs ?? [];
   const visibleModelRequests = evidence.modelRequests.filter((item) => (
     item.resultId || item.messageId || item.requestId || item.providerEndpoint || item.error
@@ -333,7 +336,14 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
             expandable={{ expandedRowRender: (item) => <SignatureRequestLogDetail item={item} />, rowExpandable: () => true }}
             columns={[
               { title: '阶段', width: 100, render: (_, item) => item.stage === 'source' ? 'Source' : item.stage === 'relay' ? 'Relay' : item.stage ?? '-' },
-              { title: '状态', width: 90, render: (_, item) => <Tag color={item.status === 'ok' ? 'green' : 'red'}>{item.status === 'ok' ? '成功' : '失败'}</Tag> },
+              {
+                title: '状态',
+                width: 90,
+                render: (_, item) => {
+                  const operational = isPatrolOperationalFailure(item);
+                  return <Tag color={item.status === 'ok' ? 'green' : operational ? 'default' : 'red'}>{item.status === 'ok' ? '成功' : operational ? '未完成' : '失败'}</Tag>;
+                },
+              },
               { title: '时间', width: 180, render: (_, item) => formatDateTime(item.completedAt ?? item.startedAt) },
               { title: 'HTTP', width: 90, render: (_, item) => item.httpStatus ?? '-' },
               { title: '上游响应 ID（Message ID）', width: 230, render: (_, item) => <SignatureIdText value={item.messageId} /> },
@@ -343,8 +353,8 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
           />
         </div>
       ) : null}
-      {evidence.labels.length ? (
-        <Space wrap>{evidence.labels.map((label) => <Tag key={label} color={label === 'patrol_probe_passed' ? 'green' : 'red'}>{evidence.labelExplanations[label] ?? label}</Tag>)}</Space>
+      {reportedLabels.length ? (
+        <Space wrap>{reportedLabels.map((label) => <Tag key={label} color="red">{evidence.labelExplanations[label] ?? label}</Tag>)}</Space>
       ) : null}
     </Space>
   );

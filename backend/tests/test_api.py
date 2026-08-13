@@ -8123,6 +8123,70 @@ def test_signature_interop_relay_operational_failure_keeps_signature_unknown(mon
     assert "signature_interop_failed" not in payload["result"]["labels"]
 
 
+def test_signature_interop_identity_access_failure_is_operational_not_identity_anomaly(monkeypatch) -> None:
+    reset_database()
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        async def __aenter__(self):  # noqa: ANN001
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+        async def post(self, url, headers, json):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "msg_source",
+                        "type": "message",
+                        "model": "claude-opus-4-6",
+                        "content": [{"type": "thinking", "thinking": "x", "signature": "sig-source"}],
+                    },
+                    request=request,
+                )
+            if calls == 2:
+                return httpx.Response(
+                    200,
+                    json={"id": "msg_relay", "type": "message", "model": "claude-opus-4-6", "content": [{"type": "text", "text": "ok"}]},
+                    request=request,
+                )
+            return httpx.Response(
+                400,
+                json={"type": "error", "error": {"message": "Upstream access forbidden, please contact administrator"}},
+                request=request,
+            )
+
+    monkeypatch.setattr("app.services.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        source_id = client.post(
+            "/api/channels",
+            json={"name": "Source", "provider_type": "anthropic", "base_url": "https://source.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "source-key"}, "enabled": True},
+        ).json()["id"]
+        relay_id = client.post(
+            "/api/channels",
+            json={"name": "Relay", "provider_type": "anthropic", "base_url": "https://relay.example", "model_name": "claude-opus-4-6", "auth_config": {"api_key": "relay-key"}, "enabled": True},
+        ).json()["id"]
+        response = client.post("/api/channels/signature-interop-test", json={"source_channel_id": source_id, "relay_channel_id": relay_id})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["signature_ok"] is None
+    assert payload["identity_status"] == "operational"
+    assert payload["identity_labels"] == ["provider_request_failed"]
+    assert "identity_probe_failed" not in payload["labels"]
+    assert "signature_interop_failed" not in payload["labels"]
+    assert payload["result"]["labels"] == []
+
+
 def test_signature_interop_latest_client_probe_id_does_not_return_old_same_channel_log() -> None:
     reset_database()
     with TestClient(app) as client:
@@ -12331,8 +12395,10 @@ def test_scheduled_probe_expected_parameter_rejection_is_displayed_as_expected()
 
 def test_operational_failure_label_distinguishes_availability_quota_and_unknown_failures() -> None:
     assert operational_failure_label("503 Service Unavailable: No available channel", http_status=503) == "provider_temporarily_unavailable"
+    assert operational_failure_label("No available accounts: no available accounts", http_status=400) == "provider_temporarily_unavailable"
     assert operational_failure_label("用户额度不足, 剩余额度: ¥-0.580994", http_status=500) == "provider_quota_or_balance_exhausted"
     assert operational_failure_label("429 quota exhausted", http_status=429) == "provider_quota_or_balance_exhausted"
+    assert operational_failure_label("Upstream access forbidden, please contact administrator", http_status=400) == "provider_request_failed"
     assert operational_failure_label("500 Internal Server Error: upstream returned an unknown failure", http_status=500) == "provider_request_failed"
 
 
