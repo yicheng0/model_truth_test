@@ -17,8 +17,8 @@ from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Quer
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import delete, exists, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import JSON, String, and_, case, cast, delete, exists, func, literal, or_, select
+from sqlalchemy.orm import Session, load_only
 
 from .admin import require_admin, require_admin_if_configured, require_configured_admin
 from .audit import audit_actor, audit_log_read, record_audit_log, scheduled_test_audit_summary
@@ -1119,16 +1119,26 @@ def start_run(data: RunCreate, background_tasks: BackgroundTasks, db: Session = 
 
 
 @app.get("/api/eval-runs", response_model=list[RunRead])
-def list_runs(scheduled_test_id: str | None = None, db: Session = Depends(get_db)) -> list[RunRead]:
+def list_runs(
+    scheduled_test_id: str | None = None,
+    exclude_patrol: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> list[RunRead]:
     stmt = select(Run).order_by(Run.created_at.desc())
     if scheduled_test_id:
         stmt = stmt.where(Run.scheduled_test_id == scheduled_test_id)
+    if exclude_patrol:
+        stmt = stmt.where(Run.scheduled_test_id.is_(None), Run.test_scope != "scheduled_probe")
     return [run_read(db, run) for run in db.scalars(stmt).all()]
 
 
 @app.get("/api/runs", response_model=list[RunRead])
-def list_runs_alias(scheduled_test_id: str | None = None, db: Session = Depends(get_db)) -> list[RunRead]:
-    return list_runs(scheduled_test_id, db)
+def list_runs_alias(
+    scheduled_test_id: str | None = None,
+    exclude_patrol: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> list[RunRead]:
+    return list_runs(scheduled_test_id, exclude_patrol, db)
 
 
 def _patrol_summary_read(
@@ -1137,6 +1147,7 @@ def _patrol_summary_read(
     run_channels: list[RunChannel],
     channel_by_id: dict[str, Channel],
     report: Report | None,
+    selected_channel_id: str | None = None,
 ) -> PatrolRunSummaryRead:
     payload = PatrolRunSummaryRead.model_validate(run)
     payload.channels = [
@@ -1148,6 +1159,8 @@ def _patrol_summary_read(
         for item in run_channels
     ]
     patrol_channel = channel_by_id.get(report.channel_id) if report else None
+    if patrol_channel is None and selected_channel_id:
+        patrol_channel = channel_by_id.get(selected_channel_id)
     if patrol_channel is None and run_channels:
         patrol_channel = channel_by_id.get(run_channels[0].channel_id)
     if patrol_channel:
@@ -1177,6 +1190,86 @@ def _patrol_needs_review(report: Report | None, labels: set[str], classification
     return bool(report and (report.grade in {"D", "E"} or labels)) and not (
         classification_status in {"claude", "aws_resource", "claude_signature", "operational_issue"} or operational_only
     )
+
+
+_PATROL_OPERATIONAL_LABELS = {
+    "provider_request_failed", "provider_temporarily_unavailable", "provider_quota_or_balance_exhausted",
+    "provider_timeout", "network_error", "request_failed",
+}
+_PATROL_NON_ERROR_CLASSIFICATIONS = {"claude", "aws_resource", "claude_signature", "operational_issue"}
+
+
+def _patrol_latest_report_subquery(channel_id: str | None = None):
+    report_stmt = select(
+        Report.id.label("report_id"),
+        Report.run_id.label("run_id"),
+        Report.channel_id.label("channel_id"),
+        Report.grade.label("grade"),
+        Report.evidence.label("evidence"),
+        Report.created_at.label("created_at"),
+        func.row_number().over(
+            partition_by=(Report.run_id, Report.channel_id),
+            order_by=(Report.created_at.desc(), Report.id.desc()),
+        ).label("report_rank"),
+    )
+    if channel_id:
+        report_stmt = report_stmt.where(Report.channel_id == channel_id)
+    ranked_reports = report_stmt.subquery("ranked_patrol_reports")
+    return select(ranked_reports).where(ranked_reports.c.report_rank == 1).subquery("latest_patrol_reports")
+
+
+def _patrol_sql_needs_review(evidence, grade, dialect_name: str):
+    classification_status = func.coalesce(evidence["classification_status"].as_string(), "")
+    if dialect_name == "postgresql":
+        raw_labels = evidence.op("->")("labels")
+        labels_json = case(
+            (func.json_typeof(raw_labels) == "array", raw_labels),
+            else_=cast(literal("[]"), JSON),
+        )
+        label_rows = func.json_array_elements(labels_json).table_valued("value").alias("patrol_label")
+        is_string_label = func.json_typeof(label_rows.c.value) == "string"
+        label_value = cast(label_rows.c.value, String)
+        operational_values = {f'"{label}"' for label in _PATROL_OPERATIONAL_LABELS}
+    else:
+        raw_labels = func.json_extract(evidence, "$.labels")
+        labels_json = case(
+            (func.json_type(raw_labels) == "array", raw_labels),
+            else_=literal("[]"),
+        )
+        label_rows = func.json_each(labels_json).table_valued("key", "value", "type").alias("patrol_label")
+        is_string_label = label_rows.c.type == "text"
+        label_value = label_rows.c.value
+        operational_values = _PATROL_OPERATIONAL_LABELS
+    has_labels = exists(select(literal(1)).select_from(label_rows).where(is_string_label))
+    has_grade_or_labels = or_(grade.in_({"D", "E"}), has_labels)
+    has_non_operational_label = exists(
+        select(literal(1)).select_from(label_rows).where(is_string_label, label_value.notin_(operational_values))
+    )
+    operational_only = and_(has_labels, ~has_non_operational_label)
+    return and_(
+        has_grade_or_labels,
+        classification_status.notin_(_PATROL_NON_ERROR_CLASSIFICATIONS),
+        ~operational_only,
+    )
+
+
+def _patrol_run_report_subquery(channel_id: str | None, dialect_name: str):
+    latest_reports = _patrol_latest_report_subquery(channel_id)
+    needs_review = _patrol_sql_needs_review(latest_reports.c.evidence, latest_reports.c.grade, dialect_name)
+    ranked = select(
+        latest_reports.c.report_id,
+        latest_reports.c.run_id,
+        latest_reports.c.channel_id,
+        latest_reports.c.grade,
+        latest_reports.c.evidence,
+        latest_reports.c.created_at,
+        needs_review.label("needs_review"),
+        func.row_number().over(
+            partition_by=latest_reports.c.run_id,
+            order_by=(needs_review.desc(), latest_reports.c.created_at.desc(), latest_reports.c.report_id.desc()),
+        ).label("run_rank"),
+    ).subquery("ranked_patrol_run_reports")
+    return select(ranked).where(ranked.c.run_rank == 1).subquery("patrol_run_reports")
 
 
 _INVALID_THINKING_SIGNATURE_RE = re.compile(r"invalid\s+[`'\"“”]?signature[`'\"“”]?\s+in\s+[`'\"“”]?thinking[`'\"“”]?\s+block", re.IGNORECASE)
@@ -1293,72 +1386,84 @@ def list_patrol_runs(
             exists(select(RunChannel.id).where(RunChannel.run_id == Run.id, RunChannel.channel_id == channel_id)),
             exists(select(Report.id).where(Report.run_id == Run.id, Report.channel_id == channel_id)),
         )
-    if errors_only:
-        candidate_runs = list(db.scalars(select(Run).where(patrol_condition).order_by(Run.created_at.desc(), Run.id.desc())).all())
-    else:
-        total = int(db.scalar(select(func.count()).select_from(Run).where(patrol_condition)) or 0)
-        if not total:
-            return PatrolRunListRead(items=[], total=0, error_count=0, deletable_count=0, page=page, page_size=page_size)
-        candidate_runs = list(db.scalars(select(Run).where(patrol_condition).order_by(Run.created_at.desc(), Run.id.desc()).offset((page - 1) * page_size).limit(page_size)).all())
-    total = len(candidate_runs) if errors_only else total
-    deletable_count = 0 if errors_only else int(
-        db.scalar(
-            select(func.count()).select_from(Run).where(
-                patrol_condition,
-                Run.status.notin_({"pending", "running"}),
-            )
-        ) or 0
-    )
-    run_meta_rows = db.execute(select(Run.id, Run.name, Run.created_at).where(patrol_condition)).all()
-    all_run_ids = [row.id for row in run_meta_rows]
-    runs_by_id = {row.id: (row.name, row.created_at) for row in run_meta_rows}
-    runs = candidate_runs
+    latest_report = _patrol_run_report_subquery(channel_id, db.bind.dialect.name)
+    needs_review = latest_report.c.needs_review
+    filtered_condition = and_(patrol_condition, needs_review) if errors_only else patrol_condition
+    count_from = Run.__table__.outerjoin(latest_report, latest_report.c.run_id == Run.id)
+    counts = db.execute(
+        select(
+            func.sum(case((filtered_condition, 1), else_=0)).label("total"),
+            func.sum(case((and_(patrol_condition, needs_review), 1), else_=0)).label("error_count"),
+            func.sum(case((and_(filtered_condition, Run.status.notin_({"pending", "running"})), 1), else_=0)).label("deletable_count"),
+        ).select_from(count_from)
+    ).one()
+    total = int(counts.total or 0)
+    error_count = int(counts.error_count or 0)
+    deletable_count = int(counts.deletable_count or 0)
+    page_rows = db.execute(
+        select(Run, latest_report.c.report_id)
+        .select_from(count_from)
+        .where(filtered_condition)
+        .order_by(Run.created_at.desc(), Run.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    runs = [row[0] for row in page_rows]
+    report_ids = [row.report_id for row in page_rows if row.report_id]
     run_ids = [run.id for run in runs]
-    run_channels_all = list(db.scalars(select(RunChannel).where(RunChannel.run_id.in_(run_ids))).all())
+    run_channels_all = list(db.scalars(select(RunChannel).where(RunChannel.run_id.in_(run_ids))).all()) if run_ids else []
     channels_by_run: dict[str, list[RunChannel]] = defaultdict(list)
     channel_ids = set()
     for item in run_channels_all:
         channels_by_run[item.run_id].append(item)
         channel_ids.add(item.channel_id)
-    report_query = select(Report).where(Report.run_id.in_(all_run_ids))
-    if channel_id:
-        report_query = report_query.where(Report.channel_id == channel_id)
-    reports = list(db.scalars(report_query.order_by(Report.created_at.desc())).all())
-    latest_report_by_run: dict[str, Report] = {}
+    report_query = select(Report).options(
+        load_only(Report.id, Report.run_id, Report.channel_id, Report.grade, Report.evidence, Report.created_at)
+    ).where(Report.id.in_(report_ids))
+    reports = list(db.scalars(report_query).all()) if report_ids else []
+    latest_report_by_run = {report.run_id: report for report in reports}
     for report in reports:
-        latest_report_by_run.setdefault(report.run_id, report)
         channel_ids.add(report.channel_id)
     channel_by_id = {channel.id: channel for channel in db.scalars(select(Channel).where(Channel.id.in_(channel_ids))).all()} if channel_ids else {}
-    error_count = 0
-    latest_for_count: dict[str, Report] = {}
-    for report in reports:
-        latest_for_count.setdefault(report.run_id, report)
-    for report in latest_for_count.values():
-        evidence = report.evidence if isinstance(report.evidence, dict) else {}
-        labels = {str(label) for label in evidence.get("labels", []) if isinstance(label, str)}
-        status = evidence.get("classification_status")
-        if _patrol_needs_review(report, labels, status):
-            error_count += 1
-    page_reports = {run_id: report for run_id, report in latest_report_by_run.items() if run_id in run_ids}
-    anomaly_summary = _patrol_anomaly_summary(runs_by_id, list(latest_report_by_run.values()), channel_by_id, channel_id)
     summaries = [
-        _patrol_summary_read(db, run, channels_by_run.get(run.id, []), channel_by_id, page_reports.get(run.id))
+        _patrol_summary_read(db, run, channels_by_run.get(run.id, []), channel_by_id, latest_report_by_run.get(run.id), channel_id)
         for run in runs
     ]
-    if errors_only:
-        summaries = [item for item in summaries if item.display_state == "error" or item.needs_review]
-        total = len(summaries)
-        deletable_count = sum(item.status not in {"pending", "running"} for item in summaries)
-        summaries = summaries[(page - 1) * page_size:page * page_size]
     return PatrolRunListRead(
         items=summaries,
         total=total,
         error_count=error_count,
         deletable_count=deletable_count,
-        anomaly_summary=anomaly_summary,
         page=page,
         page_size=page_size,
     )
+
+
+@app.get("/api/runs/patrol/anomalies", response_model=PatrolAnomalySummaryRead)
+def list_patrol_anomalies(
+    channel_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> PatrolAnomalySummaryRead:
+    patrol_condition = or_(Run.scheduled_test_id.is_not(None), Run.test_scope == "scheduled_probe")
+    if channel_id:
+        patrol_condition = patrol_condition & or_(
+            exists(select(RunChannel.id).where(RunChannel.run_id == Run.id, RunChannel.channel_id == channel_id)),
+            exists(select(Report.id).where(Report.run_id == Run.id, Report.channel_id == channel_id)),
+        )
+    latest_report = _patrol_latest_report_subquery(channel_id)
+    rows = db.execute(
+        select(Run.id, Run.name, Run.created_at, latest_report.c.report_id)
+        .select_from(Run.__table__.join(latest_report, latest_report.c.run_id == Run.id))
+        .where(patrol_condition)
+    ).all()
+    report_ids = [row.report_id for row in rows]
+    reports = list(db.scalars(select(Report).options(
+        load_only(Report.id, Report.run_id, Report.channel_id, Report.evidence, Report.created_at)
+    ).where(Report.id.in_(report_ids))).all()) if report_ids else []
+    channel_ids = {report.channel_id for report in reports}
+    channel_by_id = {channel.id: channel for channel in db.scalars(select(Channel).where(Channel.id.in_(channel_ids))).all()} if channel_ids else {}
+    runs_by_id = {row.id: (row.name, row.created_at) for row in rows}
+    return _patrol_anomaly_summary(runs_by_id, reports, channel_by_id, channel_id)
 
 
 @app.post("/api/runs", response_model=RunRead)

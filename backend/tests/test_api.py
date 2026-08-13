@@ -876,7 +876,140 @@ def test_patrol_query_performance_returns_lightweight_paginated_summaries() -> N
         assert all(item["patrol_channel_id"] == "negative_sample" for item in channel_errors["items"])
 
 
-def test_patrol_query_preserves_real_total_on_out_of_range_page_and_returns_anomaly_summary() -> None:
+def test_patrol_query_large_dataset_pages_in_sql_and_loads_anomalies_separately() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        runs = []
+        run_channels = []
+        reports = []
+        base_time = datetime(2026, 8, 13, tzinfo=timezone.utc)
+        for index in range(3000):
+            run_id = f"patrol_large_{index:04d}"
+            channel_id = "third_party_demo" if index % 2 == 0 else "negative_sample"
+            is_error = index < 1000
+            runs.append(Run(
+                id=run_id,
+                suite_id=suite_id,
+                name=f"large patrol {index}",
+                test_scope="scheduled_probe",
+                status="completed",
+                repeat_count=1,
+                concurrency=1,
+                total_jobs=1,
+                completed_jobs=1,
+                created_at=base_time + timedelta(seconds=index),
+            ))
+            run_channels.append(RunChannel(id=f"patrol_large_rc_{index:04d}", run_id=run_id, channel_id=channel_id, role_in_run="candidate"))
+            reports.append(Report(
+                id=f"patrol_large_report_{index:04d}",
+                run_id=run_id,
+                channel_id=channel_id,
+                final_score=50 if is_error else 95,
+                grade="E" if is_error else "A",
+                evidence={
+                    "labels": ["protocol_mismatch"] if is_error else ["patrol_probe_passed"],
+                    "classification_status": "anomaly" if is_error else "claude",
+                },
+            ))
+        db.add_all(runs)
+        db.add_all(run_channels)
+        db.add_all(reports)
+        db.commit()
+
+    statements: list[str] = []
+
+    def record_sql(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(engine, "before_cursor_execute", record_sql)
+    try:
+        with TestClient(app) as client:
+            started = time.perf_counter()
+            payload = client.get("/api/runs/patrol?page=1&page_size=10&errors_only=true").json()
+            elapsed = time.perf_counter() - started
+            anomalies = client.get("/api/runs/patrol/anomalies").json()
+    finally:
+        event.remove(engine, "before_cursor_execute", record_sql)
+
+    assert payload["total"] == 1000
+    assert payload["error_count"] == 1000
+    assert len(payload["items"]) == 10
+    assert payload["anomaly_summary"]["kiro_identity_leak"]["count"] == 0
+    assert anomalies["kiro_identity_leak"]["count"] == 0
+    assert anomalies["invalid_thinking_signature"]["count"] == 0
+    full_run_loads = [statement for statement in statements if statement.startswith("select runs.id, runs.suite_id")]
+    assert full_run_loads
+    assert all(" limit " in statement for statement in full_run_loads), full_run_loads
+    assert elapsed < 1.5
+
+
+def test_runs_can_exclude_patrol_records_for_normal_task_list() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        db.add_all([
+            Run(id="normal_list_run", suite_id=suite_id, name="normal", test_scope="full", status="completed"),
+            Run(id="patrol_list_run", suite_id=suite_id, name="patrol", scheduled_test_id="scheduled-1", test_scope="scheduled_probe", status="completed"),
+        ])
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/runs?exclude_patrol=true")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == ["normal_list_run"]
+
+
+def test_patrol_summary_uses_latest_report_per_run() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = Run(id="patrol_latest_report", suite_id=suite_id, name="latest", test_scope="scheduled_probe", status="completed")
+        db.add(run)
+        db.add(RunChannel(id="patrol_latest_rc", run_id=run.id, channel_id="third_party_demo", role_in_run="candidate"))
+        db.add(Report(id="patrol_old_report", run_id=run.id, channel_id="third_party_demo", grade="E", final_score=20, created_at=datetime(2026, 8, 1, tzinfo=timezone.utc), evidence={"labels": ["protocol_mismatch"], "classification_status": "anomaly"}))
+        db.add(Report(id="patrol_new_report", run_id=run.id, channel_id="third_party_demo", grade="A", final_score=95, created_at=datetime(2026, 8, 2, tzinfo=timezone.utc), evidence={"labels": ["patrol_probe_passed"], "classification_status": "claude"}))
+        db.commit()
+
+    with TestClient(app) as client:
+        payload = client.get("/api/runs/patrol?page=1&page_size=10").json()
+
+    assert payload["error_count"] == 0
+    assert payload["items"][0]["display_state"] == "ok"
+
+
+def test_patrol_summary_preserves_anomaly_from_any_channel_and_ignores_non_string_labels() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = Run(id="patrol_multi_channel", suite_id=suite_id, name="multi", test_scope="scheduled_probe", status="completed")
+        dirty = Run(id="patrol_dirty_labels", suite_id=suite_id, name="dirty", test_scope="scheduled_probe", status="completed")
+        db.add_all([run, dirty])
+        db.add_all([
+            RunChannel(id="patrol_multi_a", run_id=run.id, channel_id="third_party_demo", role_in_run="candidate"),
+            RunChannel(id="patrol_multi_b", run_id=run.id, channel_id="negative_sample", role_in_run="candidate"),
+            RunChannel(id="patrol_dirty_rc", run_id=dirty.id, channel_id="third_party_demo", role_in_run="candidate"),
+        ])
+        db.add_all([
+            Report(id="patrol_multi_error", run_id=run.id, channel_id="third_party_demo", grade="E", created_at=datetime(2026, 8, 1, tzinfo=timezone.utc), evidence={"labels": ["protocol_mismatch"], "classification_status": "anomaly"}),
+            Report(id="patrol_multi_ok", run_id=run.id, channel_id="negative_sample", grade="A", created_at=datetime(2026, 8, 2, tzinfo=timezone.utc), evidence={"labels": ["patrol_probe_passed"], "classification_status": "claude"}),
+            Report(id="patrol_dirty_report", run_id=dirty.id, channel_id="third_party_demo", grade="A", evidence={"labels": [7, {"legacy": True}], "classification_status": "anomaly"}),
+        ])
+        db.commit()
+
+    with TestClient(app) as client:
+        payload = client.get("/api/runs/patrol?errors_only=true&page=1&page_size=10").json()
+        channel = client.get("/api/runs/patrol?channel_id=negative_sample&page=1&page_size=10").json()
+
+    assert payload["total"] == 1
+    assert payload["items"][0]["id"] == run.id
+    assert payload["items"][0]["patrol_channel_id"] == "third_party_demo"
+    assert channel["items"][0]["patrol_channel_id"] == "negative_sample"
+    assert channel["items"][0]["display_state"] == "ok"
+
+
+def test_patrol_query_preserves_real_total_on_out_of_range_page_and_loads_anomaly_summary_separately() -> None:
     reset_database()
     with SessionLocal() as db:
         suite_id = db.scalar(select(TestSuiteModel.id))
@@ -911,20 +1044,24 @@ def test_patrol_query_preserves_real_total_on_out_of_range_page_and_returns_anom
         first = client.get("/api/runs/patrol?page=1&page_size=10").json()
         assert first["total"] == 21
         assert first["page"] == 1
-        assert first["anomaly_summary"]["kiro_identity_leak"]["count"] == 2
-        assert first["anomaly_summary"]["invalid_thinking_signature"]["count"] == 2
-        assert all(item["run_id"] for item in first["anomaly_summary"]["kiro_identity_leak"]["items"])
-        assert all(item["run_id"] for item in first["anomaly_summary"]["invalid_thinking_signature"]["items"])
+        assert first["anomaly_summary"]["kiro_identity_leak"]["count"] == 0
+        anomalies = client.get("/api/runs/patrol/anomalies").json()
+        assert anomalies["kiro_identity_leak"]["count"] == 2
+        assert anomalies["invalid_thinking_signature"]["count"] == 2
+        assert all(item["run_id"] for item in anomalies["kiro_identity_leak"]["items"])
+        assert all(item["run_id"] for item in anomalies["invalid_thinking_signature"]["items"])
 
         out_of_range = client.get("/api/runs/patrol?page=4&page_size=10").json()
         assert out_of_range["items"] == []
         assert out_of_range["total"] == 21
         assert out_of_range["page"] == 4
-        assert out_of_range["anomaly_summary"]["kiro_identity_leak"]["count"] == 2
+        assert out_of_range["anomaly_summary"]["kiro_identity_leak"]["count"] == 0
 
         channel = client.get("/api/runs/patrol?page=1&page_size=10&channel_id=negative_sample&errors_only=true").json()
-        assert channel["anomaly_summary"]["kiro_identity_leak"]["count"] == 1
-        assert channel["anomaly_summary"]["invalid_thinking_signature"]["count"] == 1
+        assert channel["anomaly_summary"]["kiro_identity_leak"]["count"] == 0
+        channel_anomalies = client.get("/api/runs/patrol/anomalies?channel_id=negative_sample").json()
+        assert channel_anomalies["kiro_identity_leak"]["count"] == 1
+        assert channel_anomalies["invalid_thinking_signature"]["count"] == 1
 
 
 def test_patrol_delete_button_usability_returns_filtered_deletable_count() -> None:

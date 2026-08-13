@@ -106,10 +106,28 @@ try {
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   const detailRequests = [];
   const patrolRequests = [];
+  const anomalyRequests = [];
   const deleteRequests = [];
   const deletedRunIds = new Set();
+  await page.route('**/api/runs/patrol/anomalies**', async (route) => {
+    const url = new URL(route.request().url());
+    const channelId = url.searchParams.get('channel_id');
+    anomalyRequests.push(channelId ?? 'all');
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const anomalyItems = {
+      kiro: [{ run_id: 'patrol_52', run_name: '巡检日志 52', channel_id: 'channel_b', channel_name: '渠道 B', request_ids: ['req-kiro-52'], stage: 'identity_self_report' }],
+      signature: [{ run_id: 'patrol_03', run_name: '巡检日志 3', channel_id: 'channel_a', channel_name: '渠道 A', request_ids: ['req-signature-3'], http_status: 400, stage: 'relay' }],
+    };
+    const kiroItems = anomalyItems.kiro.filter((item) => !channelId || item.channel_id === channelId);
+    const signatureItems = anomalyItems.signature.filter((item) => !channelId || item.channel_id === channelId);
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      kiro_identity_leak: { count: kiroItems.length, items: kiroItems, truncated: false },
+      invalid_thinking_signature: { count: signatureItems.length, items: signatureItems, truncated: false },
+    }) });
+  });
   await page.route('**/api/runs/patrol**', async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === '/api/runs/patrol/anomalies') return route.fallback();
     const pageNumber = Number(url.searchParams.get('page') ?? '1');
     const pageSize = Number(url.searchParams.get('page_size') ?? '10');
     const channelId = url.searchParams.get('channel_id');
@@ -126,17 +144,7 @@ try {
     }));
     const deletableCount = filtered.filter((run) => run.status !== 'pending' && run.status !== 'running').length;
     const channelErrorCount = runs.filter((run) => !deletedRunIds.has(run.id) && (!channelId || run.patrol_channel_id === channelId) && errorIds.has(run.id)).length;
-    const anomalyItems = {
-      kiro: [{ run_id: 'patrol_52', run_name: '巡检日志 52', channel_id: 'channel_b', channel_name: '渠道 B', request_ids: ['req-kiro-52'], stage: 'identity_self_report' }],
-      signature: [{ run_id: 'patrol_03', run_name: '巡检日志 3', channel_id: 'channel_a', channel_name: '渠道 A', request_ids: ['req-signature-3'], http_status: 400, stage: 'relay' }],
-    };
-    const kiroItems = anomalyItems.kiro.filter((item) => !channelId || item.channel_id === channelId);
-    const signatureItems = anomalyItems.signature.filter((item) => !channelId || item.channel_id === channelId);
-    const anomaly_summary = {
-      kiro_identity_leak: { count: kiroItems.length, items: kiroItems, truncated: false },
-      invalid_thinking_signature: { count: signatureItems.length, items: signatureItems, truncated: false },
-    };
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, total: filtered.length, error_count: channelErrorCount, deletable_count: deletableCount, anomaly_summary, page: pageNumber, page_size: pageSize }) });
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, total: filtered.length, error_count: channelErrorCount, deletable_count: deletableCount, anomaly_summary: {}, page: pageNumber, page_size: pageSize }) });
   });
   await page.route('**/api/runs/bulk-delete', async (route) => {
     const payload = JSON.parse(route.request().postData() ?? '{}');
@@ -145,8 +153,14 @@ try {
     ids.forEach((id) => deletedRunIds.add(id));
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ deleted: ids.length, missing: [], failed: {} }) });
   });
-  await page.route('**/api/runs', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runs.filter((run) => !deletedRunIds.has(run.id)) ) }));
-  await page.route('**/api/channels**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+  await page.route('**/api/runs**', (route) => {
+    if (new URL(route.request().url()).pathname !== '/api/runs') return route.fallback();
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runs.filter((run) => !deletedRunIds.has(run.id)) ) });
+  });
+  await page.route('**/api/channels**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([
+    { id: 'channel_a', name: '渠道 A', provider_type: 'anthropic', role: 'candidate', enabled: true, is_reference: false, auth_config: {} },
+    { id: 'channel_b', name: '渠道 B', provider_type: 'anthropic', role: 'candidate', enabled: true, is_reference: false, auth_config: {} },
+  ]) }));
   await page.route('**/api/reports/summary', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   await page.route('**/api/runs/*/results', (route) => {
     const runId = new URL(route.request().url()).pathname.split('/').at(-2);
@@ -169,6 +183,7 @@ try {
   }
   const firstPageIds = await tableRows.allTextContents();
   assert.equal(firstPageIds.length, 10, '第一页应显示 10 条巡检日志');
+  assert.ok(anomalyRequests.length >= 1, '异常摘要应通过独立接口加载');
   const deleteSelected = page.getByRole('button', { name: '删除已选巡检日志（0）' });
   const deleteRange = page.getByRole('button', { name: '删除当前范围（63）' });
   await deleteSelected.waitFor();
@@ -298,6 +313,16 @@ try {
   await page.getByRole('button', { name: '删除当前范围（62）' }).waitFor();
   assert.equal(deletedRunIds.has('patrol_64'), false, 'pending 日志不得进入删除集合');
   assert.equal(deletedRunIds.has('patrol_65'), false, 'running 日志不得进入删除集合');
+
+  await page.getByRole('button', { name: '删除当前范围（62）' }).click();
+  await page.locator('.ant-popover').filter({ hasText: '删除全部渠道中的已结束巡检日志' }).last().locator('button:visible').last().click();
+  await page.waitForTimeout(500);
+  assert.equal(deleteRequests.length, 2, '删除当前范围应发起第二次批量删除请求');
+  assert.equal(deleteRequests[1].length, 62, '删除当前范围应提交剩余 62 条已结束日志');
+  assert.equal(deleteRequests[1].includes('patrol_64'), false, '当前范围删除不得提交 pending 日志');
+  assert.equal(deleteRequests[1].includes('patrol_65'), false, '当前范围删除不得提交 running 日志');
+  await page.getByRole('button', { name: '删除当前范围（0）' }).waitFor();
+  assert.match(await page.locator('.patrol-log-table').innerText(), /巡检日志 64|巡检日志 65/, '范围删除后未结束日志仍应保留');
 } finally {
   await browser?.close();
   try {
