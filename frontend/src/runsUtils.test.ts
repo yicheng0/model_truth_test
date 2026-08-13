@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -711,6 +711,8 @@ describe('runs utilities', () => {
     const operationalItems = [
       { status: 'error', error: "Server error '500 Internal Server Error' response body: Service is temporarily unavailable" },
       { status: 'fail', error: '503 Service Unavailable' },
+      { status: 'fail', httpStatus: 400, error: 'No available accounts: no available accounts' },
+      { status: 'fail', httpStatus: 400, error: 'Upstream access forbidden, please contact administrator' },
       { status: 'error', error: 'request timeout while connecting to upstream' },
       { status: 'error', error: 'network connection reset by peer' },
       { status: 'error', labels: ['provider_quota_or_balance_exhausted'], error: '余额不足' },
@@ -917,6 +919,8 @@ describe('runs utilities', () => {
       isOperationalFailure: true,
       hasRealAnomaly: true,
     });
+    expect(patrolReportedLabels(operationalEvidence)).toEqual([]);
+    expect(patrolReportedLabels(mixedEvidence)).toEqual(['kiro_identity_leak']);
   });
 
   it('extracts the most specific inline patrol error and classifies operational failures', () => {

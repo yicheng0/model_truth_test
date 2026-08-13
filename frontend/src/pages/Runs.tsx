@@ -4,7 +4,7 @@ import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress,
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Channel, PatrolAnomalyGroup, Run } from '../types';
 
@@ -341,6 +341,7 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
     );
   }
   const classification = patrolClassificationLabel(evidence);
+  const reportedLabels = patrolReportedLabels(evidence);
   return (
     <Space direction="vertical" size={4} style={{ width: '100%' }}>
       <Space wrap>
@@ -373,10 +374,10 @@ function PatrolEvidenceSummary({ evidence, compact = false, showProbeDetails = t
           </Typography.Text>
         </>
       ) : null}
-      {evidence.labels.length ? (
-        <Tooltip title={evidence.labels.map((label) => evidence.labelExplanations[label] ?? label).join('；')}>
+      {reportedLabels.length ? (
+        <Tooltip title={reportedLabels.map((label) => evidence.labelExplanations[label] ?? label).join('；')}>
           <Space wrap>
-            {evidence.labels.map((label) => <Tag color={label === 'patrol_probe_passed' ? 'green' : 'red'} key={label}>{label}</Tag>)}
+            {reportedLabels.map((label) => <Tag color="red" key={label}>{label}</Tag>)}
           </Space>
         </Tooltip>
       ) : null}

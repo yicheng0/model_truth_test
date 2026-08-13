@@ -12287,12 +12287,16 @@ async def _signature_interop_result_with_identity(
     identity_status = "ok"
     identity_detail = "Source 身份回复未发现明确异常"
     if not identity_meta.get("ok"):
-        identity_status = "fail"
-        identity_labels = ["identity_probe_failed"]
-        identity_detail = "Source 身份请求失败"
+        identity_operational_label = operational_failure_label(
+            str(identity_meta.get("error") or ""),
+            http_status=identity_meta.get("http_status"),
+        )
+        identity_status = "operational" if identity_operational_label else "fail"
+        identity_labels = [identity_operational_label or "identity_probe_failed"]
+        identity_detail = "Source 身份请求遇到运营可用性问题" if identity_operational_label else "Source 身份请求失败"
         if ok:
             ok = False
-            reason = f"Source 身份请求失败：{identity_meta.get('error') or '未获得有效响应'}"
+            reason = f"{identity_detail}：{identity_meta.get('error') or '未获得有效响应'}"
             raw_error = str(identity_meta.get("error") or raw_error or "") or None
             error_http_status = identity_meta.get("http_status")
             error_stage = "source_identity"
@@ -12312,7 +12316,7 @@ async def _signature_interop_result_with_identity(
     steps.append(
         _signature_step_from_meta(
             "Source 身份验证",
-            {**identity_meta, "ok": identity_status != "fail", "excerpt": identity_text or identity_meta.get("excerpt")},
+            {**identity_meta, "ok": identity_status not in {"fail", "operational"}, "excerpt": identity_text or identity_meta.get("excerpt")},
             success_detail=identity_detail,
             fail_detail=identity_detail,
             request_payload=identity_payload,
