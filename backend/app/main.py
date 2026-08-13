@@ -2013,8 +2013,10 @@ def _delete_run_by_id(db: Session, run_id: str, *, repair_refs: bool = True) -> 
     run = db.get(Run, run_id)
     if not run:
         return False
-    if run.status in {"pending", "running"}:
-        raise HTTPException(status_code=409, detail="Unfinished runs must be canceled before deletion")
+    if run.status == "running":
+        raise HTTPException(status_code=409, detail="Running runs must be canceled before deletion")
+    if run.status == "pending":
+        raise HTTPException(status_code=409, detail="Pending runs must be canceled before deletion")
     source_snapshots = _baseline_snapshots_for_deletable_runs(db, {run_id})
     for snapshot in source_snapshots:
         conflict = _baseline_reference_conflict(db, snapshot.id, run_id)
@@ -2090,8 +2092,11 @@ def _preflight_deletable_run_ids(db: Session, run_ids: list[str]) -> tuple[set[s
         if not run:
             missing.append(run_id)
             continue
-        if run.status in {"pending", "running"}:
-            failed[run_id] = "Unfinished runs must be canceled before deletion"
+        if run.status == "running":
+            failed[run_id] = "Running runs must be canceled before deletion"
+            continue
+        if run.status == "pending":
+            failed[run_id] = "Pending runs must be canceled before deletion"
             continue
         if run_id in blocked_by_baseline:
             failed[run_id] = blocked_by_baseline[run_id]
