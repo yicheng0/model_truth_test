@@ -187,7 +187,17 @@ const OPERATIONAL_FAILURE_LABELS = new Set([
   'provider_quota_or_balance_exhausted',
   'provider_request_failed',
 ]);
-const OPERATIONAL_FAILURE_TEXT_PATTERN = /\b5\d\d\b|internal server error|service unavailable|bad gateway|gateway timeout|request timeout|timed out|connection (?:failed|error|reset)|network error|no available channel|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|access forbidden|not allowed for this account|not allowed for (?:this|the) (?:account|model)|permission denied|access denied|额度不足|余额不足|quota(?:\s+or\s+balance)?\s+(?:is\s+)?(?:exhausted|insufficient|exceeded)|insufficient\s+(?:quota|balance|credit)/i;
+const OPERATIONAL_FAILURE_TEXT_PATTERN = /\b5\d\d\b|internal server error|service unavailable|bad gateway|gateway timeout|request timeout|timed out|connection (?:failed|error|reset)|network error|no available channel|no available accounts?|temporar(?:y|ily) unavailable|upstream unavailable|provider unavailable|access forbidden|not allowed for this account|not allowed for (?:this|the) (?:account|model)|permission denied|access denied|please contact administrator|额度不足|余额不足|暂无可用账号|quota(?:\s+or\s+balance)?\s+(?:is\s+)?(?:exhausted|insufficient|exceeded)|insufficient\s+(?:quota|balance|credit)/i;
+
+const NON_REPORTABLE_PATROL_LABELS = new Set([
+  ...OPERATIONAL_FAILURE_LABELS,
+  'patrol_probe_passed',
+  'patrol_probe_claude',
+  'patrol_ai_reviewed',
+  'provider_error_variant',
+  'identity_probe_failed',
+  'identity_uncertain',
+]);
 
 export type PatrolOperationalFailureInput = {
   status?: string | null;
@@ -314,6 +324,11 @@ export function patrolEvidenceDisplayState(evidence: PatrolEvidence): PatrolEvid
     isOperationalFailure: hasOperationalEvidence,
     hasRealAnomaly,
   };
+}
+
+export function patrolReportedLabels(evidence: PatrolEvidence): string[] {
+  if (!patrolEvidenceDisplayState(evidence).hasRealAnomaly) return [];
+  return evidence.labels.filter((label) => !NON_REPORTABLE_PATROL_LABELS.has(label));
 }
 
 export function patrolSignatureDisplayState(evidence: PatrolEvidence): PatrolSignatureDisplayState {
