@@ -1,7 +1,11 @@
 import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunMode, RunResults, TestCase } from '../types';
 import { accountTypeLabel, formatChannelDisplayName } from '../channelCredentials';
 import { providerTypeLabel } from '../channelTaxonomy';
-import { formatPatrolChannel } from '../runsUtils';
+import {
+  formatPatrolChannel,
+  patrolProbeStatusColor as sharedPatrolProbeStatusColor,
+  patrolProbeStatusText as sharedPatrolProbeStatusText,
+} from '../runsUtils';
 
 export type DisplayResult = Result | BaselineResult;
 
@@ -185,25 +189,11 @@ export function channelLabel(name?: string | null, id?: string | null) {
 }
 
 export function patrolProbeStatusText(item?: PatrolProbeStatusItem | null) {
-  if (item?.status === 'ok') return '正确';
-  const labels = item?.labels ?? [];
-  const errorText = [item?.error, item?.responseText, item?.rawResponseText]
-    .filter((value): value is string => typeof value === 'string' && Boolean(value))
-    .join(' ')
-    .toLowerCase();
-  const isNativeRejection = labels.includes('provider_error_variant') || /400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool/.test(errorText);
-  return isNativeRejection ? '参数不支持' : '异常';
+  return sharedPatrolProbeStatusText(item);
 }
 
 export function patrolProbeStatusColor(item?: PatrolProbeStatusItem | null) {
-  if (item?.status === 'ok') return 'green';
-  const labels = item?.labels ?? [];
-  const errorText = [item?.error, item?.responseText, item?.rawResponseText]
-    .filter((value): value is string => typeof value === 'string' && Boolean(value))
-    .join(' ')
-    .toLowerCase();
-  const isNativeRejection = labels.includes('provider_error_variant') || /400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool/.test(errorText);
-  return isNativeRejection ? 'gold' : 'red';
+  return sharedPatrolProbeStatusColor(item);
 }
 
 export function manualProbeChannelType(channel?: Channel, taxonomy?: ChannelTaxonomySetting | null) {
