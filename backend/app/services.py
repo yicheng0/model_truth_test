@@ -9621,6 +9621,15 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
                 .order_by(ChannelAlert.created_at.desc())
             )
             if repeated:
+                eligibility = classify_feishu_alert(report)
+                refresh_notification_evidence = repeated.notification_status in {"pending", "failed"} or (
+                    eligibility["eligible"] and repeated.notification_status == "skipped"
+                )
+                if refresh_notification_evidence:
+                    repeated.run_id = report.run_id
+                    repeated.report_id = report.id
+                    repeated.notification_status = "pending" if eligibility["eligible"] else "skipped"
+                    repeated.notification_error = None if eligibility["eligible"] else eligibility["skip_reason"]
                 repeated.last_seen_at = report.created_at or datetime.now(timezone.utc)
                 repeated.consecutive_windows = int(repeated.consecutive_windows or 1) + 1
                 db.commit()
@@ -9642,6 +9651,7 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
             channel = db.get(Channel, report.channel_id)
             severity = "critical" if report.grade == "E" or ALERT_RED_FLAGS.intersection(labels) else "high"
             message = f"{patrol_channel_display_name(channel, report.channel_id)} 自动巡检异常：{alert_error_message(report.evidence or {}, labels)}"
+            eligibility = classify_feishu_alert(report)
             alert = ChannelAlert(
                 id=new_id("alert"),
                 scheduled_test_id=scheduled_id,
@@ -9655,7 +9665,8 @@ async def create_alerts_for_run(session_factory: sessionmaker[Session], run_id: 
                 trigger_labels=sorted(set(labels)),
                 message=message,
                 dedupe_key=dedupe_key,
-                notification_status="pending",
+                notification_status="pending" if eligibility["eligible"] else "skipped",
+                notification_error=None if eligibility["eligible"] else eligibility["skip_reason"],
                 first_seen_at=report.created_at or datetime.now(timezone.utc),
                 last_seen_at=report.created_at or datetime.now(timezone.utc),
                 consecutive_windows=1,
@@ -9699,6 +9710,151 @@ def report_labels(report: Report) -> list[str]:
     if not isinstance(labels, list):
         return []
     return sorted({str(label) for label in labels})
+
+
+FEISHU_ALERT_SKIP_REASON = "不符合飞书即时告警白名单"
+
+
+def _feishu_identity_probe(evidence: dict[str, Any]) -> dict[str, Any] | None:
+    model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
+    for item in model_requests:
+        if not isinstance(item, dict) or item.get("key") != "identity_self_report":
+            continue
+        labels = item.get("labels") if isinstance(item.get("labels"), list) else []
+        if "kiro_identity_leak" in labels:
+            return item
+    model_request = evidence.get("model_request") if isinstance(evidence.get("model_request"), dict) else {}
+    model_request_labels = model_request.get("labels") if isinstance(model_request.get("labels"), list) else []
+    if model_request.get("key") == "identity_self_report" and "kiro_identity_leak" in model_request_labels:
+        return model_request
+    signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    identity_labels = signature.get("identity_labels") if isinstance(signature.get("identity_labels"), list) else []
+    if "kiro_identity_leak" in identity_labels:
+        return {
+            "key": "identity_self_report",
+            "channel_id": signature.get("source_channel_id"),
+            "channel_name": signature.get("source_channel_name"),
+            "message_id": signature.get("identity_message_id"),
+            "request_id": signature.get("identity_request_id"),
+            "created_at": signature.get("created_at"),
+            "completed_at": signature.get("completed_at"),
+            "labels": identity_labels,
+        }
+    return None
+
+
+def classify_feishu_alert(report: Report) -> dict[str, Any]:
+    evidence = report.evidence if isinstance(report.evidence, dict) else {}
+    identity_probe = _feishu_identity_probe(evidence)
+    if identity_probe is not None:
+        return {
+            "eligible": True,
+            "kind": "kiro_identity_leak",
+            "trigger_labels": ["kiro_identity_leak"],
+            "skip_reason": None,
+            "error_summary": "Kiro identity leak",
+            "identity_channel_id": identity_probe.get("channel_id") or report.channel_id,
+            "identity_channel_name": identity_probe.get("channel_name"),
+            "identity_message_id": identity_probe.get("message_id") or identity_probe.get("response_id"),
+            "identity_request_id": identity_probe.get("request_id"),
+            "occurred_at": identity_probe.get("completed_at") or identity_probe.get("created_at") or report.created_at,
+        }
+
+    signature = evidence.get("signature_interop") if isinstance(evidence.get("signature_interop"), dict) else {}
+    raw_error = " ".join(str(signature.get(key) or "") for key in ("raw_error", "reason"))
+    signature_ok = signature.get("signature_ok")
+    explicit_rejection = (
+        signature.get("error_http_status") == 400
+        and str(signature.get("error_stage") or "").strip().lower() == "relay"
+        and is_explicit_invalid_thinking_signature(raw_error)
+        and (signature_ok is False or "signature_ok" not in signature)
+    )
+    if explicit_rejection:
+        return {
+            "eligible": True,
+            "kind": "invalid_thinking_signature",
+            "trigger_labels": ["signature_interop_failed"],
+            "skip_reason": None,
+            "error_summary": "Invalid signature in thinking block",
+            "source_channel_id": signature.get("source_channel_id") or report.channel_id,
+            "source_channel_name": signature.get("source_channel_name"),
+            "source_message_id": signature.get("source_message_id"),
+            "source_request_id": signature.get("source_request_id"),
+            "relay_channel_id": signature.get("relay_channel_id"),
+            "relay_channel_name": signature.get("relay_channel_name"),
+            "relay_message_id": signature.get("relay_message_id"),
+            "relay_request_id": signature.get("relay_request_id"),
+            "occurred_at": signature.get("completed_at") or signature.get("created_at") or report.created_at,
+        }
+
+    return {
+        "eligible": False,
+        "kind": None,
+        "trigger_labels": [],
+        "skip_reason": FEISHU_ALERT_SKIP_REASON,
+        "error_summary": None,
+    }
+
+
+def _feishu_safe_field(value: Any) -> str:
+    text = redact_text(str(value or "").strip())[:200]
+    return text or "未提供"
+
+
+def _feishu_occurred_at(value: Any, setting: FeishuBroadcastSetting) -> str:
+    parsed: datetime | None = None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+    if parsed is None:
+        return "未提供"
+    return _as_utc(parsed).astimezone(_zoneinfo(setting.timezone)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _feishu_channel_text(db: Session, channel_id: Any, channel_name: Any) -> str:
+    safe_id = _feishu_safe_field(channel_id)
+    name = str(channel_name or "").strip()
+    if not name and channel_id:
+        channel = db.get(Channel, str(channel_id))
+        name = patrol_channel_display_name(channel, str(channel_id)) if channel else ""
+    return f"{_feishu_safe_field(name)}（{safe_id}）"
+
+
+def build_feishu_alert_text(
+    alert: ChannelAlert,
+    report: Report,
+    eligibility: dict[str, Any],
+    db: Session,
+    setting: FeishuBroadcastSetting,
+) -> str:
+    occurred_at = eligibility.get("occurred_at") or report.created_at or alert.created_at
+    occurred_text = _feishu_occurred_at(occurred_at, setting)
+    if eligibility.get("kind") == "invalid_thinking_signature":
+        return (
+            "Claude 渠道自动巡检：Thinking Signature 异常\n"
+            f"错误：{eligibility['error_summary']}\n"
+            f"Source：{_feishu_channel_text(db, eligibility.get('source_channel_id'), eligibility.get('source_channel_name'))}\n"
+            f"Relay：{_feishu_channel_text(db, eligibility.get('relay_channel_id'), eligibility.get('relay_channel_name'))}\n"
+            f"发生时间：{occurred_text}\n"
+            f"Source Message ID：{_feishu_safe_field(eligibility.get('source_message_id'))}\n"
+            f"Source Request ID：{_feishu_safe_field(eligibility.get('source_request_id'))}\n"
+            f"Relay Message ID：{_feishu_safe_field(eligibility.get('relay_message_id'))}\n"
+            f"Relay Request ID：{_feishu_safe_field(eligibility.get('relay_request_id'))}"
+        )
+    if eligibility.get("kind") == "kiro_identity_leak":
+        return (
+            "Claude 渠道自动巡检：Kiro 身份泄漏异常\n"
+            f"错误：{eligibility['error_summary']}\n"
+            f"待测渠道：{_feishu_channel_text(db, eligibility.get('identity_channel_id'), eligibility.get('identity_channel_name'))}\n"
+            f"发生时间：{occurred_text}\n"
+            f"身份探针 Message ID：{_feishu_safe_field(eligibility.get('identity_message_id'))}\n"
+            f"身份探针 Request ID：{_feishu_safe_field(eligibility.get('identity_request_id'))}"
+        )
+    return FEISHU_ALERT_SKIP_REASON
 
 
 def report_needs_alert(report: Report, labels: list[str] | None = None, scheduled: ScheduledChannelTest | None = None) -> bool:
@@ -9803,6 +9959,17 @@ async def send_alert_notification(session_factory: sessionmaker[Session], alert_
         alert = db.get(ChannelAlert, alert_id)
         if not alert:
             return None
+        report = db.get(Report, alert.report_id)
+        eligibility = classify_feishu_alert(report) if report else {
+            "eligible": False,
+            "skip_reason": FEISHU_ALERT_SKIP_REASON,
+        }
+        if not eligibility["eligible"]:
+            alert.notification_status = "skipped"
+            alert.notification_error = eligibility["skip_reason"]
+            db.commit()
+            db.refresh(alert)
+            return alert
         alert.notification_attempt_count = (alert.notification_attempt_count or 0) + 1
         alert.last_notification_attempt_at = datetime.now(timezone.utc)
         setting = get_or_create_feishu_setting(db)
@@ -9850,7 +10017,11 @@ async def send_alert_notification(session_factory: sessionmaker[Session], alert_
         return alert
 
 
-def hourly_patrol_summary_text(report: dict[str, Any], setting: FeishuBroadcastSetting) -> str:
+def hourly_patrol_summary_text(
+    report: dict[str, Any],
+    setting: FeishuBroadcastSetting,
+    alert_details: list[str] | None = None,
+) -> str:
     from_local = _as_utc(report["from_at"]).astimezone(_zoneinfo(setting.timezone))
     to_local = _as_utc(report["to_at"]).astimezone(_zoneinfo(setting.timezone))
     app_base_url = (setting.app_base_url or "").strip().rstrip("/")
@@ -9861,7 +10032,6 @@ def hourly_patrol_summary_text(report: dict[str, Any], setting: FeishuBroadcastS
         alert_count = int(item.get("hourly_anomaly_count", item.get("alert_count", 0)) or 0)
         operational_count = int(item.get("operational_issue_count") or 0)
         minimum_score = item.get("minimum_score")
-        labels = item.get("top_labels") if isinstance(item.get("top_labels"), list) else []
         if not (run_count or alert_count or operational_count):
             continue
         normal_count = max(0, run_count - alert_count - operational_count)
@@ -9869,11 +10039,12 @@ def hourly_patrol_summary_text(report: dict[str, Any], setting: FeishuBroadcastS
         risk_parts = []
         if minimum_score is not None:
             risk_parts.append(f"最低分 {_safe_float(minimum_score):g}")
-        if labels:
-            risk_parts.append(f"主要异常 {', '.join(str(label) for label in labels[:3])}")
         risk_suffix = f"；{'；'.join(risk_parts)}" if risk_parts else ""
         lines.append(f"- {display}（{item.get('channel_id') or '-'}）：巡检 {run_count}，正常 {normal_count}，异常 {alert_count}，运营问题 {operational_count}{risk_suffix}")
     channel_lines = "\n".join(lines) or "- 本小时无渠道巡检数据"
+    alert_detail_text = ""
+    if alert_details:
+        alert_detail_text = "\n即时真实性异常：\n" + "\n\n".join(alert_details)
     return (
         "Claude 渠道自动巡检小时汇总\n"
         f"时间：{from_local:%Y-%m-%d %H:%M} ~ {to_local:%H:%M}\n"
@@ -9882,6 +10053,7 @@ def hourly_patrol_summary_text(report: dict[str, Any], setting: FeishuBroadcastS
         "渠道综合情况：\n"
         f"{channel_lines}\n"
         f"复审：{alert_link}"
+        f"{alert_detail_text}"
     )
 
 
@@ -9945,16 +10117,35 @@ async def send_hourly_patrol_summary(
             )
             db.commit()
             return {"ok": False, "status": "skipped", "message": "该小时无巡检数据"}
+        alert_created_in_window = (ChannelAlert.created_at >= from_at) & (ChannelAlert.created_at < to_at)
+        alert_last_seen_in_window = (ChannelAlert.last_seen_at >= from_at) & (ChannelAlert.last_seen_at < to_at)
         alerts = list(db.scalars(select(ChannelAlert).where(
-            ChannelAlert.created_at >= from_at,
-            ChannelAlert.created_at < to_at,
+            alert_created_in_window | alert_last_seen_in_window,
             ChannelAlert.notification_status.in_(["pending", "failed"]),
         )).all())
         report = build_smart_patrol_report(db, from_at, to_at)
         refreshed_setting = db.get(FeishuBroadcastSetting, setting.id) or setting
-        payload = feishu_signed_payload(hourly_patrol_summary_text(report, refreshed_setting), refreshed_setting.webhook_secret)
+        eligible_alerts: list[ChannelAlert] = []
+        alert_details: list[str] = []
+        for alert in alerts:
+            alert_report = db.get(Report, alert.report_id)
+            eligibility = classify_feishu_alert(alert_report) if alert_report else {
+                "eligible": False,
+                "skip_reason": FEISHU_ALERT_SKIP_REASON,
+            }
+            if eligibility["eligible"] and alert_report is not None:
+                eligible_alerts.append(alert)
+                alert_details.append(build_feishu_alert_text(alert, alert_report, eligibility, db, refreshed_setting))
+                continue
+            alert.notification_status = "skipped"
+            alert.notification_error = eligibility["skip_reason"]
+        db.commit()
+        payload = feishu_signed_payload(
+            hourly_patrol_summary_text(report, refreshed_setting, alert_details),
+            refreshed_setting.webhook_secret,
+        )
         webhook_url = refreshed_setting.webhook_url
-        alert_ids = [alert.id for alert in alerts]
+        alert_ids = [alert.id for alert in eligible_alerts]
 
     try:
         await post_feishu_payload(webhook_url, payload)
@@ -10008,8 +10199,8 @@ async def send_hourly_patrol_summary(
         "ok": True,
         "status": "sent",
         "message": "小时巡检汇总已发送",
-        "alert_count": len(alerts),
-        "channel_count": len({alert.channel_id for alert in alerts}),
+        "alert_count": len(eligible_alerts),
+        "channel_count": len({alert.channel_id for alert in eligible_alerts}),
     }
 
 
@@ -10034,24 +10225,12 @@ async def send_feishu_test_message(db: Session) -> dict[str, Any]:
 
 
 def feishu_text_payload(alert: ChannelAlert, db: Session, setting: FeishuBroadcastSetting) -> dict[str, Any]:
-    channel = db.get(Channel, alert.channel_id)
-    run = db.get(Run, alert.run_id)
-    channel_display_name = patrol_channel_display_name(channel, alert.channel_id)
-    labels = ", ".join(alert.trigger_labels or []) or "无"
-    evidence = alert_evidence_summary(db, alert) or {}
-    message_id = evidence.get("model_request_response_id") or evidence.get("model_request_message_id") or evidence.get("signature_relay_message_id") or evidence.get("signature_source_message_id")
-    request_id = evidence.get("model_request_request_id") or evidence.get("signature_relay_request_id") or evidence.get("signature_source_request_id")
-    detail = evidence.get("error_message") or scoreless_alert_message(alert.message)
-    text = (
-        "Claude 渠道自动巡检发现异常\n"
-        f"渠道：{channel_display_name}（{alert.channel_id}）\n"
-        f"模型：{channel.model_name if channel else '-'}\n"
-        f"任务：{run.name if run else alert.run_id}\n"
-        f"错误：{detail}\n"
-        f"异常标签：{labels}\n"
-        f"上游响应 ID（Message ID）：{message_id or '-'}\n"
-        f"Request ID：{request_id or '-'}"
-    )
+    report = db.get(Report, alert.report_id)
+    if report is None:
+        text = FEISHU_ALERT_SKIP_REASON
+    else:
+        eligibility = classify_feishu_alert(report)
+        text = build_feishu_alert_text(alert, report, eligibility, db, setting)
     return feishu_signed_payload(text, setting.webhook_secret)
 
 
