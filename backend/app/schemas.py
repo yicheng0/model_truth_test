@@ -1013,6 +1013,10 @@ class PatrolAnomalyEntryRead(BaseModel):
     stage: str | None = None
 
 
+class PatrolStrictAnomalyEntryRead(PatrolAnomalyEntryRead):
+    kind: Literal["kiro_identity_leak", "invalid_thinking_signature"]
+
+
 class PatrolAnomalyGroupRead(BaseModel):
     count: int = 0
     items: list[PatrolAnomalyEntryRead] = Field(default_factory=list)
@@ -1020,6 +1024,8 @@ class PatrolAnomalyGroupRead(BaseModel):
 
 
 class PatrolAnomalySummaryRead(BaseModel):
+    strict_total: int = 0
+    strict_items: list[PatrolStrictAnomalyEntryRead] = Field(default_factory=list)
     kiro_identity_leak: PatrolAnomalyGroupRead = Field(default_factory=PatrolAnomalyGroupRead)
     invalid_thinking_signature: PatrolAnomalyGroupRead = Field(default_factory=PatrolAnomalyGroupRead)
 

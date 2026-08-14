@@ -66,6 +66,7 @@ from .schemas import (
     PatrolAnomalyEntryRead,
     PatrolAnomalyGroupRead,
     PatrolAnomalySummaryRead,
+    PatrolStrictAnomalyEntryRead,
     PatrolRunListRead,
     PatrolRunSummaryRead,
     RunResultsRead,
@@ -1366,10 +1367,24 @@ def _patrol_anomaly_summary(
         rejected, http_status, stage = _patrol_signature_rejection(evidence, labels)
         if rejected:
             groups["invalid_thinking_signature"].append(PatrolAnomalyEntryRead(run_id=report.run_id, run_name=run_name, channel_id=report.channel_id, channel_name=channel.name if channel else None, created_at=report.created_at or run_created_at, request_ids=_patrol_request_ids(evidence, signature=True), http_status=http_status, stage=stage))
-    return PatrolAnomalySummaryRead(**{
-        key: PatrolAnomalyGroupRead(count=len(items), items=items[:_PATROL_ANOMALY_ITEM_LIMIT], truncated=len(items) > _PATROL_ANOMALY_ITEM_LIMIT)
-        for key, items in groups.items()
-    })
+    for items in groups.values():
+        items.sort(key=lambda item: (item.created_at or datetime.min.replace(tzinfo=timezone.utc), item.run_id), reverse=True)
+    strict_items: list[PatrolStrictAnomalyEntryRead] = []
+    seen_run_ids: set[str] = set()
+    for kind in ("kiro_identity_leak", "invalid_thinking_signature"):
+        for item in groups[kind]:
+            if item.run_id in seen_run_ids:
+                continue
+            seen_run_ids.add(item.run_id)
+            strict_items.append(PatrolStrictAnomalyEntryRead(**item.model_dump(), kind=kind))
+    return PatrolAnomalySummaryRead(
+        strict_total=len(strict_items),
+        strict_items=strict_items[:10],
+        **{
+            key: PatrolAnomalyGroupRead(count=len(items), items=items[:_PATROL_ANOMALY_ITEM_LIMIT], truncated=len(items) > _PATROL_ANOMALY_ITEM_LIMIT)
+            for key, items in groups.items()
+        },
+    )
 
 
 @app.get("/api/runs/patrol", response_model=PatrolRunListRead)

@@ -41,12 +41,9 @@ const evidenceByRunId = {
     signature_interop: { status: 'fail', raw_error: 'signature validation timed out while connecting to upstream' },
   },
   patrol_05: {
-    labels: ['quality_regression'],
-    model_requests: [{
-      status: 'fail',
-      labels: [],
-      error: `upstream payload ${'request_id_without_spaces_'.repeat(18)} end`,
-    }],
+    labels: ['provider_request_failed', 'signature_interop_failed'],
+    model_requests: [{ status: 'error', labels: ['provider_request_failed'], error: '该渠道已被禁用' }],
+    signature_interop: { status: 'fail', signature_ok: null, error_http_status: 403, raw_error: '该渠道已被禁用' },
   },
   patrol_06: {
     labels: ['quality_regression'],
@@ -106,8 +103,6 @@ try {
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   const detailRequests = [];
   const patrolRequests = [];
-  const topErrorRequests = [];
-  const topErrorScopesServed = new Set();
   const anomalyRequests = [];
   const deleteRequests = [];
   const deletedRunIds = new Set();
@@ -122,7 +117,13 @@ try {
     };
     const kiroItems = anomalyItems.kiro.filter((item) => !channelId || item.channel_id === channelId);
     const signatureItems = anomalyItems.signature.filter((item) => !channelId || item.channel_id === channelId);
+    const strictItems = [
+      ...kiroItems.map((item) => ({ kind: 'kiro_identity_leak', ...item })),
+      ...signatureItems.map((item) => ({ kind: 'invalid_thinking_signature', ...item })),
+    ];
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      strict_total: strictItems.length,
+      strict_items: strictItems,
       kiro_identity_leak: { count: kiroItems.length, items: kiroItems, truncated: false },
       invalid_thinking_signature: { count: signatureItems.length, items: signatureItems, truncated: false },
     }) });
@@ -135,19 +136,6 @@ try {
     const channelId = url.searchParams.get('channel_id');
     const errorsOnly = url.searchParams.get('errors_only') === 'true';
     patrolRequests.push(`${pageNumber}:${pageSize}:${channelId ?? 'all'}:${errorsOnly}`);
-    const topErrorScope = channelId ?? 'all';
-    if (errorsOnly && pageNumber === 1 && pageSize === 10 && !channelId && !topErrorScopesServed.has(topErrorScope)) {
-      topErrorScopesServed.add(topErrorScope);
-      topErrorRequests.push(topErrorScope);
-      const topErrorIds = ['patrol_52', 'patrol_03', 'patrol_01', 'patrol_05', 'patrol_06', 'patrol_07', 'patrol_08', 'patrol_09', 'patrol_10', 'patrol_11'];
-      const topItems = topErrorIds
-        .map((id) => runs.find((run) => run.id === id))
-        .filter(Boolean)
-        .filter((run) => !channelId || run.patrol_channel_id === channelId)
-        .map((run) => ({ ...run, display_state: 'error', needs_review: true, has_evidence: true }));
-      const scopedTotal = channelId === 'channel_a' ? 9 : channelId === 'channel_b' ? 8 : 17;
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: topItems, total: scopedTotal, error_count: scopedTotal, deletable_count: scopedTotal, anomaly_summary: {}, page: 1, page_size: 10 }) });
-    }
     const errorIds = new Set(['patrol_01', 'patrol_03', 'patrol_05', 'patrol_06', 'patrol_52']);
     const filtered = runs.filter((run) => !deletedRunIds.has(run.id) && (!channelId || run.patrol_channel_id === channelId) && (!errorsOnly || errorIds.has(run.id)));
     const start = (pageNumber - 1) * pageSize;
@@ -191,24 +179,33 @@ try {
   await page.getByText('检测任务列表', { exact: true }).waitFor({ timeout: 5000 });
   const topErrorSummary = page.getByTestId('patrol-top-error-summary');
   await topErrorSummary.waitFor({ timeout: 5000 });
-  assert.match(await topErrorSummary.innerText(), /错误日志（17）/, '检测任务列表顶部应显示真实错误总数');
+  await topErrorSummary.getByText('错误日志（2）', { exact: true }).waitFor({ timeout: 5000 });
+  assert.match(await topErrorSummary.innerText(), /错误日志（2）/, '检测任务列表顶部只应统计严格异常');
   await topErrorSummary.getByText('Kiro 身份泄漏', { exact: true }).waitFor({ timeout: 5000 });
   await topErrorSummary.getByText('Thinking Signature 无效', { exact: true }).waitFor({ timeout: 5000 });
-  assert.doesNotMatch(await topErrorSummary.innerText(), /unexpected response shape|Invalid `signature`|request_id_without_spaces_/, '顶部不应显示完整错误正文');
+  assert.doesNotMatch(await topErrorSummary.innerText(), /巡检异常|该渠道已被禁用|unexpected response shape|Invalid `signature`/, '顶部不应混入运营故障、通用错误或完整错误正文');
   assert.equal(await page.getByRole('link', { name: '巡检日志 52' }).first().getAttribute('href'), '/runs/patrol_52', '顶部任务应链接到详情页');
-  assert.equal(await topErrorSummary.locator('.ant-table-tbody > tr:not(.ant-table-measure-row)').count(), 10, '顶部最多展示 10 条错误');
-  const initialTopRequestCount = topErrorRequests.length;
-  const viewAllErrors = topErrorSummary.getByRole('button', { name: '查看全部错误' });
-  await viewAllErrors.click();
+  assert.equal(await page.getByRole('link', { name: '巡检日志 3' }).first().getAttribute('href'), '/runs/patrol_03', '顶部 Signature 任务应链接到详情页');
+  assert.equal(detailRequests.length, 0, '点击顶部任务前不应请求完整巡检结果');
+  await page.getByRole('link', { name: '巡检日志 3' }).first().click();
+  await page.waitForURL(`${baseUrl}/runs/patrol_03`);
+  await page.waitForFunction(() => document.body.innerText.length > 0);
+  assert.deepEqual(detailRequests, ['patrol_03'], '点击顶部任务应直接请求对应详情');
+  await page.goto(`${baseUrl}/runs`, { waitUntil: 'load' });
+  await page.getByTestId('patrol-top-error-summary').getByText('错误日志（2）', { exact: true }).waitFor({ timeout: 5000 });
+  detailRequests.length = 0;
+  assert.equal(await topErrorSummary.locator('.ant-table-tbody > tr:not(.ant-table-measure-row)').count(), 2, '顶部只应展示严格异常');
+  assert.equal(patrolRequests.filter((request) => request === '1:10:all:true').length, 0, '首屏不应额外请求通用错误分页作为顶部摘要');
+  const initialAnomalyRequestCount = anomalyRequests.length;
+  const viewAllErrors = topErrorSummary.getByRole('button', { name: '查看全部异常' });
   const linkedErrorFilter = page.getByRole('button', { name: /只看错误/ });
+  const previousErrorFilterState = await linkedErrorFilter.getAttribute('aria-pressed');
+  await viewAllErrors.click();
   await page.waitForTimeout(900);
-  assert.equal(await linkedErrorFilter.getAttribute('aria-pressed'), 'true', '查看全部错误应开启下方只看错误');
-  assert.equal(await page.locator('.patrol-log-pagination .ant-pagination-item-active').textContent(), '1', '查看全部错误应回到第 1 页');
-  const linkedPatrolCardBox = await page.locator('.patrol-log-card').boundingBox();
-  assert.ok(linkedPatrolCardBox && linkedPatrolCardBox.y < 320, '查看全部错误应滚动到自动巡检日志区域');
-  await linkedErrorFilter.click();
-  await page.waitForTimeout(250);
-  assert.equal(topErrorRequests.length, initialTopRequestCount, '切换下方错误筛选不应重新请求顶部错误查询');
+  assert.equal(await linkedErrorFilter.getAttribute('aria-pressed'), previousErrorFilterState, '查看全部异常不应改变下方通用错误筛选');
+  const linkedAnomalyBox = await page.getByTestId('patrol-strict-anomaly-summary').boundingBox();
+  assert.ok(linkedAnomalyBox && linkedAnomalyBox.y < 320, '查看全部异常应滚动到下方严格异常区域');
+  assert.equal(anomalyRequests.length, initialAnomalyRequestCount, '查看全部异常不应重复请求摘要');
   await page.getByText('自动巡检日志', { exact: true }).waitFor({ timeoutMs: 5000 });
   const tableRows = page.locator('.patrol-log-table .ant-table-tbody > tr:not(.ant-table-measure-row)');
   await page.waitForTimeout(1000);
@@ -299,6 +296,7 @@ try {
   await page.waitForTimeout(250);
   assert.equal(await tableRows.count(), 10, '切回全部渠道后应恢复全量第一页日志');
 
+  const anomalyRequestCountBeforePagination = anomalyRequests.length;
   await page.locator('.patrol-log-pagination .ant-pagination-item-6 a').click();
   await page.waitForTimeout(500);
   assert.ok(patrolRequests.some((request) => request.startsWith('6:10:all:false')), `点击第 6 页应请求 page=6，实际：${patrolRequests.join(', ')}`);
@@ -307,7 +305,7 @@ try {
   assert.match(pageSixText, /巡检日志 51/, '第 6 页应显示第 51 条记录');
   await page.waitForTimeout(750);
   assert.equal(await page.locator('.patrol-log-pagination .ant-pagination-item-active').textContent(), '6', '等待查询后不应跳回第 1 页');
-  assert.equal(topErrorRequests.length, initialTopRequestCount, '下方翻页不应重新请求顶部错误查询');
+  assert.equal(anomalyRequests.length, anomalyRequestCountBeforePagination, '下方翻页不应重新请求顶部异常摘要');
 
   await page.locator('.patrol-log-pagination .ant-pagination-prev button').click();
   await page.waitForTimeout(250);
@@ -369,7 +367,7 @@ try {
   await page.getByRole('button', { name: '删除当前范围（0）' }).waitFor();
   assert.match(await page.locator('.patrol-log-table').innerText(), /巡检日志 64|巡检日志 65/, '范围删除后未结束日志仍应保留');
 
-  async function openResiliencePage({ topFailure = false, anomalyFailure = false }) {
+  async function openResiliencePage({ anomalyFailure = false }) {
     const resiliencePage = await browser.newPage({ viewport: { width: 1000, height: 800 } });
     const normalRun = {
       id: 'manual_1', suite_id: 'suite_1', name: '普通检测任务', mode: 'full_comparison', test_scope: 'full',
@@ -381,6 +379,8 @@ try {
     await resiliencePage.route('**/api/runs/patrol/anomalies**', (route) => anomalyFailure
       ? route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"anomaly unavailable"}' })
       : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        strict_total: 0,
+        strict_items: [],
         kiro_identity_leak: { count: 0, items: [], truncated: false },
         invalid_thinking_signature: { count: 0, items: [], truncated: false },
       }) }));
@@ -388,7 +388,6 @@ try {
       const url = new URL(route.request().url());
       if (url.pathname === '/api/runs/patrol/anomalies') return route.fallback();
       const errorsOnly = url.searchParams.get('errors_only') === 'true';
-      if (topFailure && errorsOnly) return route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"top errors unavailable"}' });
       const items = errorsOnly ? [patrolError] : [patrolError];
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items, total: 1, error_count: 1, deletable_count: 1, anomaly_summary: {}, page: 1, page_size: 10 }) });
     });
@@ -407,14 +406,9 @@ try {
   }
 
   const anomalyFailurePage = await openResiliencePage({ anomalyFailure: true });
-  await anomalyFailurePage.getByText('高优先级错误分类暂未加载', { exact: true }).waitFor();
-  await anomalyFailurePage.getByTestId('patrol-top-error-summary').getByText('巡检异常', { exact: true }).waitFor();
+  await anomalyFailurePage.getByText('错误日志加载失败', { exact: true }).waitFor();
+  await anomalyFailurePage.getByText('普通检测任务', { exact: true }).waitFor();
   await anomalyFailurePage.close();
-
-  const topFailurePage = await openResiliencePage({ topFailure: true });
-  await topFailurePage.getByText('错误日志加载失败', { exact: true }).waitFor();
-  await topFailurePage.getByText('普通检测任务', { exact: true }).waitFor();
-  await topFailurePage.close();
 } finally {
   await browser?.close();
   try {

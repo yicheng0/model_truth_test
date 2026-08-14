@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, buildPatrolTopErrorSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
-import type { Channel, PatrolAnomalySummary, PatrolRunList, PatrolRunSummary, ReportSummary, Run, RunResults } from './types';
+import type { Channel, PatrolAnomalySummary, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
   return {
@@ -18,41 +18,23 @@ function run(id: string, scheduledTestId?: string | null): Run {
   };
 }
 
-function patrolRun(id: string, createdAt: string, channelId = 'ch_1'): PatrolRunSummary {
-  return {
-    ...run(id, 'schedule_1'),
-    name: `任务 ${id}`,
-    patrol_channel_id: channelId,
-    patrol_channel_name: channelId === 'ch_1' ? '渠道一' : '渠道二',
-    created_at: createdAt,
-    display_state: 'error',
-    needs_review: true,
-    has_evidence: true,
-  };
-}
-
-function patrolErrorPage(items: PatrolRunSummary[], total = items.length): PatrolRunList {
-  return {
-    items,
-    total,
-    error_count: total,
-    deletable_count: items.length,
-    anomaly_summary: emptyAnomalies(),
-    page: 1,
-    page_size: 10,
-  };
-}
-
 function emptyAnomalies(): PatrolAnomalySummary {
   return {
+    strict_total: 0,
+    strict_items: [],
     kiro_identity_leak: { count: 0, items: [], truncated: false },
     invalid_thinking_signature: { count: 0, items: [], truncated: false },
   };
 }
 
 describe('runs utilities', () => {
-  it('prioritizes Kiro then Signature before recent patrol errors', () => {
+  it('maps only server-provided strict Kiro and Signature anomalies', () => {
     const anomalies: PatrolAnomalySummary = {
+      strict_total: 2,
+      strict_items: [
+        { kind: 'kiro_identity_leak', run_id: 'kiro_1', run_name: 'Kiro 任务', channel_id: 'ch_2', channel_name: '渠道二', created_at: '2026-08-10T08:00:00Z', request_ids: ['req-secret'] },
+        { kind: 'invalid_thinking_signature', run_id: 'signature_1', run_name: 'Signature 任务', channel_id: 'ch_1', channel_name: '渠道一', created_at: '2026-08-11T08:00:00Z', request_ids: [], http_status: 400 },
+      ],
       kiro_identity_leak: {
         count: 1,
         items: [{ run_id: 'kiro_1', run_name: 'Kiro 任务', channel_id: 'ch_2', channel_name: '渠道二', created_at: '2026-08-10T08:00:00Z', request_ids: [] }],
@@ -65,61 +47,49 @@ describe('runs utilities', () => {
       },
     };
 
-    const summary = buildPatrolTopErrorSummary(
-      patrolErrorPage([patrolRun('ordinary_new', '2026-08-12T08:00:00Z')], 3),
-      anomalies,
-    );
+    const summary = buildPatrolTopErrorSummary(anomalies);
 
     expect(summary.items.map((item) => [item.runId, item.kind, item.priority])).toEqual([
       ['kiro_1', 'kiro_identity_leak', 1],
       ['signature_1', 'invalid_thinking_signature', 2],
-      ['ordinary_new', 'patrol_error', 3],
     ]);
+    expect(summary.total).toBe(2);
+    expect(JSON.stringify(summary)).not.toMatch(/req-secret|request.?id|raw.?response|full.?text|error.?body/i);
   });
 
-  it('deduplicates a run across all sources and keeps the highest-priority Kiro type', () => {
-    const duplicate = { run_id: 'duplicate_1', run_name: '重复任务', channel_id: 'ch_1', channel_name: '渠道一', created_at: '2026-08-12T08:00:00Z', request_ids: [] };
+  it('defensively deduplicates strict entries and keeps the highest-priority Kiro type', () => {
     const anomalies: PatrolAnomalySummary = {
-      kiro_identity_leak: { count: 1, items: [duplicate], truncated: false },
-      invalid_thinking_signature: { count: 1, items: [{ ...duplicate, http_status: 400 }], truncated: false },
+      strict_total: 1,
+      strict_items: [
+        { kind: 'kiro_identity_leak', run_id: 'duplicate_1', run_name: '重复任务', channel_id: 'ch_1', channel_name: '渠道一', created_at: '2026-08-12T08:00:00Z', request_ids: [] },
+        { kind: 'invalid_thinking_signature', run_id: 'duplicate_1', run_name: '重复任务', channel_id: 'ch_1', channel_name: '渠道一', created_at: '2026-08-12T08:00:00Z', request_ids: [], http_status: 400 },
+      ],
+      kiro_identity_leak: { count: 1, items: [], truncated: false },
+      invalid_thinking_signature: { count: 1, items: [], truncated: false },
     };
 
-    const summary = buildPatrolTopErrorSummary(
-      patrolErrorPage([patrolRun('duplicate_1', '2026-08-12T08:00:00Z')]),
-      anomalies,
-    );
+    const summary = buildPatrolTopErrorSummary(anomalies);
 
     expect(summary.items).toHaveLength(1);
     expect(summary.items[0]).toMatchObject({ runId: 'duplicate_1', kind: 'kiro_identity_leak', priority: 1 });
   });
 
-  it('sorts ordinary patrol errors newest first', () => {
-    const summary = buildPatrolTopErrorSummary(patrolErrorPage([
-      patrolRun('old', '2026-08-10T08:00:00Z'),
-      patrolRun('new', '2026-08-12T08:00:00Z'),
-      patrolRun('middle', '2026-08-11T08:00:00Z'),
-    ]), emptyAnomalies());
+  it('limits strict entries to ten while preserving the server strict total', () => {
+    const anomalies: PatrolAnomalySummary = {
+      ...emptyAnomalies(),
+      strict_total: 17,
+      strict_items: Array.from({ length: 12 }, (_, index) => ({
+        kind: 'invalid_thinking_signature' as const,
+        run_id: `signature_${index + 1}`,
+        run_name: `Signature ${index + 1}`,
+        request_ids: [],
+      })),
+    };
 
-    expect(summary.items.map((item) => item.runId)).toEqual(['new', 'middle', 'old']);
-  });
-
-  it('limits the visible summary to ten while preserving the server error total', () => {
-    const items = Array.from({ length: 12 }, (_, index) => patrolRun(`error_${index + 1}`, `2026-08-${String(index + 1).padStart(2, '0')}T08:00:00Z`));
-
-    const summary = buildPatrolTopErrorSummary(patrolErrorPage(items, 17), emptyAnomalies());
+    const summary = buildPatrolTopErrorSummary(anomalies);
 
     expect(summary.total).toBe(17);
     expect(summary.items).toHaveLength(10);
-  });
-
-  it('only consumes server-filtered error items and exposes no raw error evidence', () => {
-    const summary = buildPatrolTopErrorSummary(
-      patrolErrorPage([patrolRun('real_error', '2026-08-12T08:00:00Z')], 1),
-      emptyAnomalies(),
-    );
-
-    expect(summary.items.map((item) => item.runId)).toEqual(['real_error']);
-    expect(JSON.stringify(summary)).not.toMatch(/request.?id|raw.?response|full.?text|error.?body/i);
   });
 
   it('keeps the requested patrol page while stale responses are in flight', () => {

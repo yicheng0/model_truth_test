@@ -1150,6 +1150,10 @@ export type PatrolAnomalyEntry = {
   stage?: string | null;
 };
 
+export type PatrolStrictAnomalyEntry = PatrolAnomalyEntry & {
+  kind: 'kiro_identity_leak' | 'invalid_thinking_signature';
+};
+
 export type PatrolAnomalyGroup = {
   count: number;
   items: PatrolAnomalyEntry[];
@@ -1157,6 +1161,8 @@ export type PatrolAnomalyGroup = {
 };
 
 export type PatrolAnomalySummary = {
+  strict_total: number;
+  strict_items: PatrolStrictAnomalyEntry[];
   kiro_identity_leak: PatrolAnomalyGroup;
   invalid_thinking_signature: PatrolAnomalyGroup;
 };
