@@ -1064,6 +1064,108 @@ def test_patrol_query_preserves_real_total_on_out_of_range_page_and_loads_anomal
         assert channel_anomalies["invalid_thinking_signature"]["count"] == 1
 
 
+def test_patrol_strict_anomaly_summary_excludes_operational_failures_and_deduplicates_by_run() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        fixtures = [
+            (
+                "disabled_403",
+                "third_party_demo",
+                {"labels": ["provider_request_failed"], "classification_status": "operational_issue", "signature_interop": {"status": "fail", "signature_ok": None, "error_http_status": 403, "raw_error": "该渠道已被禁用"}},
+            ),
+            (
+                "network_timeout",
+                "third_party_demo",
+                {"labels": ["provider_request_failed"], "classification_status": "operational_issue", "signature_interop": {"status": "fail", "signature_ok": None, "error_http_status": 504, "raw_error": "Gateway timeout: network error"}},
+            ),
+            (
+                "legacy_label_only",
+                "third_party_demo",
+                {"labels": ["signature_interop_failed"], "classification_status": "anomaly", "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 403, "raw_error": "permission denied"}},
+            ),
+            (
+                "signature_explicit",
+                "third_party_demo",
+                {"labels": ["signature_interop_failed"], "classification_status": "anomaly", "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 400, "raw_error": "Invalid `signature` in `thinking` block"}},
+            ),
+            (
+                "kiro_and_signature",
+                "negative_sample",
+                {"labels": ["kiro_identity_leak", "signature_interop_failed"], "classification_status": "anomaly", "model_requests": [{"key": "identity_self_report", "response_text": "I am Kiro"}], "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 400, "raw_error": "INVALID SIGNATURE IN THINKING BLOCK"}},
+            ),
+        ]
+        for index, (suffix, channel_id, evidence) in enumerate(fixtures):
+            run = Run(
+                id=f"patrol_strict_{suffix}",
+                suite_id=suite_id,
+                name=f"strict {suffix}",
+                test_scope="scheduled_probe",
+                status="completed",
+                created_at=datetime(2026, 8, 14, tzinfo=timezone.utc) + timedelta(minutes=index),
+            )
+            db.add(run)
+            db.add(RunChannel(id=f"patrol_strict_rc_{index}", run_id=run.id, channel_id=channel_id, role_in_run="candidate"))
+            db.add(Report(id=f"patrol_strict_report_{index}", run_id=run.id, channel_id=channel_id, final_score=20, grade="E", summary="strict fixture", evidence=evidence, created_at=run.created_at))
+        db.commit()
+
+    with TestClient(app) as client:
+        payload = client.get("/api/runs/patrol/anomalies").json()
+        channel_payload = client.get("/api/runs/patrol/anomalies?channel_id=negative_sample").json()
+
+    assert payload["strict_total"] == 2
+    assert [item["run_id"] for item in payload["strict_items"]] == [
+        "patrol_strict_kiro_and_signature",
+        "patrol_strict_signature_explicit",
+    ]
+    assert [item["kind"] for item in payload["strict_items"]] == [
+        "kiro_identity_leak",
+        "invalid_thinking_signature",
+    ]
+    assert payload["kiro_identity_leak"]["count"] == 1
+    assert payload["invalid_thinking_signature"]["count"] == 2
+    strict_ids = {item["run_id"] for item in payload["strict_items"]}
+    assert "patrol_strict_disabled_403" not in strict_ids
+    assert "patrol_strict_network_timeout" not in strict_ids
+    assert "patrol_strict_legacy_label_only" not in strict_ids
+    assert channel_payload["strict_total"] == 1
+    assert channel_payload["strict_items"][0]["run_id"] == "patrol_strict_kiro_and_signature"
+
+
+def test_patrol_strict_anomaly_summary_limits_items_but_preserves_total() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        for index in range(17):
+            run = Run(
+                id=f"patrol_strict_limit_{index:02d}",
+                suite_id=suite_id,
+                name=f"strict limit {index}",
+                test_scope="scheduled_probe",
+                status="completed",
+                created_at=datetime(2026, 8, 14, tzinfo=timezone.utc) + timedelta(minutes=index),
+            )
+            db.add(run)
+            db.add(RunChannel(id=f"patrol_strict_limit_rc_{index:02d}", run_id=run.id, channel_id="third_party_demo", role_in_run="candidate"))
+            db.add(Report(
+                id=f"patrol_strict_limit_report_{index:02d}",
+                run_id=run.id,
+                channel_id="third_party_demo",
+                final_score=20,
+                grade="E",
+                evidence={"labels": ["signature_interop_failed"], "classification_status": "anomaly", "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 400, "raw_error": "Invalid 'signature' in 'thinking' block"}},
+                created_at=run.created_at,
+            ))
+        db.commit()
+
+    with TestClient(app) as client:
+        payload = client.get("/api/runs/patrol/anomalies").json()
+
+    assert payload["strict_total"] == 17
+    assert len(payload["strict_items"]) == 10
+    assert payload["strict_items"][0]["run_id"] == "patrol_strict_limit_16"
+
+
 def test_patrol_delete_button_usability_returns_filtered_deletable_count() -> None:
     reset_database()
     with SessionLocal() as db:

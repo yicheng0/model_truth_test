@@ -479,7 +479,7 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
 
 export default function Runs() {
   const queryClient = useQueryClient();
-  const patrolLogRef = useRef<HTMLDivElement>(null);
+  const patrolAnomalyRef = useRef<HTMLDivElement>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [selectedNormalRowKeys, setSelectedNormalRowKeys] = useState<Key[]>([]);
@@ -503,17 +503,6 @@ export default function Runs() {
     }),
     refetchInterval: (query) => (query.state.data?.items.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
   });
-  const patrolTopErrorsQuery = useQuery({
-    queryKey: ['patrolTopErrors', selectedPatrolChannel],
-    queryFn: () => api.patrolRuns({
-      page: 1,
-      page_size: 10,
-      channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel,
-      errors_only: true,
-    }),
-    staleTime: 60 * 1000,
-    refetchInterval: 60 * 1000,
-  });
   const patrolAnomaliesQuery = useQuery({
     queryKey: ['patrolAnomalies', selectedPatrolChannel],
     queryFn: () => api.patrolAnomalies({
@@ -536,7 +525,6 @@ export default function Runs() {
       setSelectedPatrolRowKeys((keys) => keys.filter((key) => key !== runId));
       await queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolRuns'] });
-      await queryClient.invalidateQueries({ queryKey: ['patrolTopErrors'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
     },
@@ -553,7 +541,6 @@ export default function Runs() {
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] }),
         queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
-        queryClient.invalidateQueries({ queryKey: ['patrolTopErrors'] }),
         queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] }),
         queryClient.invalidateQueries({ queryKey: ['reports'] }),
       ]);
@@ -573,7 +560,6 @@ export default function Runs() {
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] }),
         queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
-        queryClient.invalidateQueries({ queryKey: ['patrolTopErrors'] }),
         queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] }),
         queryClient.invalidateQueries({ queryKey: ['reports'] }),
       ]);
@@ -586,7 +572,6 @@ export default function Runs() {
       message.success('任务已取消');
       await queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolRuns'] });
-      await queryClient.invalidateQueries({ queryKey: ['patrolTopErrors'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
@@ -617,8 +602,8 @@ export default function Runs() {
   const errorPatrolRunCount = patrolQuery.data?.error_count ?? 0;
   const visiblePatrolRuns = patrolRuns;
   const patrolTopErrorSummary = useMemo(
-    () => buildPatrolTopErrorSummary(patrolTopErrorsQuery.data, patrolAnomaliesQuery.data),
-    [patrolAnomaliesQuery.data, patrolTopErrorsQuery.data],
+    () => buildPatrolTopErrorSummary(patrolAnomaliesQuery.data),
+    [patrolAnomaliesQuery.data],
   );
   const selectedNormalRuns = useMemo(
     () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
@@ -689,16 +674,13 @@ export default function Runs() {
     setSelectedNormalRowKeys(allNormalRunsSelected ? [] : selectableNormalRunIds);
   }
 
-  function showAllPatrolErrors() {
-    setOnlyPatrolErrors(true);
-    setPatrolPage(1);
-    window.requestAnimationFrame(() => patrolLogRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  function showAllPatrolAnomalies() {
+    window.requestAnimationFrame(() => patrolAnomalyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   }
 
   function patrolTopErrorTag(item: PatrolTopErrorItem) {
     if (item.kind === 'kiro_identity_leak') return <Tag color="red">Kiro 身份泄漏</Tag>;
-    if (item.kind === 'invalid_thinking_signature') return <Tag color="volcano">Thinking Signature 无效</Tag>;
-    return <Tag color="orange">巡检异常</Tag>;
+    return <Tag color="volcano">Thinking Signature 无效</Tag>;
   }
 
   function deleteSelectedPatrolRuns() {
@@ -814,38 +796,33 @@ export default function Runs() {
         <section className="patrol-top-error-summary" data-testid="patrol-top-error-summary">
           <div className="patrol-top-error-heading">
             <Typography.Text strong>错误日志（{patrolTopErrorSummary.total}）</Typography.Text>
-            {patrolTopErrorSummary.total > patrolTopErrorSummary.items.length ? (
-              <Button type="link" size="small" onClick={showAllPatrolErrors}>查看全部错误</Button>
+            {patrolTopErrorSummary.total > 0 ? (
+              <Button type="link" size="small" onClick={showAllPatrolAnomalies}>查看全部异常</Button>
             ) : null}
           </div>
-          {patrolTopErrorsQuery.isError ? (
+          {patrolAnomaliesQuery.isError ? (
             <Alert
               type="error"
               showIcon
               message="错误日志加载失败"
-              action={<Button size="small" onClick={() => patrolTopErrorsQuery.refetch()}>重试</Button>}
+              action={<Button size="small" onClick={() => patrolAnomaliesQuery.refetch()}>重试</Button>}
             />
           ) : (
-            <>
-              {patrolAnomaliesQuery.isError && patrolTopErrorSummary.items.length ? (
-                <Alert type="warning" showIcon message="高优先级错误分类暂未加载" style={{ marginBottom: 8 }} />
-              ) : null}
-              <Table
-                className="patrol-top-error-table"
-                rowKey="runId"
-                size="small"
-                loading={patrolTopErrorsQuery.isLoading}
-                dataSource={patrolTopErrorSummary.items}
-                pagination={false}
-                locale={{ emptyText: <Empty description="暂无需要处理的错误" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-                columns={[
-                  { title: '错误类型', width: 190, render: (_, item) => patrolTopErrorTag(item) },
-                  { title: '渠道', dataIndex: 'channelName', width: 220, render: (value, item) => value ?? item.channelId ?? '-' },
-                  { title: '任务', dataIndex: 'runName', render: (value, item) => <Link to={`/runs/${item.runId}`}>{value}</Link> },
-                  { title: '时间', dataIndex: 'createdAt', width: 180, render: formatDateTime },
-                ]}
-              />
-            </>
+            <Table
+              className="patrol-top-error-table"
+              rowKey="runId"
+              size="small"
+              loading={patrolAnomaliesQuery.isLoading}
+              dataSource={patrolTopErrorSummary.items}
+              pagination={false}
+              locale={{ emptyText: <Empty description="暂无需要处理的错误" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+              columns={[
+                { title: '错误类型', width: 190, render: (_, item) => patrolTopErrorTag(item) },
+                { title: '渠道', dataIndex: 'channelName', width: 220, render: (value, item) => value ?? item.channelId ?? '-' },
+                { title: '任务', dataIndex: 'runName', render: (value, item) => <Link to={`/runs/${item.runId}`}>{value}</Link> },
+                { title: '时间', dataIndex: 'createdAt', width: 180, render: formatDateTime },
+              ]}
+            />
           )}
         </section>
         <Space wrap style={{ width: '100%', marginBottom: 16 }}>
@@ -984,7 +961,7 @@ export default function Runs() {
         />
       </Card>
 
-      <div ref={patrolLogRef}>
+      <div>
       <Card
         className="patrol-log-card"
         title={<span className="card-title-with-icon"><CalendarClock size={18} />自动巡检日志</span>}
@@ -1072,10 +1049,12 @@ export default function Runs() {
         )}
         bordered={false}
       >
+        <div ref={patrolAnomalyRef} data-testid="patrol-strict-anomaly-summary">
         <Space direction="vertical" size={8} style={{ width: '100%', marginBottom: 12 }}>
           <PatrolGlobalAnomalyAlert title="Kiro 身份泄漏" group={patrolAnomaliesQuery.data?.kiro_identity_leak} />
           <PatrolGlobalAnomalyAlert title="Thinking Signature 无效" group={patrolAnomaliesQuery.data?.invalid_thinking_signature} />
         </Space>
+        </div>
         <Table
           className="patrol-log-table"
           rowKey="id"
