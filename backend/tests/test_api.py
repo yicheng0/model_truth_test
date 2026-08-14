@@ -57,6 +57,313 @@ def test_explicit_invalid_thinking_signature(error_text: str, expected: bool) ->
     assert is_explicit_invalid_thinking_signature(error_text) is expected
 
 
+def test_feishu_alert_eligibility_signature() -> None:
+    from app import services as services_module
+
+    classifier = getattr(services_module, "classify_feishu_alert", None)
+    assert callable(classifier), "strict Feishu alert classifier is required"
+    report = Report(
+        id="rep_feishu_signature",
+        run_id="run_feishu_signature",
+        channel_id="source_channel",
+        final_score=20,
+        grade="E",
+        evidence={
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid `signature` in `thinking` block (request id: req_relay)",
+            },
+        },
+    )
+
+    eligibility = classifier(report)
+
+    assert eligibility["eligible"] is True
+    assert eligibility["kind"] == "invalid_thinking_signature"
+    assert eligibility["error_summary"] == "Invalid signature in thinking block"
+
+
+def test_feishu_alert_eligibility_kiro_priority() -> None:
+    from app import services as services_module
+
+    classifier = getattr(services_module, "classify_feishu_alert", None)
+    assert callable(classifier), "strict Feishu alert classifier is required"
+    report = Report(
+        id="rep_feishu_kiro",
+        run_id="run_feishu_kiro",
+        channel_id="source_channel",
+        final_score=0,
+        grade="E",
+        evidence={
+            "labels": ["kiro_identity_leak", "signature_interop_failed"],
+            "model_requests": [
+                {
+                    "key": "identity_self_report",
+                    "labels": ["kiro_identity_leak"],
+                    "message_id": "msg_kiro",
+                    "request_id": "req_kiro",
+                }
+            ],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid signature in thinking block",
+            },
+        },
+    )
+
+    eligibility = classifier(report)
+
+    assert eligibility["eligible"] is True
+    assert eligibility["kind"] == "kiro_identity_leak"
+    assert eligibility["error_summary"] == "Kiro identity leak"
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"labels": ["signature_interop_failed"], "signature_interop": {"signature_ok": False}},
+        {"labels": ["signature_interop_failed"], "signature_interop": {"signature_ok": False, "error_http_status": 400, "error_stage": "relay", "raw_error": "invalid request payload"}},
+        {"labels": ["signature_interop_failed"], "signature_interop": {"signature_ok": False, "error_http_status": 500, "error_stage": "relay", "raw_error": "Invalid signature in thinking block"}},
+        {"labels": ["signature_interop_failed"], "signature_interop": {"signature_ok": False, "error_http_status": 400, "error_stage": "source", "raw_error": "Invalid signature in thinking block"}},
+        {"labels": ["protocol_mismatch"]},
+        {"labels": ["identity_mismatch"], "model_requests": [{"key": "identity_self_report", "labels": ["identity_mismatch"], "response_text": "我是 ChatGPT"}]},
+        {"labels": ["provider_temporarily_unavailable"], "classification_status": "operational_issue"},
+        {"labels": ["provider_quota_or_balance_exhausted"], "classification_status": "operational_issue"},
+        {"labels": ["provider_request_failed"], "classification_status": "operational_issue"},
+    ],
+)
+def test_feishu_alert_eligibility_non_whitelist(evidence: dict) -> None:
+    from app import services as services_module
+
+    classifier = getattr(services_module, "classify_feishu_alert", None)
+    assert callable(classifier), "strict Feishu alert classifier is required"
+    report = Report(
+        id="rep_feishu_non_whitelist",
+        run_id="run_feishu_non_whitelist",
+        channel_id="source_channel",
+        final_score=10,
+        grade="E",
+        evidence=evidence,
+    )
+
+    eligibility = classifier(report)
+
+    assert eligibility["eligible"] is False
+    assert eligibility["kind"] is None
+    assert eligibility["skip_reason"] == "不符合飞书即时告警白名单"
+
+
+def test_feishu_alert_text_signature_redacts_sensitive_evidence(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    full_signature = "Eu4BCmMIDxgC" + "signature-secret-" * 20
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid `signature` in `thinking` block; api_key=sk-health-secret",
+                "source_channel_id": "third_party_demo",
+                "source_channel_name": "Source Display",
+                "relay_channel_id": "anthropic_official",
+                "relay_channel_name": "Relay Display",
+                "source_message_id": "msg_01KpfkbsBFeSkmm4nHHHJFsO",
+                "source_request_id": "req_source_123",
+                "relay_message_id": "msg_01relay_456",
+                "relay_request_id": "9d947ae1-cbaa-45c5-9760-b0bb61a929e8",
+                "created_at": "2026-08-14T01:02:03+00:00",
+                "completed_at": "2026-08-14T01:02:05+00:00",
+                "signature_prefixes": [full_signature[:50]],
+                "request_logs": [{"request_excerpt": {"thinking": "complete private thinking", "signature": full_signature, "x-api-key": "sk-health-secret"}}],
+            },
+        }
+        db.commit()
+
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        setting = get_or_create_feishu_setting(db)
+        assert stored is not None
+        text = feishu_text_payload(stored, db, setting)["content"]["text"]
+
+    assert "Thinking Signature 异常" in text
+    assert "错误：Invalid signature in thinking block" in text
+    assert "Source：Source Display（third_party_demo）" in text
+    assert "Relay：Relay Display（anthropic_official）" in text
+    assert "发生时间：2026-08-14 09:02:05" in text
+    assert "Source Message ID：msg_01KpfkbsBFeSkmm4nHHHJFsO" in text
+    assert "Source Request ID：req_source_123" in text
+    assert "Relay Message ID：msg_01relay_456" in text
+    assert "Relay Request ID：9d947ae1-cbaa-45c5-9760-b0bb61a929e8" in text
+    assert full_signature not in text
+    assert full_signature[:50] not in text
+    assert "complete private thinking" not in text
+    assert "sk-health-secret" not in text
+    assert "request_logs" not in text
+
+
+def test_feishu_alert_text_signature_missing_ids(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid signature in thinking block",
+                "source_channel_id": "third_party_demo",
+                "relay_channel_id": "anthropic_official",
+            },
+        }
+        db.commit()
+
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        setting = get_or_create_feishu_setting(db)
+        assert stored is not None
+        text = feishu_text_payload(stored, db, setting)["content"]["text"]
+
+    assert text.count("未提供") >= 4
+    assert "Source Message ID：未提供" in text
+    assert "Source Request ID：未提供" in text
+    assert "Relay Message ID：未提供" in text
+    assert "Relay Request ID：未提供" in text
+
+
+def test_feishu_alert_text_kiro(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+    run_id = create_report_for_schedule(schedule, grade="E", score=0, labels=["kiro_identity_leak"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {
+            "labels": ["kiro_identity_leak"],
+            "model_requests": [
+                {
+                    "key": "identity_self_report",
+                    "labels": ["kiro_identity_leak"],
+                    "channel_id": "third_party_demo",
+                    "channel_name": "Kiro Source",
+                    "message_id": "msg_kiro_identity",
+                    "request_id": "req_kiro_identity",
+                    "completed_at": "2026-08-14T02:03:04+00:00",
+                    "response_text": "我是 Kiro。",
+                }
+            ],
+        }
+        db.commit()
+
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        setting = get_or_create_feishu_setting(db)
+        assert stored is not None
+        text = feishu_text_payload(stored, db, setting)["content"]["text"]
+
+    assert "Kiro 身份泄漏异常" in text
+    assert "错误：Kiro identity leak" in text
+    assert "待测渠道：Kiro Source（third_party_demo）" in text
+    assert "发生时间：2026-08-14 10:03:04" in text
+    assert "身份探针 Message ID：msg_kiro_identity" in text
+    assert "身份探针 Request ID：req_kiro_identity" in text
+    assert "我是 Kiro" not in text
+
+
+def test_feishu_alert_text_kiro_legacy_signature_fallback(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+    run_id = create_report_for_schedule(schedule, grade="E", score=0, labels=["kiro_identity_leak"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {
+            "labels": ["kiro_identity_leak"],
+            "signature_interop": {
+                "identity_labels": ["kiro_identity_leak"],
+                "source_channel_id": "third_party_demo",
+                "source_channel_name": "Legacy Kiro Source",
+                "identity_message_id": "msg_legacy_kiro",
+                "identity_request_id": "req_legacy_kiro",
+                "completed_at": "2026-08-14T03:04:05+00:00",
+            },
+        }
+        db.commit()
+
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        setting = get_or_create_feishu_setting(db)
+        assert stored is not None
+        text = feishu_text_payload(stored, db, setting)["content"]["text"]
+
+    assert "待测渠道：Legacy Kiro Source（third_party_demo）" in text
+    assert "身份探针 Message ID：msg_legacy_kiro" in text
+    assert "身份探针 Request ID：req_legacy_kiro" in text
+    assert "发生时间：2026-08-14 11:04:05" in text
+
+
+def test_feishu_alert_text_sanitizes_identifiers(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid signature in thinking block",
+                "source_channel_id": "third_party_demo",
+                "source_channel_name": "api_key=sk-channel-secret",
+                "source_message_id": "msg_" + "x" * 400,
+                "source_request_id": "authorization=Bearer-secret-value",
+            },
+        }
+        db.commit()
+
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        setting = get_or_create_feishu_setting(db)
+        assert stored is not None
+        text = feishu_text_payload(stored, db, setting)["content"]["text"]
+
+    assert "sk-channel-secret" not in text
+    assert "Bearer-secret-value" not in text
+    message_line = next(line for line in text.splitlines() if line.startswith("Source Message ID："))
+    assert len(message_line.removeprefix("Source Message ID：")) == 200
+
+
 def test_signature_result_does_not_label_operational_error_as_signature_failure() -> None:
     source = Channel(id="source", name="Source", provider_type="anthropic", model_name="claude-opus-4-6")
     relay = Channel(id="relay", name="Relay", provider_type="anthropic", model_name="claude-opus-4-6")
@@ -3027,7 +3334,8 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
     assert "双探针" not in run_payload["name"]
     assert alerts
     assert alerts[0]["channel_id"] == "negative_sample"
-    assert alerts[0]["notification_status"] == "pending"
+    assert alerts[0]["notification_status"] == "skipped"
+    assert alerts[0]["notification_error"] == "不符合飞书即时告警白名单"
 
     with SessionLocal() as db:
         report = db.scalar(select(Report).where(Report.run_id == updated_schedule["last_run_id"], Report.channel_id == "negative_sample"))
@@ -4842,7 +5150,7 @@ def test_feishu_broadcast_setting_masks_secret_and_preserves_existing_secret() -
     assert preserved["secret_configured"] is True
 
 
-def test_new_alert_waits_for_hourly_feishu_summary(monkeypatch) -> None:
+def test_alert_notification_initial_status_non_whitelist(monkeypatch) -> None:
     posted_payloads: list[tuple[str, dict]] = []
 
     async def fake_post_feishu_payload(webhook_url, payload):  # noqa: ANN001
@@ -4871,9 +5179,270 @@ def test_new_alert_waits_for_hourly_feishu_summary(monkeypatch) -> None:
     with SessionLocal() as db:
         alert = db.get(ChannelAlert, alerts[0].id)
         assert alert is not None
-        assert alert.notification_status == "pending"
+        assert alert.notification_status == "skipped"
+        assert alert.notification_error == "不符合飞书即时告警白名单"
         assert alert.notification_attempt_count == 0
         assert alert.notified_at is None
+
+
+@pytest.mark.parametrize("kind", ["signature", "kiro"])
+def test_alert_notification_initial_status_whitelist(monkeypatch, kind: str) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, quiet_minutes=0)
+    labels = ["signature_interop_failed"] if kind == "signature" else ["kiro_identity_leak"]
+    run_id = create_report_for_schedule(schedule, grade="E", score=0, labels=labels)
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = (
+            {
+                "labels": labels,
+                "signature_interop": {
+                    "signature_ok": False,
+                    "error_http_status": 400,
+                    "error_stage": "relay",
+                    "raw_error": "Invalid signature in thinking block",
+                },
+            }
+            if kind == "signature"
+            else {
+                "labels": labels,
+                "model_requests": [{"key": "identity_self_report", "labels": labels}],
+            }
+        )
+        db.commit()
+
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        assert stored is not None
+        assert stored.notification_status == "pending"
+        assert stored.notification_error is None
+
+
+def test_feishu_resend_whitelist_legacy_signature_label(monkeypatch) -> None:
+    posted_payloads: list[dict] = []
+
+    async def fake_post_feishu_payload(_webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append(payload)
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, quiet_minutes=0)
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "daily_report_enabled": False, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        assert stored is not None
+        stored.notification_status = "failed"
+        stored.notification_error = "legacy failure"
+        db.commit()
+
+    result = asyncio.run(send_alert_notification(SessionLocal, alert.id))
+
+    assert result is not None
+    assert posted_payloads == []
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        assert stored is not None
+        assert stored.notification_status == "skipped"
+        assert stored.notification_error == "不符合飞书即时告警白名单"
+        assert stored.notification_attempt_count == 0
+
+
+def test_feishu_resend_endpoint_cannot_bypass_whitelist(monkeypatch) -> None:
+    posted_payloads: list[dict] = []
+
+    async def fake_post_feishu_payload(_webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append(payload)
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, quiet_minutes=0)
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "daily_report_enabled": False, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/alerts/{alert.id}/resend-notification")
+
+    assert response.status_code == 200
+    assert response.json()["notification_status"] == "skipped"
+    assert response.json()["notification_error"] == "不符合飞书即时告警白名单"
+    assert posted_payloads == []
+
+
+def test_alert_dedup_refreshes_latest_feishu_whitelist_evidence(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, quiet_minutes=0)
+    first_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    with SessionLocal() as db:
+        first_report = db.scalar(select(Report).where(Report.run_id == first_run_id))
+        assert first_report is not None
+        first_report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {"signature_ok": False, "reason": "legacy inconclusive signature result"},
+        }
+        db.commit()
+    first_alert = asyncio.run(create_alerts_for_run(SessionLocal, first_run_id, schedule["id"]))[0]
+    second_run_id = create_report_for_schedule(schedule, grade="E", score=18, labels=["signature_interop_failed"])
+    with SessionLocal() as db:
+        second_report = db.scalar(select(Report).where(Report.run_id == second_run_id))
+        assert second_report is not None
+        second_report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid signature in thinking block",
+                "relay_request_id": "req_latest_explicit_signature",
+            },
+        }
+        second_report_id = second_report.id
+        db.commit()
+
+    repeated_alert = asyncio.run(create_alerts_for_run(SessionLocal, second_run_id, schedule["id"]))[0]
+
+    assert repeated_alert.id == first_alert.id
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, first_alert.id)
+        assert stored is not None
+        assert stored.report_id == second_report_id
+        assert stored.run_id == second_run_id
+        assert stored.notification_status == "pending"
+        assert stored.notification_error is None
+        assert stored.consecutive_windows == 2
+
+
+def test_alert_dedup_keeps_sent_whitelist_notification_sent(monkeypatch) -> None:
+    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, quiet_minutes=0)
+    run_ids = [
+        create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"]),
+        create_report_for_schedule(schedule, grade="E", score=18, labels=["signature_interop_failed"]),
+    ]
+    with SessionLocal() as db:
+        reports = list(db.scalars(select(Report).where(Report.run_id.in_(run_ids))).all())
+        assert len(reports) == 2
+        for report in reports:
+            report.evidence = {
+                "labels": ["signature_interop_failed"],
+                "signature_interop": {
+                    "signature_ok": False,
+                    "error_http_status": 400,
+                    "error_stage": "relay",
+                    "raw_error": "Invalid signature in thinking block",
+                },
+            }
+        db.commit()
+    first_alert = asyncio.run(create_alerts_for_run(SessionLocal, run_ids[0], schedule["id"]))[0]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, first_alert.id)
+        assert stored is not None
+        first_report_id = stored.report_id
+        stored.notification_status = "sent"
+        stored.notification_error = None
+        stored.notified_at = datetime.now(timezone.utc)
+        db.commit()
+
+    repeated_alert = asyncio.run(create_alerts_for_run(SessionLocal, run_ids[1], schedule["id"]))[0]
+
+    assert repeated_alert.id == first_alert.id
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, first_alert.id)
+        assert stored is not None
+        assert stored.report_id == first_report_id
+        assert stored.notification_status == "sent"
+        assert stored.notification_error is None
+        assert stored.consecutive_windows == 2
+
+
+def test_hourly_patrol_summary_includes_refreshed_whitelist_evidence_from_current_hour(monkeypatch) -> None:
+    posted_payloads: list[dict] = []
+
+    async def fake_post_feishu_payload(_webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append(payload)
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, quiet_minutes=0)
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    first_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    first_at = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        first_run = db.get(Run, first_run_id)
+        first_report = db.scalar(select(Report).where(Report.run_id == first_run_id))
+        assert first_run is not None and first_report is not None
+        first_run.created_at = first_at
+        first_report.created_at = first_at
+        first_report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {"signature_ok": False, "reason": "legacy inconclusive signature result"},
+        }
+        db.commit()
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, first_run_id, schedule["id"]))[0]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        assert stored is not None
+        stored.created_at = first_at
+        stored.first_seen_at = first_at
+        stored.last_seen_at = first_at
+        db.commit()
+
+    second_run_id = create_report_for_schedule(schedule, grade="E", score=18, labels=["signature_interop_failed"])
+    second_at = datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        second_run = db.get(Run, second_run_id)
+        second_report = db.scalar(select(Report).where(Report.run_id == second_run_id))
+        assert second_run is not None and second_report is not None
+        second_run.created_at = second_at
+        second_report.created_at = second_at
+        second_report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid signature in thinking block",
+                "relay_request_id": "req_cross_hour_signature",
+                "completed_at": "2026-07-23T14:30:00+00:00",
+            },
+        }
+        db.commit()
+    repeated = asyncio.run(create_alerts_for_run(SessionLocal, second_run_id, schedule["id"]))[0]
+    assert repeated.id == alert.id
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)))
+
+    assert result["status"] == "sent"
+    assert result["alert_count"] == 1
+    assert len(posted_payloads) == 1
+    assert "Relay Request ID：req_cross_hour_signature" in posted_payloads[0]["content"]["text"]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        assert stored is not None
+        assert stored.notification_status == "sent"
 
 
 def test_hourly_patrol_summary_sends_one_message_for_all_channels(monkeypatch) -> None:
@@ -4897,8 +5466,45 @@ def test_hourly_patrol_summary_sends_one_message_for_all_channels(monkeypatch) -
         )
         assert setting_response.status_code == 200
 
-    first_run_id = create_report_for_schedule(first_schedule, grade="E", score=20, labels=["suspected_model_swap"])
+    first_run_id = create_report_for_schedule(first_schedule, grade="E", score=20, labels=["kiro_identity_leak"])
     second_run_id = create_report_for_schedule(second_schedule, grade="D", score=58, labels=["signature_interop_failed"])
+    with SessionLocal() as db:
+        first_report = db.scalar(select(Report).where(Report.run_id == first_run_id))
+        second_report = db.scalar(select(Report).where(Report.run_id == second_run_id))
+        assert first_report is not None and second_report is not None
+        first_report.evidence = {
+            "labels": ["kiro_identity_leak"],
+            "model_requests": [
+                {
+                    "key": "identity_self_report",
+                    "labels": ["kiro_identity_leak"],
+                    "channel_id": "third_party_demo",
+                    "channel_name": "Hourly Kiro Source",
+                    "message_id": "msg_hourly_kiro",
+                    "request_id": "req_hourly_kiro",
+                    "completed_at": "2026-07-23T14:30:00+00:00",
+                }
+            ],
+        }
+        second_report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid signature in thinking block",
+                "source_channel_id": "negative_sample",
+                "source_channel_name": "Hourly Signature Source",
+                "relay_channel_id": "anthropic_official",
+                "relay_channel_name": "Hourly Signature Relay",
+                "source_message_id": "msg_hourly_source",
+                "source_request_id": "req_hourly_source",
+                "relay_message_id": "msg_hourly_relay",
+                "relay_request_id": "req_hourly_relay",
+                "completed_at": "2026-07-23T14:31:00+00:00",
+            },
+        }
+        db.commit()
     first_alert = asyncio.run(create_alerts_for_run(SessionLocal, first_run_id, first_schedule["id"]))[0]
     second_alert = asyncio.run(create_alerts_for_run(SessionLocal, second_run_id, second_schedule["id"]))[0]
     now = datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)
@@ -4923,6 +5529,10 @@ def test_hourly_patrol_summary_sends_one_message_for_all_channels(monkeypatch) -
     assert "third_party_demo" in text_payload
     assert "negative_sample" in text_payload
     assert "异常 1" in text_payload
+    assert "Kiro 身份泄漏异常" in text_payload
+    assert "身份探针 Message ID：msg_hourly_kiro" in text_payload
+    assert "Thinking Signature 异常" in text_payload
+    assert "Relay Request ID：req_hourly_relay" in text_payload
     with SessionLocal() as db:
         stored = [db.get(ChannelAlert, first_alert.id), db.get(ChannelAlert, second_alert.id)]
         assert all(alert is not None and alert.notification_status == "sent" for alert in stored)
@@ -4932,6 +5542,130 @@ def test_hourly_patrol_summary_sends_one_message_for_all_channels(monkeypatch) -
 
     assert repeated["status"] == "skipped"
     assert len(posted_payloads) == 1
+
+
+def test_hourly_patrol_summary_whitelist_skips_historical_non_whitelist(monkeypatch) -> None:
+    posted_payloads: list[dict] = []
+
+    async def fake_post_feishu_payload(_webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append(payload)
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["protocol_mismatch"])
+    alert = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))[0]
+    created_at = datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        run = db.get(Run, run_id)
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert stored is not None and run is not None and report is not None
+        stored.notification_status = "failed"
+        stored.notification_error = "legacy send failure"
+        stored.created_at = created_at
+        run.created_at = created_at
+        report.created_at = created_at
+        db.commit()
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)))
+
+    assert result["status"] == "sent"
+    assert result["alert_count"] == 0
+    assert len(posted_payloads) == 1
+    assert "protocol_mismatch" not in posted_payloads[0]["content"]["text"]
+    with SessionLocal() as db:
+        stored = db.get(ChannelAlert, alert.id)
+        assert stored is not None
+        assert stored.notification_status == "skipped"
+        assert stored.notification_error == "不符合飞书即时告警白名单"
+        assert stored.notification_attempt_count == 0
+
+
+def test_hourly_patrol_summary_whitelist_failure_only_retries_eligible_alerts(monkeypatch) -> None:
+    async def fake_post_feishu_payload(_webhook_url, _payload):  # noqa: ANN001
+        raise RuntimeError("hourly feishu outage")
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        signature_schedule = create_patrol_schedule(client, channel_id="third_party_demo", quiet_minutes=0)
+        ordinary_schedule = create_patrol_schedule(client, channel_id="negative_sample", quiet_minutes=0)
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "alert_broadcast_enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+    signature_run_id = create_report_for_schedule(signature_schedule, grade="E", score=20, labels=["signature_interop_failed"])
+    ordinary_run_id = create_report_for_schedule(ordinary_schedule, grade="E", score=20, labels=["protocol_mismatch"])
+    with SessionLocal() as db:
+        signature_report = db.scalar(select(Report).where(Report.run_id == signature_run_id))
+        assert signature_report is not None
+        signature_report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid signature in thinking block",
+            },
+        }
+        db.commit()
+    signature_alert = asyncio.run(create_alerts_for_run(SessionLocal, signature_run_id, signature_schedule["id"]))[0]
+    ordinary_alert = asyncio.run(create_alerts_for_run(SessionLocal, ordinary_run_id, ordinary_schedule["id"]))[0]
+    created_at = datetime(2026, 7, 23, 14, 30, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        for alert_id, run_id in ((signature_alert.id, signature_run_id), (ordinary_alert.id, ordinary_run_id)):
+            alert = db.get(ChannelAlert, alert_id)
+            run = db.get(Run, run_id)
+            report = db.scalar(select(Report).where(Report.run_id == run_id))
+            assert alert is not None and run is not None and report is not None
+            alert.created_at = created_at
+            if alert_id == ordinary_alert.id:
+                alert.notification_status = "failed"
+                alert.notification_error = "legacy failure"
+            run.created_at = created_at
+            report.created_at = created_at
+        db.commit()
+
+    result = asyncio.run(send_hourly_patrol_summary(SessionLocal, now=datetime(2026, 7, 23, 15, 5, tzinfo=timezone.utc)))
+
+    assert result["status"] == "failed"
+    with SessionLocal() as db:
+        stored_signature = db.get(ChannelAlert, signature_alert.id)
+        stored_ordinary = db.get(ChannelAlert, ordinary_alert.id)
+        assert stored_signature is not None and stored_ordinary is not None
+        assert stored_signature.notification_status == "failed"
+        assert stored_signature.notification_attempt_count == 1
+        assert "hourly feishu outage" in (stored_signature.notification_error or "")
+        assert stored_ordinary.notification_status == "skipped"
+        assert stored_ordinary.notification_attempt_count == 0
+        assert stored_ordinary.notification_error == "不符合飞书即时告警白名单"
+
+
+def test_feishu_test_message_bypasses_alert_whitelist(monkeypatch) -> None:
+    posted_payloads: list[dict] = []
+
+    async def fake_post_feishu_payload(_webhook_url, payload):  # noqa: ANN001
+        posted_payloads.append(payload)
+
+    monkeypatch.setattr("app.services.post_feishu_payload", fake_post_feishu_payload)
+    reset_database()
+    with TestClient(app) as client:
+        client.patch(
+            "/api/settings/feishu-broadcast",
+            json={"enabled": True, "webhook_url": "https://open.feishu.cn/test"},
+        )
+        response = client.post("/api/settings/feishu-broadcast/test")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "sent"
+    assert len(posted_payloads) == 1
+    assert posted_payloads[0]["content"]["text"] == "哈喽"
 
 
 def test_hourly_patrol_summary_sends_normal_channel_without_alerts(monkeypatch) -> None:
@@ -5102,6 +5836,23 @@ def test_alert_notification_marks_failed_when_feishu_post_fails(monkeypatch) -> 
         assert setting_response.status_code == 200
 
     alerts = asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
+    with SessionLocal() as db:
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
+        assert report is not None
+        report.evidence = {
+            "labels": ["signature_interop_failed"],
+            "signature_interop": {
+                "signature_ok": False,
+                "error_http_status": 400,
+                "error_stage": "relay",
+                "raw_error": "Invalid signature in thinking block",
+            },
+        }
+        alert = db.get(ChannelAlert, alerts[0].id)
+        assert alert is not None
+        alert.notification_status = "pending"
+        alert.notification_error = None
+        db.commit()
     sent = asyncio.run(send_alert_notification(SessionLocal, alerts[0].id))
 
     assert len(alerts) == 1
@@ -12255,7 +13006,7 @@ def test_smart_patrol_daily_text_all_normal_is_compact() -> None:
     assert "重点渠道" not in text
 
 
-def test_scheduled_alert_notification_uses_error_message(monkeypatch) -> None:
+def test_scheduled_non_whitelist_alert_notification_uses_skip_reason(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     reset_database()
     with TestClient(app) as client:
@@ -12270,15 +13021,9 @@ def test_scheduled_alert_notification_uses_error_message(monkeypatch) -> None:
         text = feishu_text_payload(alert, db, setting)["content"]["text"] if alert else ""
 
     assert alert is not None
-    assert "评级" not in text
-    assert "得分" not in text
-    assert "错误：" in text
-    assert "异常标签：" in text
-    assert "渠道：Negative Sample（negative_sample）" in text
-    assert "模型：" in text
-    assert "Request ID：" in text
-    assert "上游响应 ID（Message ID）：" in text
-    assert "Result ID：" not in text
+    assert alert.notification_status == "skipped"
+    assert alert.notification_error == "不符合飞书即时告警白名单"
+    assert text == "不符合飞书即时告警白名单"
 
 
 def test_scheduled_alert_notification_uses_stable_patrol_channel_name(monkeypatch) -> None:
@@ -12303,8 +13048,22 @@ def test_scheduled_alert_notification_uses_stable_patrol_channel_name(monkeypatc
     run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["identity_mismatch"])
     with SessionLocal() as db:
         run = db.get(Run, run_id)
+        report = db.scalar(select(Report).where(Report.run_id == run_id))
         assert run is not None
+        assert report is not None
         run.name = "9407-ogog-claude - 自动巡检资源"
+        report.evidence = {
+            "labels": ["kiro_identity_leak"],
+            "model_requests": [
+                {
+                    "key": "identity_self_report",
+                    "labels": ["kiro_identity_leak"],
+                    "channel_id": "9407-tokenflow-claude",
+                    "message_id": "msg_kiro_stable_name",
+                    "request_id": "req_kiro_stable_name",
+                }
+            ],
+        }
         db.commit()
 
     asyncio.run(create_alerts_for_run(SessionLocal, run_id, schedule["id"]))
@@ -12315,9 +13074,8 @@ def test_scheduled_alert_notification_uses_stable_patrol_channel_name(monkeypatc
         text = feishu_text_payload(alert, db, setting)["content"]["text"] if alert else ""
 
     assert alert is not None
-    assert "渠道：9407-ogog-claude（9407-tokenflow-claude）" in text
-    assert "任务：9407-ogog-claude - 自动巡检资源" in text
-    assert "渠道：9407-ogog-claude-claude" not in text
+    assert "待测渠道：9407-ogog-claude（9407-tokenflow-claude）" in text
+    assert "9407-ogog-claude-claude" not in text
 
 
 def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
