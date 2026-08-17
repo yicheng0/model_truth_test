@@ -339,7 +339,13 @@ try {
 
   const sizeChanger = page.locator('.patrol-log-pagination .ant-select').first();
   await sizeChanger.click();
+  const pageSizeResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/runs/patrol' && url.searchParams.get('page_size') === '20';
+  });
   await page.getByText('20 条/页', { exact: true }).click();
+  await pageSizeResponse;
+  await page.waitForFunction(() => document.querySelectorAll('.patrol-log-table .ant-table-tbody > tr:not(.ant-table-measure-row)').length === 20);
   const twentyPageIds = await tableRows.allTextContents();
   assert.equal(twentyPageIds.length, 20, '选择 20 条/页后应显示 20 条日志');
 
