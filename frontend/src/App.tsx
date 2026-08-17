@@ -1,11 +1,10 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Layout, Typography } from 'antd';
-import { Activity, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, Database, DatabaseZap, Gauge, GitCompare, Layers, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare } from 'lucide-react';
+import { Activity, CalendarClock, ChevronLeft, ChevronRight, ClipboardList, DatabaseZap, Gauge, GitCompare, Layers, ListChecks, Network, Send, ShieldCheck, Settings2, TerminalSquare } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Channels = lazy(() => import('./pages/Channels'));
-const Baselines = lazy(() => import('./pages/Baselines'));
 const CreateRun = lazy(() => import('./pages/CreateRun'));
 const Runs = lazy(() => import('./pages/Runs'));
 const RunDetail = lazy(() => import('./pages/RunDetail'));
@@ -56,7 +55,6 @@ const navItems = [
   { key: '/gemini-resource-check', icon: ShieldCheck, label: 'Gemini 直连', to: '/gemini-resource-check' },
   { key: '/signature-interop', icon: ShieldCheck, label: 'Signature 检测', to: '/signature-interop' },
   { key: '/test-cases', icon: ClipboardList, label: '题目管理', to: '/test-cases' },
-  { key: '/baselines', icon: Database, label: '渠道指纹', to: '/baselines' },
   { key: '/scheduled-tests', icon: CalendarClock, label: '自动巡检', to: '/scheduled-tests' },
   { key: '/new-run', icon: ListChecks, label: '新建任务', to: '/new-run' },
   { key: '/runs', icon: GitCompare, label: '任务列表', to: '/runs' },
@@ -145,7 +143,6 @@ function Shell() {
               <Route path="/claude-code-check" element={<ClaudeCodeCheck />} />
               <Route path="/signature-interop" element={<SignatureInterop />} />
               <Route path="/test-cases" element={<TestCases />} />
-              <Route path="/baselines" element={<Baselines />} />
               <Route path="/scheduled-tests" element={<ScheduledTests />} />
               <Route path="/resource-log-management" element={<ResourceLogManagement />} />
               <Route path="/new-run" element={<CreateRun />} />

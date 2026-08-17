@@ -45,7 +45,7 @@ function resultCell(
   result: DisplayResult | undefined,
   attempts: number,
   baseline = false,
-  baselineLabel = '渠道指纹',
+  baselineLabel = '历史参考',
   onOpen?: () => void,
 ) {
   return (
@@ -539,7 +539,7 @@ export default function RunDetail() {
     setOutputDrawer({
       title,
       channelName: channel.name,
-      roleLabel: displayRoleLabel ?? (baseline ? '渠道指纹' : channel.role),
+      roleLabel: displayRoleLabel ?? (baseline ? '历史参考' : channel.role),
       caseTitle: `${caseItem.title} · ${caseItem.id}`,
       attemptIndex: result.attempt_index,
       score: result.score,
@@ -873,7 +873,7 @@ export default function RunDetail() {
             ) : (
               <>
                 <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
-                <Descriptions.Item label={isSamplingRun ? '渠道指纹' : '渠道指纹'}>{data.baseline_snapshot?.name ?? (isSamplingRun ? '指纹提取中' : '本次同步对比')}</Descriptions.Item>
+                <Descriptions.Item label="参考数据">{data.baseline_snapshot?.name ?? (isSamplingRun ? '历史参考采集中' : '本次同步对比')}</Descriptions.Item>
                 <Descriptions.Item label="已返回题目">{returnedRows} / {expectedRows}</Descriptions.Item>
                 {isSamplingRun ? (
                   <Descriptions.Item label="指纹源渠道">{sampleChannels.length}</Descriptions.Item>
@@ -1067,7 +1067,7 @@ export default function RunDetail() {
             <Typography.Paragraph>
               {isSamplingRun
                 ? '每道题按执行顺序展示指纹源渠道的返回、评分和延迟。运行中每 1.8 秒自动刷新。'
-                : '每道题按执行顺序展示渠道指纹与待测渠道的返回、评分、延迟和相似度。运行中每 1.8 秒自动刷新。'}
+                : '每道题按执行顺序展示参考渠道与待测渠道的返回、评分、延迟和相似度。运行中每 1.8 秒自动刷新。'}
             </Typography.Paragraph>
           </div>
           <Tag color={data.run.status === 'running' ? 'processing' : 'default'} icon={data.run.status === 'running' ? <Clock3 size={14} /> : undefined}>
@@ -1098,10 +1098,10 @@ export default function RunDetail() {
         ) : (
           <div className="channel-pair-grid">
             <div className="channel-pair-card official">
-              <span><ShieldCheck size={16} />{data.baseline_snapshot ? '渠道指纹' : '指纹源渠道'}</span>
+              <span><ShieldCheck size={16} />{data.baseline_snapshot ? '历史参考渠道' : '参考渠道'}</span>
               <Select
                 value={selectedOfficialId || undefined}
-                placeholder={data.baseline_snapshot ? '选择渠道指纹来源' : '选择指纹源渠道'}
+                placeholder={data.baseline_snapshot ? '选择历史参考来源' : '选择参考渠道'}
                 onChange={setSelectedOfficialId}
                 options={officialChannels.map((channel) => ({ value: channel.id, label: formatChannelDisplayName(channel) }))}
               />
@@ -1127,9 +1127,9 @@ export default function RunDetail() {
         )}
 
         {isSamplingRun && !selectedSampleChannel ? (
-          <Empty description="请先在提取渠道指纹时选择可用指纹源渠道" />
+          <Empty description="该历史参考采集任务没有可用参考渠道" />
         ) : !isSamplingRun && (!selectedOfficial || !selectedCandidate) ? (
-          <Empty description="请先选择可用渠道指纹，并至少选择一个待测渠道" />
+          <Empty description="请至少选择一个参考渠道和一个待测渠道" />
         ) : (
           <Table
             className="live-monitor-table"
@@ -1174,7 +1174,7 @@ export default function RunDetail() {
                     <div className="ab-compare-grid">
                       <section className="response-panel official">
                         <div className="response-panel-head">
-                          <span><ShieldCheck size={16} />{data.baseline_snapshot ? '渠道指纹' : '指纹源渠道'}</span>
+                          <span><ShieldCheck size={16} />{data.baseline_snapshot ? '历史参考渠道' : '参考渠道'}</span>
                           <Tag color="gold">{selectedOfficial?.name ?? '未选择渠道'}</Tag>
                         </div>
                         <div className="response-meta">
@@ -1274,12 +1274,12 @@ export default function RunDetail() {
                 ),
               },
               {
-                title: '渠道指纹数据',
+                title: '参考渠道数据',
                 width: 330,
                 render: (_, row) =>
-                  resultCell(selectedOfficial, row.official, row.officialAttempts, Boolean(data.baseline_snapshot), '渠道指纹', () =>
+                  resultCell(selectedOfficial, row.official, row.officialAttempts, Boolean(data.baseline_snapshot), '历史参考', () =>
                     openOutputDrawer(
-                      data.baseline_snapshot ? '渠道指纹输出' : '指纹源输出',
+                      data.baseline_snapshot ? '历史参考输出' : '参考渠道输出',
                       selectedOfficial,
                       row.official,
                       row.caseItem,
@@ -1291,7 +1291,7 @@ export default function RunDetail() {
                 title: '待测渠道数据',
                 width: 330,
                 render: (_, row) =>
-                  resultCell(selectedCandidate, row.candidate, row.candidateAttempts, false, '渠道指纹', () =>
+                  resultCell(selectedCandidate, row.candidate, row.candidateAttempts, false, '参考渠道', () =>
                     openOutputDrawer('待测输出', selectedCandidate, row.candidate, row.caseItem, false, '待测渠道'),
                   ),
               },

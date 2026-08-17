@@ -28,7 +28,7 @@ function responseText(value?: ReportComparePredictionCell | null) {
 }
 
 function modeLabel(mode: RunMode | string) {
-  if (mode === 'baseline_build') return '渠道指纹分析';
+  if (mode === 'baseline_build') return '历史参考采集分析';
   return '真实性报告对比';
 }
 

@@ -5,7 +5,7 @@ import { useAdminAccess } from "../adminAccess";
 import { Section } from "../components/Section";
 
 const weights = [
-  ["渠道指纹一致性", 25],
+  ["参考渠道一致性", 25],
   ["云参考一致性", 15],
   ["协议结构可信度", 15],
   ["流式响应一致性", 8],

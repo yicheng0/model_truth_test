@@ -142,7 +142,7 @@ export function labelDescription(label: string, report?: RunResults['reports'][n
 }
 
 export function runModeLabel(mode?: RunMode | string) {
-  if (mode === 'baseline_build') return '渠道指纹提取';
+  if (mode === 'baseline_build') return '历史参考采集';
   if (mode === 'manual_probe') return '模型请求探针';
   return '真实性对比';
 }
