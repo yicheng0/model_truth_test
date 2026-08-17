@@ -1,7 +1,5 @@
 import type {
-  BaselineResult,
   BaselineBuildCreate,
-  BaselineSnapshot,
   Channel,
   ChannelDeleteResult,
   ChannelHealthProfile,
@@ -266,13 +264,7 @@ export const api = {
   runSummary: (runId: string) => request<RunSummary>(`/api/runs/${runId}/summary`),
   startRun: (payload: RunCreate) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(payload) }),
   samplePlan: (payload: SamplePlanCreate) => request<SamplePlan>('/api/runs/sample-plan', { method: 'POST', body: JSON.stringify(payload) }),
-  baselines: (suiteId?: string) => request<BaselineSnapshot[]>(suiteId ? `/api/baselines?suite_id=${encodeURIComponent(suiteId)}` : '/api/baselines'),
-  baseline: (id: string) => request<BaselineSnapshot>(`/api/baselines/${id}`),
-  baselineResults: (id: string) => request<BaselineResult[]>(`/api/baselines/${id}/results`),
   buildBaseline: (payload: BaselineBuildCreate) => request<Run>('/api/baselines/build', { method: 'POST', body: JSON.stringify(payload) }),
-  validateBaseline: (id: string) => request<BaselineSnapshot>(`/api/baselines/${id}/validate`, { method: 'POST' }),
-  updateBaseline: (id: string, payload: { name: string }) => request<BaselineSnapshot>(`/api/baselines/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-  deleteBaseline: (id: string) => request<{ deleted: boolean }>(`/api/baselines/${id}`, { method: 'DELETE', headers: adminHeaders() }),
   scheduledTests: () => request<ScheduledChannelTest[]>('/api/scheduled-tests'),
   scheduledTestsHealth: async () => {
     try {

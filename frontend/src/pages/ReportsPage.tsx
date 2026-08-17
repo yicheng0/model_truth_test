@@ -27,7 +27,7 @@ const modeOptions: Array<{ value: RunMode | 'all'; label: string }> = [
   { value: 'all', label: '全部报告类型' },
   { value: 'candidate_eval', label: '真实性报告' },
   { value: 'full_comparison', label: '同步对比报告' },
-  { value: 'baseline_build', label: '渠道指纹报告' },
+  { value: 'baseline_build', label: '历史参考采集报告' },
 ];
 
 const gradeOptions = ['A', 'B', 'C', 'D', 'E'] as const;
@@ -203,7 +203,7 @@ export default function ReportsPage() {
           <Typography.Text className="section-kicker">REPORT CENTER</Typography.Text>
           <Typography.Title level={2}>报告页</Typography.Title>
           <Typography.Paragraph>
-            汇总真实性对比和渠道指纹报告。同一类型的 2-3 份报告可以进入横向分析。
+            汇总真实性对比和历史参考采集报告。同一类型的 2-3 份报告可以进入横向分析。
           </Typography.Paragraph>
         </div>
         <Button type="primary" icon={<GitCompare size={16} />} disabled={!canCompare} onClick={compareSelected}>
@@ -218,11 +218,11 @@ export default function ReportsPage() {
       <section className="metric-strip">
         <div><span>报告数</span><strong>{data.length}</strong></div>
         <div><span>真实性报告</span><strong>{data.filter((item) => item.mode === 'candidate_eval' || item.mode === 'full_comparison').length}</strong></div>
-        <div><span>渠道指纹</span><strong>{data.filter((item) => item.mode === 'baseline_build').length}</strong></div>
+        <div><span>历史参考采集</span><strong>{data.filter((item) => item.mode === 'baseline_build').length}</strong></div>
       </section>
 
       {selectedRowKeys.length >= 2 && selectedModes.length > 1 ? (
-        <Alert type="warning" showIcon message="已选择不同类型报告" description="真实性报告和渠道指纹报告的指标含义不同，请只选择同一类型报告进行分析。" />
+        <Alert type="warning" showIcon message="已选择不同类型报告" description="真实性报告和历史参考采集报告的指标含义不同，请只选择同一类型报告进行分析。" />
       ) : null}
 
       <section className="metric-strip">

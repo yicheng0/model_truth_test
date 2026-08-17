@@ -58,14 +58,14 @@ function compactId(value: unknown) {
 }
 
 function modeLabel(mode: RunMode) {
-  if (mode === 'baseline_build') return '渠道指纹报告';
+  if (mode === 'baseline_build') return '历史参考采集报告';
   if (mode === 'manual_probe') return '单次探测报告';
   return '真实性对比报告';
 }
 
 function modeDescription(mode: RunMode) {
   if (mode === 'baseline_build') return '官方或参考渠道的指纹采集结果，用于后续真实性对比。';
-  return '基于渠道指纹、协议字段、输出相似度和样本证据形成的真实性判断。';
+  return '基于参考渠道、协议字段、输出相似度和样本证据形成的真实性判断。';
 }
 
 export default function ReportDetailPage() {

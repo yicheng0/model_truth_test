@@ -4,7 +4,6 @@ import { Link } from 'react-router-dom';
 import {
   BarChart3,
   CalendarClock,
-  Database,
   Network,
   PlayCircle,
   Send,
@@ -15,17 +14,17 @@ import { api, getErrorMessage } from '../api';
 const workflowSteps = [
   {
     title: '配置渠道',
-    description: '录入 Base URL、模型名和 API Key，标记哪些是指纹源，哪些是待测渠道。',
+    description: '录入 Base URL、模型名和 API Key，标记参考渠道与待测渠道。',
     to: '/channels',
     action: '去配置',
     icon: Network,
   },
   {
-    title: '维护渠道指纹',
-    description: '管理可信渠道生成的指纹基线，作为后续渠道真实性判断的参考资产。',
-    to: '/baselines',
-    action: '看指纹',
-    icon: Database,
+    title: '发起真实性对比',
+    description: '在同一次任务中选择参考渠道和待测渠道，直接生成差异证据。',
+    to: '/new-run',
+    action: '新建任务',
+    icon: PlayCircle,
   },
   {
     title: '查看检测报告',
@@ -45,30 +44,27 @@ const workflowSteps = [
 
 const featureLinks = [
   { title: '渠道管理', description: '维护渠道、协议、模型和密钥。', to: '/channels', icon: Network },
-  { title: '渠道指纹', description: '管理已经生成的基线指纹。', to: '/baselines', icon: Database },
   { title: '模型请求', description: '向单个渠道发真实请求，查看 message id 和原始响应。', to: '/model-request-test', icon: Send },
   { title: 'Signature 检测', description: '验证 thinking signature 跨渠道复用行为。', to: '/signature-interop', icon: ShieldCheck },
   { title: '自动巡检', description: '为候选渠道设置周期检测和告警。', to: '/scheduled-tests', icon: CalendarClock },
-  { title: '新建任务', description: '创建真实性对比或指纹提取任务。', to: '/new-run', icon: PlayCircle },
+  { title: '新建任务', description: '选择参考渠道与待测渠道，创建真实性对比任务。', to: '/new-run', icon: PlayCircle },
 ];
 
 export default function Dashboard() {
   const channels = useQuery({ queryKey: ['channels'], queryFn: api.channels });
-  const baselines = useQuery({ queryKey: ['baselines'], queryFn: () => api.baselines() });
   const reports = useQuery({ queryKey: ['reports'], queryFn: api.reports });
 
   const enabledChannels = channels.data?.filter((channel) => channel.enabled).length ?? 0;
   const referenceChannels = channels.data?.filter((channel) => channel.is_reference).length ?? 0;
-  const readyBaselines = baselines.data?.filter((baseline) => baseline.status === 'ready').length ?? 0;
 
   return (
     <Space direction="vertical" size={24} className="page-stack">
-      {channels.isError || baselines.isError || reports.isError ? (
+      {channels.isError || reports.isError ? (
         <Alert
           type="error"
           showIcon
           message="总览数据加载失败"
-          description={getErrorMessage(channels.error ?? baselines.error ?? reports.error)}
+          description={getErrorMessage(channels.error ?? reports.error)}
         />
       ) : null}
 
@@ -77,7 +73,7 @@ export default function Dashboard() {
           <Typography.Text className="section-kicker">APIPRO RELAY EVAL</Typography.Text>
           <Typography.Title>渠道真实性测评工作台</Typography.Title>
           <Typography.Paragraph>
-            这里聚合渠道配置、渠道指纹和报告结论。先确认渠道信息，再维护可信指纹资产，最后复核渠道评分、异常标签和诊断结论。
+            这里聚合渠道配置、真实性对比和报告结论。先确认渠道信息，再发起参考渠道与待测渠道的同步检测，最后复核评分、异常标签和诊断结论。
           </Typography.Paragraph>
         </div>
         <div className="overview-actions">
@@ -93,8 +89,7 @@ export default function Dashboard() {
       <section className="metric-strip overview-metrics">
         <div><span>已配置渠道</span><strong>{channels.data?.length ?? 0}</strong></div>
         <div><span>可用渠道</span><strong>{enabledChannels}</strong></div>
-        <div><span>指纹源渠道</span><strong>{referenceChannels}</strong></div>
-        <div><span>Ready 指纹</span><strong>{readyBaselines}</strong></div>
+        <div><span>参考渠道</span><strong>{referenceChannels}</strong></div>
         <div><span>报告数量</span><strong>{reports.data?.length ?? 0}</strong></div>
       </section>
 
@@ -126,7 +121,7 @@ export default function Dashboard() {
           <div>
             <Typography.Text className="section-kicker">FEATURES</Typography.Text>
             <Typography.Title level={2}>核心功能</Typography.Title>
-            <Typography.Paragraph>常用能力集中在这里，首页只保留渠道、指纹和报告的概览信息。</Typography.Paragraph>
+            <Typography.Paragraph>常用能力集中在这里，首页只保留渠道、检测和报告的概览信息。</Typography.Paragraph>
           </div>
         </div>
         <div className="overview-feature-grid">

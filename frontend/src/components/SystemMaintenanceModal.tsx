@@ -124,12 +124,12 @@ function SystemMaintenanceBody({
           type="warning"
           showIcon
           message="清理只删除已结束任务的日志数据"
-          description="渠道、测试集、自动巡检配置和渠道指纹会保留。被渠道指纹引用的任务不会被清理。"
+          description="渠道、测试集、自动巡检配置和历史参考基线会保留。被历史参考基线引用的任务不会被清理。"
         />
         <Space wrap>
           <Popconfirm
             title="清理已结束日志"
-            description="会删除已完成、失败、取消和中断的任务日志；运行中任务和渠道指纹引用任务会保留。"
+            description="会删除已完成、失败、取消和中断的任务日志；运行中任务和历史参考基线引用任务会保留。"
             okText="确认清理"
             cancelText="返回"
             onConfirm={() => cleanup.mutate()}
