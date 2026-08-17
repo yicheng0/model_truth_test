@@ -95,11 +95,17 @@ def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: st
     model_requests = evidence.get("model_requests") if isinstance(evidence.get("model_requests"), list) else []
     if not model_requests and isinstance(evidence.get("model_request"), dict):
         model_requests = [evidence["model_request"]]
+    def json_summary(item: dict[str, Any]) -> str:
+        if item.get("key") != "identity_blind_json":
+            return "-"
+        fields = item.get("identity_json_fields") if isinstance(item.get("identity_json_fields"), dict) else {}
+        values = "; ".join(f"{key}={fields.get(key) if fields.get(key) else '空'}" for key in ("vendor", "product", "model"))
+        return f"{item.get('identity_json_status') or '-'} / {item.get('identity_json_format') or '-'}；{values}"
     model_rows = "\n".join(
-        f"| {_scheduled_probe_display_title(item)} | {item.get('channel_name') or '-'} ({item.get('channel_id') or '-'}) | {_probe_status_text(item)} | {item.get('completed_at') or item.get('created_at') or '-'} | {item.get('response_id') or item.get('message_id') or '-'} | {item.get('request_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
+        f"| {_scheduled_probe_display_title(item)} | {item.get('channel_name') or '-'} ({item.get('channel_id') or '-'}) | {_probe_status_text(item)} | {json_summary(item)} | {item.get('completed_at') or item.get('created_at') or '-'} | {item.get('response_id') or item.get('message_id') or '-'} | {item.get('request_id') or '-'} | {item.get('request_protocol') or '-'} | {item.get('provider_endpoint') or '-'} | {', '.join(item.get('labels') or []) or '-'} | {item.get('error') or '-'} |"
         for item in model_requests
         if isinstance(item, dict)
-    ) or "| - | - | - | - | - | - | - | - | - | - |"
+    ) or "| - | - | - | - | - | - | - | - | - | - | - |"
     signature = evidence.get("signature_interop") or {}
     signature_time = signature.get("completed_at") or signature.get("created_at") or evidence.get("completed_at") or "-"
     identity_request = next(
@@ -141,8 +147,8 @@ def scheduled_probe_markdown(channel: Any, score: float, grade: str, summary: st
 
 ## 真实模型请求
 
-| 探针 | 渠道 | 状态 | 时间 | 上游响应 ID（Message ID） | Request ID | 请求协议 | Provider endpoint | 标签 | 错误 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 探针 | 渠道 | 状态 | JSON 解析 | 时间 | 上游响应 ID（Message ID） | Request ID | 请求协议 | Provider endpoint | 标签 | 错误 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 {model_rows}
 
 {ai_judge_section}
@@ -193,7 +199,17 @@ def _probe_status_text(item: dict[str, Any]) -> str:
     if operational_label == PROVIDER_REQUEST_FAILED_LABEL:
         return "检测失败"
     if "kiro_identity_leak" in labels:
+        if "identity_json_extra_text" in labels:
+            return "Kiro 身份泄漏（含额外文字）"
         return "Kiro 身份泄漏"
+    if "identity_probe_contaminated" in labels:
+        return "请求污染"
+    if "identity_json_refused" in labels:
+        return "身份拒答"
+    if "identity_json_invalid" in labels:
+        return "格式异常"
+    if "identity_json_extra_text" in labels:
+        return "格式偏差"
     if labels == {"identity_uncertain"}:
         return "身份待确认"
     if labels.intersection({"provider_error_variant"}) or _probe_parameter_unsupported(item):
@@ -238,6 +254,17 @@ def scheduled_probe_classification(
     label_set = set(labels)
     normalized_score = _safe_float(score)
     if "kiro_identity_leak" in label_set:
+        identity_request = next(
+            (item for item in model_requests if "kiro_identity_leak" in set(item.get("labels") or [])),
+            None,
+        )
+        if identity_request and str(identity_request.get("key") or "") == "identity_blind_json":
+            return {
+                "status": "anomaly",
+                "label": "疑似 Kiro 路由或隐藏人格注入",
+                "reason": "无品牌结构化探针在指定 JSON 字段中主动泄漏 Kiro，作为疑似路由或隐藏人格注入的高风险证据；结论需结合协议与行为证据复核。",
+                "score": 0,
+            }
         return {
             "status": "anomaly",
             "label": "疑似 Kiro 路由混入",
@@ -245,6 +272,17 @@ def scheduled_probe_classification(
             "score": 0,
         }
     if "identity_mismatch" in label_set:
+        identity_request = next(
+            (item for item in model_requests if "identity_mismatch" in set(item.get("labels") or [])),
+            None,
+        )
+        if identity_request and str(identity_request.get("key") or "") == "identity_blind_json":
+            return {
+                "status": "anomaly",
+                "label": "无品牌结构化身份不一致",
+                "reason": "无品牌结构化探针在指定 JSON 字段中主动给出明确的其他产品或厂商身份，作为身份异常证据进入复审。",
+                "score": min(normalized_score, 40),
+            }
         return {
             "status": "anomaly",
             "label": "身份自报不一致",

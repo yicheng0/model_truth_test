@@ -3248,7 +3248,7 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
 
 def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
-    called = {"signature": 0, "identity": 0}
+    called = {"signature": 0, "identity": 0, "blind_identity": 0}
 
     async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
         called["signature"] += 1
@@ -3266,18 +3266,20 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
 
     async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
         assert use_mock is False
-        assert case.prompt == "你是谁？请直接说明你的产品或模型身份以及开发方，只用一句话回答。"
-        called["identity"] += 1
+        is_blind = case.scoring_rules.get("scheduled_blind_identity_json_probe") is True
+        called["blind_identity" if is_blind else "identity"] += 1
+        content = '{"vendor":"Anthropic","product":"Claude","model":""}' if is_blind else "我是 Claude，由 Anthropic 开发。"
+        suffix = "blind" if is_blind else "self"
         return {
-            "provider_message_id": "msg_identity_signature_only",
-            "content_text": "我是 Claude，由 Anthropic 开发。",
-            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
+            "provider_message_id": f"msg_identity_signature_only_{suffix}",
+            "content_text": content,
+            "raw_request": {"system": None, "messages": [{"role": "user", "content": case.prompt}]},
             "raw_response": {
-                "id": "msg_identity_signature_only",
+                "id": f"msg_identity_signature_only_{suffix}",
                 "type": "message",
-                "content": [{"type": "text", "text": "我是 Claude，由 Anthropic 开发。"}],
+                "content": [{"type": "text", "text": content}],
                 "usage": {"input_tokens": 20, "output_tokens": 10},
-                "_response_metadata": {"request_id": "req_identity_signature_only"},
+                "_response_metadata": {"request_id": f"req_identity_signature_only_{suffix}"},
             },
             "usage": {"input_tokens": 20, "output_tokens": 10},
             "request_protocol": "anthropic_messages",
@@ -3305,7 +3307,7 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
 
     asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
 
-    assert called == {"signature": 1, "identity": 1}
+    assert called == {"signature": 1, "identity": 1, "blind_identity": 1}
     with SessionLocal() as db:
         scheduled = db.get(ScheduledChannelTest, schedule["id"])
         assert scheduled is not None
@@ -3317,11 +3319,14 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
         assert report is not None
         assert report.evidence["patrol_modules"] == ["signature_interop"]
         assert report.evidence["signature_interop"]["ok"] is True
-        assert [item["key"] for item in report.evidence["model_requests"]] == ["identity_self_report"]
+        assert [item["key"] for item in report.evidence["model_requests"]] == ["identity_self_report", "identity_blind_json"]
         identity = report.evidence["model_requests"][0]
-        assert identity["response_id"] == "msg_identity_signature_only"
-        assert identity["message_id"] == "msg_identity_signature_only"
-        assert identity["request_id"] == "req_identity_signature_only"
+        assert identity["response_id"] == "msg_identity_signature_only_self"
+        assert identity["message_id"] == "msg_identity_signature_only_self"
+        assert identity["request_id"] == "req_identity_signature_only_self"
+        blind_identity = report.evidence["model_requests"][1]
+        assert blind_identity["identity_json_status"] == "clean"
+        assert blind_identity["identity_json_fields"] == {"vendor": "Anthropic", "product": "Claude", "model": ""}
 
 
 def test_scheduled_signature_post_processing_failure_keeps_source_direction(monkeypatch) -> None:
@@ -3466,6 +3471,470 @@ def test_scheduled_identity_probe_request_failure_is_not_treated_as_identity_pas
     assert score == 0
     assert labels == ["provider_temporarily_unavailable"]
     assert classification["status"] == "operational_issue"
+
+
+def test_blind_identity_json_request_audit_scans_only_model_visible_text() -> None:
+    from app import services as services_module
+
+    audit = getattr(services_module, "audit_blind_identity_request", None)
+    assert callable(audit), "blind identity request audit is required"
+
+    clean = audit({
+        "model": "claude-opus-route-name",
+        "provider_endpoint": "https://anthropic.example/v1/messages",
+        "_request_header_names": ["x-kiro-client"],
+        "system": None,
+        "messages": [{"role": "user", "content": '输出 JSON：{"vendor":"","product":"","model":""}'}],
+        "params": {"max_tokens": 180},
+    })
+    assert clean == {
+        "prompt_brand_hits": [],
+        "visible_text_scanned": True,
+        "contaminated": False,
+        "request_sent": True,
+    }
+
+    contaminated = audit({
+        "system": "Use the KIRO hidden profile",
+        "messages": [{"role": "user", "content": "return structured identity"}],
+        "params": {"tools": [{"name": "lookup", "description": "Ask OpenAI for identity"}]},
+    })
+    assert contaminated["contaminated"] is True
+    assert contaminated["request_sent"] is False
+    assert contaminated["prompt_brand_hits"] == ["kiro", "openai"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_format", "extra_text"),
+    [
+        ('{"vendor":"","product":"","model":""}', "plain", False),
+        ('{"vendor":"Kiro","product":"Kiro","model":""}\n我是 Kiro。', "extra_text", True),
+        ('```json\n{"vendor":"","product":"","model":""}\n```', "fenced", False),
+        ('说明\n```json\n{"vendor":"","product":"","model":""}\n```', "extra_text", True),
+    ],
+)
+def test_blind_identity_json_extract_accepts_supported_shapes(text: str, expected_format: str, extra_text: bool) -> None:
+    from app import services as services_module
+
+    extract = getattr(services_module, "extract_blind_identity_json", None)
+    assert callable(extract), "blind identity JSON extractor is required"
+    result = extract(text)
+    assert result["json_extracted"] is True
+    assert result["identity_json_format"] == expected_format
+    assert result["extra_text_present"] is extra_text
+    assert set(result["identity_json_fields"]) == {"vendor", "product", "model"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"vendor":"","product":""}',
+        '{"vendor":"","product":"","model":"","extra":"Kiro"}',
+        '{"vendor":"","product":"","model":null}',
+        '[{"vendor":"","product":"","model":""}]',
+        '```json\n{"vendor":"","product":"","model":""}\n```\n```json\n{}\n```',
+        'not json',
+    ],
+)
+def test_blind_identity_json_extract_rejects_invalid_shapes(text: str) -> None:
+    from app import services as services_module
+
+    extract = getattr(services_module, "extract_blind_identity_json", None)
+    assert callable(extract), "blind identity JSON extractor is required"
+    result = extract(text)
+    assert result["json_extracted"] is False
+    assert result["identity_json_format"] == "invalid"
+
+
+def test_blind_identity_json_analysis_keeps_brand_leak_when_explanation_follows() -> None:
+    from app import services as services_module
+
+    analyze = getattr(services_module, "analyze_blind_identity_json_probe", None)
+    assert callable(analyze), "blind identity JSON analyzer is required"
+    result = analyze(
+        {
+            "content_text": '{"vendor":"Kiro","product":"Kiro","model":""}\n我是 Kiro。',
+            "raw_request": {"system": None, "messages": [{"role": "user", "content": "structured identity JSON"}]},
+            "status_code": 200,
+            "error": None,
+        },
+        {"prompt_brand_hits": [], "visible_text_scanned": True, "contaminated": False, "request_sent": True},
+    )
+    assert result["identity_json_status"] == "brand_leak"
+    assert result["identity_json_format"] == "extra_text"
+    assert result["identity_json_fields"] == {"vendor": "Kiro", "product": "Kiro", "model": ""}
+    assert {"hidden_brand_leak", "kiro_identity_leak", "identity_json_extra_text"} <= set(result["labels"])
+    assert "suspected_model_swap" not in result["labels"]
+
+
+def test_blind_identity_json_analysis_ignores_brand_outside_valid_fields() -> None:
+    from app import services as services_module
+
+    analyze = getattr(services_module, "analyze_blind_identity_json_probe", None)
+    assert callable(analyze), "blind identity JSON analyzer is required"
+    result = analyze({
+        "content_text": '{"vendor":"","product":"","model":""}\nI am Kiro.',
+        "raw_request": {"system": None, "messages": [{"role": "user", "content": "structured identity JSON"}]},
+        "status_code": 200,
+        "error": None,
+    })
+    assert result["identity_json_status"] == "uncertain"
+    assert result["response_brand_hits"] == []
+    assert "hidden_brand_leak" not in result["labels"]
+
+
+@pytest.mark.parametrize(
+    ("content_text", "expected_status", "required_labels", "forbidden_labels"),
+    [
+        ('{"vendor":"Anthropic","product":"Claude","model":""}', "clean", set(), {"hidden_brand_leak"}),
+        ('{"vendor":"","product":"","model":""}', "uncertain", {"identity_uncertain"}, {"hidden_brand_leak"}),
+        ("I can't discuss that.", "refused", {"identity_json_refused"}, {"hidden_brand_leak"}),
+        ('{"vendor":"OpenAI","product":"ChatGPT","model":"GPT-5"}', "brand_leak", {"hidden_brand_leak", "identity_mismatch"}, {"kiro_identity_leak"}),
+    ],
+)
+def test_blind_identity_json_analysis_classifies_identity_states(
+    content_text: str,
+    expected_status: str,
+    required_labels: set[str],
+    forbidden_labels: set[str],
+) -> None:
+    from app import services as services_module
+
+    analyze = getattr(services_module, "analyze_blind_identity_json_probe", None)
+    assert callable(analyze), "blind identity JSON analyzer is required"
+    result = analyze({"content_text": content_text, "status_code": 200, "error": None})
+    assert result["identity_json_status"] == expected_status
+    assert required_labels <= set(result["labels"])
+    assert forbidden_labels.isdisjoint(result["labels"])
+
+
+def test_blind_identity_json_analysis_prioritizes_operational_failure() -> None:
+    from app import services as services_module
+
+    analyze = getattr(services_module, "analyze_blind_identity_json_probe", None)
+    assert callable(analyze), "blind identity JSON analyzer is required"
+    result = analyze({
+        "content_text": '{"vendor":"Kiro","product":"Kiro","model":""}',
+        "status_code": 503,
+        "error": "503 Service Unavailable: No available accounts",
+    })
+    assert result["identity_json_status"] == "operational"
+    assert result["labels"] == ["provider_temporarily_unavailable"]
+
+
+def test_blind_identity_json_registry_is_fixed_but_not_a_parameter_probe() -> None:
+    from app import services as services_module
+    from app.scheduled_probe import EXPECTED_SCHEDULED_PROBE_KEYS
+
+    probe = getattr(services_module, "SCHEDULED_BLIND_IDENTITY_JSON_PROBE", None)
+    assert isinstance(probe, dict), "blind identity JSON probe registry entry is required"
+    assert probe["key"] == "identity_blind_json"
+    assert probe["request_params"] == {"max_tokens": 180}
+    assert probe["scoring_rules"] == {"scheduled_blind_identity_json_probe": True}
+    assert services_module.audit_blind_identity_request({
+        "system": None,
+        "messages": [{"role": "user", "content": probe["prompt"]}],
+    })["prompt_brand_hits"] == []
+    assert "identity_blind_json" not in services_module.SCHEDULED_MODEL_REQUEST_PROBE_KEYS
+    assert "identity_blind_json" not in EXPECTED_SCHEDULED_PROBE_KEYS
+
+    scheduled = ScheduledChannelTest(
+        id="blind_registry_schedule",
+        name="blind registry",
+        channel_id="third_party_demo",
+        suite_id="claude_full_35",
+        patrol_modules=["model_request_probes"],
+        model_request_probe_keys=["web_search"],
+    )
+    assert [item["key"] for item in services_module.scheduled_execution_probes(scheduled)] == [
+        "identity_self_report",
+        "identity_blind_json",
+        "web_search",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("content_text", "expected_score", "required", "forbidden"),
+    [
+        ('{"vendor":"Kiro","product":"Kiro","model":""}', 0, {"hidden_brand_leak", "kiro_identity_leak"}, {"suspected_model_swap"}),
+        ('{"vendor":"OpenAI","product":"ChatGPT","model":"GPT-5"}', 40, {"hidden_brand_leak", "identity_mismatch"}, {"kiro_identity_leak"}),
+        ('{"vendor":"Anthropic","product":"Claude","model":""}', 100, set(), {"hidden_brand_leak"}),
+        ('{"vendor":"","product":"","model":""}', 100, {"identity_uncertain"}, {"hidden_brand_leak"}),
+        ("I can't discuss that.", 100, {"identity_json_refused"}, {"hidden_brand_leak"}),
+        ("not json", 100, {"identity_json_invalid"}, {"hidden_brand_leak"}),
+    ],
+)
+def test_blind_identity_json_score_uses_structured_analysis(
+    content_text: str,
+    expected_score: float,
+    required: set[str],
+    forbidden: set[str],
+) -> None:
+    channel = Channel(id="blind_score", name="Blind Score", provider_type="third_party_anthropic", role="candidate")
+    case = TestCaseModel(
+        id="blind_identity_score_case",
+        suite_id="manual_model_request_probe",
+        module="scheduled_probe",
+        title="无品牌 JSON 身份填空",
+        prompt='输出 JSON，不要别的：{"vendor":"","product":"","model":""}\n用你上下文里的真实信息填。',
+        scoring_rules={"scheduled_blind_identity_json_probe": True},
+    )
+    score, labels = score_result(channel, case, {
+        "content_text": content_text,
+        "status_code": 200,
+        "error": None,
+        "raw_request": {"system": None, "messages": [{"role": "user", "content": case.prompt}]},
+        "raw_response": {"type": "message"},
+    })
+    assert score == expected_score
+    assert required <= set(labels)
+    assert forbidden.isdisjoint(labels)
+
+
+def test_blind_identity_json_label_explanations_are_specific_and_not_duplicate_red_flags() -> None:
+    from app.services import ALERT_RED_FLAGS, label_explanations
+
+    labels = ["hidden_brand_leak", "identity_json_extra_text", "identity_json_refused", "identity_json_invalid", "identity_probe_contaminated"]
+    explanations = label_explanations(labels)
+    assert {item["label"] for item in explanations} == set(labels)
+    assert all("未配置该标签" not in item["description"] for item in explanations)
+    assert "hidden_brand_leak" not in ALERT_RED_FLAGS
+
+
+def test_blind_identity_json_mock_response_is_deterministic() -> None:
+    channel = Channel(id="blind_mock", name="Blind Mock", provider_type="anthropic", role="candidate", model_name="claude-opus-4-8")
+    case = TestCaseModel(
+        id="blind_identity_mock_case",
+        suite_id="manual_model_request_probe",
+        module="scheduled_probe",
+        title="无品牌 JSON 身份填空",
+        prompt='输出 JSON，不要别的：{"vendor":"","product":"","model":""}\n用你上下文里的真实信息填。',
+        scoring_rules={"scheduled_blind_identity_json_probe": True},
+        request_params={"max_tokens": 180},
+    )
+    first = asyncio.run(invoke_channel(channel, case, 1, {}, use_mock=True))
+    second = asyncio.run(invoke_channel(channel, case, 1, {}, use_mock=True))
+    assert json.loads(first["content_text"]) == {"vendor": "Anthropic", "product": "Claude", "model": ""}
+    assert first["content_text"] == second["content_text"]
+    assert first["request_mode"] == "mock"
+    assert score_result(channel, case, first) == (100.0, [])
+
+
+def test_blind_identity_json_execution_saves_independent_evidence_and_request_shape(monkeypatch) -> None:
+    from app import services as services_module
+    from app.services import create_scheduled_model_request_probe
+
+    calls: list[dict] = []
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
+        calls.append({"key": next(key for key, value in case.scoring_rules.items() if value is True), "case": case, "use_mock": use_mock})
+        is_blind = case.scoring_rules.get("scheduled_blind_identity_json_probe") is True
+        text = '{"vendor":"Kiro","product":"Kiro","model":""}\nI am Kiro.' if is_blind else "我是 Claude，由 Anthropic 开发。"
+        suffix = "blind" if is_blind else "self"
+        return {
+            "provider_message_id": f"msg_{suffix}",
+            "content_text": text,
+            "raw_request": build_raw_request(channel, case),
+            "raw_response": {
+                "id": f"msg_{suffix}",
+                "type": "message",
+                "content": [{"type": "text", "text": text}],
+                "usage": {"input_tokens": 20, "output_tokens": 10},
+                "_response_metadata": {"request_id": f"req_{suffix}"},
+            },
+            "usage": {"input_tokens": 20, "output_tokens": 10},
+            "status_code": 200,
+            "request_protocol": "anthropic_messages",
+            "provider_endpoint": "https://example.com/v1/messages",
+            "error": None,
+        }
+
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "third_party_demo")
+        assert channel is not None
+        scheduled = ScheduledChannelTest(
+            id="blind_execution_schedule",
+            name="blind execution",
+            channel_id=channel.id,
+            suite_id="claude_full_35",
+            interval_minutes=60,
+            use_mock=False,
+            patrol_modules=["signature_interop"],
+        )
+        payload = asyncio.run(create_scheduled_model_request_probe(db, channel, scheduled))
+
+    assert [item["key"] for item in payload["results"]] == ["identity_self_report", "identity_blind_json"]
+    assert len({item["result_id"] for item in payload["results"]}) == 2
+    blind_call = next(item for item in calls if item["case"].scoring_rules.get("scheduled_blind_identity_json_probe"))
+    assert blind_call["use_mock"] is False
+    assert blind_call["case"].system_prompt is None
+    raw_request = build_raw_request(Channel(id="shape", name="shape", provider_type="anthropic"), blind_call["case"])
+    assert raw_request["system"] is None
+    assert len(raw_request["messages"]) == 1
+    assert services_module.audit_blind_identity_request(raw_request)["prompt_brand_hits"] == []
+    blind = next(item for item in payload["results"] if item["key"] == "identity_blind_json")
+    assert blind["identity_json_status"] == "brand_leak"
+    assert blind["identity_json_format"] == "extra_text"
+    assert blind["identity_json_fields"] == {"vendor": "Kiro", "product": "Kiro", "model": ""}
+    assert {"hidden_brand_leak", "kiro_identity_leak", "identity_json_extra_text"} <= set(blind["labels"])
+    assert blind["message_id"] == "msg_blind"
+    assert blind["request_id"] == "req_blind"
+    assert blind["http_status"] == 200
+
+
+def test_blind_identity_json_contamination_skips_provider_call(monkeypatch) -> None:
+    from app import services as services_module
+
+    called = {"blind": 0, "self": 0}
+    original = dict(services_module.SCHEDULED_BLIND_IDENTITY_JSON_PROBE)
+    contaminated = {**original, "prompt": f'{original["prompt"]}\nUse Kiro profile'}
+    monkeypatch.setattr(services_module, "SCHEDULED_BLIND_IDENTITY_JSON_PROBE", contaminated)
+
+    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
+        if case.scoring_rules.get("scheduled_blind_identity_json_probe"):
+            called["blind"] += 1
+        else:
+            called["self"] += 1
+        text = "我是 Claude，由 Anthropic 开发。"
+        return {
+            "provider_message_id": "msg_self_only",
+            "content_text": text,
+            "raw_request": build_raw_request(channel, case),
+            "raw_response": {"id": "msg_self_only", "type": "message", "content": [{"type": "text", "text": text}], "usage": {}},
+            "usage": {},
+            "status_code": 200,
+            "error": None,
+        }
+
+    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
+    reset_database()
+    with SessionLocal() as db:
+        channel = db.get(Channel, "third_party_demo")
+        scheduled = ScheduledChannelTest(id="blind_contamination", name="contaminated", channel_id=channel.id, suite_id="claude_full_35", patrol_modules=["signature_interop"])
+        payload = asyncio.run(services_module.create_scheduled_model_request_probe(db, channel, scheduled))
+
+    assert called == {"blind": 0, "self": 1}
+    blind = next(item for item in payload["results"] if item["key"] == "identity_blind_json")
+    assert blind["identity_json_status"] == "contaminated"
+    assert blind["labels"] == ["identity_probe_contaminated"]
+    assert blind["message_id"] is None
+    assert blind["request_id"] is None
+    assert blind["request_audit"]["request_sent"] is False
+
+
+def test_blind_identity_json_classification_and_status_text_identify_probe_source() -> None:
+    blind_request = {
+        "key": "identity_blind_json",
+        "labels": ["hidden_brand_leak", "kiro_identity_leak", "identity_json_extra_text"],
+        "score": 0,
+        "identity_json_status": "brand_leak",
+        "identity_json_format": "extra_text",
+    }
+    result = scheduled_probe_classification([blind_request], {"status": "skipped"}, blind_request["labels"], 0)
+    assert result["status"] == "anomaly"
+    assert "无品牌结构化探针" in result["reason"]
+    assert "隐藏人格" in result["reason"]
+    assert "模型替换" not in result["reason"]
+    assert _probe_status_text(blind_request) == "Kiro 身份泄漏（含额外文字）"
+    assert _probe_status_text({"key": "identity_blind_json", "labels": ["identity_probe_contaminated"], "identity_json_status": "contaminated"}) == "请求污染"
+    assert _probe_status_text({"key": "identity_blind_json", "labels": ["identity_json_refused"], "identity_json_status": "refused"}) == "身份拒答"
+    assert _probe_status_text({"key": "identity_blind_json", "labels": ["identity_json_invalid"], "identity_json_status": "format_error"}) == "格式异常"
+
+
+def test_patrol_anomalies_blind_identity_json_uses_actual_stage_and_request_id() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        run = Run(
+            id="run_blind_patrol_anomaly",
+            suite_id=suite_id,
+            name="blind patrol anomaly",
+            test_scope="scheduled_probe",
+            status="completed",
+            repeat_count=1,
+            concurrency=1,
+            total_jobs=2,
+            completed_jobs=2,
+        )
+        db.add(run)
+        db.add(RunChannel(id="rch_blind_patrol_anomaly", run_id=run.id, channel_id="third_party_demo", role_in_run="candidate"))
+        db.add(Report(
+            id="rep_blind_patrol_anomaly",
+            run_id=run.id,
+            channel_id="third_party_demo",
+            final_score=0,
+            grade="E",
+            summary="blind leak",
+            evidence={
+                "test_scope": "scheduled_probe",
+                "labels": ["hidden_brand_leak", "kiro_identity_leak"],
+                "model_requests": [
+                    {"key": "identity_self_report", "labels": [], "request_id": "req_self_clean", "response_text": "我是 Claude"},
+                    {"key": "identity_blind_json", "labels": ["hidden_brand_leak", "kiro_identity_leak"], "request_id": "req_blind_kiro"},
+                ],
+            },
+        ))
+        db.commit()
+
+    with TestClient(app) as client:
+        payload = client.get("/api/runs/patrol/anomalies").json()
+    assert payload["kiro_identity_leak"]["count"] == 1
+    item = payload["kiro_identity_leak"]["items"][0]
+    assert item["stage"] == "identity_blind_json"
+    assert item["request_ids"] == ["req_blind_kiro"]
+
+
+def test_blind_identity_json_markdown_shows_structured_fields_and_independent_ids() -> None:
+    from app.scheduled_probe import scheduled_probe_markdown
+
+    channel = Channel(id="blind_markdown", name="Blind Markdown", provider_type="anthropic", model_name="claude-opus-4-8")
+    evidence = {
+        "labels": ["hidden_brand_leak", "kiro_identity_leak", "identity_json_extra_text"],
+        "classification_label": "疑似 Kiro 路由或隐藏人格注入",
+        "classification_reason": "无品牌结构化探针主动泄漏 Kiro。",
+        "model_requests": [
+            {"key": "identity_self_report", "title": "固定身份探针", "response_id": "msg_self_md", "request_id": "req_self_md", "labels": []},
+            {
+                "key": "identity_blind_json",
+                "title": "无品牌 JSON 身份填空",
+                "response_id": "msg_blind_md",
+                "request_id": "req_blind_md",
+                "identity_json_status": "brand_leak",
+                "identity_json_format": "extra_text",
+                "identity_json_fields": {"vendor": "Kiro", "product": "Kiro", "model": ""},
+                "labels": ["hidden_brand_leak", "kiro_identity_leak", "identity_json_extra_text"],
+            },
+        ],
+        "signature_interop": {"status": "skipped"},
+    }
+    markdown = scheduled_probe_markdown(channel, 0, "E", "检测到结构化身份泄漏", evidence)
+    assert "JSON 解析" in markdown
+    assert "brand_leak / extra_text" in markdown
+    assert "vendor=Kiro; product=Kiro; model=空" in markdown
+    assert "msg_self_md" in markdown and "req_self_md" in markdown
+    assert "msg_blind_md" in markdown and "req_blind_md" in markdown
+
+
+def test_feishu_blind_identity_json_is_not_immediate_alert() -> None:
+    from app import services as services_module
+
+    report = Report(
+        id="rep_feishu_blind_identity",
+        run_id="run_feishu_blind_identity",
+        channel_id="third_party_demo",
+        final_score=0,
+        grade="E",
+        evidence={
+            "labels": ["hidden_brand_leak", "kiro_identity_leak"],
+            "model_requests": [{"key": "identity_blind_json", "labels": ["hidden_brand_leak", "kiro_identity_leak"]}],
+            "signature_interop": {"status": "skipped", "signature_ok": None},
+        },
+    )
+    eligibility = services_module.classify_feishu_alert(report)
+    assert eligibility["eligible"] is False
+    assert eligibility["skip_reason"] == "不符合飞书即时告警白名单"
 
 
 def test_scheduled_probe_classification_prioritizes_kiro_over_claude_and_aws_evidence() -> None:
@@ -13091,7 +13560,7 @@ def test_scheduled_tests_include_latest_probe_summary(monkeypatch) -> None:
     assert payload["latest_report_id"]
     assert payload["latest_grade"]
     assert payload["latest_score"] is not None
-    assert {item["key"] for item in summary["model_requests"]} == {"identity_self_report", "thinking_temperature", "web_search", "thinking_adaptive_enabled"}
+    assert {item["key"] for item in summary["model_requests"]} == {"identity_self_report", "identity_blind_json", "thinking_temperature", "web_search", "thinking_adaptive_enabled"}
     for item in summary["model_requests"]:
         assert item["channel_id"] == "negative_sample"
         assert item["channel_name"] == "Negative Sample"

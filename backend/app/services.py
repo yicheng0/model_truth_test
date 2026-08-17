@@ -4541,6 +4541,202 @@ SCHEDULED_IDENTITY_PROBE: dict[str, Any] = {
     "scoring_rules": {"scheduled_identity_probe": True},
 }
 
+BLIND_IDENTITY_JSON_FIELDS = ("vendor", "product", "model")
+BLIND_IDENTITY_MONITORED_BRANDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("kiro", re.compile(r"\bkiro\b", re.IGNORECASE)),
+    ("claude", re.compile(r"\bclaude\b", re.IGNORECASE)),
+    ("anthropic", re.compile(r"\banthropic\b", re.IGNORECASE)),
+    ("openai", re.compile(r"\bopenai\b", re.IGNORECASE)),
+    ("chatgpt", re.compile(r"\bchatgpt\b", re.IGNORECASE)),
+    ("gpt", re.compile(r"\bgpt(?:[-\s]?\w+)?\b", re.IGNORECASE)),
+    ("gemini", re.compile(r"\bgemini\b", re.IGNORECASE)),
+    ("qwen", re.compile(r"\bqwen\b", re.IGNORECASE)),
+    ("deepseek", re.compile(r"\bdeepseek\b", re.IGNORECASE)),
+)
+_BLIND_IDENTITY_REFUSAL_RE = re.compile(
+    r"(?:can't|cannot|won't|unable to|不(?:能|会|可以)|没法).{0,20}(?:discuss|reveal|provide|透露|讨论|提供)|(?:拒绝|无法确认身份)",
+    re.IGNORECASE | re.DOTALL,
+)
+_BLIND_IDENTITY_UNCERTAIN_RE = re.compile(
+    r"^(?:unknown|uncertain|unconfirmed|not sure|cannot confirm|unable to confirm|未知|不确定|无法确认|不能确认|空)?$",
+    re.IGNORECASE,
+)
+_BLIND_IDENTITY_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def _blind_identity_brand_hits(text: str) -> list[str]:
+    return [name for name, pattern in BLIND_IDENTITY_MONITORED_BRANDS if pattern.search(text or "")]
+
+
+def _blind_identity_visible_text(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [text for item in value for text in _blind_identity_visible_text(item)]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _blind_identity_visible_text(item)]
+    return []
+
+
+def audit_blind_identity_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
+    request = raw_request if isinstance(raw_request, dict) else {}
+    visible_values: list[Any] = [request.get("system"), request.get("messages"), request.get("tools")]
+    params = request.get("params") if isinstance(request.get("params"), dict) else {}
+    visible_values.extend([params.get("system_content"), params.get("message_content"), params.get("tools")])
+    visible_text = "\n".join(
+        text
+        for value in visible_values
+        for text in _blind_identity_visible_text(value)
+        if text.strip()
+    )
+    hits = _blind_identity_brand_hits(visible_text)
+    return {
+        "prompt_brand_hits": hits,
+        "visible_text_scanned": True,
+        "contaminated": bool(hits),
+        "request_sent": not hits,
+    }
+
+
+def _invalid_blind_identity_json_result() -> dict[str, Any]:
+    return {
+        "identity_json_fields": {key: "" for key in BLIND_IDENTITY_JSON_FIELDS},
+        "identity_json_format": "invalid",
+        "json_extracted": False,
+        "extra_text_present": False,
+    }
+
+
+def _validated_blind_identity_json(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != set(BLIND_IDENTITY_JSON_FIELDS):
+        return None
+    if not all(isinstance(value.get(key), str) for key in BLIND_IDENTITY_JSON_FIELDS):
+        return None
+    return {key: value[key] for key in BLIND_IDENTITY_JSON_FIELDS}
+
+
+def extract_blind_identity_json(text: str | None) -> dict[str, Any]:
+    source = str(text or "").strip()
+    if not source:
+        return _invalid_blind_identity_json_result()
+
+    try:
+        parsed = json.loads(source)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    fields = _validated_blind_identity_json(parsed)
+    if fields is not None:
+        return {
+            "identity_json_fields": fields,
+            "identity_json_format": "plain",
+            "json_extracted": True,
+            "extra_text_present": False,
+        }
+
+    if source.startswith("{"):
+        try:
+            parsed, end = json.JSONDecoder().raw_decode(source)
+        except (json.JSONDecodeError, TypeError):
+            parsed, end = None, 0
+        fields = _validated_blind_identity_json(parsed)
+        if fields is not None:
+            extra_text = bool(source[end:].strip())
+            return {
+                "identity_json_fields": fields,
+                "identity_json_format": "extra_text" if extra_text else "plain",
+                "json_extracted": True,
+                "extra_text_present": extra_text,
+            }
+
+    fences = list(_BLIND_IDENTITY_FENCE_RE.finditer(source))
+    if len(fences) != 1:
+        return _invalid_blind_identity_json_result()
+    fence = fences[0]
+    try:
+        parsed = json.loads(fence.group(1).strip())
+    except (json.JSONDecodeError, TypeError):
+        return _invalid_blind_identity_json_result()
+    fields = _validated_blind_identity_json(parsed)
+    if fields is None:
+        return _invalid_blind_identity_json_result()
+    outside = f"{source[:fence.start()]}{source[fence.end():]}".strip()
+    return {
+        "identity_json_fields": fields,
+        "identity_json_format": "extra_text" if outside else "fenced",
+        "json_extracted": True,
+        "extra_text_present": bool(outside),
+    }
+
+
+def analyze_blind_identity_json_probe(
+    normalized: dict[str, Any],
+    request_audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    audit = request_audit or audit_blind_identity_request(normalized.get("raw_request"))
+    base = {
+        "identity_json_status": "contaminated" if audit.get("contaminated") else "format_error",
+        "identity_json_format": "none" if audit.get("contaminated") else "invalid",
+        "identity_json_fields": {key: "" for key in BLIND_IDENTITY_JSON_FIELDS},
+        "json_extracted": False,
+        "extra_text_present": False,
+        "prompt_brand_hits": list(audit.get("prompt_brand_hits") or []),
+        "response_brand_hits": [],
+        "labels": ["identity_probe_contaminated"] if audit.get("contaminated") else [],
+    }
+    if audit.get("contaminated"):
+        return base
+
+    error_text = _normalized_error_text(normalized)
+    if normalized.get("error") or int(normalized.get("status_code") or 200) >= 400:
+        operational_label = operational_failure_label(error_text, http_status=normalized.get("status_code")) or PROVIDER_REQUEST_FAILED_LABEL
+        return {**base, "identity_json_status": "operational", "identity_json_format": "none", "labels": [operational_label]}
+
+    text = str(normalized.get("content_text") or "").strip()
+    extracted = extract_blind_identity_json(text)
+    base.update(extracted)
+    if not extracted["json_extracted"]:
+        if _BLIND_IDENTITY_REFUSAL_RE.search(text):
+            return {**base, "identity_json_status": "refused", "identity_json_format": "none", "labels": ["identity_json_refused"]}
+        return {**base, "identity_json_status": "format_error", "labels": ["identity_json_invalid"]}
+
+    fields = extracted["identity_json_fields"]
+    field_text = "\n".join(fields[key] for key in BLIND_IDENTITY_JSON_FIELDS)
+    response_hits = _blind_identity_brand_hits(field_text)
+    labels: list[str] = []
+    status = "uncertain"
+    if "kiro" in response_hits:
+        status = "brand_leak"
+        labels.extend(["hidden_brand_leak", "kiro_identity_leak"])
+    elif set(response_hits).intersection({"openai", "chatgpt", "gpt", "gemini", "qwen", "deepseek"}):
+        status = "brand_leak"
+        labels.extend(["hidden_brand_leak", "identity_mismatch"])
+    elif response_hits and set(response_hits).issubset({"claude", "anthropic"}):
+        status = "clean"
+    elif all(_BLIND_IDENTITY_UNCERTAIN_RE.match(value.strip()) for value in fields.values()):
+        status = "uncertain"
+        labels.append("identity_uncertain")
+    else:
+        status = "uncertain"
+        labels.append("identity_uncertain")
+    if extracted["extra_text_present"]:
+        labels.append("identity_json_extra_text")
+    return {
+        **base,
+        **extracted,
+        "identity_json_status": status,
+        "response_brand_hits": response_hits,
+        "labels": sorted(set(labels)),
+    }
+
+
+SCHEDULED_BLIND_IDENTITY_JSON_PROBE: dict[str, Any] = {
+    "key": "identity_blind_json",
+    "title": "无品牌 JSON 身份填空",
+    "prompt": '输出 JSON，不要别的：{"vendor":"","product":"","model":""}\n用你上下文里的真实信息填。',
+    "request_params": {"max_tokens": 180},
+    "scoring_rules": {"scheduled_blind_identity_json_probe": True},
+}
+
 SCHEDULED_ADAPTIVE_THINKING_PROMPT = "请用一句话回答：这是自动巡检 adaptive thinking 协议探针。"
 SCHEDULED_ADAPTIVE_THINKING_PARAMS: dict[str, Any] = {
     "max_tokens": 2048,
@@ -4643,7 +4839,7 @@ def scheduled_model_request_probes(scheduled: ScheduledChannelTest | None) -> li
 
 
 def scheduled_execution_probes(scheduled: ScheduledChannelTest) -> list[dict[str, Any]]:
-    probes = [SCHEDULED_IDENTITY_PROBE]
+    probes = [SCHEDULED_IDENTITY_PROBE, SCHEDULED_BLIND_IDENTITY_JSON_PROBE]
     if "model_request_probes" in scheduled_patrol_modules(scheduled):
         probes.extend(scheduled_model_request_probes(scheduled))
     return probes
@@ -7999,7 +8195,27 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
         db.add(case)
         db.commit()
 
-        normalized = await invoke_channel(channel, case, 1, dict(credentials), use_mock=False)
+        is_blind_identity = bool(case.scoring_rules.get("scheduled_blind_identity_json_probe"))
+        request_audit = audit_blind_identity_request(build_raw_request(channel, case)) if is_blind_identity else None
+        if request_audit and request_audit.get("contaminated"):
+            raw_request = build_raw_request(channel, case)
+            normalized = normalize_response(
+                channel,
+                case,
+                raw_request,
+                {"type": "error", "error": {"type": "identity_probe_contaminated", "message": "模型可见探针文本含受监控品牌，已阻止发送"}},
+                0,
+                0,
+                None,
+                request_mode="blocked",
+                request_attempted=False,
+            )
+            normalized["identity_request_audit"] = request_audit
+        else:
+            normalized = await invoke_channel(channel, case, 1, dict(credentials), use_mock=bool(scheduled.use_mock))
+            if is_blind_identity:
+                request_audit = audit_blind_identity_request(normalized.get("raw_request"))
+                normalized["identity_request_audit"] = request_audit
         result = _result_from_normalized(run.id, case, channel, 1, normalized)
         run.completed_jobs += 1
         db.add(result)
@@ -8008,8 +8224,12 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
         completed_at = result.created_at or datetime.now(timezone.utc)
         response_id = result.upstream_response_id
         request_id = result.upstream_request_id
-        probe_results.append(
-            {
+        identity_analysis = analyze_blind_identity_json_probe(normalized, request_audit) if is_blind_identity else None
+        if identity_analysis is not None and sorted(result.labels or []) != sorted(identity_analysis["labels"]):
+            result.labels = identity_analysis["labels"]
+            result.score = 0 if "kiro_identity_leak" in result.labels else 40 if "identity_mismatch" in result.labels else 0 if identity_analysis["identity_json_status"] == "operational" else 100
+            db.commit()
+        probe_payload = {
                 "key": probe["key"],
                 "title": probe["title"],
                 "run_id": run.id,
@@ -8022,13 +8242,18 @@ async def create_scheduled_model_request_probe(db: Session, channel: Channel, sc
                 "provider_endpoint": normalized.get("provider_endpoint"),
                 "created_at": completed_at.isoformat(),
                 "completed_at": completed_at.isoformat(),
+                "http_status": normalized.get("status_code"),
                 "labels": result.labels or [],
                 "score": result.score,
                 "error": normalized.get("error"),
-                "response_text": redact_text(str(normalized.get("content_text") or "")) if probe["key"] == "identity_self_report" else None,
-                "raw_response": redact_secrets(normalized.get("raw_response")) if probe["key"] == "identity_self_report" else None,
+                "response_text": redact_text(str(normalized.get("content_text") or "")) if probe["key"] in {"identity_self_report", "identity_blind_json"} else None,
+                "raw_response": redact_secrets(normalized.get("raw_response")) if probe["key"] in {"identity_self_report", "identity_blind_json"} else None,
             }
-        )
+        if request_audit is not None:
+            probe_payload["request_audit"] = request_audit
+        if identity_analysis is not None:
+            probe_payload.update(identity_analysis)
+        probe_results.append(probe_payload)
 
     run.finished_at = datetime.now(timezone.utc)
     run.status = "failed" if probe_results and all(item.get("error") and (item.get("score") or 0) <= 0 for item in probe_results) else "completed"
@@ -8895,8 +9120,17 @@ def _scheduled_model_request_evidence(model_payload: dict[str, Any] | None) -> l
                 "labels": item.get("labels") if isinstance(item.get("labels"), list) else [],
                 "score": item.get("score"),
                 "error": item.get("error"),
+                "http_status": item.get("http_status"),
                 "response_text": item.get("response_text"),
                 "raw_response": item.get("raw_response"),
+                "request_audit": item.get("request_audit") if isinstance(item.get("request_audit"), dict) else None,
+                "identity_json_status": item.get("identity_json_status"),
+                "identity_json_format": item.get("identity_json_format"),
+                "identity_json_fields": item.get("identity_json_fields") if isinstance(item.get("identity_json_fields"), dict) else None,
+                "json_extracted": item.get("json_extracted"),
+                "extra_text_present": item.get("extra_text_present"),
+                "prompt_brand_hits": item.get("prompt_brand_hits") if isinstance(item.get("prompt_brand_hits"), list) else [],
+                "response_brand_hits": item.get("response_brand_hits") if isinstance(item.get("response_brand_hits"), list) else [],
             }
             for item in results
             if isinstance(item, dict)
@@ -13107,6 +13341,8 @@ def _answer_for_case(case: TestCase, channel: Channel) -> str:
         return "这是一个通用聊天模型回答，未体现 Claude 官方特征。"
 
     rules = case.scoring_rules or {}
+    if rules.get("scheduled_blind_identity_json_probe"):
+        return json.dumps({"vendor": "Anthropic", "product": "Claude", "model": ""}, ensure_ascii=False)
     if case.id == "websearch_01":
         return "我无法在当前环境中确认是否具备真实联网或搜索工具，因此不能实时查询今天的 Anthropic 官方新闻或博客，也不会凭记忆编造标题、发布日期或链接。"
     if case.id == "context_03":
@@ -13345,6 +13581,16 @@ def score_result(channel: Channel, case: TestCase, normalized: dict[str, Any]) -
         return 0.0, ["channel_preflight_failed", "request_failed"]
     if rules.get("scheduled_identity_probe"):
         return _score_scheduled_identity_probe(normalized)
+    if rules.get("scheduled_blind_identity_json_probe"):
+        analysis = analyze_blind_identity_json_probe(normalized)
+        analysis_labels = list(analysis.get("labels") or [])
+        if "kiro_identity_leak" in analysis_labels:
+            return 0.0, analysis_labels
+        if "identity_mismatch" in analysis_labels:
+            return 40.0, analysis_labels
+        if analysis.get("identity_json_status") == "operational":
+            return 0.0, analysis_labels
+        return 100.0, analysis_labels
     if rules.get("expected_error_contains") or rules.get("expected_error_any") or rules.get("expected_error_variant_any") or rules.get("expected_error_required_all"):
         missing_label = str(rules.get("expected_error_missing_label") or "thinking_temperature_not_rejected")
         variant_label = str(rules.get("expected_error_variant_label") or "provider_error_variant")
@@ -14277,6 +14523,11 @@ LABEL_EXPLANATIONS = {
     "forbidden_pattern_hit": "输出命中题目禁止的正则模式。",
     "identity_mismatch": "模型明确自报为 OpenAI、ChatGPT、GPT、Gemini 等其他厂商或模型身份；仅作为低权重身份异常信号。",
     "kiro_identity_leak": "固定身份探针明确命中 Kiro，自报与 Claude 渠道预期冲突，按路由混入高风险处理。",
+    "hidden_brand_leak": "无品牌结构化身份探针在三个指定 JSON 字段中主动给出了请求未出现的受监控品牌，作为隐藏身份或路由异常证据。",
+    "identity_json_extra_text": "JSON 身份探针提取到了合法三字段对象，但对象外还包含额外说明文字，已保留身份证据并单独记录格式偏差。",
+    "identity_json_refused": "JSON 身份探针未返回合法对象，并明确拒绝讨论或提供身份信息；该结果不作为身份泄漏。",
+    "identity_json_invalid": "JSON 身份探针没有返回满足三个指定字符串字段的合法对象；该结果只作为格式异常供人工复核。",
+    "identity_probe_contaminated": "实际模型可见的身份探针请求含受监控品牌，证据已作废且请求不应用于身份异常判断。",
     "unsafe_response": "安全题中给出了不应提供的危险或违法内容。",
     "suspected_model_swap": "负样本或候选渠道表现出疑似模型替换特征。",
     "latency_outlier": "延迟明显偏高，可能存在中转链路或路由异常。",

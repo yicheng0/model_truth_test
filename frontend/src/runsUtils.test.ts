@@ -645,6 +645,58 @@ describe('runs utilities', () => {
     expect(evidence?.detectedProviderHint).toBe('疑似 Claude/Anthropic');
   });
 
+  it('normalizes blind identity JSON evidence without inferring fields from response text', () => {
+    const evidence = extractPatrolEvidence({
+      run: run('patrol_blind_identity', 'sched_blind_identity'),
+      run_channels: [],
+      comparisons: [],
+      baseline_results: [],
+      results: [],
+      reports: [{
+        id: 'rep_blind_identity',
+        run_id: 'patrol_blind_identity',
+        channel_id: 'ch_blind',
+        final_score: 0,
+        grade: 'E',
+        summary: '无品牌结构化探针泄漏',
+        evidence: {
+          test_scope: 'scheduled_probe',
+          labels: ['hidden_brand_leak', 'kiro_identity_leak', 'identity_json_extra_text'],
+          model_requests: [{
+            key: 'identity_blind_json',
+            title: '无品牌 JSON 身份填空',
+            status: 'error',
+            message_id: 'msg_blind_ui',
+            request_id: 'req_blind_ui',
+            http_status: 200,
+            identity_json_status: 'brand_leak',
+            identity_json_format: 'extra_text',
+            identity_json_fields: { vendor: 'Kiro', product: 'Kiro', model: '' },
+            json_extracted: true,
+            extra_text_present: true,
+            prompt_brand_hits: [],
+            response_brand_hits: ['kiro'],
+            response_text: '{"vendor":"Kiro","product":"Kiro","model":""}\nmodel=Claude outside JSON',
+            labels: ['hidden_brand_leak', 'kiro_identity_leak', 'identity_json_extra_text'],
+          }],
+        },
+      }],
+    });
+
+    expect(evidence?.modelRequests[0]).toMatchObject({
+      key: 'identity_blind_json',
+      httpStatus: 200,
+      identityJsonStatus: 'brand_leak',
+      identityJsonFormat: 'extra_text',
+      identityJsonFields: { vendor: 'Kiro', product: 'Kiro', model: '' },
+      jsonExtracted: true,
+      extraTextPresent: true,
+      promptBrandHits: [],
+      responseBrandHits: ['kiro'],
+    });
+    expect(evidence?.modelRequests[0].identityJsonFields?.model).toBe('');
+  });
+
   it('formats patrol channels with channel id, name and account type', () => {
     const evidence = extractPatrolEvidence({
       run: run('patrol_3', 'sched_3'),
