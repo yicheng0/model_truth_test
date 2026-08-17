@@ -155,7 +155,7 @@ npm run build
 - Thinking Signature 互通检测：指纹源渠道生成带 signature 的 thinking block，再让待测渠道复用。
 - 真实模型请求探针：发送 adaptive thinking 协议、Web Search tool、adaptive thinking effort 等参数探针，独立记录上游响应 ID（Message ID）、Request ID、协议和 endpoint。
 
-告警会携带 run、report、上游响应 ID（Message ID）、Request ID 和 source/relay ID 等证据，方便复审定位。自动巡检默认不使用 mock，也不需要手动选择测试集、渠道指纹、重复次数、并发度或评分阈值；这些旧字段仅用于兼容已有数据。
+告警会携带 run、report、上游响应 ID（Message ID）、Request ID 和 source/relay ID 等证据，方便复审定位。自动巡检默认不使用 mock，也不需要手动选择测试集、历史参考基线、重复次数、并发度或评分阈值；这些旧字段仅用于兼容已有数据。
 ## 生产部署安全说明
 
 当前项目支持运行时传入 API Key，并在报告、告警和原始请求/响应证据中尽量执行脱敏；但现有 `Channel.auth_config_encrypted` 字段在模型层仍是 JSON 配置字段，不能仅凭字段名视为已经完成企业级强加密或 KMS/Vault 托管。
