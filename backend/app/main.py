@@ -1299,8 +1299,14 @@ def _patrol_request_ids(evidence: dict[str, object], *, signature: bool) -> list
                 item.get("request_id")
                 for item in requests
                 if isinstance(item, dict)
-                and (item.get("key") == "identity_self_report" or "kiro_identity_leak" in (item.get("labels") or []))
+                and "kiro_identity_leak" in (item.get("labels") or [])
             )
+            if not candidates:
+                candidates.extend(
+                    item.get("request_id")
+                    for item in requests
+                    if isinstance(item, dict) and item.get("key") == "identity_self_report"
+                )
         signature_evidence = _patrol_evidence_dict(evidence.get("signature_interop"))
         candidates.append(signature_evidence.get("identity_request_id"))
     for value in candidates:
@@ -1328,6 +1334,15 @@ def _patrol_has_kiro_identity(evidence: dict[str, object], labels: set[str]) -> 
                 if isinstance(item.get(key), str):
                     texts.append(item[key])
     return any(_KIRO_IDENTITY_RE.search(text) and not _KIRO_NEGATION_RE.search(text) for text in texts)
+
+
+def _patrol_kiro_identity_stage(evidence: dict[str, object]) -> str:
+    requests = evidence.get("model_requests")
+    if isinstance(requests, list):
+        for item in requests:
+            if isinstance(item, dict) and "kiro_identity_leak" in (item.get("labels") or []):
+                return str(item.get("key") or "identity_self_report")
+    return "identity_self_report"
 
 
 def _patrol_signature_rejection(evidence: dict[str, object], labels: set[str]) -> tuple[bool, int | None, str | None]:
@@ -1363,7 +1378,7 @@ def _patrol_anomaly_summary(
         labels = {str(label) for label in evidence.get("labels", []) if isinstance(label, str)} if isinstance(evidence.get("labels"), list) else set()
         channel = channel_by_id.get(report.channel_id)
         if _patrol_has_kiro_identity(evidence, labels):
-            groups["kiro_identity_leak"].append(PatrolAnomalyEntryRead(run_id=report.run_id, run_name=run_name, channel_id=report.channel_id, channel_name=channel.name if channel else None, created_at=report.created_at or run_created_at, request_ids=_patrol_request_ids(evidence, signature=False), stage="identity_self_report"))
+            groups["kiro_identity_leak"].append(PatrolAnomalyEntryRead(run_id=report.run_id, run_name=run_name, channel_id=report.channel_id, channel_name=channel.name if channel else None, created_at=report.created_at or run_created_at, request_ids=_patrol_request_ids(evidence, signature=False), stage=_patrol_kiro_identity_stage(evidence)))
         rejected, http_status, stage = _patrol_signature_rejection(evidence, labels)
         if rejected:
             groups["invalid_thinking_signature"].append(PatrolAnomalyEntryRead(run_id=report.run_id, run_name=run_name, channel_id=report.channel_id, channel_name=channel.name if channel else None, created_at=report.created_at or run_created_at, request_ids=_patrol_request_ids(evidence, signature=True), http_status=http_status, stage=stage))

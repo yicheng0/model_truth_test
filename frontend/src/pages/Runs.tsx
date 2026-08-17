@@ -89,6 +89,13 @@ function patrolResultState(evidence: PatrolEvidence) {
 // Per-probe sub-status chips so a row shows at a glance which module failed.
 type PatrolProbeChip = { key: string; label: string; state: 'ok' | 'error'; detail?: string };
 
+function patrolIdentityJsonSummary(item: PatrolEvidence['modelRequests'][number]) {
+  if (item.key !== 'identity_blind_json') return '-';
+  const fields = item.identityJsonFields ?? {};
+  const value = (key: 'vendor' | 'product' | 'model') => fields[key] === '' ? '空' : fields[key] ?? '-';
+  return `${item.identityJsonStatus ?? '-'} / ${item.identityJsonFormat ?? '-'} · vendor=${value('vendor')} · product=${value('product')} · model=${value('model')}`;
+}
+
 function patrolProbeChips(evidence: PatrolEvidence): PatrolProbeChip[] {
   const chips: PatrolProbeChip[] = [];
   if (evidence.signature) {
@@ -287,11 +294,13 @@ function PatrolEvidenceDetail({ runId }: { runId: string }) {
         size="small"
         pagination={false}
         dataSource={evidence.modelRequests}
-        scroll={{ x: 1190 }}
+        scroll={{ x: 1450 }}
         columns={[
           { title: '真实请求探针', width: 160, render: (_, item) => item.title ?? item.key ?? '真实模型请求' },
           { title: '渠道', width: 180, render: (_, item) => formatPatrolChannel({ id: item.channelId, name: item.channelName, accountType: item.channelAccountType, providerType: item.channelProviderType }, item.channelId) },
           { title: '状态', width: 84, render: (_, item) => <Tag color={patrolProbeStatusColor(item)}>{patrolProbeStatusText(item)}</Tag> },
+          { title: 'HTTP', dataIndex: 'httpStatus', width: 72, render: (value) => value ?? '-' },
+          { title: 'JSON 解析', width: 300, render: (_, item) => <Typography.Text>{patrolIdentityJsonSummary(item)}</Typography.Text> },
           { title: '时间', width: 156, render: (_, item) => formatDateTime(item.completedAt ?? item.createdAt) },
           { title: 'Message ID', dataIndex: 'messageId', width: 126, render: (value) => <PatrolIdText value={value} /> },
           { title: 'Request ID', dataIndex: 'requestId', width: 126, render: (value) => <PatrolIdText value={value} /> },

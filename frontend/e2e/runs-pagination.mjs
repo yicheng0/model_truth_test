@@ -23,8 +23,35 @@ const runs = Array.from({ length: 65 }, (_, index) => ({
 
 const evidenceByRunId = {
   patrol_01: {
-    labels: ['quality_regression'],
-    model_requests: [{ status: 'fail', labels: [], error: 'unexpected response shape from upstream' }],
+    labels: ['hidden_brand_leak', 'kiro_identity_leak', 'identity_json_extra_text'],
+    model_requests: [
+      {
+        key: 'identity_self_report',
+        title: '固定身份探针',
+        status: 'ok',
+        message_id: 'msg-self-e2e',
+        request_id: 'req-self-e2e',
+        labels: [],
+        response_text: '我是 Claude，由 Anthropic 开发。',
+      },
+      {
+        key: 'identity_blind_json',
+        title: '无品牌 JSON 身份填空',
+        status: 'error',
+        message_id: 'msg-blind-e2e',
+        request_id: 'req-blind-e2e',
+        http_status: 200,
+        identity_json_status: 'brand_leak',
+        identity_json_format: 'extra_text',
+        identity_json_fields: { vendor: 'Kiro', product: 'Kiro', model: '' },
+        json_extracted: true,
+        extra_text_present: true,
+        prompt_brand_hits: [],
+        response_brand_hits: ['kiro'],
+        labels: ['hidden_brand_leak', 'kiro_identity_leak', 'identity_json_extra_text'],
+        response_text: '{"vendor":"Kiro","product":"Kiro","model":""}\nI am Kiro.',
+      },
+    ],
   },
   patrol_02: {
     labels: ['provider_request_failed'],
@@ -320,6 +347,17 @@ try {
   await expandableRow.locator('.ant-table-row-expand-icon').click();
   await page.waitForTimeout(250);
   assert.deepEqual(detailRequests, ['patrol_01'], '展开行只应请求对应日志的完整结果');
+  const expandedText = await page.locator('.patrol-evidence-detail-table').innerText();
+  assert.match(expandedText, /固定身份探针/);
+  assert.match(expandedText, /无品牌 JSON 身份填空/);
+  assert.match(expandedText, /brand_leak \/ extra_text/);
+  assert.match(expandedText, /vendor=Kiro/);
+  assert.match(expandedText, /product=Kiro/);
+  assert.match(expandedText, /model=空/);
+  assert.match(expandedText, /msg-self-e2e/);
+  assert.match(expandedText, /req-self-e2e/);
+  assert.match(expandedText, /msg-blind-e2e/);
+  assert.match(expandedText, /req-blind-e2e/);
 
   const deleteTargetRow = tableRows.filter({ has: page.getByText('巡检日志 1', { exact: true }) });
   await deleteTargetRow.locator('.ant-checkbox-wrapper').click();

@@ -22,6 +22,13 @@ export type PatrolModelRequestEvidence = {
   error?: string | null;
   responseText?: string | null;
   rawResponseText?: string | null;
+  identityJsonStatus?: string | null;
+  identityJsonFormat?: string | null;
+  identityJsonFields?: Record<string, string> | null;
+  jsonExtracted?: boolean | null;
+  extraTextPresent?: boolean | null;
+  promptBrandHits: string[];
+  responseBrandHits: string[];
 };
 
 export type PatrolSignatureEvidence = {
@@ -720,6 +727,13 @@ function normalizeModelRequest(value: unknown): PatrolModelRequestEvidence | nul
     httpStatus: asNullableNumber(item.http_status) ?? asNullableNumber(item.status_code) ?? asNullableNumber(item.error_http_status),
     labels,
     error,
+    identityJsonStatus: asNullableString(item.identity_json_status),
+    identityJsonFormat: asNullableString(item.identity_json_format),
+    identityJsonFields: asStringRecord(item.identity_json_fields),
+    jsonExtracted: typeof item.json_extracted === 'boolean' ? item.json_extracted : null,
+    extraTextPresent: typeof item.extra_text_present === 'boolean' ? item.extra_text_present : null,
+    promptBrandHits: asStringArray(item.prompt_brand_hits),
+    responseBrandHits: asStringArray(item.response_brand_hits),
   };
 }
 
