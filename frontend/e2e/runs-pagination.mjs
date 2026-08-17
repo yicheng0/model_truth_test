@@ -108,6 +108,9 @@ try {
   const patrolRequests = [];
   const anomalyRequests = [];
   const deleteRequests = [];
+  const cancelRequests = [];
+  const pageErrors = [];
+  let normalRunsRequests = 0;
   const deletedRunIds = new Set();
   await page.route('**/api/runs/patrol/anomalies**', async (route) => {
     const url = new URL(route.request().url());
@@ -153,8 +156,14 @@ try {
     ids.forEach((id) => deletedRunIds.add(id));
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ deleted: ids.length, missing: [], failed: {} }) });
   });
+  await page.route('**/api/runs/*/cancel', async (route) => {
+    const runId = new URL(route.request().url()).pathname.split('/').at(-2);
+    cancelRequests.push(runId);
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'canceled' }) });
+  });
   await page.route('**/api/runs**', (route) => {
     if (new URL(route.request().url()).pathname !== '/api/runs') return route.fallback();
+    normalRunsRequests += 1;
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(runs.filter((run) => !deletedRunIds.has(run.id)) ) });
   });
   await page.route('**/api/channels**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([
@@ -170,9 +179,19 @@ try {
   await page.route('**/apipro-logo.svg', (route) => route.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" />' }));
 
   page.on('console', (message) => console.error('BROWSER', message.type(), message.text()));
-  page.on('pageerror', (error) => console.error('PAGEERROR', error.message));
+  page.on('pageerror', (error) => {
+    pageErrors.push(error.message);
+    console.error('PAGEERROR', error.message);
+  });
   await page.goto(`${baseUrl}/runs`, { waitUntil: 'load' });
   await page.getByText('自动巡检日志', { exact: true }).waitFor({ timeoutMs: 5000 });
+  assert.equal(normalRunsRequests, 0, '检测任务页面不应再请求普通任务列表');
+  assert.equal(await page.getByText('检测任务列表', { exact: true }).count(), 0, '普通检测任务列表标题应移除');
+  for (const removedText of ['全选可删除', '任务数', '最近状态', '最近进度', '最近任务', '最近创建时间']) {
+    assert.equal(await page.getByText(removedText, { exact: false }).count(), 0, `图二功能“${removedText}”应移除`);
+  }
+  assert.equal(await page.getByRole('button', { name: '删除已选检测任务' }).count(), 0, '普通检测任务批量删除入口应移除');
+  assert.equal(await page.getByRole('link', { name: '真实性对比' }).getAttribute('href'), '/new-run');
   const tableRows = page.locator('.patrol-log-table .ant-table-tbody > tr:not(.ant-table-measure-row)');
   await page.waitForTimeout(1000);
   assert.equal(detailRequests.length, 0, '列表首屏不应请求任何完整巡检结果');
@@ -323,6 +342,14 @@ try {
   assert.equal(deleteRequests[1].includes('patrol_65'), false, '当前范围删除不得提交 running 日志');
   await page.getByRole('button', { name: '删除当前范围（0）' }).waitFor();
   assert.match(await page.locator('.patrol-log-table').innerText(), /巡检日志 64|巡检日志 65/, '范围删除后未结束日志仍应保留');
+
+  const runningRow = tableRows.filter({ has: page.getByText('巡检日志 65', { exact: true }) });
+  await runningRow.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByText('会停止剩余检测，已产生结果会保留。确定取消吗？', { exact: true }).waitFor();
+  await page.locator('.ant-popover').filter({ hasText: '取消检测任务' }).last().getByRole('button', { name: '取消任务' }).click();
+  await page.waitForTimeout(250);
+  assert.deepEqual(cancelRequests, ['patrol_65'], '运行中巡检取消只应提交目标日志 ID');
+  assert.deepEqual(pageErrors, [], '巡检页面完整流程不应产生未处理页面错误');
 } finally {
   await browser?.close();
   try {

@@ -1,27 +1,12 @@
 import { useEffect, useMemo, useState, type Key } from 'react';
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress, Select, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Alert, Button, Card, Empty, Pagination, Popconfirm, Select, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
+import { CalendarClock, CircleStop, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, deletablePatrolRunIds, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, resolvePatrolPage, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Channel, PatrolAnomalyGroup, Run } from '../types';
-
-type RunChannelGroup = {
-  key: string;
-  channelId?: string | null;
-  channelName: string;
-  runs: Run[];
-  latestRun: Run;
-};
-
-function statusColor(status: Run['status']) {
-  if (status === 'completed') return 'green';
-  if (status === 'failed') return 'red';
-  if (status === 'canceled') return 'default';
-  return 'gold';
-}
 
 function canCancel(status: Run['status']) {
   return status === 'pending' || status === 'running';
@@ -29,32 +14,6 @@ function canCancel(status: Run['status']) {
 
 function isTerminalRun(status: Run['status']) {
   return status !== 'pending' && status !== 'running';
-}
-
-function progressCell(run: Run) {
-  return (
-    <Space direction="vertical" size={4} style={{ width: '100%' }}>
-      <Progress
-        percent={run.total_jobs ? Math.round((run.completed_jobs / run.total_jobs) * 100) : 0}
-        size="small"
-        strokeColor={{ '0%': '#667eea', '100%': '#764ba2' }}
-      />
-      <span style={{ fontSize: '13px', color: 'var(--color-text-secondary)' }}>
-        {run.completed_jobs} / {run.total_jobs}
-      </span>
-    </Space>
-  );
-}
-
-function statusTag(status: Run['status']) {
-  return (
-    <Tag
-      color={statusColor(status)}
-      style={{ borderRadius: '6px', padding: '4px 12px', fontWeight: 500 }}
-    >
-      {status}
-    </Tag>
-  );
 }
 
 function evidenceStatusColor(status?: string | null) {
@@ -80,50 +39,6 @@ function PatrolIdText({ value }: { value?: string | null }) {
   const shortValue = compactId(value);
   const content = <Typography.Text className="patrol-log-id">{shortValue}</Typography.Text>;
   return value && shortValue !== value ? <Tooltip title={value}>{content}</Tooltip> : content;
-}
-
-function RunAnomalySummary({ runs }: { runs: Run[] }) {
-  const runResults = useQueries({
-    queries: runs.map((run) => ({
-      queryKey: ['runResults', run.id],
-      queryFn: () => api.runResults(run.id),
-      enabled: run.status === 'completed' || run.status === 'failed',
-    })),
-  });
-  const results = useMemo(
-    () => runResults.flatMap((query) => query.data?.results ?? []),
-    [runResults],
-  );
-  const kiroSummary = useMemo(
-    () => extractKiroIdentityLeaks(results),
-    [results],
-  );
-  const signatureSummary = useMemo(
-    () => extractInvalidThinkingSignatureErrors(results),
-    [results],
-  );
-
-  if (!kiroSummary && !signatureSummary) return null;
-  return (
-    <Space direction="vertical" size={8} style={{ width: '100%', marginBottom: 12 }}>
-      {kiroSummary ? (
-        <Alert
-          type="error"
-          showIcon
-          message="Kiro 身份泄漏"
-          description={`检测到 ${kiroSummary.count} 条明确 Kiro 身份自报，疑似逆向或路由混入。${kiroSummary.requestIds.length ? ` Request ID：${kiroSummary.requestIds.join('、')}` : ''}`}
-        />
-      ) : null}
-      {signatureSummary ? (
-        <Alert
-          type="error"
-          showIcon
-          message="Thinking Signature 无效"
-          description={`检测到 ${signatureSummary.count} 条 HTTP 400：Invalid signature in thinking block。${signatureSummary.requestIds.length ? ` Request ID：${signatureSummary.requestIds.join('、')}` : ''}`}
-        />
-      ) : null}
-    </Space>
-  );
 }
 
 function PatrolGlobalAnomalyAlert({
@@ -165,53 +80,6 @@ function formatBytes(value?: number | null) {
     index += 1;
   }
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
-}
-
-function primaryRunChannel(run: Run) {
-  const channels = run.channels ?? [];
-  const candidate = channels.find((item) => item.role_in_run === 'candidate') ?? channels[0];
-  if (!candidate) {
-    return { key: 'unknown', channelId: null, channelName: '未识别渠道' };
-  }
-  if (channels.length > 1 && run.mode !== 'manual_probe') {
-    const names = channels.map((item) => item.channel_name ?? item.channel_id).filter(Boolean);
-    return { key: `multi:${run.id}`, channelId: null, channelName: names.length ? `多渠道任务：${names.join(' / ')}` : '多渠道任务' };
-  }
-  return {
-    key: candidate.channel_id ?? candidate.channel_name ?? 'unknown',
-    channelId: candidate.channel_id,
-    channelName: candidate.channel_name ?? candidate.channel_id ?? '未识别渠道',
-  };
-}
-
-function groupRunsByChannel(runs: Run[]): RunChannelGroup[] {
-  const groups = new Map<string, RunChannelGroup>();
-  for (const run of runs) {
-    const channel = primaryRunChannel(run);
-    const existing = groups.get(channel.key);
-    if (existing) {
-      existing.runs.push(run);
-      if (new Date(run.created_at ?? 0).getTime() > new Date(existing.latestRun.created_at ?? 0).getTime()) {
-        existing.latestRun = run;
-      }
-      continue;
-    }
-    groups.set(channel.key, {
-      key: channel.key,
-      channelId: channel.channelId,
-      channelName: channel.channelName,
-      runs: [run],
-      latestRun: run,
-    });
-  }
-  return Array.from(groups.values()).sort((left, right) => new Date(right.latestRun.created_at ?? 0).getTime() - new Date(left.latestRun.created_at ?? 0).getTime());
-}
-
-function preferredDetailRun(runs: Run[]) {
-  const manualProbeRuns = runs
-    .filter((run) => run.mode === 'manual_probe')
-    .sort((left, right) => new Date(right.created_at ?? 0).getTime() - new Date(left.created_at ?? 0).getTime());
-  return manualProbeRuns[0] ?? runs[0];
 }
 
 function patrolResultState(evidence: PatrolEvidence) {
@@ -481,17 +349,11 @@ export default function Runs() {
   const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [cancelingId, setCancelingId] = useState<string | null>(null);
-  const [selectedNormalRowKeys, setSelectedNormalRowKeys] = useState<Key[]>([]);
   const [selectedPatrolRowKeys, setSelectedPatrolRowKeys] = useState<Key[]>([]);
   const [selectedPatrolChannel, setSelectedPatrolChannel] = useState(ALL_PATROL_CHANNELS);
   const [onlyPatrolErrors, setOnlyPatrolErrors] = useState(false);
   const [patrolPage, setPatrolPage] = useState(1);
   const [patrolPageSize, setPatrolPageSize] = useState(10);
-  const runs = useQuery({
-    queryKey: ['runs', 'normal-only'],
-    queryFn: () => api.runs({ exclude_patrol: true }),
-    refetchInterval: (query) => (query.state.data?.some((run) => run.status === 'pending' || run.status === 'running') ? 2500 : false),
-  });
   const patrolQuery = useQuery({
     queryKey: ['patrolRuns', patrolPage, patrolPageSize, selectedPatrolChannel, onlyPatrolErrors],
     queryFn: () => api.patrolRuns({
@@ -520,31 +382,13 @@ export default function Runs() {
     mutationFn: api.deleteRun,
     onSuccess: async (_, runId) => {
       message.success('任务已删除');
-      setSelectedNormalRowKeys((keys) => keys.filter((key) => key !== runId));
       setSelectedPatrolRowKeys((keys) => keys.filter((key) => key !== runId));
-      await queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolRuns'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] });
       await queryClient.invalidateQueries({ queryKey: ['reports'] });
     },
     onError: (error) => message.error(getErrorMessage(error)),
     onSettled: () => setDeletingId(null),
-  });
-  const deleteNormalRuns = useMutation({
-    mutationFn: api.deleteRuns,
-    onSuccess: (result, requestedIds) => {
-      const failed = Object.keys(result.failed).length;
-      message.success(failed ? `已删除 ${result.deleted} 条任务，${failed} 条删除失败` : `已删除 ${result.deleted} 条任务`);
-      setSelectedNormalRowKeys([]);
-      queryClient.setQueryData<Run[]>(['runs', 'normal-only'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
-      void Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] }),
-        queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
-        queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] }),
-        queryClient.invalidateQueries({ queryKey: ['reports'] }),
-      ]);
-    },
-    onError: (error) => message.error(getErrorMessage(error)),
   });
   const deletePatrolRuns = useMutation({
     mutationFn: api.deleteRuns,
@@ -555,9 +399,7 @@ export default function Runs() {
         message.warning(`未删除原因：${Object.entries(result.failed).map(([id, reason]) => `${id}: ${reason}`).join('；')}`);
       }
       setSelectedPatrolRowKeys([]);
-      queryClient.setQueryData<Run[]>(['runs', 'normal-only'], (cached) => removeBulkDeletedRuns(cached, requestedIds, result));
       void Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] }),
         queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
         queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] }),
         queryClient.invalidateQueries({ queryKey: ['reports'] }),
@@ -569,7 +411,6 @@ export default function Runs() {
     mutationFn: api.cancelRun,
     onSuccess: async () => {
       message.success('任务已取消');
-      await queryClient.invalidateQueries({ queryKey: ['runs', 'normal-only'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolRuns'] });
       await queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] });
     },
@@ -587,9 +428,7 @@ export default function Runs() {
     cancel.mutate(run.id);
   }
 
-  const normalRuns = runs.data ?? [];
   const patrolRuns = patrolQuery.data?.items ?? [];
-  const normalRunGroups = useMemo(() => groupRunsByChannel(normalRuns), [normalRuns]);
   const patrolChannelOptions = useMemo(() => {
     const options = (channelsQuery.data ?? []).map((channel: Channel) => ({
       value: channel.id,
@@ -600,14 +439,6 @@ export default function Runs() {
   const filteredPatrolRuns = patrolRuns;
   const errorPatrolRunCount = patrolQuery.data?.error_count ?? 0;
   const visiblePatrolRuns = patrolRuns;
-  const selectedNormalRuns = useMemo(
-    () => normalRuns.filter((run) => selectedNormalRowKeys.includes(run.id)),
-    [normalRuns, selectedNormalRowKeys],
-  );
-  const deletableSelectedNormalRuns = selectedNormalRuns.filter((run) => isTerminalRun(run.status));
-  const selectableNormalRunIds = useMemo(() => selectableRunIds(normalRuns), [normalRuns]);
-  const allNormalRunsSelected = selectableNormalRunIds.length > 0 && selectableNormalRunIds.every((id) => selectedNormalRowKeys.includes(id));
-  const someNormalRunsSelected = selectableNormalRunIds.some((id) => selectedNormalRowKeys.includes(id));
   const selectedPatrolRuns = useMemo(
     () => filteredPatrolRuns.filter((run) => selectedPatrolRowKeys.includes(run.id)),
     [filteredPatrolRuns, selectedPatrolRowKeys],
@@ -630,17 +461,12 @@ export default function Runs() {
   );
 
   useEffect(() => {
-    const normalIds = new Set(normalRuns.map((run) => run.id));
     const patrolIds = new Set(filteredPatrolRuns.map((run) => run.id));
-    setSelectedNormalRowKeys((keys) => {
-      const next = keys.filter((key) => normalIds.has(String(key)));
-      return next.length === keys.length ? keys : next;
-    });
     setSelectedPatrolRowKeys((keys) => {
       const next = keys.filter((key) => patrolIds.has(String(key)));
       return next.length === keys.length ? keys : next;
     });
-  }, [filteredPatrolRuns, normalRuns]);
+  }, [filteredPatrolRuns]);
 
   useEffect(() => {
     if (!patrolQuery.data) return;
@@ -652,22 +478,6 @@ export default function Runs() {
       isFetching: patrolQuery.isFetching,
     }));
   }, [patrolPageSize, patrolQuery.data, patrolQuery.isFetching]);
-
-  function deleteSelectedNormalRuns() {
-    if (!selectedNormalRowKeys.length) {
-      message.warning('请先选择检测任务');
-      return;
-    }
-    if (!deletableSelectedNormalRuns.length) {
-      message.warning('运行中的检测任务不能删除');
-      return;
-    }
-    deleteNormalRuns.mutate(deletableSelectedNormalRuns.map((run) => run.id));
-  }
-
-  function toggleSelectAllNormalRuns() {
-    setSelectedNormalRowKeys(allNormalRunsSelected ? [] : selectableNormalRunIds);
-  }
 
   function deleteSelectedPatrolRuns() {
     if (!selectedPatrolRowKeys.length) {
@@ -703,217 +513,15 @@ export default function Runs() {
     deletePatrolRuns.mutate(deletable);
   }
 
-  const actionColumn = {
-    title: '操作',
-    width: 290,
-    render: (_: unknown, run: Run) => (
-      <Space>
-        <Link to={`/runs/${run.id}`} style={{ fontWeight: 600 }}>查看详情</Link>
-        {canCancel(run.status) ? (
-          <Popconfirm
-            title="取消检测任务"
-            description="会停止剩余检测，已产生结果会保留。确定取消吗？"
-            okText="取消任务"
-            cancelText="返回"
-            onConfirm={() => cancelRun(run)}
-          >
-            <Button
-              icon={<CircleStop size={15} />}
-              loading={cancelingId === run.id}
-            >
-              取消
-            </Button>
-          </Popconfirm>
-        ) : null}
-        {(
-          <Popconfirm
-            title="删除检测任务"
-            description="会同时删除该任务的结果、对比和报告。确定删除吗？"
-            okText="删除"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-            disabled={run.status === 'running'}
-            onConfirm={() => deleteRun(run)}
-          >
-            <Button
-              danger
-              icon={<Trash2 size={15} />}
-              loading={deletingId === run.id}
-              disabled={run.status === 'running'}
-            >
-              删除
-            </Button>
-          </Popconfirm>
-        )}
-      </Space>
-    ),
-  };
-
   return (
     <div className="page-stack">
-      <Card
-        title={<span style={{ fontSize: '18px', fontWeight: 600 }}>检测任务列表</span>}
-        extra={
-          <Space wrap>
-            <Link to="/new-run?mode=baseline">
-              <Button size="large" icon={<Fingerprint size={16} />} style={{ height: '40px', fontWeight: 600 }}>
-                提取渠道指纹
-              </Button>
-            </Link>
-            <Link to="/new-run?mode=compare">
-              <Button type="primary" size="large" icon={<GitCompare size={16} />} style={{ height: '40px', fontWeight: 600 }}>
-                真实性对比
-              </Button>
-            </Link>
-          </Space>
-        }
-        bordered={false}
-      >
-        {runs.isError ? (
-          <Alert
-            type="error"
-            showIcon
-            message="任务列表加载失败"
-            description={getErrorMessage(runs.error)}
-            action={<Button onClick={() => runs.refetch()}>重试</Button>}
-            style={{ marginBottom: 16 }}
-          />
-          ) : null}
-        <Space wrap style={{ width: '100%', marginBottom: 16 }}>
-          <Checkbox
-            checked={allNormalRunsSelected}
-            indeterminate={!allNormalRunsSelected && someNormalRunsSelected}
-            disabled={!selectableNormalRunIds.length}
-            onChange={toggleSelectAllNormalRuns}
-          >
-            {allNormalRunsSelected ? '取消全选' : `全选可删除（${selectableNormalRunIds.length}）`}
-          </Checkbox>
-          <Popconfirm
-            title="删除已选检测任务"
-            description={`将删除 ${deletableSelectedNormalRuns.length} 条已选任务及其结果、对比和报告。运行中任务会跳过。确定删除吗？`}
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            cancelText="取消"
-            disabled={!deletableSelectedNormalRuns.length}
-            onConfirm={deleteSelectedNormalRuns}
-          >
-            <Button danger icon={<Trash2 size={15} />} disabled={!deletableSelectedNormalRuns.length} loading={deleteNormalRuns.isPending}>
-              删除已选
-            </Button>
-          </Popconfirm>
-          <Typography.Text type="secondary">已选 {selectedNormalRuns.length} / 可删除 {deletableSelectedNormalRuns.length}</Typography.Text>
-        </Space>
-        <Table
-          rowKey="key"
-          loading={runs.isLoading}
-          dataSource={normalRunGroups}
-          pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
-          locale={{ emptyText: <Empty description="暂无检测任务" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-          scroll={{ x: 980 }}
-          expandable={{
-            expandedRowRender: (group) => (
-              <>
-                <RunAnomalySummary runs={group.runs} />
-                <Table
-                  rowKey="id"
-                  size="small"
-                  pagination={false}
-                  dataSource={group.runs}
-                  rowSelection={{
-                    selectedRowKeys: selectedNormalRowKeys,
-                    onSelect: (run, selected) => {
-                      setSelectedNormalRowKeys((keys) => {
-                        if (selected) return keys.includes(run.id) ? keys : [...keys, run.id];
-                        return keys.filter((key) => key !== run.id);
-                      });
-                    },
-                    onSelectAll: (selected, _selectedRows, changeRows) => {
-                      const changedIds = new Set(changeRows.map((run) => run.id));
-                      setSelectedNormalRowKeys((keys) => {
-                        if (selected) {
-                          const next = new Set(keys.map(String));
-                          changedIds.forEach((id) => next.add(id));
-                          return Array.from(next);
-                        }
-                        return keys.filter((key) => !changedIds.has(String(key)));
-                      });
-                    },
-                    getCheckboxProps: (run) => ({ disabled: !isTerminalRun(run.status) }),
-                    preserveSelectedRowKeys: true,
-                  }}
-                  scroll={{ x: 1160 }}
-                  columns={[
-                    { title: '任务', dataIndex: 'name', width: 240 },
-                    {
-                      title: '状态',
-                      dataIndex: 'status',
-                      width: 120,
-                      render: statusTag,
-                    },
-                    {
-                      title: '进度',
-                      width: 220,
-                      render: (_, run) => progressCell(run),
-                    },
-                    { title: '创建时间', dataIndex: 'created_at', width: 190, render: formatDateTime },
-                    { title: '结束时间', dataIndex: 'finished_at', width: 190, render: formatDateTime },
-                    { title: '重复', dataIndex: 'repeat_count', width: 90 },
-                    { title: '并发', dataIndex: 'concurrency', width: 90 },
-                    actionColumn,
-                  ]}
-                />
-              </>
-            ),
-          }}
-          columns={[
-            {
-              title: '渠道',
-              width: 300,
-              render: (_, group) => (
-                <Space direction="vertical" size={2}>
-                  <Typography.Text strong>{group.channelName}</Typography.Text>
-                  <Typography.Text type="secondary">{group.channelId ?? '多渠道 / 未识别'}</Typography.Text>
-                </Space>
-              ),
-            },
-            {
-              title: '任务数',
-              width: 100,
-              render: (_, group) => <Tag color="blue">{group.runs.length}</Tag>,
-            },
-            {
-              title: '最近状态',
-              width: 120,
-              render: (_, group) => statusTag(group.latestRun.status),
-            },
-            {
-              title: '最近进度',
-              width: 220,
-              render: (_, group) => progressCell(group.latestRun),
-            },
-            {
-              title: '最近任务',
-              width: 260,
-              render: (_, group) => {
-                const preferredRun = preferredDetailRun(group.runs);
-                if (!preferredRun) return '-';
-                const shouldCallOutLatest = preferredRun.id !== group.latestRun.id;
-                return (
-                  <Space direction="vertical" size={2}>
-                    <Link to={`/runs/${preferredRun.id}`} style={{ fontWeight: 600 }}>
-                      {preferredRun.name}
-                    </Link>
-                    {shouldCallOutLatest ? (
-                      <Typography.Text type="secondary">最近一次任务：{group.latestRun.name}</Typography.Text>
-                    ) : null}
-                  </Space>
-                );
-              },
-            },
-            { title: '最近创建时间', width: 190, render: (_, group) => formatDateTime(group.latestRun.created_at) },
-          ]}
-        />
-      </Card>
+      <Space wrap style={{ justifyContent: 'flex-end', width: '100%' }}>
+        <Link to="/new-run">
+          <Button type="primary" size="large" icon={<GitCompare size={16} />} style={{ height: '40px', fontWeight: 600 }}>
+            真实性对比
+          </Button>
+        </Link>
+      </Space>
 
       <Card
         className="patrol-log-card"
