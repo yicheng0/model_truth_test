@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type Key } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Checkbox, Empty, Pagination, Popconfirm, Progress, Select, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { Link } from 'react-router-dom';
-import { CalendarClock, CircleStop, Fingerprint, GitCompare, Trash2 } from 'lucide-react';
+import { CalendarClock, CircleStop, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
 import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, buildPatrolTopErrorSummary, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, type PatrolEvidence, type PatrolTopErrorItem } from '../runsUtils';
 import { formatDateTime } from '../time';
@@ -769,12 +769,7 @@ export default function Runs() {
         title={<span style={{ fontSize: '18px', fontWeight: 600 }}>检测任务列表</span>}
         extra={
           <Space wrap>
-            <Link to="/new-run?mode=baseline">
-              <Button size="large" icon={<Fingerprint size={16} />} style={{ height: '40px', fontWeight: 600 }}>
-                提取渠道指纹
-              </Button>
-            </Link>
-            <Link to="/new-run?mode=compare">
+            <Link to="/new-run">
               <Button type="primary" size="large" icon={<GitCompare size={16} />} style={{ height: '40px', fontWeight: 600 }}>
                 真实性对比
               </Button>
