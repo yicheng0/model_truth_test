@@ -54,7 +54,7 @@ export type ManualProbeRow = {
   score?: number;
 };
 
-export type PatrolProbeStatusItem = Pick<ManualProbeRow, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'>;
+export type PatrolProbeStatusItem = Pick<ManualProbeRow, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'> & { httpStatus?: number | null };
 
 export function latestResult(results?: DisplayResult[]) {
   if (!results?.length) return undefined;
