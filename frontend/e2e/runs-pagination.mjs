@@ -286,6 +286,15 @@ try {
   const hoveredRgb = hoveredSignatureColor.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/)?.slice(1).map(Number) ?? [];
   assert.equal(hoveredRgb.length, 3, `Signature 异常任务行悬停时应返回 RGB 颜色，实际：${hoveredSignatureColor}`);
   assert.ok(hoveredRgb[0] >= 245 && hoveredRgb[0] > hoveredRgb[1] && hoveredRgb[1] >= hoveredRgb[2], `Signature 异常任务行悬停时应保持可识别的浅红色，实际：${hoveredSignatureColor}`);
+  await signatureRow.first().locator('.ant-checkbox-wrapper').click();
+  assert.equal(await signatureRow.first().evaluate((row) => row.classList.contains('ant-table-row-selected')), true, 'Signature 异常行仍应显示表格选中态');
+  const selectedSignatureCellStyle = await signatureRow.first().locator('td').first().evaluate((cell) => {
+    const style = getComputedStyle(cell);
+    return { backgroundColor: style.backgroundColor, boxShadow: style.boxShadow };
+  });
+  assert.notEqual(selectedSignatureCellStyle.backgroundColor, 'rgb(255, 241, 240)', '选中 Signature 行不应退回普通高亮背景');
+  assert.match(selectedSignatureCellStyle.boxShadow, /207, 19, 34/, '选中 Signature 行应保留红色定位标记');
+  await signatureRow.first().locator('.ant-checkbox-wrapper').click();
   const operationalRow = tableRows.filter({ has: page.getByText('巡检日志 2', { exact: true }) });
   assert.equal(await operationalRow.first().evaluate((row) => row.classList.contains('patrol-signature-anomaly-row')), false, '运营故障行不得获得 Signature 专属高亮');
 

@@ -170,7 +170,7 @@ export function extractOverviewAnomalyLabels(labels?: string[] | null): string[]
 export function extractSignatureAnomalyRunIds(group?: PatrolAnomalyGroup | null): Set<string> {
   return new Set(
     (group?.items ?? [])
-      .map((item) => item.run_id.trim())
+      .map((item) => typeof item.run_id === 'string' ? item.run_id.trim() : '')
       .filter(Boolean),
   );
 }

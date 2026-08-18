@@ -212,6 +212,8 @@ describe('runs utilities', () => {
         { run_id: 'sig_run_1', run_name: '重复任务', request_ids: [], http_status: 400 },
         { run_id: 'sig_run_2', run_name: '另一个任务', request_ids: [], http_status: 400 },
         { run_id: '   ', run_name: '空 ID', request_ids: [], http_status: 400 },
+        { run_id: null as unknown as string, run_name: '缺失 ID', request_ids: [], http_status: 400 },
+        { run_id: undefined as unknown as string, run_name: '未定义 ID', request_ids: [], http_status: 400 },
       ],
     };
 

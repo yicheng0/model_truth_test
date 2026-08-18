@@ -2716,6 +2716,18 @@ textarea:focus-visible,
   background: var(--surface-page-soft) !important;
 }
 
+.patrol-log-table .ant-table-tbody > tr.ant-table-row-selected.patrol-signature-anomaly-row > td {
+  background: #e6f4ff !important;
+}
+
+.patrol-log-table .ant-table-tbody > tr.ant-table-row-selected.patrol-signature-anomaly-row:hover > td {
+  background: #bae0ff !important;
+}
+
+.patrol-log-table .ant-table-tbody > tr.ant-table-row-selected.patrol-signature-anomaly-row > td:first-child {
+  box-shadow: inset 3px 0 0 #cf1322;
+}
+
 .ant-input,
 .ant-input-number,
 .ant-select-selector,
