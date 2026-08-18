@@ -675,6 +675,14 @@ textarea:focus-visible,
   color: #cf1322 !important;
 }
 
+.patrol-log-table .ant-table-tbody > tr.patrol-signature-anomaly-row > td {
+  background: #fff1f0 !important;
+}
+
+.patrol-log-table .ant-table-tbody > tr.patrol-signature-anomaly-row:hover > td {
+  background: #ffccc7 !important;
+}
+
 .patrol-evidence-detail {
   padding: 2px 0;
 }

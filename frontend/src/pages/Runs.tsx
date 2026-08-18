@@ -4,7 +4,7 @@ import { Alert, Button, Card, Empty, Pagination, Popconfirm, Select, Space, Spin
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, deletablePatrolRunIds, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, resolvePatrolPage, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, deletablePatrolRunIds, extractPatrolEvidence, extractSignatureAnomalyRunIds, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, resolvePatrolPage, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Channel, PatrolAnomalyGroup, Run } from '../types';
 
@@ -438,6 +438,12 @@ export default function Runs() {
   }
 
   const patrolRuns = patrolQuery.data?.items ?? [];
+  const signatureAnomalyRunIds = useMemo(
+    () => patrolAnomaliesQuery.isError
+      ? new Set<string>()
+      : extractSignatureAnomalyRunIds(patrolAnomaliesQuery.data?.invalid_thinking_signature),
+    [patrolAnomaliesQuery.data?.invalid_thinking_signature, patrolAnomaliesQuery.isError],
+  );
   const patrolChannelOptions = useMemo(() => {
     const options = (channelsQuery.data ?? []).map((channel: Channel) => ({
       value: channel.id,
@@ -626,6 +632,7 @@ export default function Runs() {
         <Table
           className="patrol-log-table"
           rowKey="id"
+          rowClassName={(run) => signatureAnomalyRunIds.has(run.id) ? 'patrol-signature-anomaly-row' : ''}
           size="small"
           loading={patrolQuery.isLoading}
           dataSource={visiblePatrolRuns}

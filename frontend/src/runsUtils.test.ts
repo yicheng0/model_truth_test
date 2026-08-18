@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
-import type { Channel, ReportSummary, Run, RunResults } from './types';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, extractSignatureAnomalyRunIds, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import type { Channel, PatrolAnomalyGroup, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
   return {
@@ -128,6 +128,27 @@ describe('runs utilities', () => {
     expect(extractOverviewAnomalyLabels([])).toEqual([]);
     expect(extractOverviewAnomalyLabels(null)).toEqual([]);
     expect(extractOverviewAnomalyLabels(undefined)).toEqual([]);
+  });
+
+  it('normalizes strict Signature anomaly run ids without using other anomaly fields', () => {
+    const group: PatrolAnomalyGroup = {
+      count: 4,
+      truncated: false,
+      items: [
+        { run_id: 'sig_run_1', run_name: '重复任务', request_ids: [], http_status: 400 },
+        { run_id: 'sig_run_1', run_name: '重复任务', request_ids: [], http_status: 400 },
+        { run_id: 'sig_run_2', run_name: '另一个任务', request_ids: [], http_status: 400 },
+        { run_id: '   ', run_name: '空 ID', request_ids: [], http_status: 400 },
+      ],
+    };
+
+    expect([...extractSignatureAnomalyRunIds(group)]).toEqual(['sig_run_1', 'sig_run_2']);
+  });
+
+  it('returns an empty Signature anomaly run-id set for empty or missing groups', () => {
+    expect(extractSignatureAnomalyRunIds(null)).toEqual(new Set());
+    expect(extractSignatureAnomalyRunIds(undefined)).toEqual(new Set());
+    expect(extractSignatureAnomalyRunIds({ count: 0, truncated: false, items: [] })).toEqual(new Set());
   });
 
   it('builds a latest-result overview for every channel', () => {
