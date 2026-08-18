@@ -7,7 +7,7 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTool
 import { api, getErrorMessage } from '../api';
 import { accountTypeLabel, formatChannelDisplayName } from '../channelCredentials';
 import { providerTypeLabel, roleColor } from '../channelTaxonomy';
-import { extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolReportedLabels, patrolSignatureDisplayState, type PatrolEvidence, type PatrolModelRequestEvidence, type PatrolSignatureRequestLog } from '../runsUtils';
+import { countedPatrolModelRequests, extractPatrolEvidence, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolReportedLabels, patrolSignatureDisplayState, type PatrolEvidence, type PatrolModelRequestEvidence, type PatrolSignatureRequestLog } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { BaselineResult, Channel, ChannelTaxonomySetting, Comparison, Result, RunResults, RunSummary, TestCase } from '../types';
 import { isComboManualProbeRun, manualProbeSummaryRows } from './runDetailManualProbe';
@@ -230,12 +230,13 @@ function PatrolDetailPanel({ evidence, focus }: { evidence: PatrolEvidence | nul
     item.resultId || item.messageId || item.requestId || item.providerEndpoint || item.error
     || item.responseText || item.rawResponseText || item.labels.length
   ));
+  const countedModelRequests = countedPatrolModelRequests(visibleModelRequests);
   const classificationText = evidence.classificationLabel || (evidence.classificationStatus === 'aws_resource' ? 'AWS 资源' : evidence.classificationStatus === 'claude' ? 'Claude 资源' : '');
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div className="channel-pair-grid">
-        <div className="monitor-stat-card"><span>真实请求探针</span><strong>{visibleModelRequests.length}</strong></div>
+        <div className="monitor-stat-card"><span>真实请求探针</span><strong>{countedModelRequests.length}</strong></div>
         <div className="monitor-stat-card"><span>Signature</span><strong><Tag color={signatureDisplay.color}>{signatureDisplay.label}</Tag></strong></div>
       </div>
       {classificationText ? <Typography.Text type="secondary">判定：{classificationText}{evidence.classificationReason && !evidenceDisplay.isOperationalFailure ? `，${evidence.classificationReason}` : ''}</Typography.Text> : null}
