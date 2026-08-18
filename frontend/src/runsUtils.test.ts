@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, extractSignatureAnomalyRunIds, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, countedPatrolModelRequests, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, extractSignatureAnomalyRunIds, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
 import type { Channel, PatrolAnomalyGroup, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
@@ -782,6 +782,7 @@ describe('runs utilities', () => {
 
   it('treats provider runtime failures as non-anomalous probe results', () => {
     const operationalItems = [
+      { status: 'fail', httpStatus: 403, error: "Client error '403 Forbidden' for url 'https://api.example.com/v1/messages'" },
       { status: 'error', error: "Server error '500 Internal Server Error' response body: Service is temporarily unavailable" },
       { status: 'fail', error: '503 Service Unavailable' },
       { status: 'fail', httpStatus: 400, error: 'No available accounts: no available accounts' },
@@ -795,6 +796,18 @@ describe('runs utilities', () => {
     for (const item of operationalItems) {
       expect(isPatrolOperationalFailure(item)).toBe(true);
     }
+  });
+
+  it('does not count forbidden requests as completed model probes', () => {
+    const items = [
+      { status: 'fail', httpStatus: 403, error: "Client error '403 Forbidden' for url 'https://api.example.com/v1/messages'", labels: [] },
+      { status: 'ok', httpStatus: 200, responseText: 'Claude response', labels: [] },
+      { status: 'fail', httpStatus: 400, error: 'unexpected response shape', labels: ['protocol_mismatch'] },
+    ];
+
+    expect(countedPatrolModelRequests(items as never)).toEqual(items.slice(1));
+    expect(patrolProbeStatusText(items[0])).toBe('正常');
+    expect(patrolProbeStatusColor(items[0])).toBe('green');
   });
 
   it('keeps explicit protocol and identity anomalies outside operational failures', () => {

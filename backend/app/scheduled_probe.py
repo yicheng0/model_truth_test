@@ -66,7 +66,7 @@ def operational_failure_label(error_text: str | None, *, http_status: Any | None
         status = int(http_status) if http_status is not None else None
     except (TypeError, ValueError):
         status = None
-    if (status is not None and status >= 500) or PROVIDER_REQUEST_FAILED_PATTERN.search(combined):
+    if status == 403 or (status is not None and status >= 500) or PROVIDER_REQUEST_FAILED_PATTERN.search(combined):
         return PROVIDER_REQUEST_FAILED_LABEL
     return None
 

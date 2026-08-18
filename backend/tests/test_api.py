@@ -13719,6 +13719,7 @@ def test_operational_failure_label_distinguishes_availability_quota_and_unknown_
     assert operational_failure_label("用户额度不足, 剩余额度: ¥-0.580994", http_status=500) == "provider_quota_or_balance_exhausted"
     assert operational_failure_label("429 quota exhausted", http_status=429) == "provider_quota_or_balance_exhausted"
     assert operational_failure_label("Upstream access forbidden, please contact administrator", http_status=400) == "provider_request_failed"
+    assert operational_failure_label("Client error '403 Forbidden' for url 'https://api.example.com/v1/messages'", http_status=403) == "provider_request_failed"
     assert operational_failure_label("500 Internal Server Error: upstream returned an unknown failure", http_status=500) == "provider_request_failed"
 
 

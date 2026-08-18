@@ -171,9 +171,14 @@ export function isPatrolOperationalFailure(item?: PatrolOperationalFailureInput 
   if (!item) return false;
   const errorText = [item.error, item.reason, item.rawError, item.responseText, item.rawResponseText].filter(Boolean).join(' ');
   if (item.errorHttpStatus === 400 && INVALID_THINKING_SIGNATURE_PATTERN.test(errorText)) return false;
-  if ((item.httpStatus ?? item.errorHttpStatus ?? null) !== null && (item.httpStatus ?? item.errorHttpStatus)! >= 500) return true;
+  const httpStatus = item.httpStatus ?? item.errorHttpStatus ?? null;
+  if (httpStatus === 403 || (httpStatus !== null && httpStatus >= 500)) return true;
   if ((item.labels ?? []).some((label) => OPERATIONAL_FAILURE_LABELS.has(label))) return true;
   return OPERATIONAL_FAILURE_TEXT_PATTERN.test(errorText);
+}
+
+export function countedPatrolModelRequests(items: PatrolModelRequestEvidence[]): PatrolModelRequestEvidence[] {
+  return items.filter((item) => !isPatrolOperationalFailure(item));
 }
 
 export type PatrolEvidenceDisplayState = {
@@ -826,14 +831,14 @@ export function isPatrolNativeParameterRejection(item?: Pick<PatrolModelRequestE
   return /400 bad request|invalid request|unsupported|not supported|temperature|thinking\.adaptive\.enabled|web_search|tool/.test(text);
 }
 
-export function patrolProbeStatusText(item?: Pick<PatrolModelRequestEvidence, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'> | null) {
+export function patrolProbeStatusText(item?: Pick<PatrolModelRequestEvidence, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText' | 'httpStatus'> | null) {
   if (item?.status === 'ok') return '正确';
   if (isPatrolOperationalFailure(item)) return '正常';
   if (isPatrolNativeParameterRejection(item)) return '参数不支持';
   return '异常';
 }
 
-export function patrolProbeStatusColor(item?: Pick<PatrolModelRequestEvidence, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText'> | null) {
+export function patrolProbeStatusColor(item?: Pick<PatrolModelRequestEvidence, 'status' | 'labels' | 'error' | 'responseText' | 'rawResponseText' | 'httpStatus'> | null) {
   if (item?.status === 'ok') return 'green';
   if (isPatrolOperationalFailure(item)) return 'green';
   if (isPatrolNativeParameterRejection(item)) return 'gold';
