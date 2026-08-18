@@ -277,6 +277,17 @@ try {
   await page.getByText(/Thinking Signature 无效（1）/).first().waitFor();
   assert.equal(await page.getByRole('link', { name: /巡检日志 52/ }).getAttribute('href'), '/runs/patrol_52', 'Kiro 摘要应链接到跨页命中详情');
   assert.equal(await page.getByRole('link', { name: /巡检日志 3/ }).getAttribute('href'), '/runs/patrol_03', 'Signature 摘要应链接到命中详情');
+  const signatureRow = tableRows.filter({ has: page.getByText('巡检日志 3', { exact: true }) });
+  assert.equal(await signatureRow.count(), 1, '当前页应存在 Signature 异常对应的任务行');
+  assert.equal(await signatureRow.first().evaluate((row) => row.classList.contains('patrol-signature-anomaly-row')), true, 'Signature 异常任务行应同步显示专属高亮 class');
+  assert.equal(await signatureRow.first().locator('td').first().evaluate((cell) => getComputedStyle(cell).backgroundColor), 'rgb(255, 241, 240)', 'Signature 异常任务行应使用浅红色背景');
+  await signatureRow.first().locator('td').first().hover();
+  const hoveredSignatureColor = await signatureRow.first().locator('td').first().evaluate((cell) => getComputedStyle(cell).backgroundColor);
+  const hoveredRgb = hoveredSignatureColor.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/)?.slice(1).map(Number) ?? [];
+  assert.equal(hoveredRgb.length, 3, `Signature 异常任务行悬停时应返回 RGB 颜色，实际：${hoveredSignatureColor}`);
+  assert.ok(hoveredRgb[0] >= 245 && hoveredRgb[0] > hoveredRgb[1] && hoveredRgb[1] >= hoveredRgb[2], `Signature 异常任务行悬停时应保持可识别的浅红色，实际：${hoveredSignatureColor}`);
+  const operationalRow = tableRows.filter({ has: page.getByText('巡检日志 2', { exact: true }) });
+  assert.equal(await operationalRow.first().evaluate((row) => row.classList.contains('patrol-signature-anomaly-row')), false, '运营故障行不得获得 Signature 专属高亮');
 
   await errorFilter.click();
   await page.waitForTimeout(250);
@@ -292,6 +303,7 @@ try {
   await page.waitForTimeout(250);
   assert.equal(await errorRows.count(), 1, '渠道 B + 只看错误应只保留渠道 B 的异常日志');
   assert.match((await errorRows.allTextContents()).join('\n'), /巡检日志 6/);
+  assert.equal(await errorRows.first().evaluate((row) => row.classList.contains('patrol-signature-anomaly-row')), false, '切换到无 Signature 异常的渠道后当前行不得残留高亮');
   await page.getByText(/Kiro 身份泄漏（1）/).first().waitFor();
   assert.equal(await page.getByText(/Thinking Signature 无效（1）/).count(), 0, '渠道 B 不应显示渠道 A 的 Signature 摘要');
   await page.getByRole('button', { name: '删除当前范围（1）' }).click();

@@ -1,4 +1,4 @@
-import type { Channel, PatrolAiJudgeEvidence, PatrolAnomalySummary, ReportSummary, Result, Run, RunResults } from './types';
+import type { Channel, PatrolAiJudgeEvidence, PatrolAnomalyGroup, PatrolAnomalySummary, ReportSummary, Result, Run, RunResults } from './types';
 import { formatChannelDisplayName } from './channelCredentials';
 
 export type PatrolModelRequestEvidence = {
@@ -165,6 +165,14 @@ const OVERVIEW_ANOMALY_LABELS = ['kiro_identity_leak', 'signature_interop_failed
 export function extractOverviewAnomalyLabels(labels?: string[] | null): string[] {
   const labelSet = new Set(labels ?? []);
   return OVERVIEW_ANOMALY_LABELS.filter((label) => labelSet.has(label));
+}
+
+export function extractSignatureAnomalyRunIds(group?: PatrolAnomalyGroup | null): Set<string> {
+  return new Set(
+    (group?.items ?? [])
+      .map((item) => item.run_id.trim())
+      .filter(Boolean),
+  );
 }
 
 const INVALID_THINKING_SIGNATURE_PATTERN = /invalid\s+[`'“”]?signature[`'“”]?\s+in\s+[`'“”]?thinking[`'”’']?\s+block/i;
