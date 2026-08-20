@@ -1,4 +1,4 @@
-import type { Channel, PatrolAiJudgeEvidence, PatrolAnomalyGroup, ReportSummary, Result, Run, RunResults } from './types';
+import type { Channel, PatrolAiJudgeEvidence, PatrolAnomalyGroup, PatrolAnomalySummary, ReportSummary, Result, Run, RunResults } from './types';
 import { formatChannelDisplayName } from './channelCredentials';
 
 export type PatrolModelRequestEvidence = {
@@ -121,6 +121,45 @@ export type PatrolChannelFilterOption = {
   label: string;
 };
 
+export type PatrolTopErrorKind = 'kiro_identity_leak' | 'invalid_thinking_signature';
+
+export type PatrolTopErrorItem = {
+  runId: string;
+  runName: string;
+  channelId?: string | null;
+  channelName?: string | null;
+  createdAt?: string | null;
+  kind: PatrolTopErrorKind;
+  priority: number;
+};
+
+export type PatrolTopErrorSummary = {
+  total: number;
+  items: PatrolTopErrorItem[];
+};
+
+export function buildPatrolTopErrorSummary(
+  anomalies?: PatrolAnomalySummary,
+  limit = 10,
+): PatrolTopErrorSummary {
+  const seenRunIds = new Set<string>();
+  const items = (anomalies?.strict_items ?? []).map<PatrolTopErrorItem>((item) => ({
+    runId: item.run_id,
+    runName: item.run_name,
+    channelId: item.channel_id,
+    channelName: item.channel_name,
+    createdAt: item.created_at,
+    kind: item.kind,
+    priority: item.kind === 'kiro_identity_leak' ? 1 : 2,
+  })).sort((left, right) => left.priority - right.priority).filter((item) => {
+    if (seenRunIds.has(item.runId)) return false;
+    seenRunIds.add(item.runId);
+    return true;
+  }).slice(0, Math.max(0, limit));
+
+  return { total: anomalies?.strict_total ?? 0, items };
+}
+
 const OVERVIEW_ANOMALY_LABELS = ['kiro_identity_leak', 'signature_interop_failed'] as const;
 
 export function extractOverviewAnomalyLabels(labels?: string[] | null): string[] {
@@ -131,7 +170,7 @@ export function extractOverviewAnomalyLabels(labels?: string[] | null): string[]
 export function extractSignatureAnomalyRunIds(group?: PatrolAnomalyGroup | null): Set<string> {
   return new Set(
     (group?.items ?? [])
-      .map((item) => item.run_id.trim())
+      .map((item) => typeof item.run_id === 'string' ? item.run_id.trim() : '')
       .filter(Boolean),
   );
 }

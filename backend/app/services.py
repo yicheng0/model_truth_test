@@ -8811,101 +8811,6 @@ def _signature_relay_for_scheduled_test(db: Session, scheduled: ScheduledChannel
     return db.scalar(select(Channel).where(Channel.is_reference.is_(True), Channel.enabled.is_(True)).limit(1))
 
 
-def _scheduled_source_failure_for_relay(model_payload: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return the current-round Source outage evidence, if Relay must be skipped."""
-    if not isinstance(model_payload, dict):
-        return None
-    run = model_payload.get("run")
-    if not isinstance(run, Run) or run.status != "failed":
-        return None
-    model_requests = _scheduled_model_request_evidence(model_payload)
-    if not model_requests or any(not item.get("error") or (item.get("score") or 0) > 0 for item in model_requests):
-        return None
-
-    labels = {
-        str(label)
-        for item in model_requests
-        for label in (item.get("labels") or [])
-        if isinstance(label, str)
-    }
-    operational_labels = labels.intersection(OPERATIONAL_FAILURE_LABELS)
-    if operational_labels:
-        label = next(item for item in OPERATIONAL_FAILURE_LABEL_PRIORITY if item in operational_labels)
-    else:
-        label = None
-        for item in model_requests:
-            label = operational_failure_label(item.get("error"), http_status=item.get("http_status"))
-            if label:
-                break
-        label = label or PROVIDER_REQUEST_FAILED_LABEL
-
-    errors = [
-        redact_text(str(item.get("error") or ""))
-        for item in model_requests
-        if str(item.get("error") or "").strip()
-    ]
-    raw_error = "; ".join(errors)[:2000] or "Source 本轮探针未返回可用响应"
-    statuses = [item.get("http_status") for item in model_requests if item.get("http_status") is not None]
-    error_http_status = next((status for status in statuses if status is not None), None)
-    return {
-        "label": label,
-        "raw_error": raw_error,
-        "error_http_status": error_http_status,
-        "reason": f"Source 本轮请求失败，已跳过 Relay：{raw_error}",
-    }
-
-
-def _scheduled_source_failure_signature_result(
-    db: Session,
-    scheduled: ScheduledChannelTest,
-    failure: dict[str, Any],
-) -> dict[str, Any]:
-    source = db.get(Channel, scheduled.channel_id)
-    relay = _signature_relay_for_scheduled_test(db, scheduled)
-    completed_at = datetime.now(timezone.utc).isoformat()
-    label = str(failure.get("label") or PROVIDER_REQUEST_FAILED_LABEL)
-    source_name = source.name if source else None
-    relay_name = relay.name if relay else None
-    return {
-        "ok": False,
-        "status": "skipped",
-        "signature_ok": None,
-        "reason": failure.get("reason") or "Source 本轮请求失败，Relay 未执行",
-        "raw_error": failure.get("raw_error"),
-        "error_http_status": failure.get("error_http_status"),
-        "error_stage": "source",
-        "created_at": completed_at,
-        "completed_at": completed_at,
-        "source_channel_id": source.id if source else scheduled.channel_id,
-        "source_channel_name": source_name,
-        "source_channel_provider_type": source.provider_type if source else None,
-        "source_channel_account_type": (source.auth_config or {}).get("account_type") if source else None,
-        "relay_channel_id": relay.id if relay else None,
-        "relay_channel_name": relay_name,
-        "relay_channel_provider_type": relay.provider_type if relay else None,
-        "relay_channel_account_type": (relay.auth_config or {}).get("account_type") if relay else None,
-        "fallback_note": SIGNATURE_FALLBACK_NOTE,
-        "source_protocol_profile": claude_protocol_profile_for_model(source.model_name) if source else None,
-        "relay_protocol_profile": claude_protocol_profile_for_model(relay.model_name) if relay else None,
-        "request_normalization_notes": [],
-        "labels": [label],
-        "steps": [
-            {
-                "name": "Source 自动巡检探针",
-                "status": "fail",
-                "detail": failure.get("raw_error") or "Source 本轮请求失败",
-                "excerpt": failure.get("raw_error"),
-            },
-            {
-                "name": "自动巡检 Signature 互通检测",
-                "status": "skipped",
-                "detail": "Relay 未执行：Source 本轮请求失败",
-                "excerpt": "本轮未向官方 Relay 发起请求",
-            },
-        ],
-    }
-
-
 def _signature_interop_report_evidence(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": bool(result.get("ok")),
@@ -9038,10 +8943,7 @@ async def execute_scheduled_probe_run(
             if not scheduled or not run:
                 return run
             modules = scheduled_patrol_modules(scheduled)
-            source_failure = _scheduled_source_failure_for_relay(model_payload)
-            if "signature_interop" in modules and source_failure:
-                signature_result = _scheduled_source_failure_signature_result(db, scheduled, source_failure)
-            elif "signature_interop" in modules:
+            if "signature_interop" in modules:
                 try:
                     signature_result = await attach_signature_interop_to_scheduled_run(session_factory, run.id, scheduled.id)
                 except Exception as exc:

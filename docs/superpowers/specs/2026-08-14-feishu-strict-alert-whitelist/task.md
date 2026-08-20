@@ -11,7 +11,7 @@
 
 ## T1: 增加严格白名单判定测试
 
-**文件：** `backend/tests/test_api.py`  
+**文件：** `backend/tests/test_api.py`
 **依赖：** 无
 
 **步骤：**
@@ -25,7 +25,7 @@
 
 ## T2: 实现严格白名单判定器
 
-**文件：** `backend/app/services.py`  
+**文件：** `backend/app/services.py`
 **依赖：** T1
 
 **步骤：**
@@ -40,7 +40,7 @@
 
 ## T3: 增加通知证据提取与安全文案测试
 
-**文件：** `backend/tests/test_api.py`  
+**文件：** `backend/tests/test_api.py`
 **依赖：** T2
 
 **步骤：**
@@ -55,7 +55,7 @@
 
 ## T4: 实现结构化证据提取和安全通知文案
 
-**文件：** `backend/app/services.py`  
+**文件：** `backend/app/services.py`
 **依赖：** T3
 
 **步骤：**
@@ -71,7 +71,7 @@
 
 ## T5: 增加新建告警通知状态测试
 
-**文件：** `backend/tests/test_api.py`  
+**文件：** `backend/tests/test_api.py`
 **依赖：** T4
 
 **步骤：**
@@ -85,7 +85,7 @@
 
 ## T6: 接入告警创建时的通知资格状态
 
-**文件：** `backend/app/services.py`  
+**文件：** `backend/app/services.py`
 **依赖：** T5
 
 **步骤：**
@@ -99,7 +99,7 @@
 
 ## T7: 增加手动重发发送前复核测试
 
-**文件：** `backend/tests/test_api.py`  
+**文件：** `backend/tests/test_api.py`
 **依赖：** T6
 
 **步骤：**
@@ -113,7 +113,7 @@
 
 ## T8: 在单条发送和手动重发前复核白名单
 
-**文件：** `backend/app/services.py`  
+**文件：** `backend/app/services.py`
 **依赖：** T7
 
 **步骤：**
@@ -127,7 +127,7 @@
 
 ## T9: 增加小时汇总白名单过滤和安全明细测试
 
-**文件：** `backend/tests/test_api.py`  
+**文件：** `backend/tests/test_api.py`
 **依赖：** T8
 
 **步骤：**
@@ -142,7 +142,7 @@
 
 ## T10: 在小时汇总中应用白名单和安全异常明细
 
-**文件：** `backend/app/services.py`  
+**文件：** `backend/app/services.py`
 **依赖：** T9
 
 **步骤：**
@@ -157,7 +157,7 @@
 
 ## T11: 增加飞书测试消息与日报口径回归测试
 
-**文件：** `backend/tests/test_api.py`  
+**文件：** `backend/tests/test_api.py`
 **依赖：** T10
 
 **步骤：**
@@ -170,7 +170,7 @@
 
 ## T12: 运行聚焦回归并修正兼容性问题
 
-**文件：** `backend/app/services.py`、`backend/tests/test_api.py`  
+**文件：** `backend/app/services.py`、`backend/tests/test_api.py`
 **依赖：** T11
 
 **步骤：**
@@ -184,7 +184,7 @@
 
 ## T13: 运行后端全量回归
 
-**文件：** `backend/app/services.py`、`backend/tests/test_api.py`  
+**文件：** `backend/app/services.py`、`backend/tests/test_api.py`
 **依赖：** T12
 
 **步骤：**

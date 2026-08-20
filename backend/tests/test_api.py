@@ -700,30 +700,6 @@ def create_patrol_schedule(client: TestClient, **overrides) -> dict:  # noqa: AN
     return response.json()
 
 
-def scheduled_source_success_payload(case, *, prefix: str) -> dict:  # noqa: ANN001
-    is_blind_identity = (case.scoring_rules or {}).get("scheduled_blind_identity_json_probe") is True
-    content = '{"vendor":"Anthropic","product":"Claude","model":""}' if is_blind_identity else "我是 Claude，由 Anthropic 开发。"
-    message_id = f"msg_{prefix}_{case.sort_order}"
-    request_id = f"req_{prefix}_{case.sort_order}"
-    return {
-        "provider_message_id": message_id,
-        "content_text": content,
-        "raw_request": {"system": None, "messages": [{"role": "user", "content": case.prompt}]},
-        "raw_response": {
-            "id": message_id,
-            "type": "message",
-            "content": [{"type": "text", "text": content}],
-            "usage": {"input_tokens": 20, "output_tokens": 10},
-            "_response_metadata": {"request_id": request_id},
-        },
-        "usage": {"input_tokens": 20, "output_tokens": 10},
-        "status_code": 200,
-        "request_protocol": "anthropic_messages",
-        "provider_endpoint": "https://source.example/v1/messages",
-        "error": None,
-    }
-
-
 def create_legacy_patrol_schedule(client: TestClient, **overrides) -> dict:  # noqa: ANN001
     suite_id, _run, snapshot = create_ready_baseline(client, overrides.pop("baseline_name", "patrol policy baseline"))
     payload = {
@@ -1387,6 +1363,108 @@ def test_patrol_query_preserves_real_total_on_out_of_range_page_and_loads_anomal
         channel_anomalies = client.get("/api/runs/patrol/anomalies?channel_id=negative_sample").json()
         assert channel_anomalies["kiro_identity_leak"]["count"] == 1
         assert channel_anomalies["invalid_thinking_signature"]["count"] == 1
+
+
+def test_patrol_strict_anomaly_summary_excludes_operational_failures_and_deduplicates_by_run() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        fixtures = [
+            (
+                "disabled_403",
+                "third_party_demo",
+                {"labels": ["provider_request_failed"], "classification_status": "operational_issue", "signature_interop": {"status": "fail", "signature_ok": None, "error_http_status": 403, "raw_error": "该渠道已被禁用"}},
+            ),
+            (
+                "network_timeout",
+                "third_party_demo",
+                {"labels": ["provider_request_failed"], "classification_status": "operational_issue", "signature_interop": {"status": "fail", "signature_ok": None, "error_http_status": 504, "raw_error": "Gateway timeout: network error"}},
+            ),
+            (
+                "legacy_label_only",
+                "third_party_demo",
+                {"labels": ["signature_interop_failed"], "classification_status": "anomaly", "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 403, "raw_error": "permission denied"}},
+            ),
+            (
+                "signature_explicit",
+                "third_party_demo",
+                {"labels": ["signature_interop_failed"], "classification_status": "anomaly", "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 400, "raw_error": "Invalid `signature` in `thinking` block"}},
+            ),
+            (
+                "kiro_and_signature",
+                "negative_sample",
+                {"labels": ["kiro_identity_leak", "signature_interop_failed"], "classification_status": "anomaly", "model_requests": [{"key": "identity_self_report", "response_text": "I am Kiro"}], "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 400, "raw_error": "INVALID SIGNATURE IN THINKING BLOCK"}},
+            ),
+        ]
+        for index, (suffix, channel_id, evidence) in enumerate(fixtures):
+            run = Run(
+                id=f"patrol_strict_{suffix}",
+                suite_id=suite_id,
+                name=f"strict {suffix}",
+                test_scope="scheduled_probe",
+                status="completed",
+                created_at=datetime(2026, 8, 14, tzinfo=timezone.utc) + timedelta(minutes=index),
+            )
+            db.add(run)
+            db.add(RunChannel(id=f"patrol_strict_rc_{index}", run_id=run.id, channel_id=channel_id, role_in_run="candidate"))
+            db.add(Report(id=f"patrol_strict_report_{index}", run_id=run.id, channel_id=channel_id, final_score=20, grade="E", summary="strict fixture", evidence=evidence, created_at=run.created_at))
+        db.commit()
+
+    with TestClient(app) as client:
+        payload = client.get("/api/runs/patrol/anomalies").json()
+        channel_payload = client.get("/api/runs/patrol/anomalies?channel_id=negative_sample").json()
+
+    assert payload["strict_total"] == 2
+    assert [item["run_id"] for item in payload["strict_items"]] == [
+        "patrol_strict_kiro_and_signature",
+        "patrol_strict_signature_explicit",
+    ]
+    assert [item["kind"] for item in payload["strict_items"]] == [
+        "kiro_identity_leak",
+        "invalid_thinking_signature",
+    ]
+    assert payload["kiro_identity_leak"]["count"] == 1
+    assert payload["invalid_thinking_signature"]["count"] == 2
+    strict_ids = {item["run_id"] for item in payload["strict_items"]}
+    assert "patrol_strict_disabled_403" not in strict_ids
+    assert "patrol_strict_network_timeout" not in strict_ids
+    assert "patrol_strict_legacy_label_only" not in strict_ids
+    assert channel_payload["strict_total"] == 1
+    assert channel_payload["strict_items"][0]["run_id"] == "patrol_strict_kiro_and_signature"
+
+
+def test_patrol_strict_anomaly_summary_limits_items_but_preserves_total() -> None:
+    reset_database()
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        for index in range(17):
+            run = Run(
+                id=f"patrol_strict_limit_{index:02d}",
+                suite_id=suite_id,
+                name=f"strict limit {index}",
+                test_scope="scheduled_probe",
+                status="completed",
+                created_at=datetime(2026, 8, 14, tzinfo=timezone.utc) + timedelta(minutes=index),
+            )
+            db.add(run)
+            db.add(RunChannel(id=f"patrol_strict_limit_rc_{index:02d}", run_id=run.id, channel_id="third_party_demo", role_in_run="candidate"))
+            db.add(Report(
+                id=f"patrol_strict_limit_report_{index:02d}",
+                run_id=run.id,
+                channel_id="third_party_demo",
+                final_score=20,
+                grade="E",
+                evidence={"labels": ["signature_interop_failed"], "classification_status": "anomaly", "signature_interop": {"status": "fail", "signature_ok": False, "error_http_status": 400, "raw_error": "Invalid 'signature' in 'thinking' block"}},
+                created_at=run.created_at,
+            ))
+        db.commit()
+
+    with TestClient(app) as client:
+        payload = client.get("/api/runs/patrol/anomalies").json()
+
+    assert payload["strict_total"] == 17
+    assert len(payload["strict_items"]) == 10
+    assert payload["strict_items"][0]["run_id"] == "patrol_strict_limit_16"
 
 
 def test_patrol_delete_button_usability_returns_filtered_deletable_count() -> None:
@@ -3197,9 +3275,6 @@ def test_invalid_baseline_with_results_is_restored_when_only_channel_check_was_s
 def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
 
-    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
-        return scheduled_source_success_payload(case, prefix="risky_source")
-
     async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
         return {
             "ok": True,
@@ -3217,7 +3292,6 @@ def test_scheduled_channel_test_run_now_creates_run_and_alert_when_risky(monkeyp
             "steps": [{"name": "最终判定", "status": "ok", "detail": "兼容", "excerpt": None}],
         }
 
-    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
     monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
     reset_database()
     with TestClient(app) as client:
@@ -3355,200 +3429,6 @@ def test_scheduled_channel_test_signature_only_module_run_now(monkeypatch) -> No
         blind_identity = report.evidence["model_requests"][1]
         assert blind_identity["identity_json_status"] == "clean"
         assert blind_identity["identity_json_fields"] == {"vendor": "Anthropic", "product": "Claude", "model": ""}
-
-
-def test_scheduled_source_failure_skips_relay_signature_request(monkeypatch) -> None:
-    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
-    source_calls: list[str] = []
-    relay_calls = 0
-
-    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
-        source_calls.append(str(next(iter(case.scoring_rules or {"unknown": True}))))
-        return {
-            "provider_message_id": None,
-            "content_text": "",
-            "raw_request": {"system": None, "messages": [{"role": "user", "content": case.prompt}]},
-            "raw_response": {"type": "error", "error": {"type": "upstream_error", "message": "503 upstream unavailable"}, "usage": {}},
-            "usage": {},
-            "status_code": 503,
-            "request_protocol": "anthropic_messages",
-            "provider_endpoint": "https://source.example/v1/messages",
-            "error": "503 upstream unavailable",
-        }
-
-    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
-        nonlocal relay_calls
-        relay_calls += 1
-        return {"ok": True, "status": "pass", "source_channel_id": source.id, "relay_channel_id": relay.id}
-
-    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
-    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
-    reset_database()
-    with TestClient(app) as client:
-        schedule = create_patrol_schedule(client, patrol_modules=["signature_interop"])
-
-    asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
-
-    with SessionLocal() as db:
-        scheduled = db.get(ScheduledChannelTest, schedule["id"])
-        assert scheduled is not None
-        run = db.get(Run, scheduled.last_run_id)
-        report = db.scalar(select(Report).where(Report.run_id == scheduled.last_run_id, Report.channel_id == scheduled.channel_id))
-        job = db.scalar(select(PatrolJob).where(PatrolJob.scheduled_test_id == scheduled.id, PatrolJob.run_id == scheduled.last_run_id))
-        attempt = db.scalar(select(PatrolJobAttempt).where(PatrolJobAttempt.job_id == job.id)) if job else None
-        alerts = list(db.scalars(select(ChannelAlert).where(ChannelAlert.run_id == scheduled.last_run_id)).all())
-
-    assert len(source_calls) == 2
-    assert relay_calls == 0
-    assert scheduled.last_status == "completed"
-    assert scheduled.locked_by is None
-    assert scheduled.next_run_at is not None
-    assert run is not None and run.status == "failed"
-    assert report is not None
-    signature = report.evidence["signature_interop"]
-    assert signature["status"] == "skipped"
-    assert signature["signature_ok"] is None
-    assert signature["error_stage"] == "source"
-    assert "503 upstream unavailable" in str(signature["raw_error"])
-    assert "Relay 未执行" in " ".join(str(step.get("detail") or "") for step in signature["steps"])
-    assert "已跳过 Relay" in (report.markdown or "")
-    assert "provider_temporarily_unavailable" in report.evidence["labels"]
-    assert "signature_interop_failed" not in report.evidence["labels"]
-    assert job is not None and job.status == "completed"
-    assert attempt is not None and attempt.status == "completed"
-    assert not any("signature_interop_failed" in (alert.trigger_labels or []) for alert in alerts)
-
-
-def test_scheduled_source_recovery_resumes_relay_signature_request(monkeypatch) -> None:
-    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
-    source_calls = 0
-    relay_calls = 0
-
-    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
-        nonlocal source_calls
-        source_calls += 1
-        if source_calls <= 2:
-            return {
-                "provider_message_id": None,
-                "content_text": "",
-                "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
-                "raw_response": {"type": "error", "error": {"type": "upstream_error", "message": "503 upstream unavailable"}, "usage": {}},
-                "usage": {},
-                "status_code": 503,
-                "request_protocol": "anthropic_messages",
-                "provider_endpoint": "https://source.example/v1/messages",
-                "error": "503 upstream unavailable",
-            }
-        return {
-            "provider_message_id": f"msg_recovered_{source_calls}",
-            "content_text": "我是 Claude，由 Anthropic 开发。",
-            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
-            "raw_response": {
-                "id": f"msg_recovered_{source_calls}",
-                "type": "message",
-                "content": [{"type": "text", "text": "我是 Claude，由 Anthropic 开发。"}],
-                "usage": {"input_tokens": 20, "output_tokens": 10},
-                "_response_metadata": {"request_id": f"req_recovered_{source_calls}"},
-            },
-            "usage": {"input_tokens": 20, "output_tokens": 10},
-            "request_protocol": "anthropic_messages",
-            "provider_endpoint": "https://source.example/v1/messages",
-            "error": None,
-        }
-
-    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
-        nonlocal relay_calls
-        relay_calls += 1
-        return {
-            "ok": True,
-            "status": "pass",
-            "reason": "Signature 互通通过",
-            "source_channel_id": source.id,
-            "relay_channel_id": relay.id,
-            "signature_prefixes": ["sig-recovered"],
-            "steps": [{"name": "最终判定", "status": "ok", "detail": "兼容", "excerpt": None}],
-        }
-
-    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
-    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
-    reset_database()
-    with TestClient(app) as client:
-        schedule = create_patrol_schedule(client, patrol_modules=["signature_interop"])
-
-    first_run = asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
-    second_run = asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
-
-    with SessionLocal() as db:
-        scheduled = db.get(ScheduledChannelTest, schedule["id"])
-        assert scheduled is not None
-        first_report = db.scalar(select(Report).where(Report.run_id == first_run.id, Report.channel_id == scheduled.channel_id)) if first_run else None
-        second_report = db.scalar(select(Report).where(Report.run_id == second_run.id, Report.channel_id == scheduled.channel_id)) if second_run else None
-
-    assert source_calls == 4
-    assert relay_calls == 1
-    assert first_run is not None and first_run.status == "failed"
-    assert second_run is not None and second_run.status == "completed"
-    assert first_report is not None and first_report.evidence["signature_interop"]["status"] == "skipped"
-    assert second_report is not None and second_report.evidence["signature_interop"]["status"] == "pass"
-    assert scheduled.last_run_id == second_run.id
-    assert scheduled.locked_by is None
-    assert scheduled.next_run_at is not None
-
-
-def test_scheduled_relay_signature_rejection_keeps_existing_failure_semantics(monkeypatch) -> None:
-    monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
-    relay_calls = 0
-
-    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
-        return {
-            "provider_message_id": "msg_signature_rejection_source",
-            "content_text": "我是 Claude，由 Anthropic 开发。",
-            "raw_request": {"messages": [{"role": "user", "content": case.prompt}]},
-            "raw_response": {
-                "id": "msg_signature_rejection_source",
-                "type": "message",
-                "content": [{"type": "text", "text": "我是 Claude，由 Anthropic 开发。"}],
-                "usage": {"input_tokens": 20, "output_tokens": 10},
-            },
-            "usage": {"input_tokens": 20, "output_tokens": 10},
-            "request_protocol": "anthropic_messages",
-            "provider_endpoint": "https://source.example/v1/messages",
-            "error": None,
-        }
-
-    async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
-        nonlocal relay_calls
-        relay_calls += 1
-        return {
-            "ok": False,
-            "status": "fail",
-            "signature_ok": False,
-            "reason": "Relay 明确拒绝 Source thinking signature",
-            "raw_error": "Invalid `signature` in `thinking` block (request id: req_relay)",
-            "error_http_status": 400,
-            "error_stage": "relay",
-            "source_channel_id": source.id,
-            "relay_channel_id": relay.id,
-            "steps": [{"name": "Relay 请求", "status": "fail", "detail": "Invalid signature", "excerpt": None}],
-        }
-
-    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
-    monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
-    reset_database()
-    with TestClient(app) as client:
-        schedule = create_patrol_schedule(client, patrol_modules=["signature_interop"])
-
-    run = asyncio.run(execute_scheduled_channel_test(SessionLocal, schedule["id"], advance_next_run=False))
-
-    with SessionLocal() as db:
-        report = db.scalar(select(Report).where(Report.run_id == run.id, Report.channel_id == schedule["channel_id"])) if run else None
-
-    assert relay_calls == 1
-    assert run is not None and run.status == "completed"
-    assert report is not None
-    assert report.evidence["signature_interop"]["status"] == "fail"
-    assert report.evidence["signature_interop"]["signature_ok"] is False
-    assert "signature_interop_failed" in report.evidence["labels"]
 
 
 def test_scheduled_signature_post_processing_failure_keeps_source_direction(monkeypatch) -> None:
@@ -5191,9 +5071,6 @@ def test_scheduled_task_timeout_marks_run_failed_and_releases_lock(monkeypatch) 
 def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
 
-    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
-        return scheduled_source_success_payload(case, prefix="signature_failure_source")
-
     async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
         return {
             "ok": False,
@@ -5213,7 +5090,6 @@ def test_scheduled_channel_test_signature_interop_failure_creates_alert(monkeypa
             "steps": [{"name": "最终判定", "status": "fail", "detail": "signature 不兼容", "excerpt": None}],
         }
 
-    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
     monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
     reset_database()
     with TestClient(app) as client:
@@ -14327,9 +14203,6 @@ def test_scheduled_signature_uses_candidate_source_and_reference_relay(monkeypat
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
     captured: dict[str, str] = {}
 
-    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
-        return scheduled_source_success_payload(case, prefix="direction_source")
-
     async def fake_signature_interop(source, relay, stream=False):  # noqa: ANN001, ARG001
         captured["source_id"] = source.id
         captured["relay_id"] = relay.id
@@ -14349,7 +14222,6 @@ def test_scheduled_signature_uses_candidate_source_and_reference_relay(monkeypat
             "steps": [{"name": "最终判定", "status": "ok", "detail": "兼容", "excerpt": None}],
         }
 
-    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
     monkeypatch.setattr("app.services.test_signature_interop", fake_signature_interop)
     reset_database()
     with TestClient(app) as client:
@@ -14384,11 +14256,6 @@ def test_scheduled_signature_uses_candidate_source_and_reference_relay(monkeypat
 
 def test_scheduled_signature_source_missing_creates_alert(monkeypatch) -> None:
     monkeypatch.delenv("FEISHU_WEBHOOK_URL", raising=False)
-
-    async def fake_invoke(channel, case, attempt, credentials, use_mock):  # noqa: ANN001, ARG001
-        return scheduled_source_success_payload(case, prefix="missing_relay_source")
-
-    monkeypatch.setattr("app.services.invoke_channel", fake_invoke)
     reset_database()
     with TestClient(app) as client:
         schedule = client.post(

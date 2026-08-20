@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, clampPage, countedPatrolModelRequests, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, extractSignatureAnomalyRunIds, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
-import type { Channel, PatrolAnomalyGroup, ReportSummary, Run, RunResults } from './types';
+import { ALL_PATROL_CHANNELS, UNKNOWN_PATROL_CHANNEL, buildChannelResultOverview, buildPatrolChannelFilterOptions, buildPatrolDeleteSummary, buildPatrolTopErrorSummary, clampPage, countedPatrolModelRequests, deletablePatrolRunIds, extractInvalidThinkingSignatureErrors, extractKiroIdentityLeaks, extractOverviewAnomalyLabels, extractPatrolEvidence, extractSignatureAnomalyRunIds, filterPatrolRunsByChannel, filterPatrolRunsByError, formatPatrolChannel, isPatrolOperationalFailure, paginateRuns, patrolEvidenceDisplayState, patrolInlineError, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, patrolSignatureDisplayState, removeBulkDeletedRuns, resolvePatrolPage, selectableRunIds, splitRunsByPatrol } from './runsUtils';
+import type { Channel, PatrolAnomalyGroup, PatrolAnomalySummary, ReportSummary, Run, RunResults } from './types';
 
 function run(id: string, scheduledTestId?: string | null): Run {
   return {
@@ -18,7 +18,80 @@ function run(id: string, scheduledTestId?: string | null): Run {
   };
 }
 
+function emptyAnomalies(): PatrolAnomalySummary {
+  return {
+    strict_total: 0,
+    strict_items: [],
+    kiro_identity_leak: { count: 0, items: [], truncated: false },
+    invalid_thinking_signature: { count: 0, items: [], truncated: false },
+  };
+}
+
 describe('runs utilities', () => {
+  it('maps only server-provided strict Kiro and Signature anomalies', () => {
+    const anomalies: PatrolAnomalySummary = {
+      strict_total: 2,
+      strict_items: [
+        { kind: 'kiro_identity_leak', run_id: 'kiro_1', run_name: 'Kiro 任务', channel_id: 'ch_2', channel_name: '渠道二', created_at: '2026-08-10T08:00:00Z', request_ids: ['req-secret'] },
+        { kind: 'invalid_thinking_signature', run_id: 'signature_1', run_name: 'Signature 任务', channel_id: 'ch_1', channel_name: '渠道一', created_at: '2026-08-11T08:00:00Z', request_ids: [], http_status: 400 },
+      ],
+      kiro_identity_leak: {
+        count: 1,
+        items: [{ run_id: 'kiro_1', run_name: 'Kiro 任务', channel_id: 'ch_2', channel_name: '渠道二', created_at: '2026-08-10T08:00:00Z', request_ids: [] }],
+        truncated: false,
+      },
+      invalid_thinking_signature: {
+        count: 1,
+        items: [{ run_id: 'signature_1', run_name: 'Signature 任务', channel_id: 'ch_1', channel_name: '渠道一', created_at: '2026-08-11T08:00:00Z', request_ids: [], http_status: 400 }],
+        truncated: false,
+      },
+    };
+
+    const summary = buildPatrolTopErrorSummary(anomalies);
+
+    expect(summary.items.map((item) => [item.runId, item.kind, item.priority])).toEqual([
+      ['kiro_1', 'kiro_identity_leak', 1],
+      ['signature_1', 'invalid_thinking_signature', 2],
+    ]);
+    expect(summary.total).toBe(2);
+    expect(JSON.stringify(summary)).not.toMatch(/req-secret|request.?id|raw.?response|full.?text|error.?body/i);
+  });
+
+  it('defensively deduplicates strict entries and keeps the highest-priority Kiro type', () => {
+    const anomalies: PatrolAnomalySummary = {
+      strict_total: 1,
+      strict_items: [
+        { kind: 'kiro_identity_leak', run_id: 'duplicate_1', run_name: '重复任务', channel_id: 'ch_1', channel_name: '渠道一', created_at: '2026-08-12T08:00:00Z', request_ids: [] },
+        { kind: 'invalid_thinking_signature', run_id: 'duplicate_1', run_name: '重复任务', channel_id: 'ch_1', channel_name: '渠道一', created_at: '2026-08-12T08:00:00Z', request_ids: [], http_status: 400 },
+      ],
+      kiro_identity_leak: { count: 1, items: [], truncated: false },
+      invalid_thinking_signature: { count: 1, items: [], truncated: false },
+    };
+
+    const summary = buildPatrolTopErrorSummary(anomalies);
+
+    expect(summary.items).toHaveLength(1);
+    expect(summary.items[0]).toMatchObject({ runId: 'duplicate_1', kind: 'kiro_identity_leak', priority: 1 });
+  });
+
+  it('limits strict entries to ten while preserving the server strict total', () => {
+    const anomalies: PatrolAnomalySummary = {
+      ...emptyAnomalies(),
+      strict_total: 17,
+      strict_items: Array.from({ length: 12 }, (_, index) => ({
+        kind: 'invalid_thinking_signature' as const,
+        run_id: `signature_${index + 1}`,
+        run_name: `Signature ${index + 1}`,
+        request_ids: [],
+      })),
+    };
+
+    const summary = buildPatrolTopErrorSummary(anomalies);
+
+    expect(summary.total).toBe(17);
+    expect(summary.items).toHaveLength(10);
+  });
+
   it('keeps the requested patrol page while stale responses are in flight', () => {
     expect(resolvePatrolPage({ requestedPage: 6, responsePage: 1, total: 289, pageSize: 10, isFetching: true })).toBe(6);
     expect(resolvePatrolPage({ requestedPage: 6, responsePage: 1, total: 289, pageSize: 10, isFetching: false })).toBe(6);
@@ -139,6 +212,8 @@ describe('runs utilities', () => {
         { run_id: 'sig_run_1', run_name: '重复任务', request_ids: [], http_status: 400 },
         { run_id: 'sig_run_2', run_name: '另一个任务', request_ids: [], http_status: 400 },
         { run_id: '   ', run_name: '空 ID', request_ids: [], http_status: 400 },
+        { run_id: null as unknown as string, run_name: '缺失 ID', request_ids: [], http_status: 400 },
+        { run_id: undefined as unknown as string, run_name: '未定义 ID', request_ids: [], http_status: 400 },
       ],
     };
 

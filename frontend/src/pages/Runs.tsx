@@ -438,11 +438,10 @@ export default function Runs() {
   }
 
   const patrolRuns = patrolQuery.data?.items ?? [];
+  const patrolAnomalySummary = patrolAnomaliesQuery.isError ? undefined : patrolAnomaliesQuery.data;
   const signatureAnomalyRunIds = useMemo(
-    () => patrolAnomaliesQuery.isError
-      ? new Set<string>()
-      : extractSignatureAnomalyRunIds(patrolAnomaliesQuery.data?.invalid_thinking_signature),
-    [patrolAnomaliesQuery.data?.invalid_thinking_signature, patrolAnomaliesQuery.isError],
+    () => extractSignatureAnomalyRunIds(patrolAnomalySummary?.invalid_thinking_signature),
+    [patrolAnomalySummary?.invalid_thinking_signature],
   );
   const patrolChannelOptions = useMemo(() => {
     const options = (channelsQuery.data ?? []).map((channel: Channel) => ({
@@ -626,8 +625,8 @@ export default function Runs() {
         bordered={false}
       >
         <Space direction="vertical" size={8} style={{ width: '100%', marginBottom: 12 }}>
-          <PatrolGlobalAnomalyAlert title="Kiro 身份泄漏" group={patrolAnomaliesQuery.data?.kiro_identity_leak} />
-          <PatrolGlobalAnomalyAlert title="Thinking Signature 无效" group={patrolAnomaliesQuery.data?.invalid_thinking_signature} />
+          <PatrolGlobalAnomalyAlert title="Kiro 身份泄漏" group={patrolAnomalySummary?.kiro_identity_leak} />
+          <PatrolGlobalAnomalyAlert title="Thinking Signature 无效" group={patrolAnomalySummary?.invalid_thinking_signature} />
         </Space>
         <Table
           className="patrol-log-table"
