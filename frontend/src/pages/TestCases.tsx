@@ -505,12 +505,21 @@ export default function TestCases() {
             },
             {
               title: '检测策略',
-              width: 190,
+              width: 300,
               render: (_, record) => {
                 const rules = record.scoring_rules ?? {};
+                const controls = [
+                  rules.positive_control ? '正向' : null,
+                  rules.negative_control ? '负向' : null,
+                  rules.tamper_control ? '篡改' : null,
+                ].filter(Boolean);
                 return (
                   <Space wrap size={4}>
                     {rules.quick ? <Tag color="blue">快速</Tag> : <Tag>完整</Tag>}
+                    {rules.detection_point_mode ? <Tag color="cyan">{String(rules.detection_point)}</Tag> : null}
+                    {rules.evidence_tier ? <Tag color="geekblue">{String(rules.evidence_tier)}</Tag> : null}
+                    {controls.map((control) => <Tag key={control} color="orange">{control}对照</Tag>)}
+                    {rules.calibration_only ? <Tag>仅校准</Tag> : null}
                     <Tag color="purple">权重 {String(rules.weight ?? 1)}</Tag>
                     <Tag color="gold">{String(rules.risk_dimension ?? 'quality')}</Tag>
                   </Space>

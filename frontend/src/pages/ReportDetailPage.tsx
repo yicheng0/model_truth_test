@@ -115,6 +115,9 @@ export default function ReportDetailPage() {
     ? arrayValue(evidence.model_requests) as Array<Record<string, unknown>>
     : legacyModelRequest ? [legacyModelRequest] : [];
   const signatureInterop = evidence.signature_interop && typeof evidence.signature_interop === 'object' ? evidence.signature_interop as Record<string, unknown> : {};
+  const detectionAssessment = evidence.detection_point_assessment;
+  const detectionItems = detectionAssessment?.detection_points?.items ?? [];
+  const identityAssessment = detectionAssessment?.identity_assessment;
   const dimensionEntries = Object.entries(dimensions);
   const sampleLabel = '预测样本';
   const lowSampleLabel = '低分样本';
@@ -388,6 +391,38 @@ export default function ReportDetailPage() {
             ]}
           />
         </Card>
+      ),
+    },
+    {
+      key: 'detection-points',
+      label: '检测点证据',
+      children: (
+        <Space direction="vertical" size={16} className="full-width">
+          <Card bordered={false}>
+            <Descriptions column={{ xs: 1, md: 2, xl: 4 }} bordered size="small">
+              <Descriptions.Item label="模型行为">{stringValue(identityAssessment?.model_identity)}</Descriptions.Item>
+              <Descriptions.Item label="客户端线索">{stringValue(identityAssessment?.client_likelihood)}</Descriptions.Item>
+              <Descriptions.Item label="访问路径">{stringValue(identityAssessment?.access_path)}</Descriptions.Item>
+              <Descriptions.Item label="官方来源闭环"><Tag color={identityAssessment?.origin_verified ? 'green' : 'default'}>{stringValue(identityAssessment?.origin_classification ?? (identityAssessment?.origin_verified ? 'anthropic_api_direct_verified' : 'configured_not_verified'))}</Tag></Descriptions.Item>
+            </Descriptions>
+          </Card>
+          <Card title="五组检测点" bordered={false}>
+            <Table
+              rowKey="key"
+              dataSource={detectionItems}
+              pagination={false}
+              size="small"
+              columns={[
+                { title: '检测点', dataIndex: 'title', render: (value: string, row) => <span><strong>{value}</strong><br /><Typography.Text type="secondary">{row.key}</Typography.Text></span> },
+                { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'pass' ? 'green' : value === 'fail' ? 'red' : value === 'warning' ? 'orange' : 'default'}>{value}</Tag> },
+                { title: '样本', render: (_, row) => `${row.pass_count}/${row.sample_count} 通过` },
+                { title: '标签', dataIndex: 'labels', render: (value: string[]) => value?.length ? <Space wrap size={4}>{value.map((label) => <Tag key={label}>{label}</Tag>)}</Space> : '-' },
+                { title: '证据摘要', dataIndex: 'observed_summary', render: (value: string[]) => value?.length ? value.slice(0, 2).join('；') : '-' },
+              ]}
+            />
+            {identityAssessment?.limitations?.length ? <Alert type="info" showIcon message="解释边界" description={<ul>{identityAssessment.limitations.map((item) => <li key={item}>{item}</li>)}</ul>} style={{ marginTop: 16 }} /> : null}
+          </Card>
+        </Space>
       ),
     },
     {

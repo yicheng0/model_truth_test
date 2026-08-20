@@ -1003,6 +1003,28 @@ def default_cases() -> list[dict[str, Any]]:
         rules.setdefault("difficulty", _default_difficulty(case["module"], case["id"]))
         rules.setdefault("coverage_tags", _default_coverage_tags(case["module"], case["id"]))
         rules["quick"] = case["id"] in QUICK_CASE_IDS
+        detection_point: str | None = None
+        if case["id"] in {"protocol_01", "protocol_02", "protocol_03", "protocol_04", "protocol_05", "protocol_07", "protocol_09", "protocol_10", "tool_01", "tool_04", "tool_07"}:
+            detection_point = "fable5_behavior"
+        elif case["id"] in {"identity_02", "identity_04"}:
+            detection_point = "kiro_bedrock"
+        elif case["id"] in {"protocol_08", "protocol_12"}:
+            detection_point = "anthropic_origin"
+        elif case["module"] in {"protocol", "tool", "websearch"}:
+            detection_point = "claude_code_client"
+        elif case["module"] in {"identity", "reasoning", "code", "context", "knowledge", "safety", "format_boundary"}:
+            detection_point = "calibration"
+        if detection_point:
+            rules["detection_point"] = detection_point
+            rules["detection_point_mode"] = True
+            rules["evidence_tier"] = "protocol" if detection_point in {"fable5_behavior", "claude_code_client"} else "behavior"
+            rules["calibration_only"] = detection_point == "calibration"
+        if case["id"] == "protocol_01":
+            rules.update({"positive_control": True, "expected_error_category": "message_shape"})
+        elif case["id"] == "protocol_03":
+            rules.update({"negative_control": True, "expected_error_category": "max_tokens"})
+        elif case["id"] == "protocol_09":
+            rules.update({"tamper_control": True, "expected_error_category": "invalid_sampling_parameter"})
         case["scoring_rules"] = rules
 
     return cases

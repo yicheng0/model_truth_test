@@ -288,6 +288,7 @@ export default function ReportsPage() {
               ),
             },
             { title: '类型', dataIndex: 'mode', width: 150, render: (value: RunMode) => <Tag color="blue">{modeLabel(value)}</Tag> },
+            { title: '检测模式', dataIndex: 'test_scope', width: 130, render: (value: string) => <Tag color={value === 'detection_points' ? 'cyan' : 'default'}>{value === 'detection_points' ? '检测点' : value}</Tag> },
             {
               title: '评级',
               dataIndex: 'grade',
@@ -333,6 +334,13 @@ export default function ReportsPage() {
                   {normalizedLabels(report).length > 4 ? <Tag>+{normalizedLabels(report).length - 4}</Tag> : null}
                 </Space>
               ),
+            },
+            {
+              title: '检测点状态',
+              width: 220,
+              render: (_, report) => report.test_scope === 'detection_points' ? (
+                <Space wrap size={4}>{Object.entries(report.detection_point_statuses ?? {}).map(([key, status]) => <Tag key={key} color={status === 'pass' ? 'green' : status === 'fail' ? 'red' : 'orange'}>{key}: {status}</Tag>)}</Space>
+              ) : '-',
             },
             { title: '创建时间', dataIndex: 'created_at', width: 180, render: formatDateTime },
             {

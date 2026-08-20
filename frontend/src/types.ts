@@ -269,6 +269,32 @@ export interface ReportEvidence {
   ai_judge?: Record<string, unknown> | null;
   classification_label?: string | null;
   classification_reason?: string | null;
+  detection_point_assessment?: {
+    detection_points?: {
+      items?: Array<{
+        key: string;
+        title: string;
+        status: string;
+        sample_count: number;
+        pass_count: number;
+        warning_count: number;
+        fail_count: number;
+        skipped_count: number;
+        labels: string[];
+        observed_summary?: string[];
+        official_doc_refs?: string[];
+      }>;
+    };
+    identity_assessment?: {
+      model_identity?: string;
+      client_likelihood?: string;
+      access_path?: string;
+      resource_identity?: string;
+      origin_verified?: boolean;
+      origin_classification?: string;
+      limitations?: string[];
+    };
+  };
 }
 
 export type ChannelTaxonomySetting = {
@@ -1256,7 +1282,7 @@ export type RunLogCleanupResult = {
 };
 
 export type RunMode = 'full_comparison' | 'baseline_build' | 'candidate_eval' | 'manual_probe';
-export type TestScope = 'quick' | 'full' | 'scheduled_probe';
+export type TestScope = 'quick' | 'full' | 'detection_points' | 'scheduled_probe';
 export type ScheduledPatrolModule = 'signature_interop' | 'model_request_probes';
 export type ScheduledModelRequestProbeKey = 'thinking_temperature' | 'web_search' | 'thinking_adaptive_enabled';
 
@@ -1486,6 +1512,7 @@ export type ReportSummary = {
   run_id: string;
   run_name: string;
   mode: RunMode;
+  test_scope?: TestScope;
   channel_id: string;
   channel_name: string;
   channel_role: string;
@@ -1495,6 +1522,7 @@ export type ReportSummary = {
   summary?: string | null;
   labels: string[];
   dimension_scores: Record<string, number | null | undefined>;
+  detection_point_statuses?: Record<string, string>;
   performance: PerformanceSummary;
   created_at?: string | null;
 };

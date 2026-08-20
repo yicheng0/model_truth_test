@@ -948,6 +948,19 @@ class RunCreate(BaseModel):
     baseline_snapshot_id: str | None = None
     runtime_credentials: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def default_detection_point_sampling(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("test_scope") == "detection_points" and "repeat_count" not in value:
+            return {**value, "repeat_count": 3}
+        return value
+
+    @model_validator(mode="after")
+    def validate_detection_point_sampling(self) -> "RunCreate":
+        if self.test_scope == "detection_points" and self.repeat_count not in {3, 5}:
+            raise ValueError("detection_points repeat_count must be 3 or 5")
+        return self
+
 
 class SamplePlanCreate(BaseModel):
     suite_id: str

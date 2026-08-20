@@ -19,6 +19,8 @@ import {
 type CreateRunValues = {
   name: string;
   suite_id: string;
+  test_scope?: TestScope;
+  repeat_count?: 3 | 5;
   reference_channel_ids?: string[];
   candidate_channel_ids?: string[];
   runtime_credentials?: Record<string, RuntimeCredentialValues>;
@@ -36,6 +38,7 @@ export default function CreateRun() {
   const watchedSuiteId = Form.useWatch('suite_id', form);
   const watchedReferenceChannelIds = Form.useWatch('reference_channel_ids', form) ?? [];
   const watchedCandidateChannelIds = Form.useWatch('candidate_channel_ids', form) ?? [];
+  const watchedTestScope = Form.useWatch('test_scope', form) ?? 'full';
   const suites = useQuery<TestSuite[]>({ queryKey: ['suites'], queryFn: api.suites });
   const channels = useQuery<Channel[]>({ queryKey: ['channels'], queryFn: api.channels });
   const channelGroups = useQuery({ queryKey: ['channelGroups'], queryFn: api.channelGroups });
@@ -88,9 +91,9 @@ export default function CreateRun() {
         name: values.name,
         suite_id: suiteId,
         channel_ids: grouped,
-        repeat_count: 1,
+        repeat_count: values.test_scope === 'detection_points' ? (values.repeat_count ?? 3) : 1,
         concurrency: 1,
-        test_scope: 'full' as TestScope,
+        test_scope: (values.test_scope ?? 'full') as TestScope,
         use_mock: false,
         runtime_credentials: runtimeCredentials,
         mode: 'full_comparison',
@@ -119,13 +122,27 @@ export default function CreateRun() {
           />
         ) : null}
         <Form form={form} layout="vertical" onFinish={submit}>
-          <Alert type="info" showIcon message="参考渠道与待测渠道会在同一次任务中执行，并生成协议、能力、相似度和风险证据链。" style={{ marginBottom: 18 }} />
+          <Alert type="info" showIcon message="参考渠道与待测渠道会在同一次任务中执行，并生成协议、能力、相似度和风险证据链。检测点模式重点观察 Fable 5 行为、Kiro/Bedrock、Claude Code 入口和官方来源证据。" style={{ marginBottom: 18 }} />
           <Form.Item label="任务名" name="name" rules={[{ required: true }]}>
             <Input
               size="large"
               placeholder="Sonnet 渠道真实性对比"
             />
           </Form.Item>
+          <Form.Item label="检测模式" name="test_scope" initialValue="full">
+            <Select
+              size="large"
+              options={[
+                { value: 'full', label: '完整检测（历史综合评分）' },
+                { value: 'detection_points', label: '检测点模式（Fable 5 / Kiro / Claude Code / 官方来源）' },
+              ]}
+            />
+          </Form.Item>
+          {watchedTestScope === 'detection_points' ? (
+            <Form.Item label="每题重复次数" name="repeat_count" initialValue={3} extra="检测点模式只允许 3 或 5 次；单轮干净不代表没有偶发换模。">
+              <Select size="large" options={[{ value: 3, label: '3 次（快速筛查）' }, { value: 5, label: '5 次（更稳健）' }]} />
+            </Form.Item>
+          ) : null}
           {!suites.isLoading && !builtInSuite ? (
             <Alert
               type="error"

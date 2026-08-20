@@ -873,7 +873,7 @@ export default function RunDetail() {
               ))
             ) : (
               <>
-                <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : '完整检测'}</Descriptions.Item>
+                <Descriptions.Item label="检测范围">{data.run.test_scope === 'quick' ? '历史兼容检测' : data.run.test_scope === 'detection_points' ? '检测点模式' : '完整检测'}</Descriptions.Item>
                 <Descriptions.Item label="参考数据">{data.baseline_snapshot?.name ?? (isSamplingRun ? '历史参考采集中' : '本次同步对比')}</Descriptions.Item>
                 <Descriptions.Item label="已返回题目">{returnedRows} / {expectedRows}</Descriptions.Item>
                 {isSamplingRun ? (

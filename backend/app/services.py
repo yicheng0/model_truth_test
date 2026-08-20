@@ -26,6 +26,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .models import AppSetting, BaselineResult, BaselineSnapshot, Channel, ChannelAlert, ChannelGroup, ChannelGroupMember, ChannelTaxonomySetting, ClaudeCodeEvidence, Comparison, FeishuBroadcastSetting, PatrolJob, PatrolJobAttempt, Report, Result, Run, RunChannel, ScheduledChannelTest, TestCase, TestSuite
 from .redaction import is_sensitive_key, merge_redacted_config, redact_secret, redact_secrets, redact_signatures, redact_text
+from .detection_points import (
+    DETECTION_POINT_ORDER,
+    build_detection_point_assessment,
+    detection_point_sort_key,
+    is_detection_point_case,
+    probes_from_results,
+)
 from .scheduled_probe import (
     OPERATIONAL_FAILURE_LABELS,
     OPERATIONAL_FAILURE_LABEL_PRIORITY,
@@ -2170,22 +2177,40 @@ def seed_demo_data(db: Session) -> None:
     case_by_id = {case.id: case for case in db.scalars(select(TestCase).where(TestCase.suite_id == suite_id)).all()}
     default_case_data = default_cases()
     created_cases = 0
+    backfilled_cases = 0
+    detection_keys = {
+        "detection_point", "detection_point_mode", "evidence_tier", "calibration_only",
+        "positive_control", "negative_control", "tamper_control", "expected_error_category",
+    }
     for case_data in default_case_data:
-        if case_data["id"] in case_by_id:
+        existing_case = case_by_id.get(case_data["id"])
+        if existing_case:
+            seeded_rules = case_data.get("scoring_rules") if isinstance(case_data.get("scoring_rules"), dict) else {}
+            current_rules = existing_case.scoring_rules if isinstance(existing_case.scoring_rules, dict) else {}
+            missing_detection = {
+                key: value for key, value in seeded_rules.items()
+                if key in detection_keys and key not in current_rules
+            }
+            if missing_detection:
+                existing_case.scoring_rules = {**current_rules, **missing_detection}
+                db.add(existing_case)
+                backfilled_cases += 1
             continue
         case_by_id[case_data["id"]] = create_case(db, TestCaseCreate(**case_data))
         created_cases += 1
-    if created_cases:
+    if created_cases or backfilled_cases:
         db.commit()
-        _logger.info("Seed: created %d missing built-in cases for suite %s", created_cases, suite_id)
+        _logger.info("Seed: created %d cases and backfilled %d detection metadata rows for suite %s", created_cases, backfilled_cases, suite_id)
     _logger.info("Seed: complete")
 
 
 def create_run(db: Session, data: RunCreate) -> Run:
     mode = data.mode or "full_comparison"
     test_scope = data.test_scope or "full"
-    if test_scope not in {"quick", "full"}:
+    if test_scope not in {"quick", "full", "detection_points"}:
         raise ValueError(f"Unsupported test scope: {test_scope}")
+    if test_scope == "detection_points" and data.repeat_count not in {3, 5}:
+        raise ValueError("detection_points repeat_count must be 3 or 5")
     if mode not in {"full_comparison", "baseline_build", "candidate_eval", MANUAL_PROBE_MODE}:
         raise ValueError(f"Unsupported run mode: {mode}")
     if mode == "candidate_eval":
@@ -2315,6 +2340,8 @@ def cases_for_scope(db: Session, suite_id: str, test_scope: str) -> list[TestCas
             .order_by(TestCase.sort_order, TestCase.module, TestCase.id)
         ).all()
     )
+    if test_scope == "detection_points":
+        return sorted([case for case in cases if is_detection_point_case(case)], key=detection_point_sort_key)
     if test_scope != "quick":
         return cases
     return [case for case in cases if (case.scoring_rules or {}).get("quick") is True]
@@ -8759,7 +8786,7 @@ def _attach_signature_interop_result_to_reports(
         evidence["red_flags"] = sorted(set(labels).intersection(ALERT_RED_FLAGS))
         evidence["label_explanations"] = label_explanations(sorted(labels))
         evidence["signature_interop"] = _signature_interop_report_evidence(signature_result)
-        safe_evidence = redact_secrets(evidence)
+        safe_evidence = redact_signatures(redact_secrets(evidence))
         report.evidence = safe_evidence
         if signature_result.get("status") != "skipped" and not signature_result.get("ok") and not signature_operational_label:
             if "kiro_identity_leak" in labels:
@@ -14035,6 +14062,10 @@ def build_reports(db: Session, run_id: str) -> None:
     snapshot = db.get(BaselineSnapshot, run.baseline_snapshot_id) if run and run.baseline_snapshot_id else None
     comparisons = db.scalars(select(Comparison).where(Comparison.run_id == run_id)).all()
     cases = {case.id: case for case in db.scalars(select(TestCase)).all()}
+    run_results = db.scalars(select(Result).where(Result.run_id == run_id)).all()
+    results_by_channel: dict[str, list[Result]] = defaultdict(list)
+    for result in run_results:
+        results_by_channel[result.channel_id].append(result)
     by_channel: dict[str, list[Comparison]] = defaultdict(list)
     for comparison in comparisons:
         by_channel[comparison.candidate_channel_id].append(comparison)
@@ -14067,7 +14098,25 @@ def build_reports(db: Session, run_id: str) -> None:
             "baseline_ready_at": snapshot.ready_at.isoformat() if snapshot and snapshot.ready_at else None,
             "baseline_expires_at": snapshot.expires_at.isoformat() if snapshot and snapshot.expires_at else None,
         }
-        safe_evidence = redact_secrets(evidence)
+        if run and run.test_scope == "detection_points":
+            point_results = results_by_channel.get(channel_id, [])
+            probe_rows = probes_from_results(point_results, cases)
+            control_plane: dict[str, Any] = {}
+            inbound_capture: dict[str, Any] = {}
+            for result in point_results:
+                normalized = result.normalized_response if isinstance(result.normalized_response, dict) else {}
+                candidate_control = normalized.get("control_plane_evidence")
+                if isinstance(candidate_control, dict):
+                    control_plane.update(candidate_control)
+                candidate_inbound = normalized.get("inbound_request_capture")
+                if isinstance(candidate_inbound, dict):
+                    inbound_capture.update(candidate_inbound)
+            evidence["detection_point_assessment"] = build_detection_point_assessment(
+                probe_rows,
+                control_plane_evidence=control_plane,
+                inbound_request=inbound_capture,
+            )
+        safe_evidence = redact_signatures(redact_secrets(evidence))
         db.add(
             Report(
                 id=new_id("rep"),
@@ -14243,6 +14292,7 @@ def _report_summary(db: Session, report: Report) -> dict[str, Any]:
         "run_id": run.id,
         "run_name": run.name,
         "mode": run.mode,
+        "test_scope": run.test_scope,
         "channel_id": channel.id,
         "channel_name": channel.name,
         "channel_role": channel.role,
@@ -14252,6 +14302,11 @@ def _report_summary(db: Session, report: Report) -> dict[str, Any]:
         "summary": report.summary,
         "labels": list(evidence.get("labels") or []),
         "dimension_scores": evidence.get("dimension_scores") or {},
+        "detection_point_statuses": {
+            str(item.get("key")): str(item.get("status"))
+            for item in (((evidence.get("detection_point_assessment") or {}).get("detection_points") or {}).get("items") or [])
+            if isinstance(item, dict) and item.get("key")
+        },
         "performance": performance_summary_for_results(results),
         "created_at": report.created_at,
     }
@@ -14737,6 +14792,21 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
         else "- 基线模式：本次任务内同步对比\n"
     )
     signature_line = signature_interop_markdown(evidence.get("signature_interop"))
+    detection = evidence.get("detection_point_assessment") if isinstance(evidence.get("detection_point_assessment"), dict) else {}
+    identity = detection.get("identity_assessment") if isinstance(detection.get("identity_assessment"), dict) else {}
+    point_items = ((detection.get("detection_points") or {}).get("items") or []) if detection else []
+    detection_lines = "\n".join(
+        f"- {item.get('title') or item.get('key')}：{item.get('status')}（{item.get('pass_count', 0)}/{item.get('sample_count', 0)} 通过）"
+        for item in point_items
+        if isinstance(item, dict)
+    ) or "- 本次不是检测点模式，未生成五组专项结论。"
+    identity_lines = (
+        f"- 模型行为：{identity.get('model_identity', 'insufficient_evidence')}\n"
+        f"- 客户端线索：{identity.get('client_likelihood', 'unobservable')}\n"
+        f"- 访问路径：{identity.get('access_path', 'transparent_unresolved')}\n"
+        f"- 官方来源闭环：{'已确认' if identity.get('origin_verified') is True else '未确认'}"
+        if identity else "- 未生成身份四分法。"
+    )
     return f"""# Claude 渠道真实性测评报告
 
 ## 基本信息
@@ -14775,6 +14845,12 @@ def report_markdown(channel: Channel, score: float, grade: str, summary: str, ev
 ## Thinking Signature 互通
 
 {signature_line}
+
+## 检测点模式
+
+{identity_lines}
+
+{detection_lines}
 
 ## 风险说明
 
