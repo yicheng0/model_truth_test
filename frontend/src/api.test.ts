@@ -300,6 +300,31 @@ describe('api request handling', () => {
     fetchMock.mockRestore();
   });
 
+  it('deletes a patrol scope with filters and the admin key', async () => {
+    const storage = new Map<string, string>([['apipro.adminApiKey', 'test-admin-key']]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ matched: 3, deleted: 3, failed: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    await api.deletePatrolScope({ channel_id: 'channel_a', errors_only: true });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/runs/patrol/delete-scope',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key' }),
+        body: JSON.stringify({ channel_id: 'channel_a', errors_only: true }),
+      }),
+    );
+    vi.unstubAllGlobals();
+    fetchMock.mockRestore();
+  });
+
   it('updates channel taxonomy settings with the expected endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

@@ -4,7 +4,7 @@ import { Alert, Button, Card, Empty, Pagination, Popconfirm, Select, Space, Spin
 import { Link } from 'react-router-dom';
 import { CalendarClock, CircleStop, GitCompare, Trash2 } from 'lucide-react';
 import { api, getErrorMessage } from '../api';
-import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, deletablePatrolRunIds, extractPatrolEvidence, extractSignatureAnomalyRunIds, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, resolvePatrolPage, type PatrolEvidence } from '../runsUtils';
+import { ALL_PATROL_CHANNELS, buildPatrolDeleteSummary, extractPatrolEvidence, extractSignatureAnomalyRunIds, formatPatrolChannel, isPatrolOperationalFailure, patrolEvidenceDisplayState, patrolProbeStatusColor, patrolProbeStatusText, patrolReportedLabels, resolvePatrolPage, type PatrolEvidence } from '../runsUtils';
 import { formatDateTime } from '../time';
 import type { Channel, PatrolAnomalyGroup, Run } from '../types';
 
@@ -416,6 +416,23 @@ export default function Runs() {
     },
     onError: (error) => message.error(getErrorMessage(error)),
   });
+  const deletePatrolScope = useMutation({
+    mutationFn: api.deletePatrolScope,
+    onSuccess: (result) => {
+      const failed = Object.keys(result.failed).length;
+      message.success(failed ? `已删除 ${result.deleted} 条日志，${failed} 条删除失败` : `已删除 ${result.deleted} 条日志`);
+      if (failed) {
+        message.warning(`未删除原因：${Object.entries(result.failed).map(([id, reason]) => `${id}: ${reason}`).join('；')}`);
+      }
+      setSelectedPatrolRowKeys([]);
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['patrolRuns'] }),
+        queryClient.invalidateQueries({ queryKey: ['patrolAnomalies'] }),
+        queryClient.invalidateQueries({ queryKey: ['reports'] }),
+      ]);
+    },
+    onError: (error) => message.error(getErrorMessage(error)),
+  });
   const cancel = useMutation({
     mutationFn: api.cancelRun,
     onSuccess: async () => {
@@ -505,26 +522,11 @@ export default function Runs() {
     deletePatrolRuns.mutate(deletableSelectedPatrolRuns.map((run) => run.id));
   }
 
-  async function deleteAllPatrolRuns() {
-    const query = {
-      page: 1,
-      page_size: 100,
-      channel_id: selectedPatrolChannel === ALL_PATROL_CHANNELS ? undefined : selectedPatrolChannel,
+  function deleteAllPatrolRuns() {
+    deletePatrolScope.mutate({
+      ...(selectedPatrolChannel === ALL_PATROL_CHANNELS ? {} : { channel_id: selectedPatrolChannel }),
       errors_only: onlyPatrolErrors,
-    };
-    const firstPage = await api.patrolRuns(query);
-    const allFilteredRuns = [...firstPage.items];
-    for (let page = 2; allFilteredRuns.length < firstPage.total; page += 1) {
-      const nextPage = await api.patrolRuns({ ...query, page });
-      allFilteredRuns.push(...nextPage.items);
-      if (!nextPage.items.length) break;
-    }
-    const deletable = deletablePatrolRunIds(allFilteredRuns);
-    if (!deletable.length) {
-      message.warning('暂无可删除的巡检日志');
-      return;
-    }
-    deletePatrolRuns.mutate(deletable);
+    });
   }
 
   return (
@@ -592,7 +594,7 @@ export default function Runs() {
                       icon={<Trash2 size={14} />}
                       aria-label={`删除已选巡检日志（${patrolDeleteSummary.selectedDeletableCount}）`}
                       disabled={!patrolDeleteSummary.selectedDeletableCount}
-                      loading={deletePatrolRuns.isPending}
+                      loading={deletePatrolRuns.isPending || deletePatrolScope.isPending}
                     >
                       删除已选（{patrolDeleteSummary.selectedDeletableCount}）
                     </Button>
@@ -614,7 +616,7 @@ export default function Runs() {
                   icon={<Trash2 size={14} />}
                   aria-label={`删除当前范围（${patrolDeleteSummary.filteredDeletableCount}）`}
                   disabled={!patrolDeleteSummary.filteredDeletableCount}
-                  loading={deletePatrolRuns.isPending}
+                  loading={deletePatrolRuns.isPending || deletePatrolScope.isPending}
                 >
                   删除当前范围（{patrolDeleteSummary.filteredDeletableCount}）
                 </Button>

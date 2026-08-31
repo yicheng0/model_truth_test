@@ -69,6 +69,8 @@ from .schemas import (
     PatrolStrictAnomalyEntryRead,
     PatrolRunListRead,
     PatrolRunSummaryRead,
+    PatrolScopeDeleteRead,
+    PatrolScopeDeleteRequest,
     RunResultsRead,
     RunSummaryRead,
     SamplePlanCreate,
@@ -1273,6 +1275,19 @@ def _patrol_run_report_subquery(channel_id: str | None, dialect_name: str):
     return select(ranked).where(ranked.c.run_rank == 1).subquery("patrol_run_reports")
 
 
+def _patrol_filter_parts(channel_id: str | None, errors_only: bool, dialect_name: str):
+    patrol_condition = or_(Run.scheduled_test_id.is_not(None), Run.test_scope == "scheduled_probe")
+    if channel_id:
+        patrol_condition = patrol_condition & or_(
+            exists(select(RunChannel.id).where(RunChannel.run_id == Run.id, RunChannel.channel_id == channel_id)),
+            exists(select(Report.id).where(Report.run_id == Run.id, Report.channel_id == channel_id)),
+        )
+    latest_report = _patrol_run_report_subquery(channel_id, dialect_name)
+    needs_review = latest_report.c.needs_review
+    filtered_condition = and_(patrol_condition, needs_review) if errors_only else patrol_condition
+    return patrol_condition, filtered_condition, latest_report
+
+
 _INVALID_THINKING_SIGNATURE_RE = re.compile(r"invalid\s+[`'\"“”]?signature[`'\"“”]?\s+in\s+[`'\"“”]?thinking[`'\"“”]?\s+block", re.IGNORECASE)
 _KIRO_IDENTITY_RE = re.compile(r"(?:我是\s*Kiro\b|\bI\s+(?:am|'m|’m)\s+Kiro\b)", re.IGNORECASE)
 _KIRO_NEGATION_RE = re.compile(r"(?:我不(?:叫|是)\s*Kiro\b|\bI\s+(?:am|'m|’m)\s+not\s+Kiro\b)", re.IGNORECASE)
@@ -1410,15 +1425,8 @@ def list_patrol_runs(
     errors_only: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> PatrolRunListRead:
-    patrol_condition = or_(Run.scheduled_test_id.is_not(None), Run.test_scope == "scheduled_probe")
-    if channel_id:
-        patrol_condition = patrol_condition & or_(
-            exists(select(RunChannel.id).where(RunChannel.run_id == Run.id, RunChannel.channel_id == channel_id)),
-            exists(select(Report.id).where(Report.run_id == Run.id, Report.channel_id == channel_id)),
-        )
-    latest_report = _patrol_run_report_subquery(channel_id, db.bind.dialect.name)
+    patrol_condition, filtered_condition, latest_report = _patrol_filter_parts(channel_id, errors_only, db.bind.dialect.name)
     needs_review = latest_report.c.needs_review
-    filtered_condition = and_(patrol_condition, needs_review) if errors_only else patrol_condition
     count_from = Run.__table__.outerjoin(latest_report, latest_report.c.run_id == Run.id)
     counts = db.execute(
         select(
@@ -1467,6 +1475,30 @@ def list_patrol_runs(
         page=page,
         page_size=page_size,
     )
+
+
+@app.post("/api/runs/patrol/delete-scope", response_model=PatrolScopeDeleteRead)
+def delete_patrol_scope(
+    data: PatrolScopeDeleteRequest,
+    _admin: None = Depends(require_admin_if_configured),
+    db: Session = Depends(get_db),
+) -> PatrolScopeDeleteRead:
+    _patrol_condition, filtered_condition, latest_report = _patrol_filter_parts(
+        data.channel_id,
+        data.errors_only,
+        db.bind.dialect.name,
+    )
+    scope_from = Run.__table__.outerjoin(latest_report, latest_report.c.run_id == Run.id)
+    run_ids = list(db.scalars(
+        select(Run.id)
+        .select_from(scope_from)
+        .where(filtered_condition, Run.status.notin_({"pending", "running"}))
+        .order_by(Run.created_at.desc(), Run.id.desc())
+    ).all())
+    deletable_ids, _missing, failed = _preflight_deletable_run_ids(db, run_ids)
+    deleted = _delete_runs_by_ids(db, deletable_ids, repair_refs=True)
+    db.commit()
+    return PatrolScopeDeleteRead(matched=len(run_ids), deleted=deleted, failed=failed)
 
 
 @app.get("/api/runs/patrol/anomalies", response_model=PatrolAnomalySummaryRead)

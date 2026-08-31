@@ -135,6 +135,7 @@ try {
   const patrolRequests = [];
   const anomalyRequests = [];
   const deleteRequests = [];
+  const scopeDeleteRequests = [];
   const cancelRequests = [];
   const pageErrors = [];
   let normalRunsRequests = 0;
@@ -182,6 +183,16 @@ try {
     deleteRequests.push(ids);
     ids.forEach((id) => deletedRunIds.add(id));
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ deleted: ids.length, missing: [], failed: {} }) });
+  });
+  await page.route('**/api/runs/patrol/delete-scope', async (route) => {
+    const payload = JSON.parse(route.request().postData() ?? '{}');
+    scopeDeleteRequests.push(payload);
+    const url = new URL(route.request().url());
+    const channelId = payload.channel_id ?? null;
+    const errorsOnly = payload.errors_only === true;
+    const matching = runs.filter((run) => !deletedRunIds.has(run.id) && (!channelId || run.patrol_channel_id === channelId) && (!errorsOnly || new Set(['patrol_01', 'patrol_03', 'patrol_05', 'patrol_06']).has(run.id)));
+    matching.filter((run) => run.status !== 'pending' && run.status !== 'running').forEach((run) => deletedRunIds.add(run.id));
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ matched: matching.filter((run) => run.status !== 'pending' && run.status !== 'running').length, deleted: matching.filter((run) => run.status !== 'pending' && run.status !== 'running').length, failed: {} }) });
   });
   await page.route('**/api/runs/*/cancel', async (route) => {
     const runId = new URL(route.request().url()).pathname.split('/').at(-2);
@@ -401,10 +412,10 @@ try {
   await page.getByRole('button', { name: '删除当前范围（62）' }).click();
   await page.locator('.ant-popover').filter({ hasText: '删除全部渠道中的已结束巡检日志' }).last().locator('button:visible').last().click();
   await page.waitForTimeout(500);
-  assert.equal(deleteRequests.length, 2, '删除当前范围应发起第二次批量删除请求');
-  assert.equal(deleteRequests[1].length, 62, '删除当前范围应提交剩余 62 条已结束日志');
-  assert.equal(deleteRequests[1].includes('patrol_64'), false, '当前范围删除不得提交 pending 日志');
-  assert.equal(deleteRequests[1].includes('patrol_65'), false, '当前范围删除不得提交 running 日志');
+  assert.equal(deleteRequests.length, 1, '删除当前范围不应复用 ID 批量删除请求');
+  assert.deepEqual(scopeDeleteRequests, [{ errors_only: false }], '删除当前范围只应提交当前范围筛选条件');
+  assert.equal(deletedRunIds.has('patrol_64'), false, 'pending 日志不得进入删除集合');
+  assert.equal(deletedRunIds.has('patrol_65'), false, 'running 日志不得进入删除集合');
   await page.getByRole('button', { name: '删除当前范围（0）' }).waitFor();
   assert.match(await page.locator('.patrol-log-table').innerText(), /巡检日志 64|巡检日志 65/, '范围删除后未结束日志仍应保留');
 

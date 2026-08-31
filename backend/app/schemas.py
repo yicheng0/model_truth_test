@@ -1053,6 +1053,17 @@ class PatrolRunListRead(BaseModel):
     page_size: int = 10
 
 
+class PatrolScopeDeleteRequest(BaseModel):
+    channel_id: str | None = None
+    errors_only: bool = False
+
+
+class PatrolScopeDeleteRead(BaseModel):
+    matched: int = 0
+    deleted: int = 0
+    failed: dict[str, str] = Field(default_factory=dict)
+
+
 class SystemUsageRead(BaseModel):
     disk_path: str
     disk_total_bytes: int

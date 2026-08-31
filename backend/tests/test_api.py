@@ -2475,6 +2475,238 @@ def test_run_bulk_delete_returns_deleted_missing_and_failed() -> None:
         assert db.scalar(select(func.count()).select_from(ChannelAlert).where(ChannelAlert.run_id == first_run_id)) == 0
 
 
+def _seed_patrol_scope_delete_runs() -> dict[str, str]:
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        case_id = db.scalar(select(TestCaseModel.id).where(TestCaseModel.suite_id == suite_id))
+        assert suite_id is not None
+        assert case_id is not None
+        definitions = [
+            ("scope_a_ok", "third_party_demo", "completed", "A", [], "claude"),
+            ("scope_a_error", "third_party_demo", "completed", "E", ["protocol_mismatch"], "anomaly"),
+            ("scope_b_ok", "negative_sample", "completed", "A", [], "claude"),
+            ("scope_b_error", "negative_sample", "failed", "D", ["quality_regression"], "anomaly"),
+            ("scope_b_pending", "negative_sample", "pending", "E", ["protocol_mismatch"], "anomaly"),
+            ("scope_b_running", "negative_sample", "running", "E", ["protocol_mismatch"], "anomaly"),
+        ]
+        for run_id, channel_id, status, grade, labels, classification_status in definitions:
+            report_id = f"report_{run_id}"
+            db.add(Run(
+                id=run_id,
+                suite_id=suite_id,
+                name=run_id,
+                mode="candidate_eval",
+                test_scope="scheduled_probe",
+                status=status,
+                repeat_count=1,
+                concurrency=1,
+                total_jobs=1,
+                completed_jobs=1 if status not in {"pending", "running"} else 0,
+            ))
+            db.add(RunChannel(id=f"channel_{run_id}", run_id=run_id, channel_id=channel_id, role_in_run="candidate"))
+            db.add(Result(
+                id=f"result_{run_id}",
+                run_id=run_id,
+                test_case_id=case_id,
+                channel_id=channel_id,
+                normalized_response={},
+                raw_request={},
+                raw_response={},
+                metrics={},
+                score=0,
+                labels=labels,
+            ))
+            db.add(Report(
+                id=report_id,
+                run_id=run_id,
+                channel_id=channel_id,
+                final_score=95 if grade == "A" else 40,
+                grade=grade,
+                evidence={"labels": labels, "classification_status": classification_status},
+            ))
+        db.commit()
+    return {run_id: status for run_id, _channel_id, status, _grade, _labels, _classification in definitions}
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_deleted"),
+    [
+        ({"errors_only": False}, {"scope_a_ok", "scope_a_error", "scope_b_ok", "scope_b_error"}),
+        ({"channel_id": "third_party_demo", "errors_only": False}, {"scope_a_ok", "scope_a_error"}),
+        ({"errors_only": True}, {"scope_a_error", "scope_b_error"}),
+        ({"channel_id": "negative_sample", "errors_only": True}, {"scope_b_error"}),
+    ],
+)
+def test_patrol_scope_delete_respects_filters_and_keeps_unfinished_runs(
+    payload: dict[str, object],
+    expected_deleted: set[str],
+) -> None:
+    reset_database()
+    statuses = _seed_patrol_scope_delete_runs()
+
+    with TestClient(app) as client:
+        response = client.post("/api/runs/patrol/delete-scope", json=payload, headers=ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json() == {"matched": len(expected_deleted), "deleted": len(expected_deleted), "failed": {}}
+    with SessionLocal() as db:
+        remaining = set(db.scalars(select(Run.id).where(Run.id.in_(statuses))).all())
+        assert remaining == set(statuses) - expected_deleted
+        assert {"scope_b_pending", "scope_b_running"}.issubset(remaining)
+
+
+def test_patrol_scope_delete_cleans_relations_repairs_schedule_and_reports_conflicts() -> None:
+    reset_database()
+    with TestClient(app) as client:
+        schedule = create_legacy_patrol_schedule(client, channel_id="negative_sample")
+
+    previous_run_id = create_report_for_schedule(schedule, grade="A", score=95, labels=[])
+    target_run_id = create_report_for_schedule(schedule, grade="E", score=20, labels=["protocol_mismatch"])
+    with SessionLocal() as db:
+        previous_report = db.scalar(select(Report).where(Report.run_id == previous_run_id))
+        target_report = db.scalar(select(Report).where(Report.run_id == target_run_id))
+        assert previous_report is not None
+        assert target_report is not None
+        previous_report.evidence = {"labels": [], "classification_status": "claude"}
+        target_report.evidence = {"labels": ["protocol_mismatch"], "classification_status": "anomaly"}
+        case_id = db.scalar(select(TestCaseModel.id).where(TestCaseModel.suite_id == schedule["suite_id"]))
+        assert case_id is not None
+        db.add(Result(
+            id="scope_cleanup_result",
+            run_id=target_run_id,
+            test_case_id=case_id,
+            channel_id="negative_sample",
+            normalized_response={},
+            raw_request={},
+            raw_response={},
+            metrics={},
+            score=0,
+            labels=["protocol_mismatch"],
+        ))
+        db.add(ChannelAlert(
+            id="scope_cleanup_alert",
+            scheduled_test_id=schedule["id"],
+            run_id=target_run_id,
+            report_id=target_report.id,
+            channel_id="negative_sample",
+            grade="E",
+            final_score=20,
+        ))
+        job = PatrolJob(
+            id="scope_cleanup_job",
+            scheduled_test_id=schedule["id"],
+            channel_id="negative_sample",
+            status="completed",
+            run_id=target_run_id,
+        )
+        db.add(job)
+        db.add(PatrolJobAttempt(id="scope_cleanup_attempt", job_id=job.id, run_id=target_run_id, status="completed"))
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        scheduled.last_run_id = target_run_id
+
+        blocked_run = Run(
+            id="scope_blocked_source",
+            suite_id=schedule["suite_id"],
+            name="blocked patrol source",
+            mode="candidate_eval",
+            test_scope="scheduled_probe",
+            status="completed",
+        )
+        blocked_snapshot = BaselineSnapshot(
+            id="scope_blocked_snapshot",
+            name="blocked snapshot",
+            suite_id=schedule["suite_id"],
+            source_run_id=blocked_run.id,
+            status="ready",
+        )
+        blocked_run.baseline_snapshot_id = blocked_snapshot.id
+        comparison_run = Run(
+            id="scope_comparison_consumer",
+            suite_id=schedule["suite_id"],
+            name="comparison consumer",
+            mode="candidate_eval",
+            test_scope="full",
+            baseline_snapshot_id=blocked_snapshot.id,
+            status="completed",
+        )
+        blocked_report = Report(
+            id="scope_blocked_report",
+            run_id=blocked_run.id,
+            channel_id="negative_sample",
+            final_score=20,
+            grade="E",
+            evidence={"labels": ["protocol_mismatch"], "classification_status": "anomaly"},
+        )
+        db.add_all([blocked_run, blocked_snapshot, comparison_run, blocked_report])
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runs/patrol/delete-scope",
+            json={"channel_id": "negative_sample", "errors_only": True},
+            headers=ADMIN_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "matched": 2,
+        "deleted": 1,
+        "failed": {"scope_blocked_source": "Baseline snapshot is referenced by existing comparison runs"},
+    }
+    with SessionLocal() as db:
+        assert db.get(Run, target_run_id) is None
+        assert db.get(Result, "scope_cleanup_result") is None
+        assert db.get(Report, target_report.id) is None
+        assert db.get(ChannelAlert, "scope_cleanup_alert") is None
+        assert db.get(PatrolJob, "scope_cleanup_job") is None
+        assert db.get(PatrolJobAttempt, "scope_cleanup_attempt") is None
+        assert db.get(Run, "scope_blocked_source") is not None
+        scheduled = db.get(ScheduledChannelTest, schedule["id"])
+        assert scheduled is not None
+        assert scheduled.last_run_id == previous_run_id
+
+
+def test_patrol_scope_delete_6002_related_runs_completes_within_five_seconds() -> None:
+    reset_database()
+    count = 6002
+    with SessionLocal() as db:
+        suite_id = db.scalar(select(TestSuiteModel.id))
+        case_id = db.scalar(select(TestCaseModel.id).where(TestCaseModel.suite_id == suite_id))
+        assert suite_id is not None
+        assert case_id is not None
+        pending: list[object] = []
+        for index in range(count):
+            run_id = f"scope_perf_run_{index:05d}"
+            report_id = f"scope_perf_report_{index:05d}"
+            job_id = f"scope_perf_job_{index:05d}"
+            pending.extend([
+                Run(id=run_id, suite_id=suite_id, name=run_id, mode="candidate_eval", test_scope="scheduled_probe", status="completed"),
+                RunChannel(id=f"scope_perf_channel_{index:05d}", run_id=run_id, channel_id="negative_sample", role_in_run="candidate"),
+                Result(id=f"scope_perf_result_{index:05d}", run_id=run_id, test_case_id=case_id, channel_id="negative_sample", normalized_response={}, raw_request={}, raw_response={}, metrics={}, score=0, labels=[]),
+                Report(id=report_id, run_id=run_id, channel_id="negative_sample", final_score=95, grade="A", evidence={"labels": [], "classification_status": "claude"}),
+                ChannelAlert(id=f"scope_perf_alert_{index:05d}", run_id=run_id, report_id=report_id, channel_id="negative_sample", grade="D", final_score=60),
+                PatrolJob(id=job_id, scheduled_test_id="scope_perf_schedule", channel_id="negative_sample", status="completed", run_id=run_id),
+                PatrolJobAttempt(id=f"scope_perf_attempt_{index:05d}", job_id=job_id, run_id=run_id, status="completed"),
+            ])
+            if len(pending) >= 3500:
+                db.add_all(pending)
+                db.flush()
+                pending.clear()
+        if pending:
+            db.add_all(pending)
+        db.commit()
+
+    with TestClient(app) as client:
+        started = time.perf_counter()
+        response = client.post("/api/runs/patrol/delete-scope", json={"errors_only": False}, headers=ADMIN_HEADERS)
+        elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    assert response.json() == {"matched": count, "deleted": count, "failed": {}}
+    assert elapsed < 5, f"scope delete took {elapsed:.3f}s"
+
+
 def test_default_suite_is_representative_32_and_keeps_custom_default_suite_cases() -> None:
     reset_database()
     with SessionLocal() as db:

@@ -1203,6 +1203,17 @@ export type PatrolRunList = {
   page_size: number;
 };
 
+export type PatrolScopeDeleteRequest = {
+  channel_id?: string;
+  errors_only?: boolean;
+};
+
+export type PatrolScopeDeleteResult = {
+  matched: number;
+  deleted: number;
+  failed: Record<string, string>;
+};
+
 export type RunCreate = {
   name: string;
   suite_id: string;
